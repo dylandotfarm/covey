@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "./require-node.js";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -8,7 +9,10 @@ import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } fr
 import { runDaemon, dataDir, loadDaemonConfig, Updater, sourceInfo } from "@covey/daemon";
 
 const argv = process.argv.slice(2);
-const cmd = argv[0] && !argv[0].startsWith("-") ? argv[0] : "tui";
+// A leading flag belongs to `tui`, except for help: `covey --help` has to
+// print the usage, not open the TUI.
+const help = ["-h", "--help", "help"];
+const cmd = argv[0] && (!argv[0].startsWith("-") || help.includes(argv[0])) ? argv[0] : "tui";
 const flag = (f: string) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
 const has = (f: string) => argv.includes(f);
 
@@ -89,7 +93,10 @@ function usage(code = 0) {
                              build takes effect (ends any turns it is running)
   covey update               pull, rebuild and restart the local daemon. Inside the
                              TUI, ctrl+k → "Update covey" does this and relaunches
-  covey info                 show this machine's daemon id, port, token, and pairing hint`);
+  covey info                 show this machine's daemon id, port, token, and pairing hint
+
+One machine, from a fresh clone: \`pnpm run setup\` builds covey and puts this
+command on your PATH. Run it again after you move the checkout.`);
   process.exit(code);
 }
 

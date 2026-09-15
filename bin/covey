@@ -1,0 +1,27 @@
+#!/bin/sh
+# The `covey` launcher. `scripts/setup.mjs` links this file into a directory on
+# your PATH, so the command starts the client from this checkout. Keep it small:
+# every start goes through it.
+set -e
+
+# Follow the symlinks back to the checkout that holds this file.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+root=$(cd "$(dirname "$self")/.." && pwd)
+entry=$root/packages/cli/dist/index.js
+
+# A fresh clone, or a clone whose dist/ was removed, builds itself once.
+# --force because tsc keeps a tsconfig.tsbuildinfo beside each package: without
+# it, a build that has lost its dist/ is reported as up to date and emits nothing.
+if [ ! -f "$entry" ]; then
+  echo "covey: no build in $root — building it once" >&2
+  (cd "$root" && pnpm install --frozen-lockfile && pnpm run build --force) >&2
+fi
+
+exec node "$entry" "$@"
