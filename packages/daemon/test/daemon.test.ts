@@ -6,7 +6,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,13 @@ import type { RpcMethodName, RpcMethods } from "@covey/protocol";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const daemonEntry = join(here, "..", "src", "main.ts");
+
+/** A throwaway directory, with every symlink already resolved. macOS makes
+ *  /var a link to /private/var, and git reports the resolved path, so a raw
+ *  mkdtemp path never compares equal to the one the daemon sends back. */
+function tempDir(prefix: string): string {
+  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+}
 
 class Client {
   private ws!: WebSocket; private id = 0; private waits = new Map<number, { res: (v: any) => void; rej: (e: Error) => void }>();
@@ -34,7 +41,7 @@ class Client {
 }
 
 async function startDaemon(port: number, name: string): Promise<{ proc: ChildProcess; home: string }> {
-  const home = mkdtempSync(join(tmpdir(), "covey-test-"));
+  const home = tempDir("covey-test-");
   const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", name], { env: { ...process.env, COVEY_HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   proc.stderr!.on("data", (d) => { log += d.toString(); });
@@ -51,8 +58,8 @@ let repoA: string, repoB: string;
 const a = new Client(), b = new Client();
 
 before(async () => {
-  repoA = mkdtempSync(join(tmpdir(), "covey-repo-a-"));
-  repoB = mkdtempSync(join(tmpdir(), "covey-repo-b-"));
+  repoA = tempDir("covey-repo-a-");
+  repoB = tempDir("covey-repo-b-");
   for (const r of [repoA, repoB]) {
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: r });
     execFileSync("git", ["remote", "add", "origin", "git@github.com:example/shared.git"], { cwd: r });
@@ -179,7 +186,7 @@ test("thread.create puts a thread in a worktree, or in the checkout", async () =
   assert.equal(inCheckout.branch, "main");
 
   // a worktree that cannot be made is reported, not silently downgraded
-  const plainDir = mkdtempSync(join(tmpdir(), "covey-nogit-"));
+  const plainDir = tempDir("covey-nogit-");
   await a.command({ type: "project.create", workspaceRoot: plainDir });
   const plainId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === plainDir)!.id;
   await assert.rejects(

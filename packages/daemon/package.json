@@ -1,7 +1,14 @@
 {
   "name": "@covey/daemon",
   "version": "0.0.1",
+  "description": "The per-machine covey daemon: Claude Agent SDK sessions, SQLite storage, and a WebSocket server.",
   "license": "MIT",
+  "author": "dylan <270018429+dylandotfarm@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dylandotfarm/covey.git",
+    "directory": "packages/daemon"
+  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

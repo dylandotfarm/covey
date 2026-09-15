@@ -1,1 +1,21 @@
-{ "name": "@covey/protocol", "version": "0.0.1", "license": "MIT", "type": "module", "main": "dist/index.js", "types": "dist/index.d.ts", "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } } }
+{
+  "name": "@covey/protocol",
+  "version": "0.0.1",
+  "description": "Wire types shared by the covey daemon and the covey TUI.",
+  "license": "MIT",
+  "author": "dylan <270018429+dylandotfarm@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dylandotfarm/covey.git",
+    "directory": "packages/protocol"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  }
+}

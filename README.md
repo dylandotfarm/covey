@@ -22,7 +22,7 @@ One machine, from a fresh clone:
 
 ```bash
 npm install -g pnpm@12.4.0               # once per machine; pnpm then keeps itself on the pinned version
-git clone https://github.com/<you>/covey.git && cd covey
+git clone https://github.com/dylandotfarm/covey.git && cd covey
 pnpm run setup                           # installs, builds, and puts `covey` on your PATH
 covey                                    # opens the TUI; starts a local daemon if none is running
 ```
@@ -140,6 +140,7 @@ instance can run beside a real one.
 ## Contributing and licence
 
 covey does not accept pull requests at the moment — see [CONTRIBUTING.md](CONTRIBUTING.md).
-Bug reports and ideas are welcome as issues.
+Bug reports and ideas are welcome as issues. For a vulnerability, do not open an issue —
+follow [SECURITY.md](SECURITY.md) instead.
 
 MIT licensed. See [LICENSE](LICENSE).

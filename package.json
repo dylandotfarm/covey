@@ -1,7 +1,17 @@
 {
   "name": "covey",
   "private": true,
+  "description": "A multi-agent terminal UI for Claude Code.",
   "license": "MIT",
+  "author": "dylan <270018429+dylandotfarm@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dylandotfarm/covey.git"
+  },
+  "homepage": "https://github.com/dylandotfarm/covey#readme",
+  "bugs": {
+    "url": "https://github.com/dylandotfarm/covey/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22",
