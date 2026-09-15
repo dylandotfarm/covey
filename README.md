@@ -18,28 +18,50 @@ A multi-agent terminal UI for Claude Code, built from scratch on the official
 
 ## Quick start
 
+One machine, from a fresh clone:
+
 ```bash
 npm install -g pnpm@12.4.0               # once per machine; pnpm then keeps itself on the pinned version
-pnpm install
-pnpm run build
-node packages/cli/dist/index.js          # opens the TUI; starts a local daemon if none is running
+git clone https://github.com/<you>/covey.git && cd covey
+pnpm run setup                           # installs, builds, and puts `covey` on your PATH
+covey                                    # opens the TUI; starts a local daemon if none is running
+```
+
+`pnpm run setup` links a small launcher (`bin/covey`) into a directory of yours that is
+already on your PATH — `$PNPM_HOME`, `~/.local/bin` or `~/bin`. If none of them is on the
+PATH it says so and prints the line to add. To have it write that line for you:
+
+```bash
+pnpm run setup --add-to-path             # appends to ~/.zshrc, ~/.bashrc or config.fish
+pnpm run setup --bin-dir ~/bin           # or choose the directory yourself
+```
+
+The launcher always runs the checkout it was linked from, so `git pull` is enough to update
+it. Run the setup again only if you move the checkout. To install without it, run the entry
+point directly:
+
+```bash
+pnpm install && pnpm run build
+node packages/cli/dist/index.js
 ```
 
 After that first build you never have to quit to update: `ctrl+k → "Update covey"` pulls,
 rebuilds, restarts the local daemon and relaunches the client in place. `covey update` does
 the same from a terminal.
 
-On another machine on the same tailnet:
+### More machines
+
+On another machine on the same tailnet, set it up the same way, then run the daemon there:
 
 ```bash
-node packages/cli/dist/index.js daemon   # foreground daemon, binds to the tailnet IP
-node packages/cli/dist/index.js info     # prints the pairing hint and the fallback token
+covey daemon                             # foreground daemon, binds to the tailnet IP
+covey info                               # prints the pairing hint and the fallback token
 ```
 
 Back on the first machine:
 
 ```bash
-node packages/cli/dist/index.js machines add ws://other-host.your-tailnet.ts.net:3790 --name other
+covey machines add ws://other-host.your-tailnet.ts.net:3790 --name other
 ```
 
 Outside Tailscale, append `--token <token from covey info>`.
@@ -105,6 +127,8 @@ packages/protocol   wire types shared by daemon and TUI
 packages/daemon     per-machine daemon: SQLite, Claude SDK sessions, WebSocket server, tailscale auth
 packages/tui        Ink (React) terminal client
 packages/cli        `covey` entrypoint: tui | daemon | machines | info
+bin/covey           launcher that setup links onto your PATH; runs its own checkout
+scripts/setup.mjs   one command from a clone: install, build, link the launcher
 docs/DESIGN.md      architecture and the reasoning behind it
 ```
 

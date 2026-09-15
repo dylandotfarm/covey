@@ -6,6 +6,9 @@
   Node ≥ 22 (uses `node:sqlite`).
 - Packages: `protocol` (types only) → `daemon` and `tui` → `cli`. Change the protocol first,
   then both sides.
+- `pnpm run setup` (`scripts/setup.mjs`) is the one-machine install: it installs, builds, and
+  links `bin/covey` into a directory on the PATH. The launcher follows its own symlink back
+  to the checkout, so a linked `covey` always runs that checkout — keep it that way.
 - Ink 7 batches fast keystrokes and pastes into one `useInput` call; `App.tsx` splits them.
   Test the TUI in tmux with small delays between `send-keys`, and capture with
   `tmux capture-pane -p -e` to see colours.

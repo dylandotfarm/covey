@@ -8,6 +8,7 @@
     "pnpm": ">=12"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "build": "tsc -b",
     "watch": "tsc -b --watch",
     "typecheck": "tsc -b --noEmit",
