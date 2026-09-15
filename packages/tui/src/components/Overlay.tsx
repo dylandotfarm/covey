@@ -1,0 +1,180 @@
+import React from "react";
+import { Box, Text } from "ink";
+import type { MachineUpdate, UpdateStep } from "@covey/protocol";
+import { browseRows, type Overlay } from "../store.js";
+import { T } from "../theme.js";
+import { truncate, SPINNER } from "../lines.js";
+
+export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number }) {
+  const w = Math.min(width - 4, 80);
+  const maxRows = Math.max(4, Math.min(height - 10, 20));
+  // Rendered in place of the transcript (not floated): Ink cannot paint an
+  // opaque background under an absolutely positioned box.
+  const frame = (title: string, body: React.ReactNode, footer: string) => (
+    <Box flexDirection="column" width={width} height={height} alignItems="center" paddingTop={Math.max(0, Math.floor((height - maxRows - 6) / 2))}>
+      <Box width={w} flexDirection="column" borderStyle="round" borderColor={T.accentDim} paddingX={1}>
+        <Text color={T.text} bold>{title}</Text>
+        {body}
+        <Text color={T.faint}>{footer}</Text>
+      </Box>
+    </Box>
+  );
+  switch (overlay.kind) {
+    case "help":
+      return frame("Keys", (
+        <Box flexDirection="column">
+          {/* Keyed by position: several keys legitimately appear twice, once
+              per pane they mean something in. */}
+          {HELP.map(([k, d], i) => <Text key={i}><Text color={T.accent}>{k.padEnd(14)}</Text><Text color={T.muted}>{d}</Text></Text>)}
+        </Box>
+      ), "esc close");
+    case "input":
+      return frame(overlay.title, (
+        <Box marginY={1}><Text color={T.text}>{filter}</Text><Text inverse> </Text>{filter.length === 0 && overlay.placeholder ? <Text color={T.subtle}>{overlay.placeholder}</Text> : null}</Box>
+      ), "enter confirm · esc cancel");
+    case "pick":
+    case "palette": {
+      const options = overlay.kind === "pick" ? overlay.options : [];
+      const toggle = overlay.kind === "pick" ? overlay.toggle : undefined;
+      const filtered = filterOptions(options, filter);
+      const start = Math.max(0, Math.min(cursor - Math.floor(maxRows / 2), filtered.length - maxRows));
+      return frame(overlay.kind === "pick" ? overlay.title : "Commands", (
+        <Box flexDirection="column">
+          <Text color={T.subtle}>› {filter}<Text inverse> </Text></Text>
+          {filtered.slice(start, start + maxRows).map((o, i) => {
+            const sel = start + i === cursor;
+            // One column of gutter before the hint, or a label that fills the
+            // row runs straight into it.
+            const avail = w - 6 - (o.hint ? o.hint.length + 1 : 0);
+            return <Text key={o.id} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>{" "}{truncate(o.label, avail).padEnd(avail)}<Text color={T.subtle}>{o.hint ? " " + o.hint : ""}</Text></Text>;
+          })}
+          {filtered.length === 0 && <Text color={T.subtle} italic> no matches</Text>}
+          {toggle && <Text color={checked ? T.accent : T.subtle}> {checked ? "[x]" : "[ ]"} {truncate(toggle, w - 10)}</Text>}
+        </Box>
+      ), toggle ? "↑↓ move · tab check · enter select · esc cancel" : "↑↓ move · enter select · esc cancel");
+    }
+    case "update": {
+      if (!update) return frame("Update", <Box marginY={1}><Text color={T.subtle}>starting…</Text></Box>, "esc close");
+      const running = update.steps.find((s) => s.status === "running");
+      const failed = update.steps.find((s) => s.status === "failed");
+      const shown = failed ?? running;
+      // The tail of whatever is running is the only part worth the rows.
+      const outRows = Math.max(3, Math.min(maxRows - update.steps.length - 1, 10));
+      const out = (shown?.output ?? "").split("\n").filter((l) => l.trim()).slice(-outRows);
+      return frame(`Update ${machineName ?? ""}`.trim() + stateSuffix(update), (
+        <Box flexDirection="column">
+          {update.steps.map((s) => <StepRow key={s.name} step={s} width={w} tick={tick ?? 0} />)}
+          {out.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              {out.map((l, i) => <Text key={i} color={T.faint}>{"  " + truncate(l.replace(/\s+$/, ""), w - 6)}</Text>)}
+            </Box>
+          )}
+          {update.error && <Text color={T.danger}>{truncate(update.error, w - 4)}</Text>}
+        </Box>
+      ), update.state === "running" || update.state === "restarting" ? "esc close — the update keeps running" : "esc close");
+    }
+    case "browse": {
+      // Same list the key handler walks — one builder, so the highlighted row
+      // and the row enter acts on can never be different things.
+      const rows = browseRows(overlay.entries, filter);
+      const start = Math.max(0, Math.min(cursor - Math.floor(maxRows / 2), rows.length - maxRows));
+      return frame(`Add project on ${machineName ?? "machine"}`, (
+        <Box flexDirection="column">
+          <Text color={T.subtle}>{truncate(overlay.path, w - 4)}</Text>
+          <Text color={T.subtle}>› {filter}<Text inverse> </Text></Text>
+          {overlay.loading ? <Text color={T.subtle}>loading…</Text> : rows.slice(start, start + maxRows).map((r, i) => {
+            const sel = start + i === cursor;
+            const [icon, label] = r.kind === "up" ? ["  ", ".."]
+              : r.kind === "new" ? ["+ ", r.name ? `New folder "${r.name}"` : "New folder…"]
+              : [r.isRepo ? "⎇ " : "  ", r.name];
+            const tint = r.kind === "dir" && r.isRepo ? T.success : r.kind === "new" ? T.accent : T.subtle;
+            return (
+              <Text key={r.kind + ":" + label} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>
+                {" "}<Text color={tint}>{icon}</Text>{truncate(label, w - 9)}
+              </Text>
+            );
+          })}
+        </Box>
+      ), "enter open dir · space select this dir · ctrl+n new folder · esc cancel");
+    }
+  }
+}
+
+function stateSuffix(u: MachineUpdate): string {
+  switch (u.state) {
+    case "running": return " — running";
+    case "restarting": return " — restarting the daemon";
+    case "succeeded": return u.toCommit ? ` — done, now at ${u.toCommit}` : " — done";
+    case "failed": return " — failed";
+  }
+}
+
+function StepRow({ step, width, tick }: { step: UpdateStep; width: number; tick: number }) {
+  const [icon, color] = step.status === "ok" ? ["✓", T.success]
+    : step.status === "failed" ? ["✗", T.danger]
+    : step.status === "running" ? [SPINNER[tick % SPINNER.length]!, T.working]
+    : step.status === "skipped" ? ["–", T.subtle]
+    : ["·", T.faint];
+  const note = step.note ?? (step.status === "running" ? step.command : "");
+  return (
+    <Text>
+      <Text color={color}>{" " + icon + " "}</Text>
+      <Text color={step.status === "pending" ? T.subtle : T.text}>{step.label.padEnd(9)}</Text>
+      <Text color={T.subtle}>{truncate(note, width - 16)}</Text>
+    </Text>
+  );
+}
+
+export function filterOptions<O extends { label: string; hint?: string }>(options: O[], filter: string): O[] {
+  const f = filter.trim().toLowerCase();
+  if (!f) return options;
+  return options.filter((o) => (o.label + " " + (o.hint ?? "")).toLowerCase().includes(f));
+}
+
+const HELP: [string, string][] = [
+  ["tab", "switch focus: sidebar ↔ composer"],
+  ["ctrl+k", "command palette (move, rename, model, mode, machines…)"],
+  ["shift+tab", "cycle permission mode (→ bypass = never ask)"],
+  ["ctrl+n", "new thread in current project"],
+  ["ctrl+t", "toggle sidebar"],
+  ["ctrl+o", "show every tool call / fold them back into >_ rows"],
+  ["ctrl+b", "background the running tool calls — they report back later"],
+  ["ctrl+c", "quit (press twice)"],
+  ["sidebar", ""],
+  ["  ↑/↓ j/k", "move — what you land on is shown on the right"],
+  ["  enter", "open thread / fold project or archive / machine panel"],
+  ["  n", "new thread (asks worktree vs. checkout in a git repo)"],
+  ["  N", "new thread in a worktree branched from HEAD"],
+  ["  a", "add project — browse dirs, ctrl+n makes a new folder"],
+  ["  m", "move thread to another machine"],
+  ["  r", "rename thread"],
+  ["  x", "archive / unarchive thread (sending a message unarchives)"],
+  ["", "  archiving hands back the worktree, keeping its branch"],
+  ["  D", "delete thread"],
+  ["ctrl+k", "…also: revert to before a turn, model, permission mode"],
+  ["machine panel", ""],
+  ["  enter", "on a machine row: update (pull, rebuild, restart),"],
+  ["", "  restart, default model, default mode"],
+  ["composer", ""],
+  ["  enter", "send"],
+  ["  shift+enter", "newline (ctrl+j always works)"],
+  ["  cmd+⌫ / ⌦", "delete to start / end of line"],
+  ["  alt+⌫ / ⌦", "delete word back / forward"],
+  ["  ctrl+u / w", "delete to line start / word back"],
+  ["  alt+← / →", "move the caret by word (esc b / esc f too)"],
+  ["  cmd+← / →", "start / end of line"],
+  ["  ctrl+a / e", "start / end of line"],
+  ["  enter", "…while a turn runs: joins it at the next tool call"],
+  ["  esc", "interrupt running turn"],
+  ["  y / a / n", "allow / always allow / deny a pending approval"],
+  ["conversation", "(no focus of its own — cmd works while you type)"],
+  ["  cmd+↑↓ / j k", "scroll a line · +shift a page · pgup/pgdn too"],
+  ["  cmd+g / +shift", "oldest loaded / back to the newest"],
+  ["  cmd+d", "show changes from the last turn (d in the sidebar)"],
+  ["  cmd+o", "expand/collapse last tool call"],
+  ["  click", "on a ▸ or >_ row: fold or unfold it"],
+  ["mouse", ""],
+  ["  click", "sidebar: open that row, as enter would"],
+  ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
+  ["  wheel", "scroll the conversation, or move the sidebar cursor"],
+];

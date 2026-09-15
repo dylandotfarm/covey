@@ -1,0 +1,104 @@
+import React from "react";
+import { Box, Text } from "ink";
+import type { Thread, TimelineItem, Attachment } from "@covey/protocol";
+import { T } from "../theme.js";
+import { fmtMs } from "../lines.js";
+import { caretToVisual, type VisualLine } from "../editor.js";
+
+export interface ComposerProps {
+  thread: Thread | null;
+  value: string;
+  cursor: number;
+  focused: boolean;
+  width: number;
+  pending: TimelineItem | null;
+  machineName: string;
+  /** Word-wrapped rows, computed in App so it can size the box to match. */
+  rows: VisualLine[];
+  maxRows: number;
+  attachments: Attachment[];
+  /** Free-text answer being typed for a pending question. */
+  answerDraft: string;
+}
+
+/** Renders the multi-line editor. Editing state lives in App (useInput). */
+export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, attachments, answerDraft }: ComposerProps) {
+  const running = thread?.latestTurn?.state === "running";
+  const lines = editorLines(rows, value, cursor, focused, maxRows);
+  const borderColor = pending ? T.warning : focused ? T.accentDim : T.border;
+  const mode = thread?.permissionMode ?? "default";
+  const bypass = mode === "bypassPermissions";
+  const modeLabel = bypass ? "⏵⏵ bypass" : mode === "acceptEdits" ? "accept edits" : mode;
+  const modeColor = bypass ? T.danger : mode === "plan" ? T.awaiting : T.subtle;
+  const turn = thread?.latestTurn;
+  const stats = turn && turn.state !== "running" && turn.costUsd != null ? `$${turn.costUsd.toFixed(3)} · ${fmtMs(Date.parse(turn.completedAt ?? turn.startedAt) - Date.parse(turn.startedAt))}` : "";
+  const diff = turn?.diff && !turn.diff.unavailable && turn.diff.files.length > 0 ? turn.diff : null;
+  const queued = thread?.queuedTurns ?? 0;
+  return (
+    <Box flexDirection="column" width={width}>
+      <Box flexDirection="column" borderStyle="round" borderColor={borderColor} paddingX={1}>
+        {pending ? (
+          pending.kind === "approval"
+            ? <Text color={T.warning}>{`⚠ approval needed: ${pending.toolName} — y allow · a always · n deny`}</Text>
+            : <Text color={T.warning}>? answer above — ↑↓ choose · enter confirm{value.length > 0 ? <Text color={T.faint}>  (your draft is kept)</Text> : null}</Text>
+        ) : null}
+        {pending?.kind === "question" && answerDraft.length > 0 && (
+          <Text>{answerDraft}<Text inverse> </Text></Text>
+        )}
+        {!pending && attachments.length > 0 && (
+          <Text color={T.success} wrap="truncate">
+            {attachments.map((a) => `⎘ ${a.name}`).join("  ")}
+            <Text color={T.faint}>  ⌫ to remove</Text>
+          </Text>
+        )}
+        {!pending && lines.map((l, i) => <Text key={i}>{l}</Text>)}
+        {!pending && value.length === 0 && !focused ? null : null}
+      </Box>
+      <Box paddingX={2} height={1} justifyContent="space-between">
+        <Box flexShrink={1} overflow="hidden" marginRight={2}>
+          <Text wrap="truncate">
+            <Text color={T.subtle}>{thread ? shortModel(thread.model) : ""}</Text>
+            {thread && <Text color={modeColor} bold={bypass}>  {modeLabel}</Text>}
+            {thread && !bypass && width > 90 && <Text color={T.faint}> (shift+tab)</Text>}
+            {thread?.branch && <Text color={T.subtle}>  ⎇ {thread.branch}</Text>}
+            {thread && <Text color={T.faint}>  @{machineName}</Text>}
+          </Text>
+        </Box>
+        <Box flexShrink={0}>
+          {diff && !running && <Text><Text color={T.success}>+{diff.additions}</Text><Text color={T.danger}> −{diff.deletions}</Text><Text color={T.subtle}> · {diff.files.length} file{diff.files.length === 1 ? "" : "s"} · </Text><Text color={T.accent}>d</Text><Text color={T.subtle}> diff  </Text></Text>}
+          {queued > 0 && <Text color={T.warning}>{queued} queued  </Text>}
+          {running ? <Text color={T.working}>working… <Text color={T.subtle}>esc interrupt{width > 100 ? " · ctrl+b background" : ""} · enter joins in</Text></Text> : <Text color={T.faint}>{stats}</Text>}
+          <Text color={T.faint}>{running ? "" : width > 110 ? "  enter send · shift+enter newline" : ""}</Text>
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
+/**
+ * Paint the wrapped rows, scrolled so the caret's row stays visible. The rows
+ * are already word-wrapped by `wrapEditorLines`; all this does is slice a
+ * window and invert one cell for the caret.
+ */
+function editorLines(rows: VisualLine[], value: string, cursor: number, focused: boolean, maxRows: number): React.ReactNode[] {
+  if (value.length === 0) {
+    return [<Text key="ph">{focused ? <Text inverse> </Text> : null}<Text color={T.subtle}>{focused ? "Message Claude…" : " Message Claude…"}</Text></Text>];
+  }
+  const { row: caretRow, col: caretCol } = caretToVisual(rows, cursor);
+  let first = Math.max(0, rows.length - maxRows);
+  if (caretRow < first) first = caretRow;
+  else if (caretRow >= first + maxRows) first = caretRow - maxRows + 1;
+  return rows.slice(first, first + maxRows).map((l, i) => {
+    const idx = first + i;
+    if (focused && idx === caretRow) {
+      return <Text key={idx}>{l.text.slice(0, caretCol)}<Text inverse>{l.text[caretCol] ?? " "}</Text>{l.text.slice(caretCol + 1)}</Text>;
+    }
+    return <Text key={idx}>{l.text.length > 0 ? l.text : " "}</Text>;
+  });
+}
+
+/** claude-opus-5[1m] → opus-5[1m]; claude-fable-5-1 → fable-5-1 */
+function shortModel(m: string | null): string {
+  if (!m) return "default model";
+  return m.replace(/^claude-/, "").replace(/-\d{8}$/, "");
+}

@@ -1,0 +1,15 @@
+packages:
+  - packages/*
+
+# --- supply-chain policy -----------------------------------------------------
+# Only resolve package versions that have been public for at least 7 days
+# (value in minutes). CI double-checks the lockfile with scripts/pkg-age.mjs.
+minimumReleaseAge: 10080
+
+# Install scripts are denied unless listed here as `true`. pnpm 12 fails the
+# install for any dependency with a build script that has no entry, so a new
+# one surfaces as a decision rather than running silently. Both of these ship
+# prebuilt binaries and work fine without their scripts.
+allowBuilds:
+  esbuild: false
+  fsevents: false

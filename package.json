@@ -1,0 +1,29 @@
+{
+  "name": "covey",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=12"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "watch": "tsc -b --watch",
+    "typecheck": "tsc -b --noEmit",
+    "test": "node --import tsx --test \"packages/*/src/**/*.test.ts\" \"packages/*/test/**/*.test.ts\"",
+    "check": "pnpm run check:age && pnpm run typecheck && pnpm test",
+    "check:age": "node scripts/pkg-age.mjs check",
+    "deps:refresh": "rm -rf node_modules pnpm-lock.yaml && pnpm install",
+    "dev": "node --import tsx packages/cli/src/index.ts",
+    "daemon": "node --import tsx packages/daemon/src/main.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  },
+  "packageManager": "pnpm@12.4.0"
+}

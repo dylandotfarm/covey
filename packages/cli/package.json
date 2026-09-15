@@ -1,0 +1,14 @@
+{
+  "name": "covey-cli",
+  "version": "0.0.1",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "covey": "dist/index.js"
+  },
+  "dependencies": {
+    "@covey/protocol": "workspace:*",
+    "@covey/daemon": "workspace:*",
+    "@covey/tui": "workspace:*"
+  }
+}
