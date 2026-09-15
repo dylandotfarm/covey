@@ -23,7 +23,7 @@
   channel. Keep it that way; it makes replay and reconnect trivial.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
-- Port 3773 on this Pi is already taken by another service; covey uses 3790.
+- The daemon listens on port 3790 by default. `COVEY_PORT` moves it.
 - A machine's control panel (enter on a sidebar machine row) makes the daemon pull, rebuild
   and restart itself (`packages/daemon/src/update.ts`). Restarting ends every turn that
   daemon is running — which may include the session you are in, if you are a covey thread.

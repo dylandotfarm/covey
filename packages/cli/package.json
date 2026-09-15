@@ -1,7 +1,14 @@
 {
   "name": "covey-cli",
   "version": "0.0.1",
+  "description": "The covey command line entry point: tui, daemon, machines, info.",
   "license": "MIT",
+  "author": "dylan <270018429+dylandotfarm@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dylandotfarm/covey.git",
+    "directory": "packages/cli"
+  },
   "type": "module",
   "bin": {
     "covey": "dist/index.js"
