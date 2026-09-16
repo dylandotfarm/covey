@@ -3,10 +3,11 @@ import "./require-node.js";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { openSync, mkdirSync, statSync } from "node:fs";
+import { openSync, mkdirSync } from "node:fs";
 import { DEFAULT_PORT } from "@covey/protocol";
 import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } from "@covey/tui";
-import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive } from "@covey/daemon";
+import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive, buildInfo, buildDirs, newestBuildMtime, buildIsNewerThan } from "@covey/daemon";
+import { daemonArgs } from "./daemonArgs.js";
 
 const argv = process.argv.slice(2);
 // A leading flag belongs to `tui`, except for help: `covey --help` has to
@@ -30,9 +31,15 @@ async function main() {
       // The TUI cannot rebuild the code it is running from, so it asks us to:
       // it quits with a relaunch request and we do the work out here, with a
       // plain terminal to report into.
+      // `buildDirs` covers every package, not just ours: `tsc -b` rewrites only
+      // what changed, so a new keybinding moves packages/tui and leaves this
+      // file's mtime alone.
+      const dirs = buildDirs(here());
       const { relaunch } = await runTui({
         machines,
         source: await sourceInfo(here()).catch(() => null),
+        build: await buildInfo(here()).catch(() => null),
+        watchBuild: () => newestBuildMtime(dirs),
         canRelaunch: true,
         notice: takeNotice(),
       });
@@ -269,14 +276,24 @@ async function healthy(port: number): Promise<boolean> {
  * The CLI reuses a healthy daemon, so one started before the current build
  * keeps serving old behaviour with no outward sign. Say so rather than letting
  * it be debugged the hard way.
+ *
+ * The pid and the start time come from `/health` on the port, or from the pid
+ * file for that port. Both already name one daemon; this adds no third way.
+ *
+ * The build is every package, not this file alone: `tsc -b` rewrites only the
+ * packages that changed, so a change to the daemon leaves the mtime of
+ * `cli/dist/index.js` where it was.
  */
 async function warnIfStale(dir: string) {
   try {
-    const h = await health(localPort());
-    if (!h?.startedAt) return;
-    const built = statSync(join(dir, "index.js")).mtimeMs;
-    if (built > Date.parse(h.startedAt)) {
-      console.error(`covey: the local daemon (pid ${h.pid}) started before the current build — ctrl+k → \"Update covey\", or run \`covey restart\``);
+    const port = localPort();
+    const h = await health(port);
+    const rec = readPidFile(port);
+    const startedAt = h?.startedAt ?? (rec && isAlive(rec.pid) ? rec.startedAt : undefined);
+    const pid = h?.pid ?? rec?.pid;
+    if (!startedAt) return;
+    if (buildIsNewerThan(dir, startedAt)) {
+      console.error(`covey: the daemon on port ${port} (pid ${pid ?? "unknown"}) started before the current build — ctrl+k → \"Update covey\", or run \`covey restart\``);
       await new Promise((r) => setTimeout(r, 1200));
     }
   } catch { /* advisory only */ }
@@ -286,10 +303,7 @@ async function spawnDaemon() {
   const logDir = join(dataDir(), "logs"); mkdirSync(logDir, { recursive: true });
   const out = openSync(join(logDir, "daemon.log"), "a");
   const port = localPort();
-  // Always pass --port, even for the default. The port then shows in `ps` and
-  // in the command line that `pkill -f` reads, so two daemons never look the
-  // same. `covey stop --port N` remains the safe way to stop one of them.
-  const args = [join(here(), "index.js"), "daemon", "--port", String(port)];
+  const args = daemonArgs(here(), port);
   const child = spawn(process.execPath, args, { detached: true, stdio: ["ignore", out, out], env: process.env });
   child.unref();
   for (let i = 0; i < 40; i++) { if (await healthy(port)) return; await new Promise((r) => setTimeout(r, 250)); }

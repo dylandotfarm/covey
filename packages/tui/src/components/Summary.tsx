@@ -5,6 +5,7 @@ import type { AppState, MachineState, SidebarRow, ThreadTally } from "../store.j
 import { liveThreads, byRecency, tallyThreads, permissionModeLabel, workspaceModeLabel } from "../store.js";
 import { T, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
+import { buildLine, buildSkew } from "../build.js";
 
 /**
  * What the main pane shows while the sidebar cursor sits on something that is
@@ -21,7 +22,7 @@ export function Summary({ state, row, width, height }: { state: AppState; row: S
     <Box flexDirection="column" width={width} height={height} paddingX={2} paddingTop={1} overflow="hidden">
       {row.kind === "project" && row.projectId
         ? <ProjectSummary m={m} projectId={row.projectId} width={inner} height={height - 1} tick={state.tick} />
-        : <MachineSummary m={m} width={inner} height={height - 1} tick={state.tick} />}
+        : <MachineSummary m={m} state={state} width={inner} height={height - 1} tick={state.tick} />}
     </Box>
   );
 }
@@ -60,12 +61,13 @@ function ProjectSummary({ m, projectId, width, height, tick }: { m: MachineState
   );
 }
 
-function MachineSummary({ m, width, height, tick }: { m: MachineState; width: number; height: number; tick: number }) {
+function MachineSummary({ m, state, width, height, tick }: { m: MachineState; state: AppState; width: number; height: number; tick: number }) {
   const info = m.info;
   const projects = [...m.projects.values()].sort((a, b) => a.title.localeCompare(b.title));
   const tally = tallyThreads(liveThreads(m));
   const settings = info?.settings;
-  const room = Math.max(1, height - (m.update ? 9 : 8) - (m.error ? 1 : 0));
+  const skew = buildSkew(state.clientBuild, info?.build);
+  const room = Math.max(1, height - (m.update ? 9 : 8) - (m.error ? 1 : 0) - (skew === "same" || skew === "unknown" ? 0 : 1));
   const shown = projects.slice(0, room);
   const meta = info
     ? [`${info.os}/${info.arch}`, `daemon ${info.daemonVersion}`, info.claudeCodeVersion ? `claude ${info.claudeCodeVersion}` : "", info.tailnetName ?? ""].filter(Boolean).join("  ·  ")
@@ -77,6 +79,17 @@ function MachineSummary({ m, width, height, tick }: { m: MachineState; width: nu
         <Text color={m.conn === "connected" ? T.success : m.conn === "connecting" ? T.warning : T.danger}>  {m.conn}</Text>
       </Text>
       <Text color={T.subtle} wrap="truncate">{meta}</Text>
+      {/* Build skew across machines is the normal state here — a client on a
+          laptop against a daemon on a Pi — so name it rather than leave the
+          reader to find out from behaviour that does not match the code. */}
+      {(skew === "behind" || skew === "ahead") && (
+        <Text wrap="truncate">
+          <Text color={skew === "behind" ? T.warning : T.subtle}>
+            {skew === "behind" ? "⚠ this machine runs an older build than your client" : "this machine runs a newer build than your client"}
+          </Text>
+          <Text color={T.faint}>  {buildLine(info?.build)} vs {buildLine(state.clientBuild)}</Text>
+        </Text>
+      )}
       {m.error && <Text color={T.danger} wrap="truncate">{m.error}</Text>}
       <Box height={1} />
       <Text wrap="truncate"><Counts t={tally} where={` in ${projects.length} project${projects.length === 1 ? "" : "s"}`} /></Text>

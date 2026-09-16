@@ -5,6 +5,7 @@ import { dataDir, loadDaemonConfig, machineSettings, platformInfo, type DaemonCo
 import { Db } from "./db.js";
 import { Engine } from "./engine.js";
 import { startServer } from "./server.js";
+import { buildInfo, buildLabel } from "./build.js";
 import { tailscaleSelf } from "./tailscale.js";
 import { Updater } from "./update.js";
 import { clearPidFile, writePidFile } from "./pidfile.js";
@@ -37,9 +38,12 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   }
   if (config.bind === "tailnet" && !ts) log("tailscale not running; binding to loopback only");
 
+  // The build, not the package version: "0.0.1" never moves, so it could not
+  // tell a client that this machine runs older code than the client does.
+  const build = await buildInfo();
   const machine: MachineInfo = {
     machineId: config.machineId, name: config.name, ...platformInfo(),
-    daemonVersion: "0.0.1", protocolVersion: PROTOCOL_VERSION,
+    daemonVersion: buildLabel(build), build, protocolVersion: PROTOCOL_VERSION,
     claudeCodeVersion: detectClaudeVersion(),
     tailnetName: ts?.dnsName, tailnetIps: ts?.ips,
     capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
@@ -49,7 +53,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   const engine = new Engine(db, machine);
   const updater = new Updater(config.machineId, log);
   const server = await startServer({ config, engine, updater, host, log });
-  log(`listening on ws://${host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
+  log(`listening on ws://${host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
   if (host !== "127.0.0.1") {
     // also listen on loopback so the local TUI never needs credentials
     try {
