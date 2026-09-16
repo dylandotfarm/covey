@@ -12,8 +12,13 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
+import { realGhHost, type GhHost } from "./integrate/gh.js";
+import { gateMember } from "./integrate/gate.js";
+import { buildQueue } from "./integrate/queue.js";
+import { findingFor } from "./integrate/audit.js";
+import { mergeMember } from "./integrate/merge.js";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -531,6 +536,91 @@ export class Engine {
     } catch (e: any) {
       throw new EngineError("gh", e?.message ?? String(e));
     }
+  }
+
+  // ---- integrating a run: gates, the queue, the audit, and the one merge ----
+  //
+  // Every call here is about a branch on *this* machine, so this daemon is the
+  // one that can answer. The run record lives on the operator's daemon; these
+  // read facts and hand them back.
+
+  /**
+   * The member, and a `gh` host in its checkout.
+   *
+   * `turnRunning` comes from the thread, never from the caller. A client that
+   * asked to merge under a running turn would be believed otherwise, and that
+   * is the mistake that hid 211 lines of work in the run of 2026-09-16.
+   */
+  private async memberContext(threadId: string, label: string, state: RunMemberState, allowMerge: boolean): Promise<{ ref: RunMemberRef; host: GhHost; base: string }> {
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", `thread ${threadId} not found`);
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    if (!t.branch) throw new EngineError("no_branch", `thread ${threadId} is not on a branch`);
+    const cwd = t.worktreePath ?? p.workspaceRoot;
+    const ref: RunMemberRef = {
+      memberId: threadId,
+      label,
+      threadId,
+      machineId: this.machine.machineId,
+      branch: t.branch,
+      pullRequest: null,
+      turnRunning: t.status === "running" || t.status === "starting" || (t.latestTurn?.state === "running"),
+      state,
+    };
+    // The base is the ref a worktree branches from, with the remote stripped:
+    // `origin/main` and `main` name the same branch to `git rev-list`.
+    const base = ((await defaultBranchRef(cwd)) ?? "main").replace(/^origin\//, "");
+    return { ref, host: realGhHost({ cwd, allowMerge }), base };
+  }
+
+  /** The gate for one member: CI, staleness, conflicts, the turn, the evidence. */
+  async runGate(threadId: string, label: string, state: RunMemberState, evidence: RegressionEvidence | null): Promise<GateVerdict> {
+    const { ref, host, base } = await this.memberContext(threadId, label, state, false);
+    const [pr, head] = await Promise.all([host.pullRequest(ref.branch), host.baseHead(base)]);
+    return gateMember({ member: ref, pr, base: head, evidence });
+  }
+
+  /** The size and the files of a member's branch, which the merge order reads. */
+  async runMemberDiff(threadId: string): Promise<MemberDiff | null> {
+    const { ref, host } = await this.memberContext(threadId, "", "review", false);
+    const pr = await host.pullRequest(ref.branch);
+    if (!pr) return null;
+    return {
+      branch: ref.branch,
+      additions: pr.additions,
+      deletions: pr.deletions,
+      files: pr.files,
+      mergeable: pr.mergeable,
+      mergeStateStatus: pr.mergeStateStatus,
+    };
+  }
+
+  /** The merge order for a whole run. Pure, and one implementation for every client. */
+  runQueue(entries: QueueEntryWire[]): QueuePosition[] {
+    return buildQueue(entries);
+  }
+
+  /** Merge one member. The gate is read fresh here and the audit runs after. */
+  async runMerge(params: {
+    threadId: string; label: string; state: RunMemberState;
+    evidence: RegressionEvidence | null; actor: MergeParty;
+    method?: "merge" | "squash" | "rebase"; queue?: QueuePosition[];
+  }): Promise<{ merged: boolean; verdict: GateVerdict; audit: AuditFinding[] }> {
+    const { ref, host, base } = await this.memberContext(params.threadId, params.label, params.state, true);
+    const result = await mergeMember(host, {
+      member: ref, base, evidence: params.evidence, actor: params.actor,
+      method: params.method, queue: params.queue,
+    });
+    return result.merged
+      ? { merged: true, verdict: result.verdict, audit: result.audit }
+      : { merged: false, verdict: result.verdict, audit: [] };
+  }
+
+  /** What a merged member's branch still holds that the base branch does not. */
+  async runAudit(threadId: string, label: string): Promise<AuditFinding | null> {
+    const { ref, host, base } = await this.memberContext(threadId, label, "merged", false);
+    return findingFor(ref, base, await host.revList(base, ref.branch));
   }
 
   private async startTurn(threadId: string, turnId: string, text: string, attachments: Attachment[]): Promise<number> {

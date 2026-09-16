@@ -18,7 +18,7 @@
  * not the merge but a behaviour question. Overlap is a hint. Only a build
  * against the real base is an answer.
  */
-import type { MemberDiff, QueueCollision, QueuePosition, RunMemberRef } from "@covey/protocol";
+import { isFinalMemberState, type MemberDiff, type QueueCollision, type QueuePosition, type RunMemberRef } from "@covey/protocol";
 
 /** A member and the change it carries, as the queue reads it. */
 export interface QueueEntry {
@@ -61,7 +61,7 @@ const MAX_LISTED_FILES = 6;
  * ordinary outcome and has no change to land.
  */
 export function buildQueue(entries: QueueEntry[]): QueuePosition[] {
-  const queued = mergeOrder(entries.filter((e) => e.member.outcome === "open"));
+  const queued = mergeOrder(entries.filter((e) => !isFinalMemberState(e.member.state)));
   return queued.map((entry, index) => {
     const meets: QueueCollision[] = [];
     for (const ahead of queued.slice(0, index)) {

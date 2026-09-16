@@ -32,7 +32,7 @@ export function findingFor(member: RunMemberRef, base: string, commits: BranchCo
 }
 
 /**
- * Run the audit over every merged member. A member with another outcome is not
+ * Run the audit over every merged member. A member in another state is not
  * asked: an open branch is meant to be ahead of the base, and a withdrawn one
  * was never meant to land.
  */
@@ -41,7 +41,7 @@ export async function auditMerged(
   base: string,
   members: RunMemberRef[],
 ): Promise<AuditFinding[]> {
-  const merged = members.filter((m) => m.outcome === "merged");
+  const merged = members.filter((m) => m.state === "merged");
   const found = await Promise.all(
     merged.map(async (m) => findingFor(m, base, await host.revList(base, m.branch))),
   );

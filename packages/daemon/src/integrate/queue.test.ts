@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { MemberDiff } from "@covey/protocol";
+import type { MemberDiff, RunMemberState } from "@covey/protocol";
 import { baseBrokenBrief, buildQueue, diffSize, fileOverlap, mergeOrder, type QueueEntry } from "./queue.js";
 import { member } from "./testHost.js";
 
-function entry(branch: string, additions: number, deletions: number, files: string[], over: Partial<MemberDiff> = {}, label?: string, outcome: "open" | "merged" | "withdrawn" = "open"): QueueEntry {
+function entry(branch: string, additions: number, deletions: number, files: string[], over: Partial<MemberDiff> = {}, label?: string, state: RunMemberState = "review"): QueueEntry {
   return {
-    member: member({ branch, label: label ?? branch, outcome }),
+    member: member({ branch, label: label ?? branch, state }),
     diff: { branch, additions, deletions, files, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", ...over },
   };
 }

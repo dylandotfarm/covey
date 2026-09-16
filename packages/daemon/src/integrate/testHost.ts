@@ -5,7 +5,7 @@
  * nothing here merges, so `pnpm test` cannot change the state of a repository
  * however a test is written.
  */
-import type { BaseHead, MemberOutcome, RunMemberRef } from "@covey/protocol";
+import type { BaseHead, RunMemberRef, RunMemberState } from "@covey/protocol";
 import type { BranchCommit, GhHost, PullRequestFacts } from "./gh.js";
 
 export interface FakeHostOptions {
@@ -52,7 +52,7 @@ export function member(over: Partial<RunMemberRef> & { branch: string }): RunMem
     branch: over.branch,
     pullRequest: over.pullRequest ?? 1,
     turnRunning: over.turnRunning ?? false,
-    outcome: (over.outcome ?? "open") as MemberOutcome,
+    state: over.state ?? "review",
   };
 }
 

@@ -427,6 +427,51 @@ Purely client side: when a thread that is not on screen transitions to waiting-o
 completed, or error, the TUI rings the terminal bell, shows a notice, and marks the sidebar
 row until it is opened. `prefs.quiet` disables the bell.
 
+## Integrating a run
+
+A run dispatches work and tracks it (#44). This is what happens when the work comes back:
+the gate, the conflict queue, the audit, and the one party that merges. The rules come from
+a real run of fifteen agents on 2026-09-16, and every one of them cost something.
+
+`packages/daemon/src/integrate/` holds it. Everything in there is pure but `gh.ts`, which is
+the only file that starts a process, so a test passes a `fakeHost` and nothing reaches GitHub.
+
+**Green is not the gate.** A check is green against the base it ran on, and the base moves.
+Two pull requests of that run were each green and each `MERGEABLE`, shared no line, and broke
+`main` when both landed: the second one's checks were computed before the first existed. So
+`summariseChecks` treats four states as a refusal — `failing`, `pending`, `stale` and
+`absent` — and a green check whose `startedAt` is earlier than the base head's commit date is
+stale. GitHub's own `mergeStateStatus` of `BEHIND` says the same thing and counts too.
+A merge queue cures this at the source, because it runs the checks on the queued merge
+result; the rule stays, because the queue is a repository setting a run cannot assume.
+
+**A test that exists is not the gate either.** When the operator asked every agent to revert
+its fix and run its test again, three of five already-merged agents found their tests proved
+nothing. So a member carries a `RegressionEvidence` record: what it reverted, which test, and
+the failure verbatim. No machine can judge a test, and `evidence.ts` does not pretend to. It
+refuses the three cheap fakes — no record, no failure text, and the output of a run that
+passed — and shows the rest to a person.
+
+**The conflict queue is serial, largest diff first**, so the cheapest change pays the
+re-merge tax. `buildQueue` also writes each member a brief that names what lands before it
+and in which file. The brief says in its own words that file overlap is a hint: in the real
+run the predicted collision never happened, the real one was in a file nobody listed, and the
+hard part was a behaviour question rather than a merge.
+
+**Never merge under a running turn.** A run owns the map from thread to branch, so the gate
+refuses while the member's thread runs. The daemon reads that from the thread itself and
+never from the caller. After any merge the audit asks
+`git rev-list origin/<base>..origin/<branch>` of every merged branch; one line of shell that
+would have caught a real loss of 211 lines at once.
+
+**One party merges.** `mergeMember` is the only path to a merge, it takes a `MergeParty` and
+refuses anybody without `integrator`, and it reads the gate fresh rather than trusting a
+verdict from a minute ago. Members never get push rights to the base branch.
+
+The RPCs are `run.gate`, `run.memberDiff`, `run.queue`, `run.merge` and `run.audit`. Each is
+answered by the daemon that holds the member's branch, because that daemon has the checkout,
+the `PATH` and the `gh` login.
+
 ## Tests
 
 `pnpm test` runs unit tests for the pure modules and an integration test that boots two

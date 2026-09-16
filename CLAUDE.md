@@ -41,3 +41,7 @@
 - Dependencies: `pnpm add <pkg>`; pnpm refuses versions younger than 7 days
   (`minimumReleaseAge` in pnpm-workspace.yaml). Keep `pnpm run check:age` green. Install
   scripts are blocked (`onlyBuiltDependencies: []`); never use npm in this repo.
+- `packages/daemon/src/integrate/` reaches `gh` and `git` through one `GhHost`
+  (`integrate/gh.ts`); everything else there is pure. Tests use `fakeHost`, so nothing
+  merges during `pnpm test`. The read path calls `assertReadOnly` first, which throws on a
+  `gh` command that can change a repository.

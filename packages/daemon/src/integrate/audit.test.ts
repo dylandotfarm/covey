@@ -20,7 +20,7 @@ test("parseRevList reads sha and subject, and survives a bare sha", () => {
 });
 
 test("a merged branch that still holds commits is the finding that recovered lost work", () => {
-  const f = findingFor(member({ branch: "issue-20-wheel-scroll", label: "#20 wheel scroll", outcome: "merged" }), "main", parseRevList(REV_LIST));
+  const f = findingFor(member({ branch: "issue-20-wheel-scroll", label: "#20 wheel scroll", state: "merged" }), "main", parseRevList(REV_LIST));
   assert.ok(f);
   assert.equal(f.branch, "issue-20-wheel-scroll");
   assert.equal(f.commits.length, 2);
@@ -30,12 +30,12 @@ test("a merged branch that still holds commits is the finding that recovered los
 });
 
 test("one commit is one commit, not `1 commits`", () => {
-  const f = findingFor(member({ branch: "b", outcome: "merged" }), "main", parseRevList(REV_LIST.split("\n")[0] + "\n"));
+  const f = findingFor(member({ branch: "b", state: "merged" }), "main", parseRevList(REV_LIST.split("\n")[0] + "\n"));
   assert.match(f!.message, /holds 1 commit that/);
 });
 
 test("a branch with nothing new is not a finding", () => {
-  assert.equal(findingFor(member({ branch: "b", outcome: "merged" }), "main", []), null);
+  assert.equal(findingFor(member({ branch: "b", state: "merged" }), "main", []), null);
 });
 
 test("the audit asks only about merged members", async () => {
@@ -43,9 +43,9 @@ test("the audit asks only about merged members", async () => {
   const host = fakeHost({ revLists: { anything: [] } });
   const wrapped = { ...host, revList: async (base: string, branch: string) => { asked.push(branch); return []; } };
   await auditMerged(wrapped, "main", [
-    member({ branch: "landed", outcome: "merged" }),
-    member({ branch: "still-open", outcome: "open" }),
-    member({ branch: "cancelled", outcome: "withdrawn" }),
+    member({ branch: "landed", state: "merged" }),
+    member({ branch: "still-open", state: "review" }),
+    member({ branch: "cancelled", state: "withdrawn" }),
   ]);
   assert.deepEqual(asked, ["landed"], "an open branch is meant to be ahead; a withdrawn one never meant to land");
 });
@@ -55,8 +55,8 @@ test("the audit returns a finding per merged branch that kept work back", async 
     revLists: { "issue-20-wheel-scroll": parseRevList(REV_LIST), clean: [] },
   });
   const findings = await auditMerged(host, "main", [
-    member({ branch: "issue-20-wheel-scroll", label: "#20 wheel scroll", outcome: "merged" }),
-    member({ branch: "clean", label: "#19 usage", outcome: "merged" }),
+    member({ branch: "issue-20-wheel-scroll", label: "#20 wheel scroll", state: "merged" }),
+    member({ branch: "clean", label: "#19 usage", state: "merged" }),
   ]);
   assert.equal(findings.length, 1);
   assert.equal(findings[0]!.branch, "issue-20-wheel-scroll");
@@ -65,7 +65,7 @@ test("the audit returns a finding per merged branch that kept work back", async 
 test("the report says plainly when the audit found nothing, and lists the commits when it did", () => {
   assert.equal(auditReport([], 13), "Audit: 13 merged branches hold no commit that the base branch lacks.");
   assert.match(auditReport([], 1), /1 merged branch holds no commit/);
-  const f = findingFor(member({ branch: "b", label: "#20", outcome: "merged" }), "main", parseRevList(REV_LIST))!;
+  const f = findingFor(member({ branch: "b", label: "#20", state: "merged" }), "main", parseRevList(REV_LIST))!;
   const text = auditReport([f], 1);
   assert.match(text, /1 merged branch holds work that never landed/);
   assert.match(text, /9b8a8ec Add a regression test for the wheel scroll offset/);

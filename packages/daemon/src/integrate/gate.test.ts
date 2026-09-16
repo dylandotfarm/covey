@@ -80,7 +80,7 @@ test("a member with no pull request is refused, and still reports its evidence g
 
 test("a withdrawn member is refused as withdrawn, which is an outcome and not a failure", () => {
   const verdict = gateMember({
-    member: member({ branch: "issue-15-esc", outcome: "withdrawn", label: "#15 rebind esc" }),
+    member: member({ branch: "issue-15-esc", state: "withdrawn", label: "#15 rebind esc" }),
     pr: null, base: BASE, evidence: null,
   });
   assert.equal(verdict.refusals[0]!.code, "withdrawn");

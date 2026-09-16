@@ -127,9 +127,14 @@ export function assertReadOnly(args: string[]): void {
 
 // ---- the real host ----------------------------------------------------------
 
-async function gh(repo: string, args: string[]): Promise<string> {
+/**
+ * `gh` in a checkout, with no `--repo`: the remote of the checkout is the
+ * repository, exactly as it is for the agent that works there. `gh api` reads
+ * the same remote through its `{owner}` and `{repo}` placeholders.
+ */
+async function gh(cwd: string, args: string[]): Promise<string> {
   assertReadOnly(args);
-  const { stdout } = await run("gh", [...args, "--repo", repo], { timeout: CALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
+  const { stdout } = await run("gh", args, { cwd, timeout: CALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
   return stdout;
 }
 
@@ -138,18 +143,31 @@ const PR_FIELDS = [
   "mergeable", "mergeStateStatus", "additions", "deletions", "files", "statusCheckRollup",
 ].join(",");
 
-/**
- * The host that talks to the real `gh` and the real `git`.
- *
- * `allowMerge` is off by default. A caller that wants to merge asks for it,
- * which keeps the mutation out of every host that a report or a dry run builds.
- */
-export function realGhHost(repo: string, cwd: string, allowMerge = false): GhHost {
+export interface RealHostOptions {
+  /** A checkout of the repository. Every call runs there. */
+  cwd: string;
+  /**
+   * Let this host merge. Off by default, so a host built for a report or a dry
+   * run has no way to change anything.
+   */
+  allowMerge?: boolean;
+}
+
+export function realGhHost(options: RealHostOptions): GhHost {
+  const { cwd } = options;
+
+  // `origin/<branch>` is a local ref and goes stale, and a stale ref is exactly
+  // what the audit must not read: the commits it looks for were pushed a minute
+  // ago. Fetch once per host, and share the one fetch between every branch.
+  let fetched: Promise<void> | null = null;
+  const fetchOnce = () => (fetched ??= run("git", ["fetch", "--quiet", "origin"], { cwd, timeout: CALL_TIMEOUT_MS })
+    .then(() => undefined, () => undefined));
+
   const host: GhHost = {
     async pullRequest(branch) {
       let out: string;
       try {
-        out = await gh(repo, ["pr", "view", branch, "--json", PR_FIELDS]);
+        out = await gh(cwd, ["pr", "view", branch, "--json", PR_FIELDS]);
       } catch {
         return null; // no pull request on that branch
       }
@@ -172,7 +190,7 @@ export function realGhHost(repo: string, cwd: string, allowMerge = false): GhHos
 
     async baseHead(base) {
       try {
-        const out = await gh(repo, ["api", `repos/${repo}/commits/${base}`, "--jq", "{oid:.sha,committedAt:.commit.committer.date}"]);
+        const out = await gh(cwd, ["api", `repos/{owner}/{repo}/commits/${base}`, "--jq", "{oid:.sha,committedAt:.commit.committer.date}"]);
         const j = JSON.parse(out);
         return j.oid && j.committedAt ? { oid: j.oid, committedAt: j.committedAt } : null;
       } catch {
@@ -181,6 +199,7 @@ export function realGhHost(repo: string, cwd: string, allowMerge = false): GhHos
     },
 
     async revList(base, branch) {
+      await fetchOnce();
       try {
         const { stdout } = await run(
           "git",
@@ -194,11 +213,11 @@ export function realGhHost(repo: string, cwd: string, allowMerge = false): GhHos
     },
   };
 
-  if (allowMerge) {
+  if (options.allowMerge) {
     host.mergePullRequest = async (number, method) => {
       // The only mutation in this half of the run. Everything above refuses
       // before it gets here; this call trusts that and does the merge.
-      await run("gh", ["pr", "merge", String(number), `--${method}`, "--repo", repo], { timeout: CALL_TIMEOUT_MS });
+      await run("gh", ["pr", "merge", String(number), `--${method}`], { cwd, timeout: CALL_TIMEOUT_MS });
     };
   }
   return host;

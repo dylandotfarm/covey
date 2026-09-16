@@ -86,7 +86,7 @@ export async function mergeMember(host: GhHost, request: MergeRequest): Promise<
 
   // Straight after any merge, ask every merged branch whether it holds work
   // the base branch does not. This is the check that found the lost 211 lines.
-  const merged: RunMemberRef = { ...member, outcome: "merged" };
+  const merged: RunMemberRef = { ...member, state: "merged" };
   const audit = await auditMerged(host, base, [merged]);
   return { merged: true, verdict, audit };
 }

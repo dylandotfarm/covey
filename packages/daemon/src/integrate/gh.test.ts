@@ -54,8 +54,8 @@ test("gh api with a body is a write, because gh turns it into a POST", () => {
 });
 
 test("a host built without the merge capability has no way to merge", () => {
-  const readOnly = realGhHost("o/r", process.cwd());
+  const readOnly = realGhHost({ cwd: process.cwd() });
   assert.equal(readOnly.mergePullRequest, undefined, "nothing can call what is not there");
-  const integrator = realGhHost("o/r", process.cwd(), true);
+  const integrator = realGhHost({ cwd: process.cwd(), allowMerge: true });
   assert.equal(typeof integrator.mergePullRequest, "function");
 });

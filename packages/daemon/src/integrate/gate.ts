@@ -37,7 +37,7 @@ export function gateMember(input: GateInput): GateVerdict {
   const { member, pr, base, evidence } = input;
   const refusals: GateRefusal[] = [];
 
-  if (member.outcome === "withdrawn") {
+  if (member.state === "withdrawn") {
     refusals.push({
       code: "withdrawn",
       message: `${member.label} is withdrawn: the task was cancelled after the work was done, and there is nothing to merge`,

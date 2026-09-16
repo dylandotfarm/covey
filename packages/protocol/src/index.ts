@@ -750,11 +750,22 @@ export interface RunMember {
 }
 
 /**
- * Per-member review state. Issue #45 owns every field in here; #44 only
- * carries it through the store and the wire.
+ * Per-member review state: what the gate decided, the evidence the member
+ * recorded, where it sits in the merge queue, and what the audit found on its
+ * branch after a merge. #44 carries this through the store and the wire and
+ * never reads it. See "Integration of a run" at the end of this file.
  */
 export interface RunMemberReview {
-  [key: string]: unknown;
+  /** The gate, as it was last read. It goes stale when the base head moves. */
+  gate: GateVerdict | null;
+  /** The record that the member's test fails without its fix. */
+  evidence: RegressionEvidence | null;
+  /** This member's place in the merge queue, and the brief it was sent. */
+  queue: QueuePosition | null;
+  /** Set when the audit finds commits on a merged branch that the base lacks. */
+  audit: AuditFinding | null;
+  /** When the run last read the gate, ISO 8601. */
+  checkedAt: string | null;
 }
 
 /**
@@ -1232,6 +1243,59 @@ export interface RpcMethods {
    * what order, is issue #45.
    */
   "run.pullRequest": { params: { threadId: ThreadId }; result: RunPullRequest | null };
+  /**
+   * The gate for one member, read on the machine that holds its branch.
+   *
+   * The daemon reads `turnRunning` from the thread itself, so a client cannot
+   * say the member is idle and merge under a running turn. The caller passes
+   * the evidence, which lives in the run record on the operator's daemon.
+   */
+  "run.gate": {
+    params: { threadId: ThreadId; label: string; state: RunMemberState; evidence: RegressionEvidence | null };
+    result: GateVerdict;
+  };
+  /** The size and the files of a member's branch, which the merge queue orders on. */
+  "run.memberDiff": { params: { threadId: ThreadId }; result: MemberDiff | null };
+  /**
+   * The merge order for a whole run: serial, largest diff first, with the brief
+   * for each member. Pure, and answered by the daemon that stores the run, so
+   * there is one implementation of the order and not one per client.
+   */
+  "run.queue": { params: { entries: QueueEntryWire[] }; result: QueuePosition[] };
+  /**
+   * Merge one member. The gate is read fresh here, not taken from an older
+   * verdict, and the audit runs straight after. `merged: false` comes back with
+   * the refusals, which the operator forwards to the member unchanged.
+   *
+   * One party merges: a caller without `integrator` is refused whatever the
+   * gate says.
+   */
+  "run.merge": {
+    params: {
+      threadId: ThreadId;
+      label: string;
+      state: RunMemberState;
+      evidence: RegressionEvidence | null;
+      actor: MergeParty;
+      method?: "merge" | "squash" | "rebase";
+      /** The queue, so a merge out of order is refused rather than taken. */
+      queue?: QueuePosition[];
+    };
+    result: { merged: boolean; verdict: GateVerdict; audit: AuditFinding[] };
+  };
+  /**
+   * `git rev-list origin/<base>..origin/<branch>` for one merged member.
+   *
+   * One line of shell that would have caught a real loss: a member pushed 211
+   * lines to a branch whose pull request had already merged, and nothing saw it.
+   */
+  "run.audit": { params: { threadId: ThreadId; label: string }; result: AuditFinding | null };
+}
+
+/** One member's entry in the merge queue, as it crosses the wire. */
+export interface QueueEntryWire {
+  member: RunMemberRef;
+  diff: MemberDiff;
 }
 
 export type RpcMethodName = keyof RpcMethods;
@@ -1299,17 +1363,17 @@ export const KNOWN_MODELS: { id: string; label: string }[] = [
 //  - One party merges. A member never gets push rights to the base branch.
 
 /**
- * RECONCILE WITH #44. The run model — the group, its members, placement and
- * dispatch — belongs to #44, which is not merged yet. This is the smallest set
- * of member fields that the gate, the queue and the audit read. When #44 lands,
- * delete this block and read the run's own member type instead.
+ * The little of a run member that the gate, the queue and the audit read.
+ *
+ * It is a view of `RunMember`, not a second model: `memberRef` in the daemon
+ * builds one. The only field that is not on `RunMember` is `turnRunning`,
+ * which belongs to the member's thread rather than to the member.
  */
 export interface RunMemberRef {
-  /** Stable id of the member inside its run. */
+  /** `RunMember.id`. */
   memberId: string;
   /** Short human label, e.g. `#20 wheel scroll`. It goes in the queue brief. */
   label: string;
-  /** The thread that does the work, or null when the run has not dispatched it. */
   threadId: ThreadId | null;
   machineId: MachineId | null;
   /** The branch the member pushes to. The gate and the audit both key on it. */
@@ -1321,17 +1385,8 @@ export interface RunMemberRef {
    * to branch, so it can answer this; the integration half only reads it.
    */
   turnRunning: boolean;
-  outcome: MemberOutcome;
+  state: RunMemberState;
 }
-
-/**
- * How a member ends. `withdrawn` is an ordinary outcome, not a failure: a task
- * cancelled after the agent did the work still produced the reasoning that the
- * replacement task needs.
- *
- * RECONCILE WITH #44, which also names `dispatched`, `working` and `blocked`.
- */
-export type MemberOutcome = "open" | "merged" | "withdrawn";
 
 /** One check on a pull request, flattened from `gh pr view --json statusCheckRollup`. */
 export interface CheckSummary {
