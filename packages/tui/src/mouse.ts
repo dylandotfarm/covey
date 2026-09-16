@@ -8,7 +8,10 @@
  *
  * The escape here is that essentially every terminal bypasses mouse reporting
  * while Shift is held, so shift+drag still gives the user native selection and
- * scrollback behaviour. That is documented in the help overlay.
+ * scrollback behaviour. That is documented in the help overlay. It also rules
+ * shift out as *the* modifier for the wheel, because in most terminals the
+ * report never arrives. `wheelDelta` below names alt, which no common terminal
+ * claims, and takes shift only where a terminal does forward it.
  *
  * Ink has no mouse support, but it also does not mangle these sequences: an
  * unrecognised CSI arrives at `useInput` as the raw sequence with one leading
@@ -29,14 +32,25 @@ export function disableMouse(out: NodeJS.WriteStream = process.stdout): void {
   out.write(DISABLE);
 }
 
+/**
+ * The SGR wheel codes are 64 up, 65 down, 66 left, 67 right, so the direction
+ * is the low *two* bits. Testing only the low bit read a left notch as an up
+ * and a right notch as a down. A trackpad mixes a small sideways component into
+ * most of a slow vertical scroll, so that showed up as a flicker: scroll down,
+ * and every stray 66 threw the view back up against the hand.
+ */
+const WHEEL = ["up", "down", "left", "right"] as const;
+export type WheelDirection = (typeof WHEEL)[number];
+
 export interface MouseEvent {
   kind: "press" | "drag" | "release" | "wheel";
-  /** 0 = left, 1 = middle, 2 = right. */
+  /** 0 = left, 1 = middle, 2 = right. Says nothing on a wheel event, where the
+   *  same two bits carry the direction; read `wheel` there. */
   button: number;
   /** 1-based screen coordinates. */
   col: number;
   row: number;
-  wheel?: "up" | "down";
+  wheel?: WheelDirection;
   shift: boolean;
   alt: boolean;
   ctrl: boolean;
@@ -63,7 +77,7 @@ export function parseMouse(input: string): MouseEvent[] {
     const isWheel = (code & 64) !== 0;
     const mods = { shift: (code & 4) !== 0, alt: (code & 8) !== 0, ctrl: (code & 16) !== 0 };
     if (isWheel) {
-      out.push({ kind: "wheel", button: code & 3, col, row, wheel: (code & 1) === 0 ? "up" : "down", ...mods });
+      out.push({ kind: "wheel", button: code & 3, col, row, wheel: WHEEL[code & 3]!, ...mods });
     } else if (released) {
       out.push({ kind: "release", button: code & 3, col, row, ...mods });
     } else {
@@ -71,6 +85,26 @@ export function parseMouse(input: string): MouseEvent[] {
     }
   }
   return out;
+}
+
+/**
+ * Rows to move for one wheel notch: positive towards the older lines, negative
+ * towards the newest. One row a notch, so the scroll follows the hand; a
+ * modifier asks for `page` instead.
+ *
+ * A sideways notch gives 0, because no pane scrolls sideways. The caller must
+ * treat 0 as "do nothing" rather than as a scroll of no distance, so that a
+ * sideways notch cannot take the focus or start a page load either.
+ *
+ * alt is the modifier the help overlay names. shift and ctrl also count, because
+ * they cost nothing and a terminal that does forward them then behaves the same.
+ */
+export function wheelDelta(ev: MouseEvent, page: number): number {
+  if (ev.kind !== "wheel") return 0;
+  const step = ev.alt || ev.ctrl || ev.shift ? Math.max(1, page) : 1;
+  if (ev.wheel === "up") return step;
+  if (ev.wheel === "down") return -step;
+  return 0;
 }
 
 /** True when the chunk is nothing but mouse reports, so it must not be typed. */
