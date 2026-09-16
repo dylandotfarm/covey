@@ -15,7 +15,7 @@ const tool = (turnId: string, summary: string, extra: Record<string, unknown> = 
 
 function view(items: TimelineItem[], latestTurn: string | null): ThreadView {
   const thread = { latestTurn: latestTurn ? { turnId: latestTurn, state: "completed", startedAt: "", completedAt: "" } : null } as Thread;
-  return { machine: "m", threadId: "t", thread, items: new Map(items.map((i) => [i.id, i])), loading: false, error: null, hasMore: false, loadingOlder: false, seq: items.length };
+  return { machine: "m", threadId: "t", thread, items: new Map(items.map((i) => [i.id, i])), loading: false, error: null, hasMore: false, loadingOlder: false, seq: items.length, commands: null, dirs: new Map() };
 }
 
 const text = (l: ReturnType<typeof layoutTranscript>) => l.lines.map(lineText).join("\n");

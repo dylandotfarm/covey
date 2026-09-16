@@ -19,7 +19,7 @@ const item = (n: number, threadId = "t"): TimelineItem => ({
 const items = (n: number, threadId = "t") =>
   new Map(Array.from({ length: n }, (_, i) => item(i + 1, threadId)).map((i) => [i.id, i]));
 
-const entry = (n: number, seq = n) => ({ thread: null, items: items(n), hasMore: false, seq });
+const entry = (n: number, seq = n) => ({ thread: null, items: items(n), hasMore: false, seq, commands: null });
 
 // ---- the cache itself -------------------------------------------------------
 
@@ -34,7 +34,7 @@ test("a cached view comes back once, and the cache keeps no copy", () => {
 
 test("an empty view is not worth a slot", () => {
   const c = new ViewCache();
-  c.put("m", "t", { thread: null, items: new Map(), hasMore: false, seq: 4 });
+  c.put("m", "t", { thread: null, items: new Map(), hasMore: false, seq: 4, commands: null });
   assert.equal(c.size, 0);
 });
 
@@ -96,7 +96,7 @@ class FakeClient {
   async watchThread(threadId: string, limit: number): Promise<ThreadSnapshot> {
     this.snapshots.push({ threadId, limit });
     if (this.fail) throw new Error("not connected");
-    return { seq: this.seq, thread: { id: threadId } as Thread, items: [...items(this.size, threadId).values()], hasMore: true };
+    return { seq: this.seq, thread: { id: threadId } as Thread, items: [...items(this.size, threadId).values()], hasMore: true, commands: null };
   }
   async unwatchThread() {}
   resumeThread(threadId: string, afterSeq: number) { this.resumes.push({ threadId, afterSeq }); }

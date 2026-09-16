@@ -29,6 +29,7 @@ function open(input: Record<string, unknown>) {
     onTurnComplete: () => {},
     onSessionInit: () => {},
     onModelUsed: () => {},
+    onCommands: () => {},
     now: () => "2026-09-15T00:00:00.000Z",
   } as SessionSink;
   const s = new ClaudeSession({ threadId: "t1" } as SessionParams, sink);
