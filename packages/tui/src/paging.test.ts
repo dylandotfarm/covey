@@ -19,7 +19,7 @@ const viewOf = (n: number): ThreadView => {
   const items = Array.from({ length: n }, (_, i) => oneLiner(i + 1));
   return {
     machine: "pi", threadId: "t", thread: null, items: new Map(items.map((i) => [i.id, i])),
-    loading: false, error: null, hasMore: true, loadingOlder: false, commands: null, dirs: new Map(),
+    loading: false, error: null, hasMore: true, loadingOlder: false, seq: n, commands: null, dirs: new Map(),
   };
 };
 

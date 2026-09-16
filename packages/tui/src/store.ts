@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
+import { ViewCache } from "./viewCache.js";
 
 /**
  * How many timeline items a thread opens with when the reader means it. Big
@@ -44,6 +45,12 @@ export interface ThreadView {
   /** Older items exist before the earliest loaded one. */
   hasMore: boolean;
   loadingOlder: boolean;
+  /**
+   * The thread seq these items are synced to: the snapshot's seq, then the seq
+   * of the last event applied. A revisit resubscribes from it, so the daemon
+   * sends only what changed. Zero until the first snapshot lands.
+   */
+  seq: number;
   /**
    * The `/` menu the daemon reported for this thread. `null` means the daemon
    * does not know yet — the thread has never run a session — which the menu
@@ -174,6 +181,8 @@ export class Store {
   state: AppState;
   private listeners = new Set<Listener>();
   private clients = new Map<string, MachineClient>();
+  /** Threads the reader has already opened, ready to paint again. */
+  private viewCache = new ViewCache();
   private config: TuiConfig;
   private noticeTimer: NodeJS.Timeout | null = null;
 
@@ -224,6 +233,8 @@ export class Store {
     const client = new MachineClient(saved, {
       state: (s, err) => {
         ms.conn = s; ms.error = err ?? null; ms.info = client.info;
+        // A cached seq only means something to the daemon it was read from.
+        if (s !== "connected") this.viewCache.dropMachine(ms.key);
         // A restarting daemon cannot report its own success — it is gone by
         // then. Reconnecting is the success, so say so here.
         if (s === "connected" && ms.restarting) {
@@ -267,6 +278,7 @@ export class Store {
     this.config.machines = this.config.machines.filter((m) => m.url !== key);
     this.persist();
     if (this.state.selected?.machine === key) this.select(null);
+    this.viewCache.dropMachine(key);
     this.touch();
   }
 
@@ -327,12 +339,27 @@ export class Store {
       // The SDK replaces its command list rather than patching it, so we do too.
       case "commands.updated": v.commands = ev.commands; break;
     }
+    // A resent snapshot carries each item's own seq, which is older than the
+    // subscription's, so take the highest and never go backwards.
+    v.seq = Math.max(v.seq, ev.seq);
     this.set({ view: { ...v } });
   }
 
   // ---- selection -----------------------------------------------------------
 
   private selectGen = 0;
+
+  /**
+   * Keep the view the reader leaves, so that coming back needs no snapshot.
+   * A half-loaded or failed view is not kept: its items are a fragment and its
+   * seq says nothing about where they came from.
+   */
+  private cacheCurrentView() {
+    const v = this.state.view;
+    if (!v || v.loading || v.error || v.seq === 0) return;
+    this.viewCache.put(v.machine, v.threadId, { thread: v.thread, items: v.items, hasMore: v.hasMore, seq: v.seq, commands: v.commands });
+  }
+
   /**
    * Open a thread. `limit` is how many of the newest items to fetch: a preview
    * asks for about a screen's worth, because that is all it can paint, and the
@@ -344,16 +371,37 @@ export class Store {
   async select(sel: { machine: string; threadId: string } | null, limit = FULL_PAGE) {
     const gen = ++this.selectGen;
     const prev = this.state.selected;
+    this.cacheCurrentView();
     // Not awaited: releasing the old machine's subscription is bookkeeping, and
     // the new thread's snapshot does not wait on it.
     if (prev && prev.machine !== sel?.machine) void this.clients.get(prev.machine)?.unwatchThread();
     if (!sel) { this.set({ selected: null, view: null }); return; }
     const client = this.clients.get(sel.machine);
     const ms = this.state.machines.get(sel.machine);
-    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, commands: null, dirs: new Map() };
     this.state.attention.delete(`${sel.machine}:${sel.threadId}`);
-    this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     this.config.prefs.lastSelected = sel; this.persist();
+
+    const cached = this.viewCache.take(sel.machine, sel.threadId);
+    if (cached) {
+      // Paint first, reconcile after. The subscription replays every event
+      // after the seq these items were cached at, so nothing here is trusted;
+      // it is only early. `limit` does not apply — the reader gets the page
+      // they had, and App tops it up through loadOlder() if it is short of the
+      // pane.
+      const view: ThreadView = {
+        machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? cached.thread,
+        items: cached.items, loading: false, error: null, hasMore: cached.hasMore, loadingOlder: false, seq: cached.seq,
+        // The menu comes back with the items; the directories are read again,
+        // because a file may have appeared since the reader was last here.
+        commands: cached.commands, dirs: new Map(),
+      };
+      this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
+      client?.resumeThread(sel.threadId, cached.seq);
+      return;
+    }
+
+    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0, commands: null, dirs: new Map() };
+    this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     try {
       const snap: ThreadSnapshot | undefined = await client?.watchThread(sel.threadId, limit);
       if (gen !== this.selectGen || this.state.selected?.threadId !== sel.threadId) return;
@@ -367,6 +415,9 @@ export class Store {
         view.items = merged;
         view.hasMore = snap.hasMore;
         view.commands = snap.commands;
+        // Events that landed while the snapshot was in flight already carried
+        // the view past the snapshot's seq, so keep the higher of the two.
+        view.seq = Math.max(view.seq, snap.seq);
       }
       view.loading = false;
       this.set({ view: { ...view } });
