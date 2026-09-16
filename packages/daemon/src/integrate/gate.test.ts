@@ -63,6 +63,21 @@ test("a pending check is a refusal, and so is a stale green one", () => {
   assert.match(stale.refusals[0]!.message, /Re-run it against the base head/);
 });
 
+test("a pull request that proves nothing is refused, the same as a failing one", () => {
+  // Green is not the gate, and neither is quiet. A rollup with no check at all,
+  // and one where every check was skipped, each prove exactly nothing.
+  const none = gateMember({ member: member({ branch: "b" }), pr: pr({ number: 1, checks: [] }), base: BASE, evidence: EVIDENCE });
+  assert.equal(none.ok, false);
+  assert.deepEqual(none.refusals.map((r) => r.code), ["ci-absent"]);
+  assert.match(none.refusals[0]!.message, /#1 proves nothing: the pull request has no checks/);
+
+  const skipped = [{ name: "close", workflowName: "no external prs", status: "COMPLETED", conclusion: "SKIPPED", startedAt: "2026-09-16T16:30:00Z" }];
+  const all = gateMember({ member: member({ branch: "b" }), pr: pr({ number: 1, checks: skipped }), base: BASE, evidence: EVIDENCE });
+  assert.equal(all.ok, false);
+  assert.deepEqual(all.refusals.map((r) => r.code), ["ci-absent"]);
+  assert.match(all.refusals[0]!.message, /skipped or cancelled/);
+});
+
 test("a conflicting pull request is refused, by either signal GitHub gives", () => {
   assert.ok(codes({ member: member({ branch: "b" }), pr: pr({ number: 1, checks: GREEN, mergeable: "CONFLICTING" }), base: BASE, evidence: EVIDENCE }).includes("merge-conflict"));
   assert.ok(codes({ member: member({ branch: "b" }), pr: pr({ number: 1, checks: GREEN, mergeStateStatus: "DIRTY" }), base: BASE, evidence: EVIDENCE }).includes("merge-conflict"));

@@ -40,6 +40,18 @@ test("a member may not merge, however green it is — one party merges", async (
   assert.match(refusal.message, /never gets push rights to `main`/);
 });
 
+test("a caller that names no party is refused, not answered with an exception", async () => {
+  // `actor` crosses the wire. A client that omits it must read a refusal, the
+  // same as a member does, rather than a stack trace from inside the merge.
+  for (const actor of [undefined, null, {} as MergeParty]) {
+    const h = host();
+    const result = await mergeMember(h, { member: member({ branch: "good" }), base: "main", evidence: EVIDENCE, actor });
+    assert.equal(result.merged, false, String(actor));
+    assert.deepEqual(h.merges, [], "nothing was merged");
+    assert.ok(result.verdict.refusals.some((r) => r.code === "not-the-merge-party"), String(actor));
+  }
+});
+
 test("the gate is read fresh at merge time, not taken from an older verdict", async () => {
   // The same green checks, and a base head that landed after they started.
   const moved: BaseHead = { oid: "newer", committedAt: "2026-09-16T16:45:00Z" };

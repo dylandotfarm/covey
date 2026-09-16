@@ -30,8 +30,8 @@ export interface MergeRequest {
   base: string;
   /** The record that the test fails without the fix. The gate reads it. */
   evidence: RegressionEvidence | null;
-  /** Who asks. A member is refused whatever its gate says. */
-  actor: MergeParty;
+  /** Who asks. A member is refused whatever its gate says, and so is a caller that sends none. */
+  actor: MergeParty | null | undefined;
   method?: MergeMethod;
   /** The queue, so a merge out of order is refused rather than taken. */
   queue?: QueuePosition[];
@@ -54,10 +54,13 @@ export async function mergeMember(host: GhHost, request: MergeRequest): Promise<
   const head = await host.baseHead(base);
   const verdict = gateMember({ member, pr, base: head, evidence });
 
-  if (!actor.integrator) {
+  // `actor` crosses the wire, so it may be missing or half-built. A caller that
+  // names no party is not the integrator; it is refused like any other member,
+  // and never with an exception the operator has to read as a stack trace.
+  if (!actor?.integrator) {
     verdict.refusals.push({
       code: "not-the-merge-party",
-      message: `${actor.id} may not merge: one party merges, and a member never gets push rights to \`${base}\``,
+      message: `${actor?.id || "a caller that names no party"} may not merge: one party merges, and a member never gets push rights to \`${base}\``,
     });
     verdict.ok = false;
   }
