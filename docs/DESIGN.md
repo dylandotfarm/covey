@@ -420,6 +420,8 @@ streaming, queueing, and diff capture.
   signal handling and the alternate-screen escape are untested there.
 - **Other providers**: `Thread.provider` and `MachineCapabilities.providers` exist; the
   engine currently instantiates only `ClaudeSession`.
-- **Attachments / image paste**.
+- **Attachments**: drag-and-drop attaches a file of any type, and `ctrl+v` attaches the
+  clipboard image through `pngpaste` / `wl-paste` / `xclip` when one of them is installed.
+  There is no reader for Windows, and no paste for a non-image on the clipboard.
 - **Rust client**: the protocol is the contract; a ratatui client can replace `packages/tui`
   without daemon changes. Worth doing once the protocol stops moving.

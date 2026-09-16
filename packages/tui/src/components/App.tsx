@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { appendFileSync } from "node:fs";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
+import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
 import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
@@ -13,7 +13,7 @@ import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
 import * as Ed from "../editor.js";
-import { readDroppedImages } from "../attachments.js";
+import { readClipboardImage, readDroppedFiles } from "../attachments.js";
 import { T } from "../theme.js";
 
 const SIDEBAR_W = 34;
@@ -624,15 +624,11 @@ export function App({ store }: { store: Store }) {
     }
     if (editing && rawInput.length > 1 && !special) {
       // A drag-and-drop arrives as a paste of the file's path. If the whole
-      // chunk parses as image paths, attach them; otherwise it is ordinary text.
+      // chunk parses as dropped files, attach them; otherwise it is ordinary text.
       if (state.view) {
-        const { attachments, errors } = readDroppedImages(rawInput);
+        const { attachments, errors } = readDroppedFiles(rawInput);
         for (const e of errors) store.notify(e, "error");
-        if (attachments.length > 0) {
-          store.addAttachments(state.view.threadId, attachments);
-          store.notify(`attached ${attachments.map((a) => a.name).join(", ")}`, "success");
-          return;
-        }
+        if (attach(attachments)) return;
         if (errors.length > 0) return;
       }
       // paste: normalise CRLF and insert
@@ -844,7 +840,24 @@ export function App({ store }: { store: Store }) {
     if (key.ctrl && input === "e") return setCaret(Ed.lineEnd(draft, caret));
     if (key.ctrl && input === "u") return applyEdit(Ed.deleteToLineStart({ value: draft, caret }));
     if (key.ctrl && input === "w") return applyEdit(Ed.deleteWordBack({ value: draft, caret }));
+    // Terminals paste with cmd+v (macOS) or ctrl+shift+v (Linux) and send the
+    // TUI nothing at all when the clipboard holds an image, so ctrl+v is free
+    // for covey to read the clipboard itself.
+    if (key.ctrl && input === "v") return pasteClipboardImage();
     if (input && !key.ctrl && !key.meta && !key.super) insert(input);
+  }
+  /** Hand new attachments to the store. Returns false when there were none. */
+  function attach(attachments: Attachment[]): boolean {
+    if (attachments.length === 0 || !state.view) return false;
+    store.addAttachments(state.view.threadId, attachments);
+    store.notify(`attached ${attachments.map((a) => a.name).join(", ")}`, "success");
+    return true;
+  }
+  function pasteClipboardImage() {
+    if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
+    const { attachment, error } = readClipboardImage();
+    if (attachment) attach([attachment]);
+    else if (error) store.notify(error, "error");
   }
   function applyEdit(next: Ed.EditState) { setDraft(next.value); setCaret(next.caret); }
   function insert(s: string) { applyEdit(Ed.insert({ value: draft, caret }, s)); }
