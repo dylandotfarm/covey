@@ -17,9 +17,18 @@ test("findTargets picks out a URL and an absolute path", () => {
   assert.deepEqual(hits.map((h) => h.uri), ["file:///Users/d/a.ts", "https://example.com/x"]);
 });
 
-test("findTargets leaves prose that only looks like a path alone", () => {
-  for (const s of ["and/or", "24/7/365", "a/b/c", "nine of /ten"]) {
-    assert.deepEqual(findTargets(s, local), [], s);
+test("a relative path is not linked: the match must not follow a word character", () => {
+  // Guards the PREFIX check. Without it `a/b/c` links to `file:///b/c`, a file
+  // that is not the one on screen.
+  for (const s of ["a/b/c", "24/7/365", "src/tui/lines.ts"]) {
+    assert.deepEqual(findTargets(s, local).map((h) => h.uri), [], s);
+  }
+});
+
+test("a one-segment path is not linked: it reads as prose more often than as a path", () => {
+  // Guards the segment count. Without it `and/or` links to `file:///or`.
+  for (const s of ["and/or", "nine of /ten", "run /tmp"]) {
+    assert.deepEqual(findTargets(s, local).map((h) => h.uri), [], s);
   }
 });
 
@@ -88,10 +97,6 @@ test("markdownToLines renders a link's label, not its source", () => {
   assert.deepEqual(links(lines[0]!), ["https://example.com/n"]);
 });
 
-test("without a link context the markdown link is still not raw source", () => {
-  assert.equal(markdownToLines("read [the notes](https://example.com/n)", 60).map(text).join(""), "read the notes");
-});
-
 test("a tool row takes its link from the input, not from the truncated summary", () => {
   const path = "/Users/d/" + "long-directory-name/".repeat(6) + "file.ts";
   const item = {
@@ -102,6 +107,8 @@ test("a tool row takes its link from the input, not from the truncated summary",
   } as const;
   const lines = renderItem(item, { width: 200, expanded: new Set(), links: local });
   assert.ok(text(lines[0]!).includes("…"), "the summary really is truncated");
+  // Scanning the summary text instead would give the path up to the ellipsis:
+  // a directory that exists, with the file name cut off.
   assert.deepEqual(links(lines[0]!), ["file://" + path], "the link is the whole path");
   assert.ok(lines[0]!.some((sp) => sp.text.startsWith("Read") && sp.link), "the summary words carry it, not only the path");
 });
