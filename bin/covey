@@ -16,6 +16,26 @@ done
 root=$(cd "$(dirname "$self")/.." && pwd)
 entry=$root/packages/cli/dist/index.js
 
+# The Node version test comes first: `node:sqlite` is a Node 22 builtin, so an
+# older Node stops while it loads the modules, and a build on an older Node is
+# no use anyway. `packages/cli/dist/index.js` makes the same test, for a start
+# that does not come through this file.
+min_major=22
+if ! command -v node >/dev/null 2>&1; then
+  echo "covey needs Node $min_major or newer; there is no \`node\` on the PATH." >&2
+  exit 1
+fi
+node_version=$(node -v)            # for example: v24.21.0
+node_major=${node_version#v}
+node_major=${node_major%%.*}
+case $node_major in
+  '' | *[!0-9]*) node_major=0 ;;   # an unreadable version counts as too old
+esac
+if [ "$node_major" -lt "$min_major" ]; then
+  echo "covey needs Node $min_major or newer; this is $node_version." >&2
+  exit 1
+fi
+
 # A fresh clone, or a clone whose dist/ was removed, builds itself once.
 # --force because tsc keeps a tsconfig.tsbuildinfo beside each package: without
 # it, a build that has lost its dist/ is reported as up to date and emits nothing.

@@ -31,7 +31,7 @@
   `COVEY_PORT=3799 COVEY_HOME=/tmp/h COVEY_CONFIG=/tmp/c node packages/cli/dist/index.js`
   runs a complete second instance (client + daemon) that cannot touch the real one.
 - The client updates itself by quitting with a request the CLI performs (pull, build, restart
-  the daemon) before `process.execve`ing back into the new build — see `packages/cli/src/index.ts`.
+  the daemon) before `process.execve`ing back into the new build — see `packages/cli/src/main.ts`.
 - Dependencies: `pnpm add <pkg>`; pnpm refuses versions younger than 7 days
   (`minimumReleaseAge` in pnpm-workspace.yaml). Keep `pnpm run check:age` green. Install
   scripts are blocked (`onlyBuiltDependencies: []`); never use npm in this repo.
