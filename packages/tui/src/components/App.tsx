@@ -216,7 +216,7 @@ export function App({ store }: { store: Store }) {
   // fetched. `loadDir` reads each one once.
   useEffect(() => { if (mentionDirPath !== null) void store.loadDir(mentionDirPath); }, [mentionDirPath, threadKey, store]);
 
-  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle }); };
+  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string, onCancel?: () => void) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle, onCancel }); };
   const openInput = (title: string, onSubmit: (v: string) => void, initial = "", placeholder?: string, onCancel?: () => void) => { setOvFilter(initial); store.setOverlay({ kind: "input", title, onSubmit, initial, placeholder, onCancel }); };
 
   // ---- actions ----------------------------------------------------------------
@@ -574,7 +574,7 @@ export function App({ store }: { store: Store }) {
       return openPick(`Drop ${m.task.key} from the run?`, [
         { id: "no", label: "Cancel" },
         { id: "yes", label: "Drop it — it was never dispatched" },
-      ], (id) => { backToRun(ov, at); if (id === "yes") void store.threadCommand({ type: "run.member.remove", runId: run.id, memberId: m.id }, ov.machine); });
+      ], (id) => { backToRun(ov, at); if (id === "yes") void store.threadCommand({ type: "run.member.remove", runId: run.id, memberId: m.id }, ov.machine); }, undefined, () => backToRun(ov, at));
     }
     if (input === "r") return openInput("Rename run", (v) => { backToRun(ov, at); if (v.trim()) void store.threadCommand({ type: "run.update", runId: run.id, name: v.trim() }, ov.machine); }, run.name, undefined, () => backToRun(ov, at));
   }
@@ -596,7 +596,7 @@ export function App({ store }: { store: Store }) {
     ], (id) => {
       backToRun(ov, 0);
       if (id === "yes") void store.dispatchRun(ov.machine, ov.runId);
-    });
+    }, undefined, () => backToRun(ov, 0));
   };
 
   /**
@@ -620,7 +620,7 @@ export function App({ store }: { store: Store }) {
         backToRun(ov, at);
         if (text.trim()) void store.sendToRun(ov.machine, ov.runId, to.map((m) => m.id), text);
       }, "", "they all get this, verbatim", () => backToRun(ov, at));
-    });
+    }, undefined, () => backToRun(ov, at));
   };
 
   /** Move a member to another machine, before it has a thread. */
@@ -637,7 +637,7 @@ export function App({ store }: { store: Store }) {
     })), (id) => {
       backToRun(ov, at);
       void store.moveMember(ov.machine, run.id, m.id, id);
-    });
+    }, undefined, () => backToRun(ov, at));
   };
 
   /** The states an operator sets by hand. `blocked` is not an error. */
@@ -656,7 +656,7 @@ export function App({ store }: { store: Store }) {
       }
       backToRun(ov, at);
       void store.patchMember(ov.machine, run.id, m.id, { state: next });
-    });
+    }, undefined, () => backToRun(ov, at));
   };
 
   /** Add a task to a run in flight, without tearing the run down. */
@@ -1072,7 +1072,14 @@ export function App({ store }: { store: Store }) {
 
   function handleOverlayKey(input: string, key: any) {
     const ov = state.overlay!;
-    if (key.escape) { store.setOverlay(null); setOvFilter(""); if (ov.kind === "input") ov.onCancel?.(); return; }
+    if (key.escape) {
+      store.setOverlay(null);
+      setOvFilter("");
+      // A pick opened from the run panel goes back to it, rather than closing
+      // the panel the reader was working in.
+      if (ov.kind === "input" || ov.kind === "pick") ov.onCancel?.();
+      return;
+    }
     if (ov.kind === "help" || ov.kind === "update") return;
     if (ov.kind === "run") return handleRunKey(ov, input, key);
     if (ov.kind === "usage") {

@@ -18,9 +18,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { RunTask } from "@covey/protocol";
 import {
-  DEFAULT_BRIEF, PLACEMENT_RULE, RUN_PORT_MAX, RUN_PORT_MIN, allocateResources, firstUnmet,
-  meets, memberSlug, parseRequirements, parseTaskList, placeTasks, renderBrief, runPortBase,
-  withIssueTitles, type PlacementMachine,
+  DEFAULT_BRIEF, PLACEMENT_RULE, RUN_PORT_MAX, RUN_PORT_MIN, allocatePorts, allocateResources,
+  firstUnmet, meets, memberSlug, parseRequirements, parseTaskList, placeTasks, renderBrief,
+  runPortBase, withIssueTitles, type PlacementMachine,
 } from "./run.js";
 
 const MAC: PlacementMachine = {
@@ -159,29 +159,35 @@ test("meets and firstUnmet agree about what a machine is missing", () => {
 
 test("no two members of a run share a port, a home or a config", () => {
   const runId = "8f0d2b1e-0000-4000-8000-000000000001";
-  const members = Array.from({ length: 15 }, (_, i) =>
-    allocateResources(runId, i, "/tmp", memberSlug(task({ key: `#${i}` }), i)));
+  const ports = allocatePorts(runId, 15);
+  const members = ports.map((p, i) => allocateResources(runId, p, "/tmp", memberSlug(task({ key: `#${i}` }), i)));
   assert.equal(new Set(members.map((m) => m.port)).size, 15, "fifteen agents, fifteen ports");
   assert.equal(new Set(members.map((m) => m.coveyHome)).size, 15, "fifteen agents, fifteen homes");
   assert.equal(new Set(members.map((m) => m.coveyConfig)).size, 15, "fifteen agents, fifteen configs");
 });
 
 test("a member's port is never the port a real daemon listens on", () => {
-  const runId = "8f0d2b1e-0000-4000-8000-000000000002";
-  for (let i = 0; i < 200; i++) {
-    const { port } = allocateResources(runId, i, "/tmp", `m${i}`);
-    assert.notEqual(port, 3790, "3790 hosts the session the operator is in");
-    assert.ok(port >= RUN_PORT_MIN && port <= RUN_PORT_MAX, `${port} is outside the run range`);
+  for (let run = 0; run < 50; run++) {
+    for (const port of allocatePorts(`8f0d2b1e-0000-4000-8000-${String(run).padStart(12, "0")}`, 20)) {
+      assert.notEqual(port, 3790, "3790 hosts the session the operator is in");
+      assert.ok(port >= RUN_PORT_MIN && port <= RUN_PORT_MAX, `${port} is outside the run range`);
+    }
   }
 });
 
-test("the port block does not move when a task is added to a run in flight", () => {
-  // A base that depended on the member count would re-number a member that is
-  // already at work on its own port.
+test("a second run does not take a port the first run's members are using", () => {
+  // Two run ids that hash into the same place is a one-in-two-hundred event,
+  // and it happened on the third run ever created. Hashing alone is not enough.
+  const first = allocatePorts("run-a", 4);
+  const clash = allocatePorts("run-b", 4, new Set(first));
+  assert.equal(clash.filter((p) => first.includes(p)).length, 0);
+  assert.equal(new Set(clash).size, 4);
+});
+
+test("the block a run already holds is stable when it is asked for again", () => {
   const runId = "8f0d2b1e-0000-4000-8000-000000000003";
-  const before = allocateResources(runId, 2, "/tmp", "i44").port;
-  assert.equal(runPortBase(runId), runPortBase(runId));
-  assert.equal(allocateResources(runId, 2, "/tmp", "i44").port, before);
+  assert.deepEqual(allocatePorts(runId, 3), allocatePorts(runId, 3));
+  assert.equal(runPortBase(runId), allocatePorts(runId, 1)[0]);
 });
 
 test("two runs do not start from the same port", () => {
@@ -191,8 +197,8 @@ test("two runs do not start from the same port", () => {
 });
 
 test("a member's directories go under the tmpdir of the machine it runs on", () => {
-  const mac = allocateResources("r", 0, "/var/folders/xx", "1-i44");
-  const pi = allocateResources("r", 1, "/tmp", "2-i45");
+  const mac = allocateResources("r", 3801, "/var/folders/xx", "1-i44");
+  const pi = allocateResources("r", 3802, "/tmp", "2-i45");
   assert.ok(mac.coveyHome.startsWith("/var/folders/xx/"), mac.coveyHome);
   assert.ok(pi.coveyHome.startsWith("/tmp/"), pi.coveyHome);
   assert.notEqual(mac.coveyConfig, mac.coveyHome);
@@ -217,7 +223,7 @@ function brief(index: number, template = DEFAULT_BRIEF) {
     task: t,
     machineName: "mac",
     branch: `covey/branch${index}`,
-    resources: allocateResources(runId, index, "/tmp", memberSlug(t, index)),
+    resources: allocateResources(runId, allocatePorts(runId, 15)[index]!, "/tmp", memberSlug(t, index)),
     position: index + 1,
     total: 15,
   });
@@ -237,6 +243,42 @@ test("a brief leaves no token unsubstituted", () => {
 
 test("the brief carries the branch the daemon actually minted", () => {
   assert.match(brief(3), /covey\/branch3/);
+});
+
+test("a brief for a plain task says nothing about an issue it does not have", () => {
+  // A run takes a plain line of text as well as an issue number. `gh issue
+  // view .` and "Closes " are worse than saying neither.
+  const plain = renderBrief(DEFAULT_BRIEF, {
+    runName: "r", goal: "g", task: task({ key: "t1", title: "Reply with ok" }), machineName: "mac",
+    branch: "covey/abc", resources: { port: 3841, coveyHome: "/tmp/h", coveyConfig: "/tmp/c" },
+    position: 1, total: 3,
+  });
+  assert.equal(plain.includes("gh issue view"), false, plain.slice(0, 200));
+  assert.equal(plain.includes("Closes"), false);
+  assert.equal(plain.includes("gh issue comment"), false);
+  assert.match(plain, /^Your task: Reply with ok/);
+  // …and it still says the parts that are not about an issue.
+  assert.match(plain, /port 3841/);
+  assert.match(plain, /pull request against `main`/);
+  assert.equal(/\n\n\n/.test(plain), false, "a dropped section must not leave a hole");
+});
+
+test("a brief for an issue task keeps every issue line", () => {
+  const withIssue = brief(0);
+  assert.match(withIssue, /gh issue view #44/);
+  assert.match(withIssue, /gh issue comment #44/);
+  assert.match(withIssue, /Closes #44/);
+  assert.match(withIssue, /^Work on #44 — /);
+});
+
+test("a section is kept or dropped by whether its value is there", () => {
+  const ctx = {
+    runName: "r", goal: "g", machineName: "m", branch: "b",
+    resources: { port: 3801, coveyHome: "/tmp/a", coveyConfig: "/tmp/b" }, position: 1, total: 1,
+  };
+  const tpl = "A{{#issue}} yes {{issue}}{{/issue}}{{^issue}} no {{/issue}}B";
+  assert.equal(renderBrief(tpl, { ...ctx, task: task({ key: "#7", issue: 7 }) }), "A yes #7B");
+  assert.equal(renderBrief(tpl, { ...ctx, task: task({ key: "t1" }) }), "A no B");
 });
 
 test("an unknown token is left alone rather than blanked", () => {

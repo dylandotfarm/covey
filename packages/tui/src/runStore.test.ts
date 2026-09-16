@@ -63,7 +63,7 @@ class FakeClient {
         briefTemplate: cmd.run.briefTemplate, workspaceMode: cmd.run.workspaceMode,
         members: cmd.run.members.map((m) => ({
           ...m, threadId: null, branch: null, worktreePath: null, pullRequest: null,
-          state: "planned" as const, note: null, brief: null, dispatchedAt: null, updatedAt: now, review: null,
+          state: "planned" as const, note: m.note ?? null, brief: null, dispatchedAt: null, updatedAt: now, review: null,
         })),
         closedAt: null, createdAt: now, updatedAt: now,
       };
@@ -74,7 +74,7 @@ class FakeClient {
       const now = new Date().toISOString();
       this.run.members.push({
         ...cmd.member, threadId: null, branch: null, worktreePath: null, pullRequest: null,
-        state: "planned", note: null, brief: null, dispatchedAt: null, updatedAt: now, review: null,
+        state: "planned", note: cmd.member.note ?? null, brief: null, dispatchedAt: null, updatedAt: now, review: null,
       });
     }
     if (this.run) ms.runs.set(this.run.id, structuredClone(this.run));
@@ -122,14 +122,21 @@ function twoMachines() {
   return { store, mac: clients.get(MAC)!, pi: clients.get(PI)! };
 }
 
-async function runOf(store: Store, tasks: string) {
+async function runOf(store: Store, tasks: string, runId?: string) {
   const id = await store.createRun({
     machine: MAC, name: "covey issues", goal: "close the backlog",
-    tasks: parseTaskList(tasks), repositoryIdentity: "github.com/dylandotfarm/covey",
+    tasks: parseTaskList(tasks), repositoryIdentity: "github.com/dylandotfarm/covey", runId,
   });
   assert.ok(id, "the run was created");
   return id!;
 }
+
+/**
+ * Two run ids that hash to the same first port. Hashing spreads runs over the
+ * range; it does not keep them apart, and one-in-two-hundred happened on the
+ * third run ever created.
+ */
+const COLLIDING = ["00000000-0000-4000-8000-000000000013", "00000000-0000-4000-8000-000000000019"];
 
 // ---------------------------------------------------------------------------
 
@@ -158,6 +165,23 @@ test("placement obeys a task's requirements, not the size of the machine", async
   // would be made against a project id that machine has never heard of.
   assert.equal(run.members[12]!.projectId, "p-mac");
   assert.equal(run.members[13]!.projectId, "p-pi");
+});
+
+test("a member the rule could not place says so on its own row", async () => {
+  const { store } = twoMachines();
+  // `pngpaste` is on neither machine. Dropping the task silently is how one
+  // goes missing from a run of twenty, so it is placed and flagged instead.
+  const id = await runOf(store, "Paste the clipboard image needs=pngpaste");
+  const m = store.run(MAC, id)!.members[0]!;
+  assert.equal(m.state, "planned");
+  assert.match(m.note ?? "", /not placed by the rule/);
+  assert.match(m.note ?? "", /pngpaste/);
+});
+
+test("a member the rule did place carries no note", async () => {
+  const { store } = twoMachines();
+  const id = await runOf(store, "44");
+  assert.equal(store.run(MAC, id)!.members[0]!.note, null);
 });
 
 test("a member's directories belong to the machine it runs on", async () => {
@@ -244,6 +268,15 @@ test("a member's thread starting work moves it to working, once", async () => {
   await new Promise((r) => setTimeout(r, 0));
   assert.equal(mac.commands.filter((c) => c.type === "run.member.patch" && (c as any).patch.state === "working").length, patches.length,
     "a second thread event must not send the same patch again");
+});
+
+test("a second run does not hand out a port the first run's members hold", async () => {
+  const { store } = twoMachines();
+  const a = await runOf(store, "1 2 3 4", COLLIDING[0]);
+  const b = await runOf(store, "5 6 7 8", COLLIDING[1]);
+  const held = store.run(MAC, a)!.members.map((m) => m.resources.port);
+  const next = store.run(MAC, b)!.members.map((m) => m.resources.port);
+  assert.equal(next.filter((p) => held.includes(p)).length, 0, "two runs at once, and no shared port");
 });
 
 test("a task added mid-run lands where there is room", async () => {

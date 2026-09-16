@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { isFinalMemberState } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
-import { DEFAULT_BRIEF, allocateResources, memberSlug, placeTasks, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
+import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
@@ -96,6 +96,11 @@ export type Overlay =
       filter?: boolean;
       /** Label for a checkbox row under the list, flipped with tab. */
       toggle?: string;
+      /**
+       * Where esc goes. Without it esc closes everything, which throws the
+       * reader out of the run panel they opened the pick from.
+       */
+      onCancel?: () => void;
     }
   /** `onCancel` lets esc go back where the input came from instead of closing
    *  everything — the folder prompt returns to the directory it was opened on. */
@@ -1032,14 +1037,17 @@ export class Store {
     repositoryIdentity: string | null;
     briefTemplate?: string;
     workspaceMode?: WorkspaceMode;
+    /** The run's id. Supplied only by a test that needs a known one. */
+    runId?: string;
   }): Promise<string | null> {
     const client = this.clients.get(o.machine);
     if (!client) { this.notify("start a run from a connected machine", "error"); return null; }
     const machines = this.placementMachines(o.repositoryIdentity);
     if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return null; }
-    const runId = randomUUID();
+    const runId = o.runId ?? randomUUID();
     const placed = placeTasks(o.tasks, machines);
     const byId = new Map(machines.map((m) => [m.machineId, m]));
+    const ports = allocatePorts(runId, placed.length, this.portsInUse());
     const members = placed.map((p, i) => {
       // A task no machine can take still gets a member, on the fastest machine,
       // so the operator sees it and decides. Dropping it silently is how a task
@@ -1050,7 +1058,10 @@ export class Store {
         task: p.task,
         machineId: target.machineId,
         projectId: target.projectId,
-        resources: allocateResources(runId, i, target.tmpDir, memberSlug(p.task, i)),
+        resources: allocateResources(runId, ports[i]!, target.tmpDir, memberSlug(p.task, i)),
+        // A member the rule could not place says so on its own row. Moving it
+        // is the operator's call, and they cannot make it without the reason.
+        note: p.machineId === null ? `not placed by the rule: ${p.reason} — move it or change the task` : null,
       };
     });
     try {
@@ -1070,6 +1081,23 @@ export class Store {
     } catch (e: any) { this.notify(e.message, "error"); return null; }
   }
 
+  /**
+   * The ports the members of every run this client can see are still using.
+   *
+   * Two runs whose ids hash close together would otherwise hand the same port
+   * to two agents — which is issue #8 happening again, one level up. A member
+   * that is merged or withdrawn has given its port back.
+   */
+  private portsInUse(): Set<number> {
+    const ports = new Set<number>();
+    for (const key of this.state.order) {
+      for (const run of this.state.machines.get(key)?.runs.values() ?? []) {
+        for (const m of run.members) if (!isFinalMemberState(m.state)) ports.add(m.resources.port);
+      }
+    }
+    return ports;
+  }
+
   /** Change one member's row. Everything about a run is one of these. */
   async patchMember(machine: string, runId: string, memberId: string, patch: RunMemberPatch): Promise<string | null> {
     return this.threadCommand({ type: "run.member.patch", runId, memberId, patch }, machine);
@@ -1087,9 +1115,10 @@ export class Store {
     await this.patchMember(machine, runId, memberId, {
       machineId: to.machineId,
       projectId: to.projectId,
-      // The port and the directories follow the member: they are named for the
-      // machine they will be used on, and `/tmp` is not `/tmp` everywhere.
-      resources: allocateResources(runId, index, to.tmpDir, memberSlug(m.task, index)),
+      // The port is the member's and goes with it. The directories are rebuilt,
+      // because they are named for the machine they will be used on and `/tmp`
+      // is not `/tmp` everywhere.
+      resources: allocateResources(runId, m.resources.port, to.tmpDir, memberSlug(m.task, index)),
     });
     this.notify(`${m.task.key} → ${to.name}`, "success");
   }
@@ -1198,6 +1227,11 @@ export class Store {
     const carrying = new Map<string, number>();
     for (const m of run.members) if (!isFinalMemberState(m.state)) carrying.set(m.machineId, (carrying.get(m.machineId) ?? 0) + 1);
     const placed = placeTasks(tasks, machines, carrying);
+    // The new members clear every port this run already holds, as well as every
+    // other run's — an added task must not take the port of a member at work.
+    const taken = this.portsInUse();
+    for (const m of run.members) taken.add(m.resources.port);
+    const ports = allocatePorts(runId, tasks.length, taken);
     for (let i = 0; i < tasks.length; i++) {
       const index = run.members.length + i;
       const target = machines.find((x) => x.machineId === placed[i]!.machineId) ?? machines[0]!;
@@ -1209,7 +1243,7 @@ export class Store {
           task: tasks[i]!,
           machineId: target.machineId,
           projectId: target.projectId,
-          resources: allocateResources(runId, index, target.tmpDir, memberSlug(tasks[i]!, index)),
+          resources: allocateResources(runId, ports[i]!, target.tmpDir, memberSlug(tasks[i]!, index)),
         },
       }, machine);
       if (err) return;

@@ -31,7 +31,7 @@ function newMember(init: import("@covey/protocol").RunMemberInit, now: string): 
     worktreePath: null,
     pullRequest: null,
     state: "planned",
-    note: null,
+    note: init.note ?? null,
     resources: init.resources,
     brief: null,
     dispatchedAt: null,
