@@ -130,15 +130,19 @@ export async function startDaemon(opts: {
   name?: string;
   home?: string;
   env?: NodeJS.ProcessEnv;
-  /** Override the start budget. Only `daemons.test.ts` passes this, to put a
-   *  daemon in the position the original 10s budget put every daemon in: still
-   *  booting when its budget ran out. */
+  /** Override the start budget. Only `daemons.test.ts` passes this, to reach
+   *  the failure path below in a second rather than in sixty. */
   startBudgetMs?: number;
+  /** Spawn this argv instead of the daemon. Only `daemons.test.ts` passes it,
+   *  to put something on the other end that will never open the port — so the
+   *  budget runs out by construction, on an idle CI runner exactly as on a
+   *  loaded Pi, rather than by the test being faster than the machine. */
+  argv?: string[];
 } = {}): Promise<TestDaemon> {
   const port = opts.port ?? (await freePort());
   const home = opts.home ?? tempDir("covey-test-");
-  const args = ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port)];
-  if (opts.name) args.push("--name", opts.name);
+  const args = opts.argv ?? ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port)];
+  if (opts.name && !opts.argv) args.push("--name", opts.name);
 
   const proc = spawn(process.execPath, args, {
     env: { ...process.env, COVEY_HOME: home, ...opts.env },
@@ -161,16 +165,22 @@ export async function startDaemon(opts: {
 
   const budget = opts.startBudgetMs ?? START_BUDGET_MS;
   const deadline = Date.now() + budget;
+  let diedWhileStarting = false;
   while (Date.now() < deadline) {
-    // A daemon that has already exited is never going to answer. Say so now
-    // rather than spending the rest of the budget asking a dead port.
-    if (exited(proc)) break;
+    // A process that has already exited is never going to answer. Say so now
+    // rather than spending the rest of the budget polling a dead port.
+    if (exited(proc)) { diedWhileStarting = true; break; }
     try {
       if ((await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })).ok) return daemon;
     } catch { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 100));
   }
-  const how = exited(proc) ? `it exited (code=${proc.exitCode} signal=${proc.signalCode})` : `it never answered in ${budget / 1000}s`;
+  // The two are worth telling apart, and not only for the test that does.
+  // "It died" sends you to the daemon's log, which is printed below; "it never
+  // answered" sends you to the port, or to the budget.
+  const how = diedWhileStarting
+    ? `it exited while starting (code=${proc.exitCode} signal=${proc.signalCode})`
+    : `it never answered in ${budget / 1000}s`;
   // A daemon that would not start must not also be left behind — the old code
   // threw here and walked away from the process it had spawned. Trouble
   // stopping it is not the news; why it would not start is.
