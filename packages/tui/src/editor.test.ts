@@ -4,10 +4,19 @@ import {
   wrapEditorLines, caretToVisual, visualToCaret, moveVisualRow,
   lineStart, lineEnd, wordStart, wordEnd,
   deleteBack, deleteForward, deleteToLineStart, deleteToLineEnd,
-  deleteWordBack, deleteWordForward, insert,
+  deleteWordBack, deleteWordForward, insert, normalisePaste,
 } from "./editor.js";
+import { width } from "./lines.js";
 
 const texts = (v: string, w: number) => wrapEditorLines(v, w).map((l) => l.text);
+
+/** Columns a terminal really paints for `s`, with tab stops every 8. This is
+ *  what `width()` cannot do, because it gets no starting column. */
+const painted = (s: string) => {
+  let col = 0;
+  for (const ch of s) col = ch === "\t" ? col + (8 - (col % 8)) : col + width(ch);
+  return col;
+};
 
 test("wraps at word boundaries instead of splitting mid-word", () => {
   assert.deepEqual(texts("the quick brown fox jumps", 10), ["the quick", "brown fox", "jumps"]);
@@ -19,6 +28,30 @@ test("hard-breaks a single token longer than the line", () => {
 
 test("keeps explicit newlines as row breaks, including empty lines", () => {
   assert.deepEqual(texts("a\n\nb", 10), ["a", "", "b"]);
+});
+
+test("a pasted tab never makes a row wider than the budget", () => {
+  const w = 60;
+  const pasted = "\t\t\t\tconst result = compute(alpha, beta, gamma, delta);";
+  // Guard, not the assertion under test: if the sample stopped overflowing the
+  // case below would pass against any implementation and protect nothing.
+  assert.ok(painted(pasted) > w, `the sample paste must overflow ${w} columns, or this case tests nothing`);
+  // The defect is the painted width of a row, so assert exactly that. Checking
+  // that no tab survived would pass for any expansion that drops tabs without
+  // making one character one column, and would hide the overflow behind it.
+  for (const row of wrapEditorLines(normalisePaste(pasted), w)) {
+    const paints = painted(row.text);
+    assert.ok(
+      paints <= w,
+      `row paints ${paints} columns into a ${w} column budget, so ${paints - w} columns land on the sidebar: ${JSON.stringify(row.text)}`,
+    );
+  }
+});
+
+// Not a regression case: the CRLF rule moved here from `App.tsx` unchanged.
+// This pins the moved behaviour, and the indent depth the tab rule produces.
+test("normalisePaste keeps indent depth and still folds CRLF", () => {
+  assert.equal(normalisePaste("\ta\r\n\t\tb\rc"), "  a\n    b\nc");
 });
 
 test("every caret offset maps to exactly one row", () => {

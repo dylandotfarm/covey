@@ -30,6 +30,12 @@
   Try update/restart changes against a throwaway clone + daemon on another port, not 3790:
   `COVEY_PORT=3799 COVEY_HOME=/tmp/h COVEY_CONFIG=/tmp/c node packages/cli/dist/index.js`
   runs a complete second instance (client + daemon) that cannot touch the real one.
+- Stop a throwaway daemon by port, never by pattern:
+  `COVEY_HOME=/tmp/h node packages/cli/dist/index.js stop --port 3799`.
+  Every daemon runs the same program, so `pkill -f "index.js daemon"` and
+  `pkill -f "covey.*daemon"` also kill the daemon on 3790 — which may be the one that hosts
+  you. `covey stop` signals one pid, taken from `/health` on that port or from
+  `<COVEY_HOME>/daemon-<port>.pid`. To check first: `cat /tmp/h/daemon-3799.pid`.
 - The client updates itself by quitting with a request the CLI performs (pull, build, restart
   the daemon) before `process.execve`ing back into the new build — see `packages/cli/src/main.ts`.
 - Dependencies: `pnpm add <pkg>`; pnpm refuses versions younger than 7 days

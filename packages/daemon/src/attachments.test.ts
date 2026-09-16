@@ -42,7 +42,21 @@ test("a non-image is referenced by path instead of inlined", () => {
   ]);
   const { blocks, noteLines } = attachmentBlocks(stored);
   assert.equal(blocks.length, 0);
-  assert.match(noteLines[0]!, /^Attached file: /);
+  // materialiseAttachments renames the copy to a uuid, so the note has to keep
+  // the name the file was dropped under.
+  assert.match(noteLines[0]!, /^Attached file: notes\.txt \(/);
+  assert.ok(stored[0]!.path.endsWith(".txt"));
+});
+
+test("a dropped pdf keeps its extension and reaches the agent by path", () => {
+  const stored = materialiseAttachments("thread-6", [
+    { name: "report 1.pdf", path: "/on/the/tui/machine/report 1.pdf", mimeType: "application/pdf", data: Buffer.from("%PDF-1.7\n").toString("base64") },
+  ]);
+  assert.ok(existsSync(stored[0]!.path));
+  assert.match(stored[0]!.path, /\.pdf$/);
+  const { blocks, noteLines } = attachmentBlocks(stored);
+  assert.equal(blocks.length, 0, "a pdf is not an image block");
+  assert.match(noteLines[0]!, /^Attached file: report 1\.pdf \(.*\.pdf\)$/);
 });
 
 test("oversized attachments are rejected", () => {

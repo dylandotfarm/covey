@@ -4,6 +4,7 @@ import { archiveKey, liveThreads, type AppState, type SidebarRow } from "../stor
 import type { SidebarCell } from "../sidebar.js";
 import { T, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
+import { buildSkew } from "../build.js";
 
 export function Sidebar({ state, rows, cells, cursor, width, focused }: { state: AppState; rows: SidebarRow[]; cells: SidebarCell[]; cursor: number; width: number; focused: boolean }) {
   const inner = width - 1;
@@ -11,7 +12,11 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
     <Box flexDirection="column" width={width} borderStyle="single" borderRight borderTop={false} borderBottom={false} borderLeft={false} borderColor={T.border}>
       <Box paddingX={1} height={1}>
         <Text color={T.text} bold>covey</Text>
-        <Text color={T.subtle}>  {state.order.length} machine{state.order.length === 1 ? "" : "s"}</Text>
+        {/* A client goes stale while it runs and cannot feel it, so the one
+            place the reader always looks says so. */}
+        {state.clientStale
+          ? <Text color={T.warning}>  ⚠ newer build on disk</Text>
+          : <Text color={T.subtle}>  {state.order.length} machine{state.order.length === 1 ? "" : "s"}</Text>}
       </Box>
       {/* Painted from `cells`, not from `rows`: the blank lines above machine
           headers and the scroll window have to be identical to what App uses
@@ -40,12 +45,15 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const dot = m.conn === "connected" ? "●" : m.conn === "connecting" ? "◌" : "○";
       const dotColor = m.conn === "connected" ? T.success : m.conn === "connecting" ? T.warning : T.danger;
       const name = m.info?.name ?? m.saved.name;
-      const meta = m.conn === "connected" ? (m.info?.os ?? "") : m.conn;
+      // A machine behind the client is worth more than its os here: the os
+      // never changes, and old code on the far end is what wastes an hour.
+      const behind = m.conn === "connected" && buildSkew(state.clientBuild, m.info?.build) === "behind";
+      const meta = m.conn !== "connected" ? m.conn : behind ? "⚠ old build" : (m.info?.os ?? "");
       return (
         <Box paddingX={1} height={1} backgroundColor={bg}>
           <Text color={dotColor}>{dot} </Text>
           <Text color={T.text} bold>{truncate(name.toUpperCase(), width - 6 - meta.length)}</Text>
-          <Text color={T.subtle}>  {meta}</Text>
+          <Text color={behind ? T.warning : T.subtle}>  {meta}</Text>
         </Box>
       );
     }

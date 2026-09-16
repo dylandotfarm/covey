@@ -38,3 +38,19 @@ export function rowAtScreenRow(cells: SidebarCell[], screenRow: number, top: num
   const c = cells[screenRow - top];
   return c && c.kind === "row" ? c.index : null;
 }
+
+/**
+ * Where the cursor sits now. The cursor is held as a row key, not as an index,
+ * because the tree re-sorts under it: `byRecency` moves a thread to the top of
+ * its project on every turn that starts and every turn that finishes, on any
+ * machine. An index would slide onto whichever thread spoke last.
+ *
+ * `last` is the index the cursor was on before. A key cannot say where its row
+ * used to be, so when the row goes — archived, deleted, moved, or folded away
+ * with its project — this is what puts the cursor next to where it was instead
+ * of at the top of the tree.
+ */
+export function cursorIndex(rows: SidebarRow[], key: string, last: number): number {
+  const at = rows.findIndex((r) => r.key === key);
+  return at >= 0 ? at : Math.max(0, Math.min(rows.length - 1, last));
+}

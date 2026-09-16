@@ -19,11 +19,11 @@ const viewOf = (n: number): ThreadView => {
   const items = Array.from({ length: n }, (_, i) => oneLiner(i + 1));
   return {
     machine: "pi", threadId: "t", thread: null, items: new Map(items.map((i) => [i.id, i])),
-    loading: false, error: null, hasMore: true, loadingOlder: false,
+    loading: false, error: null, hasMore: true, loadingOlder: false, seq: n,
   };
 };
 
-const linesFor = (n: number) => layoutTranscript(viewOf(n), 120, new Set(), 0).lines.length;
+const linesFor = (n: number) => layoutTranscript(viewOf(n), 120, new Set()).lines.length;
 
 test("a collapsed tool call is one line — the assumption the page size rests on", () => {
   assert.equal(linesFor(1), 1);

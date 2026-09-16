@@ -23,6 +23,10 @@ Server and protocol:
 - Approvals are durable timeline items, not in-flight RPC state. `canUseTool` parks on a
   promise that a later `approval.respond` command resolves.
 - Capability flags on `MachineInfo` instead of version sniffing.
+- `MachineInfo.build` reports the daemon's commit and its commit date. The client compares
+  it with its own to show which machines run older code. Nothing branches on it: what a
+  daemon can do is still a capability flag, and the field is optional so an older daemon
+  stays legal.
 
 TUI:
 
@@ -169,6 +173,16 @@ without committing to anything:
 - a **machine** row draws the same thing one level up: os/arch, daemon and
   Claude versions, tailnet name, the defaults new threads inherit there, the
   last update, and a line per project.
+
+The cursor is a row *key*, not an index into the row list. The tree re-sorts
+under it — `byRecency` moves a thread to the top of its project on every turn
+that starts and every turn that finishes, on any machine — so an index points
+at a different thread a moment later, and the preview opens a conversation
+nobody asked for. `cursorIndex` in `sidebar.ts` turns the key back into an
+index, because the painter and the hit test below still speak in rows. When the
+row a key names goes — archived, deleted, moved, folded away with its project —
+the cursor falls back to the index that row was on, and App writes the key of
+whatever is there back, so the next re-sort has a live key to hold.
 
 A preview fetches a screen's worth of the thread, not the thread. The page is
 `previewPage(height)` items for a transcript pane `height` lines tall: an item
@@ -420,6 +434,8 @@ streaming, queueing, and diff capture.
   signal handling and the alternate-screen escape are untested there.
 - **Other providers**: `Thread.provider` and `MachineCapabilities.providers` exist; the
   engine currently instantiates only `ClaudeSession`.
-- **Attachments / image paste**.
+- **Attachments**: drag-and-drop attaches a file of any type, and `ctrl+v` attaches the
+  clipboard image through `pngpaste` / `wl-paste` / `xclip` when one of them is installed.
+  There is no reader for Windows, and no paste for a non-image on the clipboard.
 - **Rust client**: the protocol is the contract; a ratatui client can replace `packages/tui`
   without daemon changes. Worth doing once the protocol stops moving.

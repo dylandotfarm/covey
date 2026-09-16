@@ -1,19 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { appendFileSync } from "node:fs";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
+import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
-import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
-import { sidebarCells, rowAtScreenRow } from "../sidebar.js";
+import { parseMouse, wheelDelta, copyToClipboard, type MouseEvent } from "../mouse.js";
+import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
+import { buildLine, buildSkew } from "../build.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
 import { Transcript, layoutTranscript } from "./Transcript.js";
+import { currentAsk, takeAnswer } from "../question.js";
 import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
 import * as Ed from "../editor.js";
-import { readDroppedImages } from "../attachments.js";
+import { readClipboardImage, readDroppedFiles } from "../attachments.js";
 import { T } from "../theme.js";
 
 const SIDEBAR_W = 34;
@@ -48,7 +50,15 @@ export function App({ store }: { store: Store }) {
     return () => { stdout.off("resize", on); };
   }, [stdout]);
 
-  const [cursor, setCursor] = useState(0);
+  /**
+   * The sidebar cursor is a row key, not an index. The tree re-sorts under it
+   * — a turn on any machine moves its thread to the top of its project — and
+   * an index would then point at a different thread than it did a moment ago,
+   * with the preview opening a conversation nobody asked for.
+   */
+  const [cursorKey, setCursorKey] = useState("");
+  /** The index that key was on, for when the row it names goes away. */
+  const lastCursor = useRef(0);
   const [ovCursor, setOvCursor] = useState(0);
   const [ovFilter, setOvFilter] = useState("");
   const [ovToggle, setOvToggle] = useState(false);
@@ -58,12 +68,16 @@ export function App({ store }: { store: Store }) {
   // is preserved across the interruption.
   const [answerDraft, setAnswerDraft] = useState("");
   const [questionCursor, setQuestionCursor] = useState(0);
+  // An AskUserQuestion call carries up to four questions, stepped through one
+  // at a time. The answers collect here and go to the daemon in one command.
+  const [answersGiven, setAnswersGiven] = useState<string[]>([]);
   const [quitArmed, setQuitArmed] = useState(false);
   const quitTimer = useRef<NodeJS.Timeout | null>(null);
   /** Transcript line the mouse went down on, so a click can fold what it hit. */
   const pressedLine = useRef<number | null>(null);
 
   const rows = useMemo(() => sidebarRows(state), [state]);
+  const cursor = cursorIndex(rows, cursorKey, lastCursor.current);
   const sidebarVisible = !state.sidebarCollapsed && size.cols >= 70;
   // Hoisted out of Sidebar for the same reason the transcript's lines are:
   // the click hit test and the painter have to agree on which row is where.
@@ -79,7 +93,8 @@ export function App({ store }: { store: Store }) {
     ? 3 + (pending.kind === "question" && answerDraft.length > 0 ? 1 : 0)
     : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0);
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionCursor, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionCursor, state.toolsExpanded]);
+  const questionUi = useMemo(() => ({ cursor: questionCursor, answered: answersGiven }), [questionCursor, answersGiven]);
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
@@ -103,12 +118,17 @@ export function App({ store }: { store: Store }) {
   const diffLines = useMemo(() => (state.diffView?.diff ? diffToLines(state.diffView.diff.patch, mainW - 2) : []), [state.diffView?.diff, mainW]);
   const machineName = state.view ? (state.machines.get(state.view.machine)?.info?.name ?? "") : "";
 
-  // keep sidebar cursor on the active thread when the list changes
-  useEffect(() => { if (cursor >= rows.length) setCursor(Math.max(0, rows.length - 1)); }, [rows.length, cursor]);
+  useEffect(() => { lastCursor.current = cursor; }, [cursor]);
+  // The key has to name a row that exists. When the row it named has gone,
+  // `cursorIndex` has already fallen back to the nearest surviving one; write
+  // that row's key back, or the cursor is an index again until the next move.
+  useEffect(() => {
+    if (rows.length > 0 && !rows.some((r) => r.key === cursorKey)) setCursorKey(rows[cursor]!.key);
+  }, [rows, cursorKey, cursor]);
   // Reset the answer buffer when a different request comes up, so a stale
   // half-typed answer never carries into the next question.
   const pendingId = pending && (pending.kind === "approval" || pending.kind === "question") ? pending.requestId : null;
-  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); }, [pendingId]);
+  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); setAnswersGiven([]); }, [pendingId]);
   // A relaunch is the CLI's job (it rebuilds and re-execs); all we do is
   // unmount cleanly so the terminal is handed back in one piece.
   useEffect(() => { if (state.relaunch) { store.shutdown(); exit(); } }, [state.relaunch, store, exit]);
@@ -122,6 +142,19 @@ export function App({ store }: { store: Store }) {
 
   // ---- actions ----------------------------------------------------------------
   const currentRow = rows[cursor];
+
+  /**
+   * Move the cursor `delta` rows and remember the row it lands on. The update
+   * is functional because Ink hands a batched chunk of j/k — or of wheel
+   * events — to one handler call: reading `cursor` from the closure would make
+   * the whole chunk one step.
+   */
+  const moveCursor = (delta: number) => setCursorKey((k) => {
+    const to = rows[Math.max(0, Math.min(rows.length - 1, cursorIndex(rows, k, lastCursor.current) + delta))];
+    return to ? to.key : k;
+  });
+  /** Put the cursor on a row the mouse found, by index. */
+  const pointCursor = (index: number) => { const r = rows[index]; if (r) setCursorKey(r.key); };
   const contextMachine = state.selected?.machine ?? currentRow?.machine ?? state.order[0];
   const contextProject = state.view?.thread?.projectId ?? currentRow?.projectId;
 
@@ -272,14 +305,17 @@ export function App({ store }: { store: Store }) {
     const modelLabel = settings.defaultModel
       ? (KNOWN_MODELS.find((k) => k.id === settings.defaultModel)?.label ?? settings.defaultModel)
       : "from Claude settings";
+    // "behind" is the reason most updates get run, so say it where the finger
+    // already is instead of only in the summary behind it.
+    const skew = buildSkew(state.clientBuild, info.build);
     const opts: PickOption[] = [
-      { id: "update", label: "Update — pull, rebuild, restart", hint: busy ? "interrupts running turns" : "" },
+      { id: "update", label: "Update — pull, rebuild, restart", hint: skew === "behind" ? "older build than your client" : busy ? "interrupts running turns" : "" },
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
       { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
-    openPick(`${info.name} — ${info.os}/${info.arch} · daemon ${info.daemonVersion}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
+    openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
       switch (id) {
         case "update": return void confirmUpdate(machineKey!);
         case "restart": return confirmRestart(machineKey!);
@@ -506,15 +542,20 @@ export function App({ store }: { store: Store }) {
    * the sign flips there.
    */
   function scrollPane(lines: number) {
-    if (state.diffView) {
+    // The live state, not the render snapshot: a held key arrives as one
+    // batched chunk and is replayed key by key, so each repeat has to measure
+    // from the one before it. `store.set` writes and notifies synchronously,
+    // so `getState()` is already the result of the last repeat.
+    const live = store.getState();
+    if (live.diffView) {
       const max = Math.max(0, diffLines.length - Math.max(1, transcriptH - 2));
-      store.setDiffScroll(Math.max(0, Math.min(max, state.diffView.scroll + lines)));
+      store.setDiffScroll(Math.max(0, Math.min(max, live.diffView.scroll + lines)));
       return;
     }
     const max = Math.max(0, layout.lines.length - transcriptH);
-    const next = Math.max(0, Math.min(max, state.scrollFromBottom - lines));
+    const next = Math.max(0, Math.min(max, live.scrollFromBottom - lines));
     store.setScroll(next);
-    if (lines < 0 && next >= max && state.view?.hasMore) void store.loadOlder();
+    if (lines < 0 && next >= max && live.view?.hasMore) void store.loadOlder();
   }
 
   /** Fold or unfold the most recent tool call or thinking block. */
@@ -529,20 +570,29 @@ export function App({ store }: { store: Store }) {
     const inTranscript = ev.row >= TRANSCRIPT_TOP && ev.row < TRANSCRIPT_TOP + transcriptH && !inSidebar;
 
     if (ev.kind === "wheel") {
-      const delta = ev.wheel === "up" ? 3 : -3;
+      // One row a notch, alt for half a page. 0 is a sideways notch, which
+      // nothing here scrolls; it must not take the focus or load older lines
+      // either, so leave before any of that.
+      const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
+      if (delta === 0) return;
       // Over the sidebar the wheel moves the cursor rather than scrolling a
       // viewport of its own: the cursor is what the window is centred on, and
       // one source of truth means the preview follows the wheel too.
       if (inSidebar) {
         store.setFocus("sidebar");
-        setCursor((c) => Math.max(0, Math.min(rows.length - 1, c - delta)));
+        moveCursor(-delta);
         return;
       }
-      if (state.diffView) return store.setDiffScroll(state.diffView.scroll - delta);
+      // Same rule as `scrollPane`: a chunk holds several notches and is
+      // replayed one at a time, so every notch measures from the store rather
+      // than from `state`, which is the last render's snapshot and does not
+      // move inside the loop. Read the snapshot and five notches move one row.
+      const live = store.getState();
+      if (live.diffView) return store.setDiffScroll(live.diffView.scroll - delta);
       const max = Math.max(0, layout.lines.length - transcriptH);
-      const next = Math.min(max, Math.max(0, state.scrollFromBottom + delta));
+      const next = Math.min(max, Math.max(0, live.scrollFromBottom + delta));
       store.setScroll(next);
-      if (next >= max && state.view?.hasMore) void store.loadOlder();
+      if (next >= max && live.view?.hasMore) void store.loadOlder();
       return;
     }
 
@@ -556,7 +606,7 @@ export function App({ store }: { store: Store }) {
         store.setFocus("sidebar");
         const idx = rowAtScreenRow(cells, ev.row, SIDEBAR_TOP);
         if (idx == null) return;
-        setCursor(idx);
+        pointCursor(idx);
         activateRow(rows[idx]);
         return;
       }
@@ -624,19 +674,15 @@ export function App({ store }: { store: Store }) {
     }
     if (editing && rawInput.length > 1 && !special) {
       // A drag-and-drop arrives as a paste of the file's path. If the whole
-      // chunk parses as image paths, attach them; otherwise it is ordinary text.
+      // chunk parses as dropped files, attach them; otherwise it is ordinary text.
       if (state.view) {
-        const { attachments, errors } = readDroppedImages(rawInput);
+        const { attachments, errors } = readDroppedFiles(rawInput);
         for (const e of errors) store.notify(e, "error");
-        if (attachments.length > 0) {
-          store.addAttachments(state.view.threadId, attachments);
-          store.notify(`attached ${attachments.map((a) => a.name).join(", ")}`, "success");
-          return;
-        }
+        if (attach(attachments)) return;
         if (errors.length > 0) return;
       }
-      // paste: normalise CRLF and insert
-      insert(rawInput.replace(/\r\n?/g, "\n"));
+      // paste: normalise line endings and tabs, then insert
+      insert(Ed.normalisePaste(rawInput));
       return;
     }
     handleKey(rawInput, rawKey);
@@ -743,10 +789,10 @@ export function App({ store }: { store: Store }) {
 
   function handleSidebarKey(input: string, key: any) {
     const row = rows[cursor];
-    if (key.upArrow || input === "k") return setCursor((c) => Math.max(0, c - 1));
-    if (key.downArrow || input === "j") return setCursor((c) => Math.min(rows.length - 1, c + 1));
-    if (key.pageUp) return setCursor((c) => Math.max(0, c - 10));
-    if (key.pageDown) return setCursor((c) => Math.min(rows.length - 1, c + 10));
+    if (key.upArrow || input === "k") return moveCursor(-1);
+    if (key.downArrow || input === "j") return moveCursor(1);
+    if (key.pageUp) return moveCursor(-10);
+    if (key.pageDown) return moveCursor(10);
     if (input === "?") return store.setOverlay({ kind: "help" });
     if (!row) return;
     if (key.return || input === "l" || key.rightArrow) return activateRow(row);
@@ -781,21 +827,30 @@ export function App({ store }: { store: Store }) {
         // Answers use their own buffer, never the composer draft — otherwise
         // whatever you were part-way through typing is consumed as the answer
         // and lost. This branch returns unconditionally so `draft` survives.
-        const opts = pending.options ?? [];
+        // One question at a time: the keys below always act on the question the
+        // user has reached, and only the last answer sends the set.
+        const opts = currentAsk(pending, answersGiven)?.options ?? [];
         const customRow = opts.length;
+        const take = (a: string) => {
+          const { answered, send } = takeAnswer(pending, answersGiven, a);
+          setAnswersGiven(answered);
+          setAnswerDraft("");
+          setQuestionCursor(0);
+          if (send) void store.respondQuestion(send);
+        };
         // Functional updates throughout: a batched chunk is replayed character
         // by character here, so reading state from the closure would let each
         // replay clobber the last instead of accumulating.
         if (key.upArrow) { setQuestionCursor((c) => Math.max(0, c - 1)); return; }
         if (key.downArrow) { setQuestionCursor((c) => Math.min(customRow, c + 1)); return; }
         if (key.return) {
-          if (questionCursor < opts.length) { void store.respondQuestion(opts[questionCursor]!.label); return; }
+          if (questionCursor < opts.length) { take(opts[questionCursor]!.label); return; }
           const a = answerDraft.trim();
-          if (a) { void store.respondQuestion(a); setAnswerDraft(""); }
+          if (a) take(a);
           return;
         }
         if (answerDraft.length === 0 && /^[1-9]$/.test(input) && Number(input) <= opts.length) {
-          void store.respondQuestion(opts[Number(input) - 1]!.label);
+          take(opts[Number(input) - 1]!.label);
           return;
         }
         if (key.backspace || key.delete) { setAnswerDraft((d) => d.slice(0, -1)); return; }
@@ -844,7 +899,24 @@ export function App({ store }: { store: Store }) {
     if (key.ctrl && input === "e") return setCaret(Ed.lineEnd(draft, caret));
     if (key.ctrl && input === "u") return applyEdit(Ed.deleteToLineStart({ value: draft, caret }));
     if (key.ctrl && input === "w") return applyEdit(Ed.deleteWordBack({ value: draft, caret }));
+    // Terminals paste with cmd+v (macOS) or ctrl+shift+v (Linux) and send the
+    // TUI nothing at all when the clipboard holds an image, so ctrl+v is free
+    // for covey to read the clipboard itself.
+    if (key.ctrl && input === "v") return pasteClipboardImage();
     if (input && !key.ctrl && !key.meta && !key.super) insert(input);
+  }
+  /** Hand new attachments to the store. Returns false when there were none. */
+  function attach(attachments: Attachment[]): boolean {
+    if (attachments.length === 0 || !state.view) return false;
+    store.addAttachments(state.view.threadId, attachments);
+    store.notify(`attached ${attachments.map((a) => a.name).join(", ")}`, "success");
+    return true;
+  }
+  function pasteClipboardImage() {
+    if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
+    const { attachment, error } = readClipboardImage();
+    if (attachment) attach([attachment]);
+    else if (error) store.notify(error, "error");
   }
   function applyEdit(next: Ed.EditState) { setDraft(next.value); setCaret(next.caret); }
   function insert(s: string) { applyEdit(Ed.insert({ value: draft, caret }, s)); }

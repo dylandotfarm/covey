@@ -126,7 +126,7 @@ source of truth.
 packages/protocol   wire types shared by daemon and TUI
 packages/daemon     per-machine daemon: SQLite, Claude SDK sessions, WebSocket server, tailscale auth
 packages/tui        Ink (React) terminal client
-packages/cli        `covey` entrypoint: tui | daemon | machines | info
+packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart | stop
 bin/covey           launcher that setup links onto your PATH; runs its own checkout
 scripts/setup.mjs   one command from a clone: install, build, link the launcher
 docs/DESIGN.md      architecture and the reasoning behind it
@@ -135,7 +135,10 @@ docs/DESIGN.md      architecture and the reasoning behind it
 Data lives in `~/.local/share/covey` (Linux), `~/Library/Application Support/covey` (macOS),
 `%APPDATA%\covey` (Windows). Override with `COVEY_HOME` (daemon) and `COVEY_CONFIG` (TUI).
 `COVEY_PORT` moves the local daemon and the client that starts it off 3790, so a throwaway
-instance can run beside a real one.
+instance can run beside a real one. Stop one of them by port — `covey stop --port 3799` —
+and never by a pattern over the command line: every daemon runs the same program, so a
+pattern matches all of them. Each daemon writes `<COVEY_HOME>/daemon-<port>.pid` while it
+runs, and takes that file away when it stops.
 
 ## Contributing and licence
 

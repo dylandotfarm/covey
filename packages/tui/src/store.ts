@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings } from "@covey/protocol";
+import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
+import { ViewCache } from "./viewCache.js";
 
 /**
  * How many timeline items a thread opens with when the reader means it. Big
@@ -44,6 +45,12 @@ export interface ThreadView {
   /** Older items exist before the earliest loaded one. */
   hasMore: boolean;
   loadingOlder: boolean;
+  /**
+   * The thread seq these items are synced to: the snapshot's seq, then the seq
+   * of the last event applied. A revisit resubscribes from it, so the daemon
+   * sends only what changed. Zero until the first snapshot lands.
+   */
+  seq: number;
 }
 
 export type Focus = "sidebar" | "composer";
@@ -104,6 +111,10 @@ export interface AppState {
    * process cannot rebuild and re-exec itself from inside its own event loop.
    */
   relaunch: RelaunchRequest | null;
+  /** The build this client runs, to compare with each machine's. */
+  clientBuild: BuildInfo | null;
+  /** A build newer than the one this client loaded now sits on disk. */
+  clientStale: boolean;
 }
 
 export interface RelaunchRequest {
@@ -113,9 +124,23 @@ export interface RelaunchRequest {
   restartDaemon: boolean;
 }
 
+/** How often the client asks whether a newer build has landed on disk. */
+const BUILD_POLL_MS = 30_000;
+
 export interface StoreOptions {
   /** The checkout this client runs from, as worked out by the CLI. */
   source?: MachineSource | null;
+  /** The build this client runs, so the sidebar can flag a machine behind it. */
+  build?: BuildInfo | null;
+  /**
+   * Newest mtime of the files this client was loaded from, in milliseconds.
+   * Polled rather than read once: a client goes stale while it runs. Somebody
+   * rebuilds in another terminal, this process keeps the code it loaded, and
+   * every keybinding stays at the old behaviour with nothing to show for it.
+   */
+  watchBuild?: () => number;
+  /** How often to ask. Only a test needs to move it. */
+  buildPollMs?: number;
   /** False when nothing can relaunch us (the TUI was not started by the CLI). */
   canRelaunch?: boolean;
   /** Carried over from the process we were relaunched from. */
@@ -154,12 +179,15 @@ export class Store {
   state: AppState;
   private listeners = new Set<Listener>();
   private clients = new Map<string, MachineClient>();
+  /** Threads the reader has already opened, ready to paint again. */
+  private viewCache = new ViewCache();
   private config: TuiConfig;
   private noticeTimer: NodeJS.Timeout | null = null;
 
   /** The checkout this client runs from; null when it is not a git checkout. */
   readonly clientSource: MachineSource | null;
   readonly canRelaunch: boolean;
+  private buildTimer: NodeJS.Timeout | null = null;
 
   constructor(machines: SavedMachine[], opts: StoreOptions = {}) {
     this.config = loadConfig();
@@ -172,10 +200,34 @@ export class Store {
       toolsExpanded: this.config.prefs.toolsExpanded ?? false, overlay: null, notice: null,
       scrollFromBottom: 0, drafts: new Map(), pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
       selection: null, relaunch: null,
+      clientBuild: opts.build ?? null, clientStale: false,
     };
     for (const m of machines) this.addMachine(m, false);
     setInterval(() => this.set({ tick: this.state.tick + 1 }), 700).unref();
+    if (opts.watchBuild) this.watchOwnBuild(opts.watchBuild, opts.buildPollMs ?? BUILD_POLL_MS);
     if (opts.notice) this.notify(opts.notice.text, opts.notice.tone);
+  }
+
+  /**
+   * Watch the files this client was loaded from. A file with a later mtime than
+   * the one we started with means the build on disk is not the build we run —
+   * and nothing else in the process can tell, because the code is in memory.
+   * One report is enough, so the timer stops on the first.
+   */
+  private watchOwnBuild(read: () => number, every: number) {
+    const at = read();
+    if (at <= 0) return;
+    this.buildTimer = setInterval(() => {
+      if (read() <= at) return;
+      this.stopWatchingBuild();
+      this.set({ clientStale: true });
+      this.notify("a newer build is on disk — this client still runs the old one. ctrl+k → \"Update covey\"", "error");
+    }, every);
+    this.buildTimer.unref();
+  }
+
+  private stopWatchingBuild() {
+    if (this.buildTimer) { clearInterval(this.buildTimer); this.buildTimer = null; }
   }
 
   /** Quit in a way the CLI reads as "come back", optionally rebuilt first. */
@@ -204,6 +256,8 @@ export class Store {
     const client = new MachineClient(saved, {
       state: (s, err) => {
         ms.conn = s; ms.error = err ?? null; ms.info = client.info;
+        // A cached seq only means something to the daemon it was read from.
+        if (s !== "connected") this.viewCache.dropMachine(ms.key);
         // A restarting daemon cannot report its own success — it is gone by
         // then. Reconnecting is the success, so say so here.
         if (s === "connected" && ms.restarting) {
@@ -247,6 +301,7 @@ export class Store {
     this.config.machines = this.config.machines.filter((m) => m.url !== key);
     this.persist();
     if (this.state.selected?.machine === key) this.select(null);
+    this.viewCache.dropMachine(key);
     this.touch();
   }
 
@@ -305,12 +360,27 @@ export class Store {
       case "item.removed": v.items.delete(ev.itemId); break;
       case "thread.updated": v.thread = ev.thread; break;
     }
+    // A resent snapshot carries each item's own seq, which is older than the
+    // subscription's, so take the highest and never go backwards.
+    v.seq = Math.max(v.seq, ev.seq);
     this.set({ view: { ...v } });
   }
 
   // ---- selection -----------------------------------------------------------
 
   private selectGen = 0;
+
+  /**
+   * Keep the view the reader leaves, so that coming back needs no snapshot.
+   * A half-loaded or failed view is not kept: its items are a fragment and its
+   * seq says nothing about where they came from.
+   */
+  private cacheCurrentView() {
+    const v = this.state.view;
+    if (!v || v.loading || v.error || v.seq === 0) return;
+    this.viewCache.put(v.machine, v.threadId, { thread: v.thread, items: v.items, hasMore: v.hasMore, seq: v.seq });
+  }
+
   /**
    * Open a thread. `limit` is how many of the newest items to fetch: a preview
    * asks for about a screen's worth, because that is all it can paint, and the
@@ -322,16 +392,34 @@ export class Store {
   async select(sel: { machine: string; threadId: string } | null, limit = FULL_PAGE) {
     const gen = ++this.selectGen;
     const prev = this.state.selected;
+    this.cacheCurrentView();
     // Not awaited: releasing the old machine's subscription is bookkeeping, and
     // the new thread's snapshot does not wait on it.
     if (prev && prev.machine !== sel?.machine) void this.clients.get(prev.machine)?.unwatchThread();
     if (!sel) { this.set({ selected: null, view: null }); return; }
     const client = this.clients.get(sel.machine);
     const ms = this.state.machines.get(sel.machine);
-    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false };
     this.state.attention.delete(`${sel.machine}:${sel.threadId}`);
-    this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     this.config.prefs.lastSelected = sel; this.persist();
+
+    const cached = this.viewCache.take(sel.machine, sel.threadId);
+    if (cached) {
+      // Paint first, reconcile after. The subscription replays every event
+      // after the seq these items were cached at, so nothing here is trusted;
+      // it is only early. `limit` does not apply — the reader gets the page
+      // they had, and App tops it up through loadOlder() if it is short of the
+      // pane.
+      const view: ThreadView = {
+        machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? cached.thread,
+        items: cached.items, loading: false, error: null, hasMore: cached.hasMore, loadingOlder: false, seq: cached.seq,
+      };
+      this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
+      client?.resumeThread(sel.threadId, cached.seq);
+      return;
+    }
+
+    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0 };
+    this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     try {
       const snap: ThreadSnapshot | undefined = await client?.watchThread(sel.threadId, limit);
       if (gen !== this.selectGen || this.state.selected?.threadId !== sel.threadId) return;
@@ -344,6 +432,9 @@ export class Store {
         for (const [id, it] of view.items) if (!merged.has(id) || (merged.get(id)!.updatedAt < it.updatedAt)) merged.set(id, it);
         view.items = merged;
         view.hasMore = snap.hasMore;
+        // Events that landed while the snapshot was in flight already carried
+        // the view past the snapshot's seq, so keep the higher of the two.
+        view.seq = Math.max(view.seq, snap.seq);
       }
       view.loading = false;
       this.set({ view: { ...view } });
@@ -634,11 +725,14 @@ export class Store {
     await client.command({ type: "approval.respond", threadId: v.threadId, requestId: it.requestId, behavior, ...(always ? { updatedPermissions: it.suggestions } : {}) }).catch((e) => this.notify(e.message, "error"));
   }
 
-  async respondQuestion(answer: string) {
+  /** One answer for each question on the pending item, in order. */
+  async respondQuestion(answers: string[]) {
     const v = this.state.view; const it = this.pendingRequest();
     const client = v && this.clients.get(v.machine);
     if (!v || !client || !it || it.kind !== "question") return;
-    await client.command({ type: "question.respond", threadId: v.threadId, requestId: it.requestId, answer }).catch((e) => this.notify(e.message, "error"));
+    // `answer` carries the first one as well, so a daemon that predates the
+    // list still answers a single question.
+    await client.command({ type: "question.respond", threadId: v.threadId, requestId: it.requestId, answer: answers[0] ?? "", answers }).catch((e) => this.notify(e.message, "error"));
   }
 
   async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string) {
@@ -691,7 +785,11 @@ export class Store {
     } catch (e: any) { this.notify(e.message, "error"); }
   }
 
-  shutdown() { for (const c of this.clients.values()) c.stop(); }
+  shutdown() {
+    this.stopWatchingBuild();
+    if (this.noticeTimer) { clearTimeout(this.noticeTimer); this.noticeTimer = null; }
+    for (const c of this.clients.values()) c.stop();
+  }
 }
 
 // ---- derived helpers --------------------------------------------------------
