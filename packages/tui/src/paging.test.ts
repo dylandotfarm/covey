@@ -23,7 +23,7 @@ const viewOf = (n: number): ThreadView => {
   };
 };
 
-const linesFor = (n: number) => layoutTranscript(viewOf(n), 120, new Set(), 0).lines.length;
+const linesFor = (n: number) => layoutTranscript(viewOf(n), 120, new Set()).lines.length;
 
 test("a collapsed tool call is one line — the assumption the page size rests on", () => {
   assert.equal(linesFor(1), 1);

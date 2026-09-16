@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { appendFileSync } from "node:fs";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
+import { KNOWN_MODELS, questionAsks, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
 import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
@@ -58,6 +58,9 @@ export function App({ store }: { store: Store }) {
   // is preserved across the interruption.
   const [answerDraft, setAnswerDraft] = useState("");
   const [questionCursor, setQuestionCursor] = useState(0);
+  // An AskUserQuestion call carries up to four questions, stepped through one
+  // at a time. The answers collect here and go to the daemon in one command.
+  const [answersGiven, setAnswersGiven] = useState<string[]>([]);
   const [quitArmed, setQuitArmed] = useState(false);
   const quitTimer = useRef<NodeJS.Timeout | null>(null);
   /** Transcript line the mouse went down on, so a click can fold what it hit. */
@@ -79,7 +82,8 @@ export function App({ store }: { store: Store }) {
     ? 3 + (pending.kind === "question" && answerDraft.length > 0 ? 1 : 0)
     : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0);
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionCursor, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionCursor, state.toolsExpanded]);
+  const questionUi = useMemo(() => ({ cursor: questionCursor, answered: answersGiven }), [questionCursor, answersGiven]);
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
@@ -108,7 +112,7 @@ export function App({ store }: { store: Store }) {
   // Reset the answer buffer when a different request comes up, so a stale
   // half-typed answer never carries into the next question.
   const pendingId = pending && (pending.kind === "approval" || pending.kind === "question") ? pending.requestId : null;
-  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); }, [pendingId]);
+  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); setAnswersGiven([]); }, [pendingId]);
   // A relaunch is the CLI's job (it rebuilds and re-execs); all we do is
   // unmount cleanly so the terminal is handed back in one piece.
   useEffect(() => { if (state.relaunch) { store.shutdown(); exit(); } }, [state.relaunch, store, exit]);
@@ -781,21 +785,33 @@ export function App({ store }: { store: Store }) {
         // Answers use their own buffer, never the composer draft — otherwise
         // whatever you were part-way through typing is consumed as the answer
         // and lost. This branch returns unconditionally so `draft` survives.
-        const opts = pending.options ?? [];
+        // One question at a time: the keys below always act on the question at
+        // `answersGiven.length`, and the last answer sends the whole set.
+        const asks = questionAsks(pending);
+        const opts = asks[answersGiven.length]?.options ?? [];
         const customRow = opts.length;
+        const take = (a: string) => {
+          const next = [...answersGiven, a];
+          setAnswersGiven(next);
+          setAnswerDraft("");
+          setQuestionCursor(0);
+          // The CLI drops a question it gets no answer for and never says so,
+          // so the command carries an answer for every question.
+          if (next.length >= asks.length) void store.respondQuestion(next);
+        };
         // Functional updates throughout: a batched chunk is replayed character
         // by character here, so reading state from the closure would let each
         // replay clobber the last instead of accumulating.
         if (key.upArrow) { setQuestionCursor((c) => Math.max(0, c - 1)); return; }
         if (key.downArrow) { setQuestionCursor((c) => Math.min(customRow, c + 1)); return; }
         if (key.return) {
-          if (questionCursor < opts.length) { void store.respondQuestion(opts[questionCursor]!.label); return; }
+          if (questionCursor < opts.length) { take(opts[questionCursor]!.label); return; }
           const a = answerDraft.trim();
-          if (a) { void store.respondQuestion(a); setAnswerDraft(""); }
+          if (a) take(a);
           return;
         }
         if (answerDraft.length === 0 && /^[1-9]$/.test(input) && Number(input) <= opts.length) {
-          void store.respondQuestion(opts[Number(input) - 1]!.label);
+          take(opts[Number(input) - 1]!.label);
           return;
         }
         if (key.backspace || key.delete) { setAnswerDraft((d) => d.slice(0, -1)); return; }

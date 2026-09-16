@@ -342,13 +342,56 @@ export interface ApprovalItem extends ItemBase {
   decidedAt: string | null;
 }
 
+/** One question inside an `AskUserQuestion` call. */
+export interface QuestionAsk {
+  /**
+   * The question text, verbatim. The CLI keys the answer by this exact string
+   * and drops a question it finds no key for, so never reword it.
+   */
+  question: string;
+  /** Short chip label the tool supplies, e.g. "Auth method". */
+  header?: string;
+  /** Null when the tool offered no choices, so the answer is free text. */
+  options: { label: string; description?: string }[] | null;
+}
+
+/**
+ * An `AskUserQuestion` call. The tool asks one to four questions at a time and
+ * the CLI expects an answer for each one, so this holds a list even though one
+ * question is the common case.
+ */
 export interface QuestionItem extends ItemBase {
   kind: "question";
   requestId: string;
-  prompt: string;
-  options: { label: string; description?: string }[] | null;
-  answer: string | null;
+  /** One to four questions, in the order the tool asked them. */
+  questions: QuestionAsk[];
+  /** One answer for each question, in the same order. Empty until answered. */
+  answers: string[];
   status: "pending" | "answered" | "expired";
+}
+
+/** The shape a daemon wrote before covey handled more than one question. */
+interface LegacyQuestionItem {
+  prompt?: string;
+  options?: { label: string; description?: string }[] | null;
+  answer?: string | null;
+}
+
+/**
+ * The questions on an item. Items live in the database as JSON and replay
+ * verbatim, so a transcript written before the list existed still reads.
+ */
+export function questionAsks(item: QuestionItem): QuestionAsk[] {
+  if (Array.isArray(item.questions)) return item.questions;
+  const old = item as LegacyQuestionItem;
+  return [{ question: old.prompt ?? "", options: old.options ?? null }];
+}
+
+/** The answers on an item, from either shape. See `questionAsks`. */
+export function questionAnswers(item: QuestionItem): string[] {
+  if (Array.isArray(item.answers)) return item.answers;
+  const old = item as LegacyQuestionItem;
+  return old.answer ? [old.answer] : [];
 }
 
 export interface SystemNoteItem extends ItemBase {
@@ -474,7 +517,15 @@ export type Command =
       updatedPermissions?: unknown[];
       message?: string;
     }
-  | { type: "question.respond"; threadId: ThreadId; requestId: string; answer: string }
+  | {
+      type: "question.respond";
+      threadId: ThreadId;
+      requestId: string;
+      /** The first answer. A daemon that predates `answers` reads only this. */
+      answer: string;
+      /** One answer for each question on the item, in order. */
+      answers?: string[];
+    }
   | { type: "session.stop"; threadId: ThreadId };
 
 export type CommandEnvelope = Command & { commandId: string };

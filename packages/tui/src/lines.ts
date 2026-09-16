@@ -1,4 +1,4 @@
-import type { TimelineItem, ToolCallItem } from "@covey/protocol";
+import { questionAnswers, questionAsks, type TimelineItem, type ToolCallItem } from "@covey/protocol";
 import { T } from "./theme.js";
 
 /**
@@ -113,11 +113,22 @@ function inline(s: string, base: Partial<Span>): Span[] {
   return spans;
 }
 
+/**
+ * How far the user has got through a pending `AskUserQuestion`. The questions
+ * are stepped through one at a time, so the renderer needs both the row the
+ * cursor sits on and the answers already given.
+ */
+export interface QuestionUi {
+  /** Highlighted row of the current question; `options.length` = the free-text row. */
+  cursor: number;
+  /** One answer for each question already stepped past, in order. */
+  answered: string[];
+}
+
 export interface RenderOpts {
   width: number;
   expanded: Set<string>;
-  /** Highlighted row of a pending question; `options.length` = the free-text row. */
-  questionCursor?: number;
+  question?: QuestionUi;
 }
 
 /** Render one item to lines, including its trailing blank line. */
@@ -198,29 +209,52 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
     }
     case "question": {
       const pending = item.status === "pending";
-      const opts = item.options ?? [];
-      const cursor = o.questionCursor ?? 0;
+      const asks = questionAsks(item);
+      const cursor = o.question?.cursor ?? 0;
+      // While the request is open the answers live in the client, because the
+      // daemon only hears them once the whole set is sent.
+      const answered = pending ? o.question?.answered ?? [] : questionAnswers(item);
+      // The question being answered now. Past the end once the last answer is
+      // in and the round trip to the daemon has not landed yet.
+      const current = pending ? answered.length : -1;
       const lines: Line[] = [];
-      lines.push(...wrapSpans([{ text: "  " }, { text: "?", color: T.awaiting, bold: true }, { text: " " + item.prompt, color: T.text }], w));
-      opts.forEach((op, i) => {
-        const sel = pending && cursor === i;
+      asks.forEach((ask, qi) => {
+        // Questions ahead of the current one stay hidden: the user cannot act
+        // on them yet, and the counter already says they are coming. A settled
+        // item shows the lot, answered or expired.
+        if (pending && qi > current) return;
+        const live = qi === current;
+        const opts = ask.options ?? [];
+        const count = asks.length > 1 ? ` (${qi + 1} of ${asks.length})` : "";
         lines.push(...wrapSpans([
-          { text: sel ? "  ❯ " : "    ", color: T.accent, bold: true },
-          { text: `${i + 1}. `, color: pending ? T.accent : T.subtle, bold: pending },
-          { text: op.label, color: T.text, bg: sel ? T.selection : undefined, bold: sel },
-          ...(op.description ? [{ text: ` — ${op.description}`, color: T.subtle, bg: sel ? T.selection : undefined }] : []),
+          { text: "  " }, { text: "?", color: T.awaiting, bold: true },
+          { text: " " + ask.question, color: T.text },
+          ...(count ? [{ text: count, color: T.faint }] : []),
         ], w));
+        // An answered question in a set keeps only its answer; repeating every
+        // option it had would bury the one still being asked.
+        if (live || asks.length === 1) {
+          opts.forEach((op, i) => {
+            const sel = live && cursor === i;
+            lines.push(...wrapSpans([
+              { text: sel ? "  ❯ " : "    ", color: T.accent, bold: true },
+              { text: `${i + 1}. `, color: live ? T.accent : T.subtle, bold: live },
+              { text: op.label, color: T.text, bg: sel ? T.selection : undefined, bold: sel },
+              ...(op.description ? [{ text: ` — ${op.description}`, color: T.subtle, bg: sel ? T.selection : undefined }] : []),
+            ], w));
+          });
+        }
+        if (live) {
+          // A free-text row so a custom answer is a visible choice rather than a
+          // hidden affordance.
+          const sel = cursor >= opts.length;
+          lines.push([
+            { text: sel ? "  ❯ " : "    ", color: T.accent, bold: true },
+            { text: opts.length > 0 ? "type your own answer" : "type an answer", color: sel ? T.text : T.subtle, italic: true, bg: sel ? T.selection : undefined },
+          ]);
+          lines.push([{ text: "    ↑↓ choose · enter confirm" + (opts.length > 0 ? " · or press a number" : ""), color: T.faint }]);
+        } else if (answered[qi]) lines.push([{ text: "    → " + answered[qi]!, color: T.muted }]);
       });
-      if (pending) {
-        // A free-text row so a custom answer is a visible choice rather than a
-        // hidden affordance.
-        const sel = cursor >= opts.length;
-        lines.push([
-          { text: sel ? "  ❯ " : "    ", color: T.accent, bold: true },
-          { text: opts.length > 0 ? "type your own answer" : "type an answer", color: sel ? T.text : T.subtle, italic: true, bg: sel ? T.selection : undefined },
-        ]);
-        lines.push([{ text: "    ↑↓ choose · enter confirm" + (opts.length > 0 ? " · or press a number" : ""), color: T.faint }]);
-      } else if (item.answer) lines.push([{ text: "    → " + item.answer, color: T.muted }]);
       lines.push([]);
       return lines;
     }
