@@ -21,6 +21,21 @@ export interface ComposerProps {
   answerDraft: string;
 }
 
+/**
+ * The finished turn's cost and duration, for the footer. Empty while the turn
+ * runs, or when the daemon sent no figure.
+ *
+ * The `~` is not decoration. The figure is the SDK's own estimate at list
+ * prices, and on a subscription plan no such money is charged, so a bare `$`
+ * reads as a bill. It also belongs to this turn alone — the SDK reports a
+ * running total for the session, which the daemon differences per turn.
+ */
+export function turnStats(turn: Thread["latestTurn"] | undefined): string {
+  if (!turn || turn.state === "running" || turn.costUsd == null) return "";
+  const ms = Date.parse(turn.completedAt ?? turn.startedAt) - Date.parse(turn.startedAt);
+  return `~$${turn.costUsd.toFixed(3)} · ${fmtMs(ms)}`;
+}
+
 /** Renders the multi-line editor. Editing state lives in App (useInput). */
 export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, attachments, answerDraft }: ComposerProps) {
   const running = thread?.latestTurn?.state === "running";
@@ -31,8 +46,7 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   const modeLabel = bypass ? "⏵⏵ bypass" : mode === "acceptEdits" ? "accept edits" : mode;
   const modeColor = bypass ? T.danger : mode === "plan" ? T.awaiting : T.subtle;
   const turn = thread?.latestTurn;
-  // `~` because the figure is the SDK's list-price estimate, not money charged.
-  const stats = turn && turn.state !== "running" && turn.costUsd != null ? `~$${turn.costUsd.toFixed(3)} · ${fmtMs(Date.parse(turn.completedAt ?? turn.startedAt) - Date.parse(turn.startedAt))}` : "";
+  const stats = turnStats(turn);
   const diff = turn?.diff && !turn.diff.unavailable && turn.diff.files.length > 0 ? turn.diff : null;
   const queued = thread?.queuedTurns ?? 0;
   return (
