@@ -31,7 +31,14 @@ export interface MachineInfo {
   os: "linux" | "darwin" | "win32" | string;
   arch: string;
   homeDir: string;
+  /** Short commit of the build the daemon runs, e.g. `b9a8b01` or `b9a8b01-dirty`. */
   daemonVersion: string;
+  /**
+   * The build in full, so a client can tell whether this machine runs older
+   * code than it does. Optional: a daemon built before this field omits it,
+   * and the client says "unknown" rather than guessing.
+   */
+  build?: BuildInfo;
   protocolVersion: number;
   claudeCodeVersion?: string;
   /** Tailscale MagicDNS name, if the daemon is on a tailnet. */
@@ -40,6 +47,29 @@ export interface MachineInfo {
   capabilities: MachineCapabilities;
   /** Machine-wide defaults, changed from the TUI's machine control panel. */
   settings: MachineSettings;
+}
+
+/**
+ * Which build a process runs.
+ *
+ * `committedAt` is the ordering key on purpose. The client and the daemon are
+ * on different machines with different clocks, so a local mtime cannot say
+ * which of two builds is older. The commit date comes from the git history,
+ * which both machines agree on.
+ *
+ * `builtAt` is a local mtime. It orders nothing across machines; it says when
+ * this checkout last compiled, which only has a meaning on its own machine.
+ */
+export interface BuildInfo {
+  /** Short commit of `HEAD`, or null when the process does not run from a checkout. */
+  commit: string | null;
+  /** Commit date of `HEAD`, ISO 8601. The only field that crosses machines. */
+  committedAt: string | null;
+  branch: string | null;
+  /** True when the checkout has uncommitted changes, so the commit does not describe the code. */
+  dirty: boolean;
+  /** Newest mtime of the compiled files, ISO 8601. Local to one machine. */
+  builtAt: string | null;
 }
 
 /**
