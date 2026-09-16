@@ -163,7 +163,78 @@ The client brokers the transfer, so daemons never need to authenticate to each o
 responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Methods: `hello`,
 `shell.snapshot/subscribe`, `thread.snapshot/subscribe`, `unsubscribe`, `command`,
 `thread.export/import/markMoved`, `fs.listDir/mkdir`, `models.list`, `project.git`, `turn.diff`,
-`machine.source/update/restart`.
+`machine.source/update/restart`, `run.issues/pullRequest`.
+
+## Runs
+
+A **run** is a named group of threads with one goal: one request from the operator becomes
+many threads across many machines, each with one task, tracked to a finish. Call it a run —
+it has a beginning, an end and a result.
+
+### Where a run lives
+
+The record is **daemon state**, on the daemon the operator started the run from: a run
+outlives a client restart, so it cannot live in the TUI's config. It is one JSON row in the
+`runs` table, sent whole in `ShellSnapshot.runs` and re-sent whole on every change as
+`run.upserted` — the same rule timeline items follow, so a client that reconnects mid-run
+sees what one that watched throughout does.
+
+A run is **dispatched by the client**, because a daemon holds no connection to another
+daemon. Only the TUI has one to every machine. So the daemon stores and fans out, and the
+client places, creates the threads, sends the briefs and patches each member's row.
+
+A member carries `review`, which issue #45 owns: gates, the conflict queue and the merge
+order attach there. Dispatch and tracking carry that field and never read it.
+
+### What placement uses
+
+`MachineCapabilities` says nothing a run can place work with. `MachineInfo.resources`
+(`MachineResources`) says the rest: cores, memory, a concurrency limit from the two, the
+machine's tmpdir, and the tools the daemon can run.
+
+**The daemon reads it, never `ssh`.** The daemon is started from a login shell — often
+through `nvm` — and a non-interactive `ssh` session is not, so the two resolve different
+`PATH`s. An agent inherits the daemon's. On 2026-09-16 an `ssh` probe reported that a machine
+had no `pnpm`; it had `pnpm`, and the operator nearly installed a second one.
+`packages/daemon/src/resources.ts` therefore probes `process.env.PATH`, after the listener
+binds, and pushes the answer as `machine.updated`. It reports a second copy of a name when
+there is one — which is how the machine with the old `/usr/bin/node` answers for itself.
+
+### The rule
+
+> Each task goes to the fastest machine that meets its requirements and still has room; when
+> every machine is full, to the one carrying least for its size.
+
+A task may carry requirements — `os=darwin`, `arch=arm64`, `needs=tmux`, `machine=pi` — and
+placement obeys every one. The rule is shown in the run panel while the run is still being
+planned, and `m` moves a member to another machine until it has a thread. Placement that
+cannot be overridden will be wrong on the first run that matters.
+
+### One set of resources per member
+
+Each member gets a port, a `COVEY_HOME` and a `COVEY_CONFIG` that nobody else in the run has,
+and the brief template substitutes them. This is the defect that made the issue: the brief of
+2026-09-16 gave all fifteen agents the same throwaway port, and one of them ran
+`covey stop --port 3799` and stopped a daemon another agent had started.
+
+Ports come from a contiguous block in 3800–3999, chosen from the run's id, so a member can
+never be handed 3790. The block depends on the run's id alone and not on how many members it
+has, or adding a task would re-number a member already at work on its own port.
+
+### Tracking, and talking to it
+
+A run is a sidebar row that opens to its members: task, thread, machine, branch, pull
+request, state. `planned → dispatched → working → review → merged`, plus `blocked` and
+`withdrawn`. `blocked` is not an error, and `withdrawn` is an outcome beside `merged`, with
+the reasoning kept in `note`.
+
+Everything but the pull request streams over the shell subscription the sidebar already
+holds. `run.pullRequest` fetches the rest, with `gh` on the machine that holds the branch —
+identity and state only; mergeability is #45's.
+
+`s` in the run panel sends one message to every member, to the marked ones, or to one. The
+operator of 2026-09-16 sent the same correction to fifteen threads four separate times, each
+one a hand-written loop over thread ids.
 
 ## Browsing the sidebar
 

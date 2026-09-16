@@ -69,7 +69,9 @@ test("a run outlives the process that stored it", async () => {
     await send(e, { type: "run.member.patch", runId: "run-1", memberId: "mem44", patch: { threadId: "t1", branch: "covey/aaa", state: "working" } });
     // A second Engine on the same directory is what a daemon restart is.
     const again = new Engine(new Db(dir), { ...MACHINE });
-    const run = again.shellSnapshot().runs![0]!;
+    const runs = again.shellSnapshot().runs ?? [];
+    assert.equal(runs.length, 1, "the run did not survive the restart — it is not in the daemon's database");
+    const run = runs[0]!;
     assert.equal(run.name, "covey issues");
     assert.equal(run.members.length, 3);
     assert.equal(run.members[0]!.threadId, "t1");
@@ -183,7 +185,9 @@ test("review state is carried whole and never read here — the seam for issue #
     await send(e, { type: "run.create", run: runInit() });
     await send(e, { type: "run.member.patch", runId: "run-1", memberId: "mem44", patch: { review: { gate: "regression-test", evidence: "reverted, watched it fail", position: 2 } } });
     // It has to survive the round trip through SQLite as well as the patch.
-    const run = new Engine(new Db(dir), { ...MACHINE }).shellSnapshot().runs![0]!;
+    const runs = new Engine(new Db(dir), { ...MACHINE }).shellSnapshot().runs ?? [];
+    assert.equal(runs.length, 1, "the run did not survive the restart — it is not in the daemon's database");
+    const run = runs[0]!;
     assert.deepEqual(run.members[0]!.review, { gate: "regression-test", evidence: "reverted, watched it fail", position: 2 });
     assert.equal(run.members[1]!.review, null);
   } finally { close(); }

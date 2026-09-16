@@ -89,17 +89,32 @@ test("the rule is one line, so it can be shown before it runs", () => {
   assert.ok(PLACEMENT_RULE.length > 20 && !PLACEMENT_RULE.includes("\n"));
 });
 
-test("a task that needs macOS never lands on the Pi", () => {
+test("a task that needs macOS stays on the Mac even when the Mac is full", () => {
   // Two tasks of the real run could only be done on macOS: one needed
-  // `pngpaste`, one needed reveal-in-Finder.
-  const tasks = [task({ key: "#1", requires: [{ kind: "os", value: "darwin" }] })];
+  // `pngpaste`, one needed reveal-in-Finder. The Mac has to be full first, or
+  // the case passes on the size of the machine and proves nothing about the
+  // requirement — which is the trap three of five agents fell into that day.
+  const tasks = [
+    ...Array.from({ length: 12 }, (_, i) => task({ key: `#${i}` })),
+    task({ key: "#mac", requires: [{ kind: "os", value: "darwin" }] }),
+  ];
   const placed = placeTasks(tasks, [PI, MAC]);
-  assert.equal(placed[0]!.machineId, "mac", "os=darwin must not be placed on linux");
+  assert.equal(placed[11]!.machineId, "mac", "the Mac took its twelve first");
+  assert.equal(placed[12]!.machineId, "mac", "os=darwin must not be placed on linux, full or not");
 });
 
-test("a task that needs a tool goes to the machine that has it", () => {
-  const tasks = [task({ key: "#1", requires: [{ kind: "tool", value: "tmux" }] })];
-  assert.equal(placeTasks(tasks, [PI, MAC])[0]!.machineId, "mac");
+test("a task that can only be done on the Pi goes to the Pi, slow though it is", () => {
+  // The Pi was the only machine with an old /usr/bin/node to reproduce against.
+  const tasks = [task({ key: "#1", requires: [{ kind: "os", value: "linux" }] })];
+  assert.equal(placeTasks(tasks, [PI, MAC])[0]!.machineId, "pi");
+});
+
+test("a task that needs a tool goes to the machine that has it, full or not", () => {
+  const tasks = [
+    ...Array.from({ length: 12 }, (_, i) => task({ key: `#${i}` })),
+    task({ key: "#tmux", requires: [{ kind: "tool", value: "tmux" }] }),
+  ];
+  assert.equal(placeTasks(tasks, [PI, MAC])[12]!.machineId, "mac");
 });
 
 test("a task nobody can take is reported, not placed somewhere that cannot do it", () => {

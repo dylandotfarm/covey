@@ -144,16 +144,20 @@ test("a run places its tasks and gives every member its own port", async () => {
   assert.ok(!ports.includes(3790), "never the port the operator's own daemon listens on");
 });
 
-test("placement puts the macOS-only task on the Mac and fills the fast machine first", async () => {
+test("placement obeys a task's requirements, not the size of the machine", async () => {
   const { store } = twoMachines();
-  const id = await runOf(store, "Reveal a file in Finder os=darwin; Reproduce on the Pi machine=pi");
+  // The Mac is filled first, so a placement that ignored `os=darwin` would put
+  // the thirteenth task on the Pi — which cannot reveal a file in Finder.
+  const filler = Array.from({ length: 12 }, (_, i) => `Task ${i}`).join("; ");
+  const id = await runOf(store, `${filler}; Reveal a file in Finder os=darwin; Reproduce on the Pi machine=pi`);
   const run = store.run(MAC, id)!;
-  assert.equal(run.members[0]!.machineId, "mac");
-  assert.equal(run.members[1]!.machineId, "pi");
+  assert.equal(run.members[11]!.machineId, "mac", "the Mac took its twelve first");
+  assert.equal(run.members[12]!.machineId, "mac");
+  assert.equal(run.members[13]!.machineId, "pi");
   // Each member is put in the project on *its own* machine, or the thread
   // would be made against a project id that machine has never heard of.
-  assert.equal(run.members[0]!.projectId, "p-mac");
-  assert.equal(run.members[1]!.projectId, "p-pi");
+  assert.equal(run.members[12]!.projectId, "p-mac");
+  assert.equal(run.members[13]!.projectId, "p-pi");
 });
 
 test("a member's directories belong to the machine it runs on", async () => {
