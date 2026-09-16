@@ -1,9 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { archiveKey, liveThreads, type AppState, type SidebarRow } from "../store.js";
+import { archiveKey, liveThreads, runKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
 import { T, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
+import { runMemberStateLabel, runState, tallyRun } from "@covey/protocol";
 import { buildSkew } from "../build.js";
 
 export function Sidebar({ state, rows, cells, cursor, width, focused }: { state: AppState; rows: SidebarRow[]; cells: SidebarCell[]; cursor: number; width: number; focused: boolean }) {
@@ -82,6 +83,45 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
           <Text color={T.faint}>{open ? "▾" : "▸"}</Text>
           <Text color={T.subtle}> {truncate("Archived", width - 10)}</Text>
           <Text color={T.faint}> {row.count}</Text>
+        </Box>
+      );
+    }
+    case "run": {
+      const run = row.run!;
+      const open = state.expanded[runKey(row.machine, run.id)] ?? true;
+      const t = tallyRun(run);
+      // What is left to do, not what is done: a run is watched until it ends.
+      const left = t.total - t.merged - t.withdrawn;
+      const st = runState(run);
+      const meta = st === "planning" ? `${t.total} planned` : st === "finished" ? "done" : `${left} of ${t.total} left`;
+      const tint = t.blocked > 0 ? T.awaiting : st === "finished" ? T.success : st === "planning" ? T.subtle : T.working;
+      return (
+        <Box paddingLeft={2} paddingRight={1} height={1} backgroundColor={bg}>
+          <Text color={tint}>{open ? "▾" : "▸"}</Text>
+          <Text color={T.text}> {truncate(run.name, width - 9 - meta.length)}</Text>
+          <Text color={T.subtle}>  {meta}</Text>
+        </Box>
+      );
+    }
+    case "member": {
+      const mem = row.member!;
+      const label = runMemberStateLabel(mem.state);
+      const who = state.machines.get(row.machine);
+      // The member's thread is on whichever machine took the task, which is
+      // not always the machine holding the run — so the row says which.
+      const on = [...state.machines.values()].find((x) => x.info?.machineId === mem.machineId);
+      const where = on?.info?.name ?? "";
+      const tint = mem.state === "blocked" ? T.awaiting
+        : mem.state === "working" ? T.working
+        : mem.state === "merged" ? T.success
+        : mem.state === "withdrawn" ? T.faint : T.subtle;
+      const right = `${label}${where && where !== who?.info?.name ? ` · ${where}` : ""}`;
+      const titleW = Math.max(6, width - 5 - right.length);
+      return (
+        <Box paddingLeft={4} paddingRight={1} height={1} backgroundColor={bg}>
+          <Text color={tint}>{mem.state === "working" ? "●" : mem.state === "blocked" ? "◼" : mem.state === "merged" ? "✓" : mem.state === "withdrawn" ? "–" : "·"}</Text>
+          <Text color={mem.state === "withdrawn" ? T.faint : T.muted}> {truncate(`${mem.task.key} ${mem.task.title}`, titleW).padEnd(titleW)}</Text>
+          <Text color={tint}> {right}</Text>
         </Box>
       );
     }

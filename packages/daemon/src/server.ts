@@ -197,6 +197,10 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
         return sourceInfo();
       case "machine.update":
         return o.updater.start({ restart: p.restart });
+      case "run.issues":
+        return engine.runIssues(String(p.projectId), Array.isArray(p.numbers) ? p.numbers.map(Number) : []);
+      case "run.pullRequest":
+        return engine.runPullRequest(String(p.threadId));
       case "machine.restart": {
         const pid = process.pid;
         scheduleRestart(o.log);
