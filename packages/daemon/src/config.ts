@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir, hostname, platform, arch } from "node:os";
+import { homedir, hostname, platform, arch, totalmem } from "node:os";
 import { join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
 import type { MachineSettings, PermissionMode } from "@covey/protocol";
@@ -49,6 +49,38 @@ export interface DaemonConfig {
   defaultPermissionMode: PermissionMode | null;
   /** Machine-wide default for incremental text on new threads; null = off. */
   defaultStreaming: boolean | null;
+  /** Minutes a thread may idle before its session is released; 0 = never, null = default. */
+  sessionIdleMinutes: number | null;
+  /** Sessions kept live at one time; null = a limit derived from memory. */
+  maxLiveSessions: number | null;
+}
+
+/**
+ * The default idle limit, in minutes.
+ *
+ * A session costs about 300 MB and answers about 0.3 s faster than a resumed
+ * one (measured on macOS with SDK 0.3.265, on a 458 KB transcript). The prompt
+ * cache expires after about five minutes, so a session that has been quiet for
+ * longer than that holds memory for almost no gain. Fifteen minutes is past
+ * every ordinary pause — a read, a build, a meeting — and well inside the hour
+ * a forgotten thread would otherwise hold.
+ */
+export const DEFAULT_SESSION_IDLE_MINUTES = 15;
+
+/** What one live session costs in resident memory. Measured: 271-363 MB. */
+const SESSION_MEMORY_BYTES = 300 * 1024 * 1024;
+
+/**
+ * How many sessions this machine keeps live when nobody said otherwise.
+ *
+ * The daemon spends at most 15% of the machine's memory on warm sessions, and
+ * never fewer than two (a thread and the one beside it) nor more than eight.
+ * A small machine therefore holds fewer sessions than a large one, which is
+ * what a memory limit has to mean.
+ */
+export function defaultLiveSessionLimit(mem = totalmem()): number {
+  const affordable = Math.floor((mem * 0.15) / SESSION_MEMORY_BYTES);
+  return Math.min(8, Math.max(2, affordable));
 }
 
 const configFile = () => join(dataDir(), "daemon.json");
@@ -59,14 +91,27 @@ function readConfigFile(): Record<string, unknown> {
 }
 
 /** Settings written before these fields existed simply read as "no opinion". */
-export function machineSettings(cfg: Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming">): MachineSettings {
+export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions">>): MachineSettings {
   return {
     defaultModel: cfg.defaultModel ?? null,
     defaultPermissionMode: cfg.defaultPermissionMode ?? null,
     // The old escape becomes the seed for the new default, so a machine that
     // starts with COVEY_STREAM=1 still gives every new thread incremental text.
     defaultStreaming: cfg.defaultStreaming ?? (process.env.COVEY_STREAM === "1" ? true : null),
+    // The environment is the escape hatch for both limits: a machine can turn
+    // the sweep off (`COVEY_SESSION_IDLE_MINUTES=0`) without an edit to
+    // daemon.json, and the file still wins when it holds a value.
+    sessionIdleMinutes: cfg.sessionIdleMinutes ?? envNumber("COVEY_SESSION_IDLE_MINUTES"),
+    maxLiveSessions: cfg.maxLiveSessions ?? envNumber("COVEY_MAX_LIVE_SESSIONS"),
   };
+}
+
+/** A whole number from the environment, or null when it is absent or not one. */
+function envNumber(name: string): number | null {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null;
 }
 
 /**
@@ -100,6 +145,8 @@ export function loadDaemonConfig(overrides: Partial<DaemonConfig> = {}): DaemonC
       defaultModel: null,
       defaultPermissionMode: null,
       defaultStreaming: null,
+      sessionIdleMinutes: null,
+      maxLiveSessions: null,
     };
     writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
   }

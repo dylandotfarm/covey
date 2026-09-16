@@ -93,6 +93,21 @@ export interface MachineSettings {
    * same as `false`; it is nullable so the field matches the two beside it.
    */
   defaultStreaming: boolean | null;
+  /**
+   * How long a thread may sit idle before the daemon stops its Claude session
+   * and gives the memory back. `0` keeps every session for ever. Absent or
+   * `null` means the daemon's own default.
+   *
+   * The next message starts a new process and resumes the transcript, so the
+   * conversation is not lost — it costs about a third of a second.
+   */
+  sessionIdleMinutes?: number | null;
+  /**
+   * How many Claude sessions this machine keeps live at one time. Above the
+   * limit the daemon releases the least recently used session that is not
+   * busy. Absent or `null` means a limit derived from the machine's memory.
+   */
+  maxLiveSessions?: number | null;
 }
 
 export interface MachineCapabilities {
@@ -1005,6 +1020,10 @@ export type Command =
       defaultModel?: string | null;
       defaultPermissionMode?: PermissionMode | null;
       defaultStreaming?: boolean | null;
+      /** Minutes a thread may sit idle before its session is released; `0` = never. */
+      sessionIdleMinutes?: number | null;
+      /** How many sessions stay live at one time on this machine. */
+      maxLiveSessions?: number | null;
     }
   | {
       type: "thread.create";
