@@ -14,8 +14,12 @@ import { join } from "node:path";
  * its own host. The port in the command line makes the two look different in
  * `ps`. `covey stop --port N` remains the safe way to stop one of them.
  *
- * This lives in its own module because `index.ts` runs `main()` when it loads,
+ * This lives in its own module because `main.ts` runs `main()` when it loads,
  * so a test cannot import it.
+ *
+ * The entry is `index.js`, not `main.js`: `index.js` tests the Node version
+ * before it loads the rest of the program, so a daemon that the CLI starts
+ * makes that test too.
  */
 export function daemonArgs(dir: string, port: number): string[] {
   return [join(dir, "index.js"), "daemon", "--port", String(port)];
