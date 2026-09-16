@@ -13,7 +13,7 @@ import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
 import * as Ed from "../editor.js";
-import { readDroppedImages } from "../attachments.js";
+import { readDroppedImages, spliceTags, tagAttachments } from "../attachments.js";
 import { T } from "../theme.js";
 
 const SIDEBAR_W = 34;
@@ -74,10 +74,9 @@ export function App({ store }: { store: Store }) {
   // row count, so both need the same answer.
   const editorRows = useMemo(() => Ed.wrapEditorLines(draft, mainW - 4), [draft, mainW]);
   const maxEditorRows = 10;
-  const attachmentCount = state.view ? store.attachments(state.view.threadId).length : 0;
   const composerRows = pending
     ? 3 + (pending.kind === "question" && answerDraft.length > 0 ? 1 : 0)
-    : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0);
+    : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2;
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
   const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionCursor, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionCursor, state.toolsExpanded]);
   // Append the live activity row outside the heavy memo, so the spinner can
@@ -629,8 +628,13 @@ export function App({ store }: { store: Store }) {
         const { attachments, errors } = readDroppedImages(rawInput);
         for (const e of errors) store.notify(e, "error");
         if (attachments.length > 0) {
-          store.addAttachments(state.view.threadId, attachments);
-          store.notify(`attached ${attachments.map((a) => a.name).join(", ")}`, "success");
+          // The file goes into the sentence as a tag, where the user dropped
+          // it. Tag against the live draft and the tags already in it, so two
+          // files with one name stay apart.
+          const live = store.syncAttachments(state.view.threadId, draft);
+          const tagged = tagAttachments(attachments, [draft, ...live.map((a) => a.tag)].join("\n"));
+          store.addAttachments(state.view.threadId, tagged);
+          applyEdit(spliceTags(draft, caret, tagged.map((a) => a.tag)));
           return;
         }
         if (errors.length > 0) return;
@@ -813,8 +817,8 @@ export function App({ store }: { store: Store }) {
     if (key.return && !key.shift && !key.ctrl && !key.meta && !key.super) {
       if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
       const text = draft.trim();
-      // An image on its own is a legitimate turn.
-      if (!text && store.attachments(state.view.threadId).length === 0) return;
+      // An image on its own is a legitimate turn: its tag is the whole text.
+      if (!text) return;
       void store.sendTurn(text);
       if (running) store.notify("sent — the agent picks it up at its next tool call");
       setDraft(""); setCaret(0);
@@ -822,8 +826,7 @@ export function App({ store }: { store: Store }) {
     }
     if ((key.ctrl && input === "j") || (key.return && (key.shift || key.meta || key.super))) return insert("\n");
     if (key.backspace || key.delete) {
-      // Backspace on an empty composer peels off the last attachment.
-      if (key.backspace && draft.length === 0 && state.view && store.removeLastAttachment(state.view.threadId)) return;
+      // An attachment has no key of its own: delete its tag out of the draft.
       // cmd (super) = line-scoped, alt (meta) = word-scoped, bare = one char.
       const st = { value: draft, caret };
       const fwd = key.delete;
@@ -885,7 +888,7 @@ export function App({ store }: { store: Store }) {
                 ? <Summary state={state} row={summaryRow} width={mainW} height={transcriptH} />
                 : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={state.scrollFromBottom} width={mainW} selection={state.selection} />}
         </Box>
-        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} attachments={state.view ? store.attachments(state.view.threadId) : []} answerDraft={answerDraft} />
+        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} />
       </Box>
     </Box>
   );

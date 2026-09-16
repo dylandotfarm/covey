@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDroppedPaths, imageMime, readDroppedImages } from "./attachments.js";
+import { parseDroppedPaths, imageMime, readDroppedImages, makeTag, tagAttachments, spliceTags, keepTagged } from "./attachments.js";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -48,4 +48,40 @@ test("a missing file reports an error rather than attaching", () => {
   const { attachments, errors } = readDroppedImages("/nope/missing.png");
   assert.equal(attachments.length, 0);
   assert.equal(errors.length, 1);
+});
+
+const att = (name: string) => ({ name, path: `/a/${name}`, mimeType: "image/png" });
+
+test("a file becomes a tag named after the file", () => {
+  assert.equal(makeTag("shot.png", ""), "[shot.png]");
+});
+
+test("two files with one name get two tags", () => {
+  const tags = tagAttachments([att("shot.png"), att("shot.png"), att("shot.png")], "").map((a) => a.tag);
+  assert.deepEqual(tags, ["[shot.png]", "[shot.png 2]", "[shot.png 3]"]);
+});
+
+test("a tag the user typed by hand does not collide", () => {
+  assert.equal(makeTag("shot.png", "why is [shot.png] red?"), "[shot.png 2]");
+});
+
+test("a bracket in the name cannot split the tag", () => {
+  assert.equal(makeTag("a[1].png", ""), "[a_1_.png]");
+});
+
+test("the tag lands at the caret, spaced off the words around it", () => {
+  assert.deepEqual(spliceTags("look at and say why", 8, ["[shot.png]"]), { value: "look at [shot.png] and say why", caret: 19 });
+  // At the end of the draft the trailing space still goes in, so the next word
+  // the user types does not touch the tag.
+  assert.deepEqual(spliceTags("look at this", 12, ["[shot.png]"]), { value: "look at this [shot.png] ", caret: 24 });
+  assert.deepEqual(spliceTags("", 0, ["[shot.png]"]), { value: "[shot.png] ", caret: 11 });
+  // The draft already has the space, so do not add a second one.
+  assert.deepEqual(spliceTags("look at  rest", 8, ["[one.png]", "[two.png]"]), { value: "look at [one.png] [two.png] rest", caret: 27 });
+});
+
+test("an attachment goes when the user deletes its tag", () => {
+  const atts = tagAttachments([att("shot.png"), att("shot.png")], "");
+  assert.deepEqual(keepTagged("compare [shot.png] with [shot.png 2]", atts).length, 2);
+  assert.deepEqual(keepTagged("compare [shot.png] with nothing", atts).map((a) => a.tag), ["[shot.png]"]);
+  assert.deepEqual(keepTagged("", atts), []);
 });

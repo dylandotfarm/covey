@@ -131,7 +131,12 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
         const lw = l.reduce((a, s) => a + width(s.text), 0);
         return [{ text: "  ", bg: T.userBg }, ...l.map((s) => ({ ...s, bg: T.userBg })), { text: " ".repeat(Math.max(0, inner - lw)) + "  ", bg: T.userBg }];
       });
-      if (item.attachments.length) lines.push([{ text: "  " + item.attachments.map((a) => `⎘ ${a.name}`).join("  "), color: T.subtle }]);
+      // An attachment reads as a tag — `[shot.png]` — inside the text itself,
+      // so it needs no line of its own. The footer stays for a file the text
+      // does not name: a message sent before tags existed, or one folded in by
+      // another client.
+      const unnamed = item.attachments.filter((a) => !item.text.includes(a.name));
+      if (unnamed.length) lines.push([{ text: "  " + unnamed.map((a) => `⎘ ${a.name}`).join("  "), color: T.subtle }]);
       // Deliberately not "will be read next": the CLI folds this in at a tool
       // boundary and does not say when, so claiming a moment would be a guess.
       if (item.folded) lines.push([{ text: "  ↳ sent into the turn already running", color: T.info, italic: true }]);

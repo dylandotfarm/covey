@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings } from "@covey/protocol";
+import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
+import { keepTagged, type TaggedAttachment } from "./attachments.js";
 
 /**
  * How many timeline items a thread opens with when the reader means it. Big
@@ -90,7 +91,7 @@ export interface AppState {
   scrollFromBottom: number; // lines scrolled up from bottom (0 = follow)
   drafts: Map<string, string>;
   /** Files dropped into the composer, per thread, pending the next send. */
-  pendingAttachments: Map<string, Attachment[]>;
+  pendingAttachments: Map<string, TaggedAttachment[]>;
   tick: number;
   /** Diff panel replacing the transcript. */
   diffView: { threadId: string; loading: boolean; diff: TurnDiff | null; scroll: number } | null;
@@ -380,17 +381,24 @@ export class Store {
   draft(threadId: string) { return this.state.drafts.get(threadId) ?? ""; }
 
   attachments(threadId: string) { return this.state.pendingAttachments.get(threadId) ?? []; }
-  addAttachments(threadId: string, atts: Attachment[]) {
+  addAttachments(threadId: string, atts: TaggedAttachment[]) {
     if (atts.length === 0) return;
     this.state.pendingAttachments.set(threadId, [...this.attachments(threadId), ...atts]);
     this.touch();
   }
-  removeLastAttachment(threadId: string) {
+  /**
+   * Drop the attachments whose tag the user deleted from the draft. The tag is
+   * the only record of the file in the text, so no tag means no attachment.
+   */
+  syncAttachments(threadId: string, text: string) {
     const cur = this.attachments(threadId);
-    if (cur.length === 0) return false;
-    this.state.pendingAttachments.set(threadId, cur.slice(0, -1));
+    if (cur.length === 0) return cur;
+    const kept = keepTagged(text, cur);
+    if (kept.length === cur.length) return cur;
+    if (kept.length === 0) this.state.pendingAttachments.delete(threadId);
+    else this.state.pendingAttachments.set(threadId, kept);
     this.touch();
-    return true;
+    return kept;
   }
   clearAttachments(threadId: string) {
     if (this.state.pendingAttachments.delete(threadId)) this.touch();
@@ -544,7 +552,9 @@ export class Store {
     const v = this.state.view;
     const client = v && this.clients.get(v.machine);
     if (!v || !client) return;
-    const attachments = this.attachments(v.threadId);
+    // The tag in the text is the file. Whatever lost its tag does not go.
+    const kept = this.syncAttachments(v.threadId, text);
+    const attachments = kept.map(({ tag: _tag, ...a }) => a);
     try {
       await client.command({ type: "turn.send", threadId: v.threadId, turnId: randomUUID(), text, ...(attachments.length ? { attachments } : {}) });
       this.clearAttachments(v.threadId);
