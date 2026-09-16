@@ -350,6 +350,28 @@ test("machine.source points at the checkout the daemon runs from", async () => {
   assert.equal(src.canUpdate, !!src.remote, "nothing to pull from without a remote");
 });
 
+test("usage.report answers for its own machine, with an empty total before any turn", async () => {
+  const info = await a.rpc("hello", { protocolVersion: 1, client: "test" });
+  const r = await a.rpc("usage.report", { since: "2026-01-01T00:00:00.000Z", until: "2026-01-02T00:00:00.000Z", groupBy: "thread" });
+  assert.equal(r.machineId, info.machineId);
+  assert.equal(r.machineName, "alpha");
+  assert.equal(r.since, "2026-01-01T00:00:00.000Z");
+  assert.equal(r.groupBy, "thread");
+  assert.deepEqual(r.total, { turns: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, estimatedCostUsd: 0 });
+  assert.deepEqual(r.groups, []);
+
+  // One database holds one machine's turns, so grouping by machine is that
+  // machine's own total under its own name.
+  const byMachine = await a.rpc("usage.report", { groupBy: "machine" });
+  assert.equal(byMachine.groups.length, 1);
+  assert.equal(byMachine.groups[0]!.key, info.machineId);
+  assert.equal(byMachine.groups[0]!.label, "alpha");
+  assert.deepEqual(byMachine.groups[0]!.turns, byMachine.total.turns);
+  // No window is open ended, not an error.
+  assert.equal(byMachine.since, null);
+  assert.equal(byMachine.until, null);
+});
+
 /**
  * Regression test for the first half of issue #7. Put `daemonVersion: "0.0.1"`
  * back in `runDaemon` and this fails: the package version never moves, so no
@@ -398,6 +420,19 @@ test("live: a real turn streams items, folds a second message in, and captures a
   assert.equal(t.archivedAt, null, "sending a message unarchived the thread");
   assert.equal(t.queuedTurns, 0, "nothing waits behind a running turn any more");
   assert.equal(t.latestTurn.state, "completed");
+  // The turn carries what it alone spent, cache figures and model split
+  // included — not the session's running total.
+  assert.ok(t.latestTurn.usage, "the turn reports its usage");
+  assert.ok(t.latestTurn.usage.outputTokens > 0, "a turn that replied spent output tokens");
+  assert.ok(t.latestTurn.usage.byModel.length > 0, "the split names at least one model");
+  const used = await b.rpc("usage.report", { groupBy: "thread" });
+  assert.ok(used.total.turns > 0, "the turn was recorded");
+  assert.ok(used.total.outputTokens >= t.latestTurn.usage.outputTokens);
+  const mine = used.groups.find((g) => g.key === threadId);
+  assert.ok(mine, "the thread shows in the totals");
+  const byModel = await b.rpc("usage.report", { groupBy: "model" });
+  assert.ok(Math.abs(byModel.groups.reduce((n, g) => n + g.estimatedCostUsd, 0) - byModel.total.estimatedCostUsd) < 1e-6,
+    "the model split adds up to the total");
   const folded = b.pushes.map((p) => p.event?.item).filter((i) => i?.kind === "user" && i.text.startsWith("Reply with"));
   assert.ok(folded.some((i) => i.folded === true), "the second message went into the running turn");
   assert.ok(folded.every((i) => i.turnId === editTurn), "and belongs to that turn, not one of its own");

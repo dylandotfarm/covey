@@ -270,11 +270,103 @@ export interface LatestTurn {
   state: "running" | "interrupted" | "completed" | "error";
   startedAt: string;
   completedAt: string | null;
+  /** This turn's estimated cost. See `TokenCounts.estimatedCostUsd`. */
   costUsd?: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Everything this turn spent, cache figures and per-model split included. */
+  usage?: TurnUsage;
   /** Working-tree change summary for this turn (git repos only). */
   diff?: TurnDiffSummary;
+}
+
+// ---------------------------------------------------------------------------
+// Usage (tokens and estimated cost)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a turn, or a set of turns, spent.
+ *
+ * The SDK reports cumulative counters for the whole session, so the daemon
+ * differences them per turn before it stores a row. Every figure here is
+ * therefore the delta for that turn alone, and the figures add up.
+ */
+export interface TokenCounts {
+  inputTokens: number;
+  outputTokens: number;
+  /** Tokens written into the prompt cache. */
+  cacheCreationInputTokens: number;
+  /** Tokens read back from the prompt cache. On a long thread this dominates
+   *  the input count, so a total that leaves it out is wrong. */
+  cacheReadInputTokens: number;
+  /**
+   * The SDK's own estimate at list prices. On a subscription plan this is not
+   * money charged. Always label it "estimated" in an interface.
+   */
+  estimatedCostUsd: number;
+}
+
+/** One model's share of a turn. */
+export interface ModelCounts extends TokenCounts {
+  model: string;
+}
+
+/** A turn's totals, plus the split by model — a turn can change model part
+ *  way, and a subagent may run on another one. */
+export interface TurnUsage extends TokenCounts {
+  byModel: ModelCounts[];
+}
+
+/** One finished turn, as the daemon stores it. */
+export interface TurnRecord extends TokenCounts {
+  threadId: ThreadId;
+  turnId: TurnId;
+  projectId: ProjectId;
+  startedAt: string;
+  endedAt: string;
+  state: "completed" | "error" | "interrupted";
+  /** The model that did most of the work, for a one-line label. */
+  model: string | null;
+  byModel: ModelCounts[];
+}
+
+/** What a usage total is broken down by. */
+export type UsageGroupBy = "thread" | "project" | "model" | "machine";
+
+export interface UsageTotals extends TokenCounts {
+  /** Turns that carried figures, not turns started. */
+  turns: number;
+}
+
+export interface UsageGroup extends UsageTotals {
+  /** Thread id, project id, model id, or the machine id. */
+  key: string;
+  label: string;
+}
+
+/**
+ * One machine's answer. The TUI cannot read a database on another machine, so
+ * it asks every machine the same question and adds the answers up.
+ */
+export interface UsageReport {
+  machineId: MachineId;
+  machineName: string;
+  /** The window asked for, echoed back. `null` = open ended. */
+  since: string | null;
+  until: string | null;
+  groupBy: UsageGroupBy;
+  total: UsageTotals;
+  groups: UsageGroup[];
+}
+
+/** Window and grouping for `usage.report`. Both bounds are ISO instants; the
+ *  client owns the clock, so every machine answers about the same period. */
+export interface UsageQuery {
+  /** Inclusive lower bound on the turn's end time. */
+  since?: string | null;
+  /** Exclusive upper bound. */
+  until?: string | null;
+  groupBy?: UsageGroupBy;
 }
 
 export interface TurnDiffSummary {
@@ -742,6 +834,11 @@ export interface RpcMethods {
   "project.git": { params: { projectId: ProjectId }; result: ProjectGit };
   /** Full patch for a turn; `turnId` omitted = latest turn with a diff. */
   "turn.diff": { params: { threadId: ThreadId; turnId?: TurnId }; result: TurnDiff | null };
+  /**
+   * Token and estimated-cost totals for turns that ended inside a window.
+   * Every machine answers for the turns it ran, so the TUI asks them all.
+   */
+  "usage.report": { params: UsageQuery; result: UsageReport };
   /** What the daemon is running: checkout, branch, commit. Read on demand. */
   "machine.source": { params: Record<string, never>; result: MachineSource };
   /**
