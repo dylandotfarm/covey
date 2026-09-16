@@ -182,3 +182,25 @@ test("an attachment goes when the user deletes its tag", () => {
   assert.deepEqual(keepTagged("compare [shot.png] with nothing", atts).map((a) => a.tag), ["[shot.png]"]);
   assert.deepEqual(keepTagged("", atts), []);
 });
+
+test("a dropped file lands in the draft as a tag at the caret", () => {
+  const drop = applyDrop("look at and say why", 8, [att("shot.png")], []);
+  assert.equal(drop.value, "look at [shot.png] and say why", "the file belongs where it was dropped, not on a line of its own");
+  assert.equal(drop.caret, 19);
+  assert.deepEqual(drop.attachments.map((a) => a.tag), ["[shot.png]"]);
+});
+
+test("two files with one name get two tags the user can tell apart", () => {
+  const first = applyDrop("compare", 7, [att("shot.png")], []);
+  const second = applyDrop(first.value, first.caret, [att("shot.png")], first.attachments);
+  const tags = second.attachments.map((a) => a.tag);
+  assert.equal(new Set(tags).size, 2, `two files called shot.png need two tags, got ${JSON.stringify(tags)}`);
+  assert.equal(second.value, "compare [shot.png] [shot.png 2] ");
+});
+
+test("a drop forgets the file whose tag the user already deleted", () => {
+  const first = applyDrop("", 0, [att("shot.png")], []);
+  // The user selects the tag and deletes it, then drops the same file again.
+  const second = applyDrop("", 0, [att("shot.png")], first.attachments);
+  assert.deepEqual(second.attachments.map((a) => a.tag), ["[shot.png]"], "the freed name is free to use again");
+});
