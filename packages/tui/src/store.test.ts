@@ -68,10 +68,13 @@ test("a rewind the daemon refuses never says it reverted", async (t) => {
   const c = new CommandClient("interrupt the running turn first");
   storeWithClient(store, c);
 
-  assert.equal(await store.revertTurn("t", "turn-1"), false);
+  const ok = await store.revertTurn("t", "turn-1");
+  // The notice first: it is what the reader sees, and a green "reverted" over
+  // the red refusal tells them the opposite of what happened.
   assert.equal(store.getState().notice?.text, "interrupt the running turn first",
     "the refusal is the answer the reader gets, and nothing may paint over it");
   assert.equal(store.getState().notice?.tone, "error");
+  assert.equal(ok, false);
 });
 
 test("a rewind that goes through says it reverted", async (t) => {
