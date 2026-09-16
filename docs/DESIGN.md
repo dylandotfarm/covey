@@ -23,6 +23,10 @@ Server and protocol:
 - Approvals are durable timeline items, not in-flight RPC state. `canUseTool` parks on a
   promise that a later `approval.respond` command resolves.
 - Capability flags on `MachineInfo` instead of version sniffing.
+- `MachineInfo.build` reports the daemon's commit and its commit date. The client compares
+  it with its own to show which machines run older code. Nothing branches on it: what a
+  daemon can do is still a capability flag, and the field is optional so an older daemon
+  stays legal.
 
 TUI:
 

@@ -78,39 +78,66 @@ after(() => {
   for (const d of [A?.home, B?.home, repoA, repoB]) if (d) rmSync(d, { recursive: true, force: true });
 });
 
-test("a daemon names itself by port: a pid file, and a line in the log when it stops", async () => {
-  // Every daemon runs `node <dir>/index.js daemon`, so a pattern such as
-  // `pkill -f "index.js daemon"` matches all of them. A session once killed
-  // the daemon that hosted it that way. A pid file for each port is the name
-  // that `covey stop --port N` uses instead.
-  const port = PORT_A + 25;
+/**
+ * A daemon on `port`, started the way the CLI starts one. Returns the process
+ * and the log it writes, so a test can read both.
+ */
+async function stoppableDaemon(port: number): Promise<{ proc: ChildProcess; home: string; log: () => string }> {
   const home = tempDir("covey-test-stop-");
   const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", "stoppable"], { env: { ...process.env, COVEY_HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   proc.stderr!.on("data", (d) => { log += d.toString(); });
+  for (let i = 0; i < 100; i++) {
+    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) break; } catch { /* retry */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return { proc, home, log: () => log };
+}
+
+function reap(proc: ChildProcess, home: string) {
+  if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+  rmSync(home, { recursive: true, force: true });
+}
+
+// Issue #8: every daemon runs `node <dir>/index.js daemon`, so a pattern such
+// as `pkill -f "index.js daemon"` matches all of them. A session killed the
+// daemon that hosted it that way, and the stop left no line in the log.
+
+test("a daemon writes a pid file for its port, and takes it away when it stops", async () => {
+  // The pid file is the name that `covey stop --port N` uses, in place of a
+  // pattern over the command line.
+  const port = PORT_A + 25;
+  const { proc, home, log } = await stoppableDaemon(port);
   try {
-    for (let i = 0; i < 100; i++) {
-      try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) break; } catch { /* retry */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
     const pidFile = join(home, `daemon-${port}.pid`);
-    assert.ok(existsSync(pidFile), `expected a pid file at ${pidFile}\n${log}`);
+    assert.ok(existsSync(pidFile), `expected a pid file at ${pidFile}\n${log()}`);
     const rec = JSON.parse(readFileSync(pidFile, "utf8"));
     assert.equal(rec.pid, proc.pid, "the pid file names the daemon process");
     assert.equal(rec.port, port, "and the port it listens on");
-    // A second daemon on a second port keeps its own file.
+    // A daemon on another port keeps its own file, under its own data dir.
     assert.equal(existsSync(join(A.home, `daemon-${PORT_A}.pid`)), true);
+    assert.notEqual(join(A.home, `daemon-${PORT_A}.pid`), pidFile);
 
-    // Stop it the way `covey stop` does: one signal, to one pid.
     proc.kill("SIGTERM");
     await new Promise<void>((res) => proc.once("exit", () => res()));
-
-    assert.match(log, new RegExp(`stopping: signal=SIGTERM pid=${proc.pid} port=${port} at \\d{4}-`),
-      `a silent stop costs hours to explain; the log must say why. Got:\n${log}`);
     assert.equal(existsSync(pidFile), false, "the pid file goes when the daemon goes");
   } finally {
-    if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
-    rmSync(home, { recursive: true, force: true });
+    reap(proc, home);
+  }
+});
+
+test("a daemon says why it stopped, so the log does not just end", async () => {
+  // The stop used to be silent. The log ended in the middle of the work with
+  // no error and no shutdown line, and the daemon looked like it vanished.
+  const port = PORT_A + 26;
+  const { proc, home, log } = await stoppableDaemon(port);
+  try {
+    proc.kill("SIGTERM");
+    await new Promise<void>((res) => proc.once("exit", () => res()));
+    assert.match(log(), new RegExp(`stopping: signal=SIGTERM pid=${proc.pid} port=${port} at \\d{4}-`),
+      `a silent stop costs hours to explain; the log must name the signal, the pid and the time. Got:\n${log()}`);
+  } finally {
+    reap(proc, home);
   }
 });
 
@@ -153,6 +180,14 @@ test("thread subscription replays after a seq and synchronizes", async () => {
   const kinds = a.pushes.filter((p) => p.push === "thread").map((p) => p.event.kind);
   assert.ok(kinds.includes("thread.updated"));
   assert.ok(a.pushes.some((p) => p.push === "thread.synchronized"));
+});
+
+test("a thread that has never run reports no `/` menu, which is not an empty one", async () => {
+  const snap = await a.rpc("shell.snapshot", {});
+  const threadId = snap.threads[0]!.id;
+  // null is "nobody has asked the SDK yet". The composer says so rather than
+  // showing a menu with nothing in it.
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).commands, null);
 });
 
 test("export → import on another daemon → markMoved tombstones the source", async () => {
@@ -290,6 +325,31 @@ test("machine.source points at the checkout the daemon runs from", async () => {
   assert.equal(src.root, root);
   assert.equal(typeof src.commit, "string");
   assert.equal(src.canUpdate, !!src.remote, "nothing to pull from without a remote");
+});
+
+/**
+ * Regression test for the first half of issue #7. Put `daemonVersion: "0.0.1"`
+ * back in `runDaemon` and this fails: the package version never moves, so no
+ * client can tell that a machine runs older code than it does.
+ */
+test("a machine reports the build it runs, not a package version that never moves", async () => {
+  const info = (await a.rpc("shell.snapshot", {})).machine;
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: here, encoding: "utf8" }).trim();
+  const commit = git("rev-parse", "--short", "HEAD");
+  const expected = git("status", "--porcelain") ? `${commit}-dirty` : commit;
+
+  assert.notEqual(info.daemonVersion, "0.0.1", "the package version identifies no build");
+  assert.equal(info.daemonVersion, expected, "daemonVersion is the commit of the build the daemon runs");
+
+  assert.ok(info.build, "MachineInfo.build is what lets a client order two machines");
+  assert.equal(info.build!.commit, commit);
+  assert.ok(info.build!.committedAt && Number.isFinite(Date.parse(info.build!.committedAt)),
+    "the commit date is the only field that orders builds across machines with their own clocks");
+
+  // Two daemons out of one checkout run the same build, and the client says so
+  // rather than guessing from a local mtime.
+  const other = (await b.rpc("shell.snapshot", {})).machine;
+  assert.equal(other.build!.commit, info.build!.commit);
 });
 
 test("live: a real turn streams items, folds a second message in, and captures a diff", { skip: !process.env.COVEY_LIVE_TESTS }, async () => {

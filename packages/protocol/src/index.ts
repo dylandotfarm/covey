@@ -31,7 +31,14 @@ export interface MachineInfo {
   os: "linux" | "darwin" | "win32" | string;
   arch: string;
   homeDir: string;
+  /** Short commit of the build the daemon runs, e.g. `b9a8b01` or `b9a8b01-dirty`. */
   daemonVersion: string;
+  /**
+   * The build in full, so a client can tell whether this machine runs older
+   * code than it does. Optional: a daemon built before this field omits it,
+   * and the client says "unknown" rather than guessing.
+   */
+  build?: BuildInfo;
   protocolVersion: number;
   claudeCodeVersion?: string;
   /** Tailscale MagicDNS name, if the daemon is on a tailnet. */
@@ -40,6 +47,29 @@ export interface MachineInfo {
   capabilities: MachineCapabilities;
   /** Machine-wide defaults, changed from the TUI's machine control panel. */
   settings: MachineSettings;
+}
+
+/**
+ * Which build a process runs.
+ *
+ * `committedAt` is the ordering key on purpose. The client and the daemon are
+ * on different machines with different clocks, so a local mtime cannot say
+ * which of two builds is older. The commit date comes from the git history,
+ * which both machines agree on.
+ *
+ * `builtAt` is a local mtime. It orders nothing across machines; it says when
+ * this checkout last compiled, which only has a meaning on its own machine.
+ */
+export interface BuildInfo {
+  /** Short commit of `HEAD`, or null when the process does not run from a checkout. */
+  commit: string | null;
+  /** Commit date of `HEAD`, ISO 8601. The only field that crosses machines. */
+  committedAt: string | null;
+  branch: string | null;
+  /** True when the checkout has uncommitted changes, so the commit does not describe the code. */
+  dirty: boolean;
+  /** Newest mtime of the compiled files, ISO 8601. Local to one machine. */
+  builtAt: string | null;
 }
 
 /**
@@ -342,13 +372,56 @@ export interface ApprovalItem extends ItemBase {
   decidedAt: string | null;
 }
 
+/** One question inside an `AskUserQuestion` call. */
+export interface QuestionAsk {
+  /**
+   * The question text, verbatim. The CLI keys the answer by this exact string
+   * and drops a question it finds no key for, so never reword it.
+   */
+  question: string;
+  /** Short chip label the tool supplies, e.g. "Auth method". */
+  header?: string;
+  /** Null when the tool offered no choices, so the answer is free text. */
+  options: { label: string; description?: string }[] | null;
+}
+
+/**
+ * An `AskUserQuestion` call. The tool asks one to four questions at a time and
+ * the CLI expects an answer for each one, so this holds a list even though one
+ * question is the common case.
+ */
 export interface QuestionItem extends ItemBase {
   kind: "question";
   requestId: string;
-  prompt: string;
-  options: { label: string; description?: string }[] | null;
-  answer: string | null;
+  /** One to four questions, in the order the tool asked them. */
+  questions: QuestionAsk[];
+  /** One answer for each question, in the same order. Empty until answered. */
+  answers: string[];
   status: "pending" | "answered" | "expired";
+}
+
+/** The shape a daemon wrote before covey handled more than one question. */
+interface LegacyQuestionItem {
+  prompt?: string;
+  options?: { label: string; description?: string }[] | null;
+  answer?: string | null;
+}
+
+/**
+ * The questions on an item. Items live in the database as JSON and replay
+ * verbatim, so a transcript written before the list existed still reads.
+ */
+export function questionAsks(item: QuestionItem): QuestionAsk[] {
+  if (Array.isArray(item.questions)) return item.questions;
+  const old = item as LegacyQuestionItem;
+  return [{ question: old.prompt ?? "", options: old.options ?? null }];
+}
+
+/** The answers on an item, from either shape. See `questionAsks`. */
+export function questionAnswers(item: QuestionItem): string[] {
+  if (Array.isArray(item.answers)) return item.answers;
+  const old = item as LegacyQuestionItem;
+  return old.answer ? [old.answer] : [];
 }
 
 export interface SystemNoteItem extends ItemBase {
@@ -391,6 +464,43 @@ export function isImageMime(m: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Commands typed in the composer (the `/` prefix)
+// ---------------------------------------------------------------------------
+
+/**
+ * One entry of the `/` menu.
+ *
+ * The SDK owns most of the list: `Query.supportedCommands()` gives it at the
+ * start of a session, and the SDK pushes a whole new list when it finds more
+ * skills. `source` keeps a place beside that list for covey's own commands,
+ * which the client answers itself instead of sending to the agent.
+ */
+export interface SlashCommandInfo {
+  /** Command name, without the leading slash. */
+  name: string;
+  description: string;
+  /** Hint for the arguments, e.g. `<file>`. Empty when the command takes none. */
+  argumentHint: string;
+  /** Other names for the same command, e.g. `cost` for `usage`. */
+  aliases?: string[];
+  /** `sdk` = send the line to the agent. `covey` = the client acts on it. */
+  source: "sdk" | "covey";
+}
+
+/** One candidate for the `@` menu: a name in a directory under the thread. */
+export interface PathEntry {
+  name: string;
+  isDir: boolean;
+}
+
+/**
+ * The commands a thread knows about. `null` is "not known yet" — the thread
+ * has never had a session, so nobody has asked the SDK. An empty array is
+ * "the session answered, and it has no commands".
+ */
+export type ThreadCommands = SlashCommandInfo[] | null;
+
+// ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
 
@@ -407,6 +517,13 @@ export interface ThreadSnapshot {
   items: TimelineItem[];
   /** True when older items exist beyond `items[0]`. */
   hasMore: boolean;
+  /**
+   * The `/` menu for this thread, or `null` while it is not known yet. It
+   * rides the thread subscription rather than the `Thread` record, because the
+   * shell snapshot carries every thread on the machine and the sidebar must
+   * not pay for a command list per thread.
+   */
+  commands: ThreadCommands;
 }
 
 // ---------------------------------------------------------------------------
@@ -474,7 +591,15 @@ export type Command =
       updatedPermissions?: unknown[];
       message?: string;
     }
-  | { type: "question.respond"; threadId: ThreadId; requestId: string; answer: string }
+  | {
+      type: "question.respond";
+      threadId: ThreadId;
+      requestId: string;
+      /** The first answer. A daemon that predates `answers` reads only this. */
+      answer: string;
+      /** One answer for each question on the item, in order. */
+      answers?: string[];
+    }
   | { type: "session.stop"; threadId: ThreadId };
 
 export type CommandEnvelope = Command & { commandId: string };
@@ -507,7 +632,10 @@ export type ShellEvent =
 export type ThreadEvent =
   | { seq: number; kind: "item.upserted"; item: TimelineItem }
   | { seq: number; kind: "item.removed"; itemId: ItemId }
-  | { seq: number; kind: "thread.updated"; thread: Thread };
+  | { seq: number; kind: "thread.updated"; thread: Thread }
+  /** The whole `/` menu, every time. The SDK replaces its list rather than
+   *  patching it, so this event replaces the client's copy too. */
+  | { seq: number; kind: "commands.updated"; commands: SlashCommandInfo[] };
 
 /** Distributive Omit that preserves discriminated unions. */
 export type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;
@@ -575,6 +703,18 @@ export interface RpcMethods {
    */
   "fs.mkdir": { params: { path: string; name: string }; result: { path: string } };
   "models.list": { params: Record<string, never>; result: { id: string; label: string }[] };
+  /**
+   * One directory under a thread's working directory, for the `@` menu. The
+   * candidates are on the daemon's machine, so the client cannot read them
+   * itself. `dir` is relative to that working directory and may not leave it;
+   * `""` is the working directory itself. A directory that is not there
+   * answers with no entries rather than an error, because the reader is part
+   * way through typing its name.
+   */
+  "thread.listDir": {
+    params: { threadId: ThreadId; dir: string };
+    result: { dir: string; entries: PathEntry[]; truncated: boolean };
+  };
   /** Live branch state, asked for when offering where a new thread should run. */
   "project.git": { params: { projectId: ProjectId }; result: ProjectGit };
   /** Full patch for a turn; `turnId` omitted = latest turn with a diff. */
