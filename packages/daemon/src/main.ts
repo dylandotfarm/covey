@@ -50,7 +50,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     settings: machineSettings(config),
   };
   const db = new Db(join(dataDir()));
-  const engine = new Engine(db, machine);
+  const engine = new Engine(db, machine, { log });
   const updater = new Updater(config.machineId, log);
   const server = await startServer({ config, engine, updater, host, log });
   log(`listening on ws://${host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
