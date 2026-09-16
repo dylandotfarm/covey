@@ -12,19 +12,27 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const cliSrc = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "index.ts");
+/**
+ * Every source file of the CLI, not one of them. The CLI is split: `index.ts`
+ * tests the Node version and `main.ts` is the program, and both can print. A
+ * rule that read one file would go quiet the next time the code moves.
+ */
+const cliDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+const cliSources = () => readdirSync(cliDir)
+  .filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"))
+  .map((f) => readFileSync(join(cliDir, f), "utf8"));
 
 /**
  * The lines of the CLI that can reach a terminal. The comments that explain
  * the defect name `pkill` on purpose, so they are not offenders.
  */
 function printableLines(): string[] {
-  return readFileSync(cliSrc, "utf8")
-    .split("\n")
+  return cliSources()
+    .flatMap((text) => text.split("\n"))
     .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l));
 }
 
@@ -36,7 +44,7 @@ test("the CLI never tells anyone to kill daemons by pattern", () => {
 });
 
 test("the advice that replaced it names one process", () => {
-  const src = readFileSync(cliSrc, "utf8");
+  const src = cliSources().join("\n");
   assert.match(src, /kill \$\(lsof -ti :\$\{port\}\)/,
     "the fallback advice should resolve the port to one pid before it kills anything");
   assert.match(src, /covey stop/, "the CLI should offer `covey stop` as the safe way out");
