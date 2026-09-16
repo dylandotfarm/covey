@@ -133,7 +133,7 @@ export function filterOptions<O extends { label: string; hint?: string }>(option
 
 const HELP: [string, string][] = [
   ["tab", "switch focus: sidebar ↔ composer"],
-  ["ctrl+k", "command palette (move, rename, model, mode, machines…)"],
+  ["ctrl+k", "command palette (move, rename, model, mode, streaming, machines…)"],
   ["shift+tab", "cycle permission mode (→ bypass = never ask)"],
   ["ctrl+n", "new thread in current project"],
   ["ctrl+t", "toggle sidebar"],

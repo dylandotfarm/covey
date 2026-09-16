@@ -267,7 +267,7 @@ export function App({ store }: { store: Store }) {
     if (!m) return;
     if (m.conn !== "connected" || !m.info) { store.notify(`${m.saved.name} is ${m.conn}`, "error"); return; }
     const info = m.info;
-    const settings = info.settings ?? { defaultModel: null, defaultPermissionMode: null };
+    const settings = info.settings ?? { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null };
     const busy = runningTurns(machineKey!);
     const modelLabel = settings.defaultModel
       ? (KNOWN_MODELS.find((k) => k.id === settings.defaultModel)?.label ?? settings.defaultModel)
@@ -277,6 +277,7 @@ export function App({ store }: { store: Store }) {
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
       { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
+      { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
     openPick(`${info.name} — ${info.os}/${info.arch} · daemon ${info.daemonVersion}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
@@ -299,6 +300,13 @@ export function App({ store }: { store: Store }) {
           void store.setMachineDefaults(machineKey!, { defaultPermissionMode: mode });
           store.notify(`${info.name}: new threads start in ${permissionModeLabel(mode)}`, mode === "bypassPermissions" ? "error" : "info");
         });
+        case "streaming": {
+          store.setOverlay(null);
+          const on = !settings.defaultStreaming;
+          void store.setMachineDefaults(machineKey!, { defaultStreaming: on });
+          store.notify(`${info.name}: new threads ${on ? "show text as it arrives" : "show each reply whole"}`);
+          return;
+        }
         case "log": { store.setOverlay({ kind: "update", machine: machineKey! }); return; }
       }
     });
@@ -375,6 +383,7 @@ export function App({ store }: { store: Store }) {
       opts.push({ id: "rename", label: "Rename thread", hint: "r" });
       opts.push({ id: "model", label: `Model: ${t.model ?? "default"}` });
       opts.push({ id: "mode", label: `Permission mode: ${t.permissionMode}` });
+      opts.push({ id: "streaming", label: t.streaming ? "Streaming: on — text arrives token by token" : "Streaming: off — each reply lands whole", hint: "this thread" });
       opts.push({ id: "diff", label: "Show changes from the last turn", hint: "d" });
       if (t.latestTurn?.state === "running") opts.push({ id: "background", label: "Background the running tool calls", hint: "ctrl+b" });
       opts.push({ id: "revert", label: "Revert to before a turn… (files + conversation)" });
@@ -399,6 +408,7 @@ export function App({ store }: { store: Store }) {
         case "rename": return openInput("Rename thread", (v) => { store.setOverlay(null); void store.threadCommand({ type: "thread.rename", threadId: t!.id, title: v }); }, t!.title);
         case "model": return openPick("Model", [{ id: "", label: "Default (from Claude settings)" }, ...KNOWN_MODELS.map((m) => ({ id: m.id, label: m.label, hint: m.id }))], (mid) => { store.setOverlay(null); void store.threadCommand({ type: "thread.setModel", threadId: t!.id, model: mid || null }); });
         case "mode": return openPick("Permission mode", PERMISSION_CYCLE.map((m) => ({ id: m, label: m, hint: m === "bypassPermissions" ? "runs tools without asking" : m === t!.permissionMode ? "current" : "" })), (m) => { store.setOverlay(null); void store.setPermissionMode(t!.id, m as PermissionMode); });
+        case "streaming": return void store.setStreaming(t!.id, !t!.streaming);
         case "diff": return void store.toggleDiff();
         case "background": return void store.background();
         case "revert": {

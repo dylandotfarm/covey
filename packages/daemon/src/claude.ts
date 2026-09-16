@@ -33,6 +33,8 @@ export interface SessionParams {
   permissionModeExplicit: boolean;
   /** True when a transcript for this session already exists (resume). */
   resume: boolean;
+  /** Forward incremental text for this thread. Changeable while it runs. */
+  streaming: boolean;
   sessionStore: SessionStore;
   additionalDirectories?: string[];
 }
@@ -44,9 +46,6 @@ interface Pending {
    *  `updatedInput` must still satisfy the tool's own schema. */
   input: Record<string, unknown>;
 }
-
-/** Incremental text streaming, off unless explicitly asked for. */
-const STREAMING = process.env.COVEY_STREAM === "1";
 
 export class ClaudeSession {
   private q: Query | null = null;
@@ -86,10 +85,14 @@ export class ClaudeSession {
   start() {
     const opts: Options = {
       cwd: this.params.cwd,
-      // Off by default: responses land whole, rather than token by token.
-      // The transcript shows a live activity line instead.
-      // Set COVEY_STREAM=1 to get incremental text back.
-      includePartialMessages: STREAMING,
+      // Always asked for, even when the thread does not want incremental text.
+      // The SDK takes this at start time only — `Query` has no control request
+      // for it — so a thread that could not ask for it here could never turn
+      // streaming on without a restart. The gate is `params.streaming`, which
+      // `setStreaming` moves at any time, and which the `stream_event` case
+      // reads. The extra messages cross a pipe to a subprocess on this machine;
+      // nothing goes on the wire to a client until an item changes.
+      includePartialMessages: true,
       permissionMode: toSdkMode(this.params.permissionMode),
       // Consent flag, not an override: the SDK requires it to be true *before*
       // `bypassPermissions` can be selected, and it is a start-time-only option.
@@ -199,6 +202,31 @@ export class ClaudeSession {
   async setModel(model: string | null) {
     this.params.model = model;
     await this.q?.setModel(model ?? undefined).catch(() => {});
+  }
+
+  /**
+   * Turn incremental text on or off, live. Mid-turn is safe in both
+   * directions:
+   *
+   *  - On: the blocks already open have no entry in `blocks`, so their deltas
+   *    are dropped until the next block starts. The `assistant` message at the
+   *    end of the message still writes every block whole.
+   *  - Off: the blocks already open are finished here, so no row is left with
+   *    a cursor on it that never moves. `blocks` is kept, not cleared, so the
+   *    `assistant` message reconciles those same item ids instead of minting
+   *    new ones beside them.
+   */
+  setStreaming(streaming: boolean) {
+    if (this.params.streaming === streaming) return;
+    this.params.streaming = streaming;
+    if (streaming) return;
+    const now = this.sink.now();
+    const base = { threadId: this.params.threadId, turnId: this.currentTurnId, seq: 0, createdAt: now, updatedAt: now };
+    for (const b of this.blocks) {
+      if (!b) continue;
+      if (b.kind === "text") this.sink.upsertItem({ ...base, id: b.itemId, kind: "assistant", text: b.text, streaming: false, model: this.params.model });
+      else if (b.kind === "thinking") this.sink.upsertItem({ ...base, id: b.itemId, kind: "thinking", text: b.text, streaming: false });
+    }
   }
 
   stop() {
@@ -406,10 +434,17 @@ export class ClaudeSession {
       case "stream_event": {
         if (msg.parent_tool_use_id) return; // subagent internals: skip
         const ev = msg.event as any;
+        // Empty the block table on every message, whether the thread streams
+        // or not. A turn interrupted part way through a message leaves entries
+        // behind, and the `assistant` case reads a leftover entry as "this
+        // block streamed" and writes the next message over the older item.
+        if (ev.type === "message_start") { this.blocks = []; return; }
+        // The thread does not want incremental text. Dropping the rest of the
+        // case leaves `blocks` empty, which is the state the `assistant` case
+        // below reads as "nothing streamed": it then derives the item ids from
+        // the API message id and writes each block once, whole.
+        if (!this.params.streaming) return;
         switch (ev.type) {
-          case "message_start":
-            this.blocks = [];
-            return;
           case "content_block_start": {
             const cb = ev.content_block;
             const itemId = this.newItemId();

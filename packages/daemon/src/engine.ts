@@ -142,6 +142,7 @@ export class Engine {
         this.machine.settings = saveMachineSettings({
           ...(cmd.defaultModel !== undefined ? { defaultModel: cmd.defaultModel } : {}),
           ...(cmd.defaultPermissionMode !== undefined ? { defaultPermissionMode: cmd.defaultPermissionMode } : {}),
+          ...(cmd.defaultStreaming !== undefined ? { defaultStreaming: cmd.defaultStreaming } : {}),
         });
         return this.emitShell({ kind: "machine.updated", machine: this.machine });
       }
@@ -201,6 +202,7 @@ export class Engine {
           // an opinion do we honour the user's own settings default.
           permissionMode: cmd.permissionMode ?? machineMode ?? resolveDefaultPermissionMode(p.workspaceRoot),
           permissionModeExplicit: cmd.permissionMode !== undefined || machineMode !== null,
+          streaming: cmd.streaming ?? this.machine.settings.defaultStreaming ?? false,
           branch, worktreePath, status: "idle", lastError: null, pendingApprovals: 0, queuedTurns: 0, latestTurn: null,
           lastMessageAt: null, archivedAt: null, pinnedAt: null, movedTo: null, createdAt: now, updatedAt: now,
         };
@@ -244,6 +246,13 @@ export class Engine {
       case "thread.setModel": {
         await this.sessions.get(cmd.threadId)?.setModel(cmd.model);
         return this.mutateThread(cmd.threadId, (t) => { t.model = cmd.model; });
+      }
+      case "thread.setStreaming": {
+        // No restart, and no wait for the turn to end: the session already
+        // receives the partial messages and only decides whether to pass them
+        // on, so the next token of the turn in flight goes the new way.
+        this.sessions.get(cmd.threadId)?.setStreaming(cmd.streaming);
+        return this.mutateThread(cmd.threadId, (t) => { t.streaming = cmd.streaming; });
       }
       case "turn.send": {
         const t = this.db.getThread(cmd.threadId);
@@ -568,6 +577,7 @@ export class Engine {
       {
         threadId: t.id, sessionId: t.sessionId, cwd: t.worktreePath ?? p.workspaceRoot,
         model: t.model, permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
+        streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
       },
       this.sinkFor(t.id),

@@ -88,13 +88,19 @@ not by the SDK's default cwd-derived key, so the key is identical on every machi
 `packages/daemon/src/claude.ts`. One `query()` per thread with a streaming input iterable,
 so successive turns reuse the subprocess. Options that matter:
 
-- `includePartialMessages`: **off by default**. Replies land whole, and the transcript shows a live activity row (spinner, elapsed, tool count, and
-  whether the model is running a tool or writing text) so the wait is legible. Item ids are
-  derived from the API message id, so a replayed `assistant` message cannot duplicate rows.
-  `COVEY_STREAM=1` restores incremental text: deltas fold into the same item id and are
-  re-sent with accumulated text (throttled to ~60 ms), and the final `assistant` message
-  reconciles the blocks authoritatively. The whole-item re-send contract is unchanged either
-  way — there is still no delta channel.
+- `includePartialMessages`: **always true**, because the SDK takes it at start time only.
+  What each thread sees is decided in the daemon by `Thread.streaming`, which
+  `thread.setStreaming` moves at any time — mid-turn included, with no restart. The palette
+  holds the per-thread switch and the machine control panel holds the default for new
+  threads (`machine.settings.defaultStreaming`, seeded by `COVEY_STREAM=1`).
+  With streaming **off** the `stream_event` case drops everything but the `message_start`
+  reset, so replies land whole, item ids come from the API message id (a replayed `assistant`
+  message cannot duplicate rows), and the transcript shows a live activity row (spinner,
+  elapsed, tool count, and whether the model runs a tool or writes text) so the wait is
+  legible. With streaming **on** the deltas fold into the same item id and are re-sent with
+  accumulated text (throttled to ~60 ms), and the final `assistant` message reconciles the
+  blocks authoritatively. The whole-item re-send contract is the same either way — there is
+  still no delta channel.
 - `sessionId` on first start, `resume` afterwards (decided by whether a transcript exists).
 - `canUseTool`: creates an `approval` item (or a `question` item for `AskUserQuestion`),
   sets thread status to `waiting`, and awaits the user's command. "Always allow" returns the

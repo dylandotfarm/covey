@@ -450,6 +450,15 @@ export class Store {
     );
   }
 
+  /**
+   * Turn incremental text on or off for one thread. The daemon applies it to
+   * the live session at once, so a turn already in flight changes with it.
+   */
+  async setStreaming(threadId: string, streaming: boolean) {
+    await this.threadCommand({ type: "thread.setStreaming", threadId, streaming });
+    this.notify(streaming ? "streaming on — text arrives token by token" : "streaming off — each reply lands whole");
+  }
+
   // ---- actions -------------------------------------------------------------
 
   async createThread(machine: string, projectId: string, opts: { workspaceMode?: WorkspaceMode } = {}) {
