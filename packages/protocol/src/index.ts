@@ -900,3 +900,190 @@ export const KNOWN_MODELS: { id: string; label: string }[] = [
   { id: "claude-sonnet-5", label: "Sonnet 5" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
+
+// ---------------------------------------------------------------------------
+// Integration of a run: gates, the conflict queue, and the audit
+// ---------------------------------------------------------------------------
+//
+// A run dispatches work (#44); these types describe what happens when the work
+// comes back. The rules come from a real run of fifteen agents on 2026-09-16:
+//
+//  - A green check is not the gate. A check is green against the base it ran
+//    on, and that base moves. A pending check and a stale check are both a
+//    refusal.
+//  - A test that exists is not the gate. The gate is the evidence that the
+//    member reverted the fix and watched the test fail.
+//  - File overlap is a hint about a conflict. It is never the answer.
+//  - One party merges. A member never gets push rights to the base branch.
+
+/**
+ * RECONCILE WITH #44. The run model — the group, its members, placement and
+ * dispatch — belongs to #44, which is not merged yet. This is the smallest set
+ * of member fields that the gate, the queue and the audit read. When #44 lands,
+ * delete this block and read the run's own member type instead.
+ */
+export interface RunMemberRef {
+  /** Stable id of the member inside its run. */
+  memberId: string;
+  /** Short human label, e.g. `#20 wheel scroll`. It goes in the queue brief. */
+  label: string;
+  /** The thread that does the work, or null when the run has not dispatched it. */
+  threadId: ThreadId | null;
+  machineId: MachineId | null;
+  /** The branch the member pushes to. The gate and the audit both key on it. */
+  branch: string;
+  /** The pull request number, or null before the member opens one. */
+  pullRequest: number | null;
+  /**
+   * True while the member's thread runs a turn. A run owns the map from thread
+   * to branch, so it can answer this; the integration half only reads it.
+   */
+  turnRunning: boolean;
+  outcome: MemberOutcome;
+}
+
+/**
+ * How a member ends. `withdrawn` is an ordinary outcome, not a failure: a task
+ * cancelled after the agent did the work still produced the reasoning that the
+ * replacement task needs.
+ *
+ * RECONCILE WITH #44, which also names `dispatched`, `working` and `blocked`.
+ */
+export type MemberOutcome = "open" | "merged" | "withdrawn";
+
+/** One check on a pull request, flattened from `gh pr view --json statusCheckRollup`. */
+export interface CheckSummary {
+  name: string;
+  /** The workflow that owns the check, e.g. `ci`. Null for a status context. */
+  workflow: string | null;
+  state: CheckState;
+  /**
+   * When the check started, ISO 8601. The staleness test reads this field: a
+   * check that started before the current base head landed did not include it.
+   */
+  startedAt: string | null;
+  url: string | null;
+}
+
+/** `neutral` covers a skipped or cancelled check: it neither passes nor fails. */
+export type CheckState = "success" | "failure" | "pending" | "neutral";
+
+/**
+ * The state of the checks as a gate reads them.
+ *  - `passing`  — every check succeeded, and each one ran against the current base head.
+ *  - `pending`  — a check has not finished. This is a refusal, not a pass.
+ *  - `failing`  — a check failed.
+ *  - `stale`    — every check succeeded, but against a base that has since moved.
+ *  - `absent`   — no check proved anything.
+ */
+export type CiState = "passing" | "pending" | "failing" | "stale" | "absent";
+
+/** The commit at the tip of the base branch, and when it landed there. */
+export interface BaseHead {
+  oid: string;
+  /** ISO 8601. A check that started before this time did not test this commit. */
+  committedAt: string;
+}
+
+/**
+ * The evidence that a member's test bites. A machine cannot judge a test, so
+ * the member records what it did: it reverted the fix, ran the test, and kept
+ * the failure verbatim. The failure text is the whole value of this record.
+ */
+export interface RegressionEvidence {
+  /** What the member reverted, e.g. `the guard in sidebar.ts:112`. */
+  reverted: string;
+  /** The test that failed once the fix was gone. */
+  test: string;
+  /** The failure, copied from the test run. Empty text proves nothing. */
+  failure: string;
+  recordedAt: string;
+  /** The thread that recorded it, so a reader can trace it back. */
+  recordedBy?: string;
+}
+
+export type GateRefusalCode =
+  | "ci-failing"
+  | "ci-pending"
+  | "ci-stale"
+  | "ci-absent"
+  | "merge-conflict"
+  | "pr-draft"
+  | "pr-missing"
+  | "turn-running"
+  | "no-evidence"
+  | "evidence-proves-nothing"
+  | "withdrawn"
+  | "not-the-merge-party";
+
+export interface GateRefusal {
+  code: GateRefusalCode;
+  /** One sentence for the operator, with the fact that caused the refusal. */
+  message: string;
+}
+
+/** What the gate decides about one member. `ok` is true only with no refusals. */
+export interface GateVerdict {
+  memberId: string;
+  branch: string;
+  ok: boolean;
+  ci: CiState;
+  checks: CheckSummary[];
+  /** Every reason to refuse, not the first one. The operator fixes them together. */
+  refusals: GateRefusal[];
+  evidence: RegressionEvidence | null;
+}
+
+/** The size and reach of one member's change, for the conflict queue. */
+export interface MemberDiff {
+  branch: string;
+  additions: number;
+  deletions: number;
+  /** Every path the branch touches, as `gh pr view --json files` reports it. */
+  files: string[];
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** `CLEAN`, `BEHIND`, `DIRTY`, `UNSTABLE`, `BLOCKED`, `DRAFT`, `UNKNOWN`. */
+  mergeStateStatus: string;
+}
+
+/** A member that lands earlier and touches a file this member also touches. */
+export interface QueueCollision {
+  branch: string;
+  label: string;
+  files: string[];
+}
+
+/** One member's place in the merge queue, and the brief the run sends it. */
+export interface QueuePosition {
+  memberId: string;
+  branch: string;
+  label: string;
+  /** 1 is the first merge. Largest diff first. */
+  position: number;
+  total: number;
+  /** additions + deletions, the cost of a re-merge. */
+  size: number;
+  /** Members ahead of this one that share a file with it. A hint, not the answer. */
+  meets: QueueCollision[];
+  /** The message to send to the member. It names the files and the caution. */
+  brief: string;
+}
+
+/** A merged member whose branch still holds commits that the base branch lacks. */
+export interface AuditFinding {
+  memberId: string;
+  branch: string;
+  /** The commits that `origin/<base>..origin/<branch>` reports. */
+  commits: { sha: string; subject: string }[];
+  message: string;
+}
+
+/**
+ * Who may merge. One party merges and the members never do, so a merge takes a
+ * party with `integrator` set. Fifteen agents with push rights to one branch is
+ * a worse problem than the one a run solves.
+ */
+export interface MergeParty {
+  id: string;
+  integrator: boolean;
+}
