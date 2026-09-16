@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { Thread, TimelineItem, Attachment } from "@covey/protocol";
+import type { Thread, TimelineItem } from "@covey/protocol";
 import { T } from "../theme.js";
 import { fmtMs } from "../lines.js";
 import { caretToVisual, type VisualLine } from "../editor.js";
@@ -17,7 +17,6 @@ export interface ComposerProps {
   /** Word-wrapped rows, computed in App so it can size the box to match. */
   rows: VisualLine[];
   maxRows: number;
-  attachments: Attachment[];
   /** Free-text answer being typed for a pending question. */
   answerDraft: string;
   /** The prefix menu — `/` commands, `@` files — while one is open. */
@@ -25,7 +24,7 @@ export interface ComposerProps {
 }
 
 /** Renders the multi-line editor. Editing state lives in App (useInput). */
-export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, attachments, answerDraft, menu }: ComposerProps) {
+export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, answerDraft, menu }: ComposerProps) {
   const running = thread?.latestTurn?.state === "running";
   const lines = editorLines(rows, value, cursor, focused, maxRows);
   const borderColor = pending ? T.warning : focused ? T.accentDim : T.border;
@@ -48,12 +47,6 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
         ) : null}
         {pending?.kind === "question" && answerDraft.length > 0 && (
           <Text>{answerDraft}<Text inverse> </Text></Text>
-        )}
-        {!pending && attachments.length > 0 && (
-          <Text color={T.success} wrap="truncate">
-            {attachments.map((a) => `⎘ ${a.name}`).join("  ")}
-            <Text color={T.faint}>  ⌫ to remove</Text>
-          </Text>
         )}
         {!pending && lines.map((l, i) => <Text key={i}>{l}</Text>)}
         {!pending && value.length === 0 && !focused ? null : null}

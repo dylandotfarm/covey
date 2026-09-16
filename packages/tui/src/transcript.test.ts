@@ -81,3 +81,16 @@ test("a call still running in the background is counted on the folded row", () =
   const items = [user("a", "go"), tool("a", "ls"), tool("a", "npm test", { background: { taskId: "k", state: "running", summary: null } }), user("b", "ok")];
   assert.match(text(layoutTranscript(view(items, "b"), 80, new Set())), /1 in the background/);
 });
+
+test("an attachment the text names inline needs no footer line", () => {
+  const withTag = base("user", "a", { text: "why is [shot.png] red?", attachments: [{ name: "shot.png", path: "/d/1.png", mimeType: "image/png" }] });
+  const out = text(layoutTranscript(view([withTag], "a"), 80, new Set()));
+  assert.match(out, /why is \[shot\.png\] red\?/);
+  assert.doesNotMatch(out, /⎘/, "the tag already says which file this is");
+});
+
+test("a message from before tags existed keeps its footer line", () => {
+  const old = base("user", "a", { text: "look at this", attachments: [{ name: "shot.png", path: "/d/1.png", mimeType: "image/png" }] });
+  const out = text(layoutTranscript(view([old], "a"), 80, new Set()));
+  assert.match(out, /⎘ shot\.png/);
+});

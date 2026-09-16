@@ -20,7 +20,7 @@ import * as Ed from "../editor.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboardImage, readDroppedFiles } from "../attachments.js";
+import { readClipboardImage, readDroppedFiles, applyDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
 const SIDEBAR_W = 34;
@@ -97,7 +97,6 @@ export function App({ store }: { store: Store }) {
   // row count, so both need the same answer.
   const editorRows = useMemo(() => Ed.wrapEditorLines(draft, mainW - 4), [draft, mainW]);
   const maxEditorRows = 10;
-  const attachmentCount = state.view ? store.attachments(state.view.threadId).length : 0;
   // A prefix menu is a property of the draft, not a mode: it is open whenever
   // the draft is part way through a command name or a file mention, and esc
   // has not shut it. `/` wins, because a draft cannot be both.
@@ -129,7 +128,7 @@ export function App({ store }: { store: Store }) {
   };
   const composerRows = (pending
     ? 3 + (pending.kind === "question" && answerDraft.length > 0 ? 1 : 0)
-    : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0))
+    : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2)
     + (menu ? menuHeight(menu) : 0);
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
   const questionUi = useMemo(() => ({ cursor: questionCursor, answered: answersGiven }), [questionCursor, answersGiven]);
@@ -966,8 +965,8 @@ export function App({ store }: { store: Store }) {
     if (key.return && !key.shift && !key.ctrl && !key.meta && !key.super) {
       if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
       const text = draft.trim();
-      // An image on its own is a legitimate turn.
-      if (!text && store.attachments(state.view.threadId).length === 0) return;
+      // An image on its own is a legitimate turn: its tag is the whole text.
+      if (!text) return;
       void store.sendTurn(text);
       if (running) store.notify("sent — the agent picks it up at its next tool call");
       setDraft(""); setCaret(0);
@@ -975,8 +974,7 @@ export function App({ store }: { store: Store }) {
     }
     if ((key.ctrl && input === "j") || (key.return && (key.shift || key.meta || key.super))) return insert("\n");
     if (key.backspace || key.delete) {
-      // Backspace on an empty composer peels off the last attachment.
-      if (key.backspace && draft.length === 0 && state.view && store.removeLastAttachment(state.view.threadId)) return;
+      // An attachment has no key of its own: delete its tag out of the draft.
       // cmd (super) = line-scoped, alt (meta) = word-scoped, bare = one char.
       const st = { value: draft, caret };
       const fwd = key.delete;
@@ -1019,10 +1017,15 @@ export function App({ store }: { store: Store }) {
     if (e && mention) applyEdit(acceptMention(draft, mention, e));
   }
   /** Hand new attachments to the store. Returns false when there were none. */
+  /**
+   * Put the files into the sentence as tags, at the caret. Both ways in — a
+   * drop and a clipboard paste — come through here, so both read the same.
+   */
   function attach(attachments: Attachment[]): boolean {
     if (attachments.length === 0 || !state.view) return false;
-    store.addAttachments(state.view.threadId, attachments);
-    store.notify(`attached ${attachments.map((a) => a.name).join(", ")}`, "success");
+    const drop = applyDrop(draft, caret, attachments, store.attachments(state.view.threadId));
+    store.setAttachments(state.view.threadId, drop.attachments);
+    applyEdit({ value: drop.value, caret: drop.caret });
     return true;
   }
   function pasteClipboardImage() {
@@ -1070,7 +1073,7 @@ export function App({ store }: { store: Store }) {
                 ? <Summary state={state} row={summaryRow} width={mainW} height={transcriptH} />
                 : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={state.scrollFromBottom} width={mainW} selection={state.selection} />}
         </Box>
-        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} attachments={state.view ? store.attachments(state.view.threadId) : []} answerDraft={answerDraft} menu={menu} />
+        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} menu={menu} />
       </Box>
     </Box>
   );
