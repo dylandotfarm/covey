@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings } from "@covey/protocol";
+import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
+import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
 
 /**
@@ -51,6 +52,26 @@ export interface ThreadView {
    * sends only what changed. Zero until the first snapshot lands.
    */
   seq: number;
+  /**
+   * The `/` menu the daemon reported for this thread. `null` means the daemon
+   * does not know yet — the thread has never run a session — which the menu
+   * says rather than showing an empty list.
+   */
+  commands: ThreadCommands;
+  /**
+   * Directories read for the `@` menu, keyed by their path relative to the
+   * thread's working directory (`""` is that directory). One request per
+   * directory, not per keystroke: the filtering happens here.
+   */
+  dirs: Map<string, DirListing>;
+}
+
+export interface DirListing {
+  entries: PathEntry[];
+  loading: boolean;
+  /** The directory holds more names than the daemon was willing to send. */
+  truncated: boolean;
+  error: string | null;
 }
 
 export type Focus = "sidebar" | "composer";
@@ -73,7 +94,18 @@ export type Overlay =
   | { kind: "input"; title: string; placeholder?: string; initial?: string; onSubmit: (v: string) => void; onCancel?: () => void }
   /** Live progress of `machine.update`; closing it leaves the update running. */
   | { kind: "update"; machine: string }
-  | { kind: "browse"; machine: string; path: string; entries: DirEntry[]; onPick: (path: string) => void; loading?: boolean };
+  | { kind: "browse"; machine: string; path: string; entries: DirEntry[]; onPick: (path: string) => void; loading?: boolean }
+  /** Token and estimated-cost totals, asked of every connected machine. */
+  | {
+      kind: "usage";
+      /** Index into `USAGE_WINDOWS`. */
+      window: number;
+      groupBy: UsageGroupBy;
+      loading: boolean;
+      reports: UsageReport[];
+      /** Machines that could not answer, with the reason. */
+      errors: { machine: string; message: string }[];
+    };
 
 export interface DirEntry { name: string; isDir: boolean; isRepo: boolean }
 
@@ -97,7 +129,7 @@ export interface AppState {
   scrollFromBottom: number; // lines scrolled up from bottom (0 = follow)
   drafts: Map<string, string>;
   /** Files dropped into the composer, per thread, pending the next send. */
-  pendingAttachments: Map<string, Attachment[]>;
+  pendingAttachments: Map<string, TaggedAttachment[]>;
   tick: number;
   /** Diff panel replacing the transcript. */
   diffView: { threadId: string; loading: boolean; diff: TurnDiff | null; scroll: number } | null;
@@ -359,6 +391,8 @@ export class Store {
       case "item.upserted": v.items.set(ev.item.id, ev.item); break;
       case "item.removed": v.items.delete(ev.itemId); break;
       case "thread.updated": v.thread = ev.thread; break;
+      // The SDK replaces its command list rather than patching it, so we do too.
+      case "commands.updated": v.commands = ev.commands; break;
     }
     // A resent snapshot carries each item's own seq, which is older than the
     // subscription's, so take the highest and never go backwards.
@@ -378,7 +412,7 @@ export class Store {
   private cacheCurrentView() {
     const v = this.state.view;
     if (!v || v.loading || v.error || v.seq === 0) return;
-    this.viewCache.put(v.machine, v.threadId, { thread: v.thread, items: v.items, hasMore: v.hasMore, seq: v.seq });
+    this.viewCache.put(v.machine, v.threadId, { thread: v.thread, items: v.items, hasMore: v.hasMore, seq: v.seq, commands: v.commands });
   }
 
   /**
@@ -412,13 +446,16 @@ export class Store {
       const view: ThreadView = {
         machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? cached.thread,
         items: cached.items, loading: false, error: null, hasMore: cached.hasMore, loadingOlder: false, seq: cached.seq,
+        // The menu comes back with the items; the directories are read again,
+        // because a file may have appeared since the reader was last here.
+        commands: cached.commands, dirs: new Map(),
       };
       this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
       client?.resumeThread(sel.threadId, cached.seq);
       return;
     }
 
-    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0 };
+    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0, commands: null, dirs: new Map() };
     this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     try {
       const snap: ThreadSnapshot | undefined = await client?.watchThread(sel.threadId, limit);
@@ -432,6 +469,7 @@ export class Store {
         for (const [id, it] of view.items) if (!merged.has(id) || (merged.get(id)!.updatedAt < it.updatedAt)) merged.set(id, it);
         view.items = merged;
         view.hasMore = snap.hasMore;
+        view.commands = snap.commands;
         // Events that landed while the snapshot was in flight already carried
         // the view past the snapshot's seq, so keep the higher of the two.
         view.seq = Math.max(view.seq, snap.seq);
@@ -471,17 +509,24 @@ export class Store {
   draft(threadId: string) { return this.state.drafts.get(threadId) ?? ""; }
 
   attachments(threadId: string) { return this.state.pendingAttachments.get(threadId) ?? []; }
-  addAttachments(threadId: string, atts: Attachment[]) {
-    if (atts.length === 0) return;
-    this.state.pendingAttachments.set(threadId, [...this.attachments(threadId), ...atts]);
+  setAttachments(threadId: string, atts: TaggedAttachment[]) {
+    if (atts.length === 0) this.state.pendingAttachments.delete(threadId);
+    else this.state.pendingAttachments.set(threadId, atts);
     this.touch();
   }
-  removeLastAttachment(threadId: string) {
+  /**
+   * Drop the attachments whose tag the user deleted from the draft. The tag is
+   * the only record of the file in the text, so no tag means no attachment.
+   */
+  syncAttachments(threadId: string, text: string) {
     const cur = this.attachments(threadId);
-    if (cur.length === 0) return false;
-    this.state.pendingAttachments.set(threadId, cur.slice(0, -1));
+    if (cur.length === 0) return cur;
+    const kept = keepTagged(text, cur);
+    if (kept.length === cur.length) return cur;
+    if (kept.length === 0) this.state.pendingAttachments.delete(threadId);
+    else this.state.pendingAttachments.set(threadId, kept);
     this.touch();
-    return true;
+    return kept;
   }
   clearAttachments(threadId: string) {
     if (this.state.pendingAttachments.delete(threadId)) this.touch();
@@ -539,6 +584,15 @@ export class Store {
       mode === "bypassPermissions" ? "bypass permissions — tools now run without asking" : `permission mode: ${mode}`,
       mode === "bypassPermissions" ? "error" : "info",
     );
+  }
+
+  /**
+   * Turn incremental text on or off for one thread. The daemon applies it to
+   * the live session at once, so a turn already in flight changes with it.
+   */
+  async setStreaming(threadId: string, streaming: boolean) {
+    await this.threadCommand({ type: "thread.setStreaming", threadId, streaming });
+    this.notify(streaming ? "streaming on — text arrives token by token" : "streaming off — each reply lands whole");
   }
 
   // ---- actions -------------------------------------------------------------
@@ -602,6 +656,35 @@ export class Store {
       : e?.message ?? String(e);
   }
 
+  /**
+   * Ask every connected machine what its turns cost inside a window. The TUI
+   * cannot read a database on another machine, so each one answers for itself
+   * and the overlay adds the answers up.
+   *
+   * The client owns the clock: it sends absolute instants, so machines in
+   * different time zones still answer about the same period.
+   */
+  async loadUsage(window: number, groupBy: UsageGroupBy) {
+    const { since, until } = usageWindow(window);
+    const keys = this.state.order.filter((k) => this.state.machines.get(k)?.conn === "connected");
+    this.setOverlay({ kind: "usage", window, groupBy, loading: true, reports: [], errors: [] });
+    const answers = await Promise.all(keys.map(async (k) => {
+      const client = this.clients.get(k);
+      if (!client) return { machine: k, message: "not connected" };
+      try { return await client.rpc("usage.report", { since, until, groupBy }); }
+      catch (e: any) { return { machine: k, message: this.machineError(k, e) }; }
+    }));
+    // A window or grouping changed while the answers were in flight; that
+    // request owns the overlay now.
+    const ov = this.state.overlay;
+    if (ov?.kind !== "usage" || ov.window !== window || ov.groupBy !== groupBy) return;
+    this.setOverlay({
+      kind: "usage", window, groupBy, loading: false,
+      reports: answers.filter((a): a is UsageReport => "total" in a),
+      errors: answers.filter((a): a is { machine: string; message: string } => "message" in a),
+    });
+  }
+
   /** Pull, rebuild and restart that machine's daemon. Progress arrives as pushes. */
   async updateMachine(machine: string) {
     const client = this.clients.get(machine);
@@ -635,7 +718,9 @@ export class Store {
     const v = this.state.view;
     const client = v && this.clients.get(v.machine);
     if (!v || !client) return;
-    const attachments = this.attachments(v.threadId);
+    // The tag in the text is the file. Whatever lost its tag does not go.
+    const kept = this.syncAttachments(v.threadId, text);
+    const attachments = kept.map(({ tag: _tag, ...a }) => a);
     try {
       await client.command({ type: "turn.send", threadId: v.threadId, turnId: randomUUID(), text, ...(attachments.length ? { attachments } : {}) });
       this.clearAttachments(v.threadId);
@@ -756,6 +841,34 @@ export class Store {
       this.notify(`moved to ${dstInfo.name}`, "success");
       await this.select({ machine: to.machine, threadId: r.threadId });
     } catch (e: any) { this.notify(`move failed: ${e.message}`, "error"); }
+  }
+
+  /**
+   * Read one directory under the open thread for the `@` menu, once. The
+   * listing is kept for as long as the thread is open: a mention is typed in
+   * seconds, and a request per keystroke over a tailnet is not worth the
+   * newer answer.
+   */
+  async loadDir(dir: string) {
+    const v = this.state.view;
+    if (!v || v.dirs.has(dir)) return;
+    const client = this.clients.get(v.machine);
+    if (!client) return;
+    const threadId = v.threadId;
+    v.dirs.set(dir, { entries: [], loading: true, truncated: false, error: null });
+    this.touch();
+    const put = (l: DirListing) => {
+      const cur = this.state.view;
+      if (!cur || cur.threadId !== threadId) return;
+      cur.dirs.set(dir, l);
+      this.set({ view: { ...cur } });
+    };
+    try {
+      const r = await client.rpc("thread.listDir", { threadId, dir });
+      put({ entries: r.entries, loading: false, truncated: r.truncated, error: null });
+    } catch (e: any) {
+      put({ entries: [], loading: false, truncated: false, error: e.message });
+    }
   }
 
   async browse(machine: string, path: string, onPick: (p: string) => void) {
@@ -961,4 +1074,84 @@ export function sidebarRows(s: AppState): SidebarRow[] {
     }
   }
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Usage windows and totals
+// ---------------------------------------------------------------------------
+
+/**
+ * The periods the usage overlay offers. A day starts at the reader's own
+ * midnight, so "today" means the day they are looking at, and "last 7 days"
+ * covers today and the six days before it.
+ */
+export const USAGE_WINDOWS: { id: string; label: string; days: number | null }[] = [
+  { id: "today", label: "Today", days: 1 },
+  { id: "7d", label: "Last 7 days", days: 7 },
+  { id: "30d", label: "Last 30 days", days: 30 },
+  { id: "all", label: "All time", days: null },
+];
+
+/** The window as absolute instants. `null` means no bound. */
+export function usageWindow(index: number, now = new Date()): { since: string | null; until: string | null } {
+  const w = USAGE_WINDOWS[index] ?? USAGE_WINDOWS[0]!;
+  if (w.days === null) return { since: null, until: null };
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (w.days - 1));
+  return { since: start.toISOString(), until: null };
+}
+
+/** Add machine answers into one figure. */
+export function sumUsage(totals: UsageTotals[]): UsageTotals {
+  const z: UsageTotals = { turns: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, estimatedCostUsd: 0 };
+  for (const t of totals) {
+    z.turns += t.turns;
+    z.inputTokens += t.inputTokens;
+    z.outputTokens += t.outputTokens;
+    z.cacheCreationInputTokens += t.cacheCreationInputTokens;
+    z.cacheReadInputTokens += t.cacheReadInputTokens;
+    z.estimatedCostUsd += t.estimatedCostUsd;
+  }
+  return z;
+}
+
+/**
+ * The rows the usage overlay paints: every machine's groups in one list,
+ * biggest first, each tagged with the machine it came from. Grouping by
+ * machine gives one row per machine, so the tag is dropped there.
+ */
+export function usageRows(reports: UsageReport[], groupBy: UsageGroupBy): { key: string; label: string; machine: string; total: UsageTotals }[] {
+  // A machine row is named after its machine, and a model row is not a
+  // machine's at all — both would only repeat themselves with a tag.
+  const tagged = groupBy !== "machine" && groupBy !== "model";
+  const rows = reports.flatMap((r) => r.groups.map((g) => ({
+    key: `${r.machineId}:${g.key}`,
+    label: g.label,
+    machine: tagged ? r.machineName : "",
+    total: g as UsageTotals,
+  })));
+  // One model runs on several machines, so its rows belong together.
+  if (groupBy === "model") {
+    const byModel = new Map<string, { key: string; label: string; machine: string; total: UsageTotals }>();
+    for (const r of rows) {
+      const seen = byModel.get(r.label);
+      if (seen) seen.total = sumUsage([seen.total, r.total]);
+      else byModel.set(r.label, { ...r, key: r.label });
+    }
+    return [...byModel.values()].sort((a, b) => b.total.estimatedCostUsd - a.total.estimatedCostUsd);
+  }
+  return rows.sort((a, b) => b.total.estimatedCostUsd - a.total.estimatedCostUsd);
+}
+
+/** Tokens, short enough for a column: 1.2M, 340k, 812. */
+export function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+  return String(n);
+}
+
+/** Always with a `~`: the figure is the SDK's list-price estimate, not a bill. */
+export function fmtCost(usd: number): string {
+  if (usd === 0) return "~$0";
+  if (usd < 0.01) return "~$0.01";
+  return `~$${usd < 100 ? usd.toFixed(2) : Math.round(usd)}`;
 }

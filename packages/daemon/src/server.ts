@@ -182,10 +182,14 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
       }
       case "models.list":
         return KNOWN_MODELS;
+      case "thread.listDir":
+        return engine.listThreadDir(p.threadId, String(p.dir ?? ""));
       case "project.git":
         return engine.projectGit(p.projectId);
       case "turn.diff":
         return engine.turnDiff(p.threadId, p.turnId);
+      case "usage.report":
+        return engine.usageReport({ since: p.since, until: p.until, groupBy: p.groupBy });
       case "machine.source":
         return sourceInfo();
       case "machine.update":

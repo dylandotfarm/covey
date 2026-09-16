@@ -1,0 +1,202 @@
+/**
+ * Clickable paths and URLs in the transcript.
+ *
+ * Two routes, because no single one covers every terminal:
+ *
+ * 1. An OSC 8 hyperlink. The terminal does the hit test and the open, the
+ *    pointer changes shape, and no mouse plumbing is involved. The URI never
+ *    enters `Span.text`, so `width()` in `lines.ts` keeps counting printable
+ *    columns only. Ink measures with `string-width`, which also skips the
+ *    sequence, and `slice-ansi` reopens the link after a wrap.
+ * 2. alt+click and ctrl+click on the same span. SGR mouse reports carry a bit
+ *    for alt (8) and one for ctrl (16), so `parseMouse` already decodes them.
+ *    There is no bit for cmd, and shift is reserved: terminals bypass mouse
+ *    reporting while it is held, which is the escape hatch for native
+ *    selection.
+ *
+ * A path in the transcript is a path on the *daemon's* host, and the file
+ * manager runs on the *client's* host. So a file link is drawn only when the
+ * thread's machine is the loopback one. A URL is safe from any machine.
+ */
+import type { Span } from "./lines.js";
+
+export interface LinkContext {
+  /**
+   * True when the thread's machine is this machine. A path from a remote
+   * daemon means nothing to the local file manager, so it is left as text.
+   */
+  localFiles: boolean;
+  /** Home directory of the thread's machine, to expand a leading `~`. */
+  homeDir?: string;
+}
+
+/**
+ * A web URL, or an absolute path.
+ *
+ * The URL branch comes first so that the path inside `https://host/a/b` never
+ * matches on its own. The path branch allows a leading `~`; the callers below
+ * reject a bare one-segment match such as the `/or` in `and/or`.
+ */
+const TARGET = /https?:\/\/[^\s<>"'`()[\]{}]+|~?(?:\/[A-Za-z0-9._+@%~-]+)+\/?/g;
+
+/** Trailing punctuation belongs to the sentence, not to the target. */
+const TRAILING = /[.,;:!?'"`)\]}>]+$/;
+
+/** A character that means the match is the tail of a longer word or path. */
+const PREFIX = /[A-Za-z0-9_~./:@%+-]/;
+
+export interface Target {
+  /** Character offsets into the text that was scanned. */
+  start: number;
+  end: number;
+  /** What the terminal should open. */
+  uri: string;
+}
+
+/** Find every URL and every absolute path in one piece of text. */
+export function findTargets(text: string, ctx: LinkContext): Target[] {
+  const out: Target[] = [];
+  TARGET.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = TARGET.exec(text))) {
+    let hit = m[0];
+    const start = m.index;
+    const before = start > 0 ? text[start - 1]! : "";
+    if (before && PREFIX.test(before)) continue;
+    hit = hit.replace(TRAILING, "");
+    if (!hit) continue;
+    const uri = targetUri(hit, ctx);
+    if (!uri) continue;
+    out.push({ start, end: start + hit.length, uri });
+  }
+  return out;
+}
+
+/** The URI for one matched piece of text, or null when it is not a target. */
+export function targetUri(hit: string, ctx: LinkContext): string | null {
+  if (/^https?:\/\//.test(hit)) return safeUri(hit);
+  if (!ctx.localFiles) return null;
+  let path = hit;
+  if (path.startsWith("~")) {
+    if (!ctx.homeDir) return null;
+    path = ctx.homeDir.replace(/\/$/, "") + path.slice(1);
+  } else if (!path.startsWith("/")) return null;
+  // A single segment is prose more often than a path: `/or`, `/me`, `/tmp`
+  // read the same way, and a wrong link is worse than no link.
+  else if (path.split("/").filter(Boolean).length < 2) return null;
+  return safeUri("file://" + path.split("/").map(encodeURIComponent).join("/"));
+}
+
+/**
+ * Take the escape characters out of a URI.
+ *
+ * The transcript carries text the agent wrote, so an ESC or a BEL in it could
+ * otherwise end the OSC 8 sequence early and write raw bytes to the terminal.
+ */
+export function safeUri(uri: string): string {
+  return uri.replace(/[\u0000-\u001f\u007f]/g, (c) => "%" + c.charCodeAt(0).toString(16).padStart(2, "0"));
+}
+
+/**
+ * Attach a link to every URL and every absolute path in a span array, before
+ * the wrap splits it.
+ *
+ * Order matters: a path that is wrapped over two rows arrives here whole, and
+ * `wrapSpans` copies the `link` field into each piece it cuts, so both rows
+ * point at the same file. Scanning after the wrap would link half a path.
+ */
+export function linkSpans(spans: Span[], ctx: LinkContext | undefined): Span[] {
+  if (!ctx) return spans;
+  let changed = false;
+  const out: Span[] = [];
+  for (const sp of spans) {
+    // A link set by the caller is the better one: a tool row takes its target
+    // from the tool input, which is not truncated.
+    if (sp.link || !sp.text) { out.push(sp); continue; }
+    const hits = findTargets(sp.text, ctx);
+    if (hits.length === 0) { out.push(sp); continue; }
+    changed = true;
+    let at = 0;
+    for (const h of hits) {
+      if (h.start > at) out.push({ ...sp, text: sp.text.slice(at, h.start) });
+      out.push({ ...sp, text: sp.text.slice(h.start, h.end), link: h.uri });
+      at = h.end;
+    }
+    if (at < sp.text.length) out.push({ ...sp, text: sp.text.slice(at) });
+  }
+  return changed ? out : spans;
+}
+
+/** Keys in a tool input that hold a path, in the order we prefer them. */
+const PATH_KEYS = ["file_path", "notebook_path", "path", "filePath"];
+
+/**
+ * The link for a tool row, read from the tool input rather than from the
+ * summary.
+ *
+ * `summariseTool` puts the path through `short(s, 80)`, which cuts it with an
+ * ellipsis, so a link built from the summary text would point at nothing. The
+ * whole input already travels over the protocol on `ToolCallItem.input`.
+ */
+export function toolLink(input: unknown, ctx: LinkContext | undefined): string | undefined {
+  if (!ctx || !input || typeof input !== "object") return undefined;
+  const i = input as Record<string, unknown>;
+  if (typeof i.url === "string" && /^https?:\/\//.test(i.url)) return safeUri(i.url);
+  for (const k of PATH_KEYS) {
+    const v = i[k];
+    if (typeof v !== "string" || !v) continue;
+    const uri = targetUri(v, ctx);
+    if (uri) return uri;
+  }
+  return undefined;
+}
+
+/**
+ * How the client's host opens a target. Kept apart from the spawn so the
+ * choice can be tested without opening anything.
+ */
+export function openCommand(uri: string, platform: string): { cmd: string; args: string[] } {
+  const isFile = uri.startsWith("file://");
+  const path = isFile ? decodeURIComponent(uri.slice("file://".length)) : uri;
+  switch (platform) {
+    // `-R` reveals the file in the Finder instead of opening it in whatever
+    // application owns the extension. That is what the issue asks for, and it
+    // is also the safer of the two: it never runs the file.
+    case "darwin": return { cmd: "open", args: isFile ? ["-R", path] : [uri] };
+    case "win32": return { cmd: "explorer", args: isFile ? ["/select," + path.replace(/\//g, "\\")] : [uri] };
+    default: return { cmd: "xdg-open", args: [isFile ? dirOf(path) : uri] };
+  }
+}
+
+/** The directory holding a file, because `xdg-open` has no reveal. */
+function dirOf(path: string): string {
+  const i = path.lastIndexOf("/");
+  return i > 0 ? path.slice(0, i) : "/";
+}
+
+// ---------------------------------------------------------------------------
+// OSC 8
+// ---------------------------------------------------------------------------
+
+const ESC = "\u001b";
+const OPEN = ESC + "]8;;";
+const ST = ESC + "\\";
+
+/**
+ * Wrap text in an OSC 8 hyperlink.
+ *
+ * Verified against ink 7.1.1: `string-width` and `widest-line` both report the
+ * printable width only, so the sequence costs no columns in the layout.
+ */
+export function osc8(uri: string, text: string): string {
+  return OPEN + safeUri(uri) + ST + text + OPEN + ST;
+}
+
+/**
+ * False when hyperlinks are turned off. A terminal that does not know OSC 8
+ * drops it, but the escape hatch costs one line and keeps the alt+click route
+ * available on its own.
+ */
+export function hyperlinksEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !env.COVEY_NO_HYPERLINKS;
+}

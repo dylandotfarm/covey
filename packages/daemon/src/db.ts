@@ -8,6 +8,12 @@ import type {
   ShellEvent,
   ThreadEvent,
   ShellEventBody,
+  SlashCommandInfo,
+  ModelCounts,
+  TurnRecord,
+  UsageGroup,
+  UsageGroupBy,
+  UsageTotals,
 } from "@covey/protocol";
 
 /**
@@ -15,6 +21,7 @@ import type {
  *
  * Tables:
  *  projects / threads / items       — current state (projections)
+ *  turns                            — one row per finished turn (usage)
  *  shell_events / thread_events     — append log with seq for replay
  *  transcripts                      — SDK SessionStore mirror (raw JSONL rows)
  *  command_receipts                 — idempotency for retried commands
@@ -71,9 +78,24 @@ export class Db {
         ON transcripts(project_key, session_id, subpath, uuid) WHERE uuid IS NOT NULL;
       CREATE TABLE IF NOT EXISTS command_receipts (
         command_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS thread_commands (
+        thread_id TEXT PRIMARY KEY, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS turn_checkpoints (
         thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, before_tree TEXT, after_tree TEXT,
         cwd TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (thread_id, turn_id));
+      CREATE TABLE IF NOT EXISTS turns (
+        thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, project_id TEXT NOT NULL,
+        started_at TEXT NOT NULL, ended_at TEXT NOT NULL, state TEXT NOT NULL,
+        model TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cache_read_input_tokens INTEGER NOT NULL DEFAULT 0,
+        cost_usd REAL NOT NULL DEFAULT 0,
+        by_model TEXT NOT NULL DEFAULT '[]',
+        PRIMARY KEY (thread_id, turn_id));
+      CREATE INDEX IF NOT EXISTS turns_ended ON turns(ended_at);
+      CREATE INDEX IF NOT EXISTS turns_project ON turns(project_id, ended_at);
     `);
     const cols = (this.sql.prepare("PRAGMA table_info(turn_checkpoints)").all() as any[]).map((c) => c.name);
     if (!cols.includes("user_message_uuid")) this.sql.exec("ALTER TABLE turn_checkpoints ADD COLUMN user_message_uuid TEXT");
@@ -130,9 +152,27 @@ export class Db {
   }
   deleteThread(id: string) {
     this.sql.prepare("DELETE FROM items WHERE thread_id = ?").run(id);
+    this.sql.prepare("DELETE FROM thread_commands WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM thread_events WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM thread_seq WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM threads WHERE id = ?").run(id);
+  }
+
+  /**
+   * The `/` menu last read off the thread's session. `null` means nobody has
+   * asked the SDK yet, which is a different answer from an empty list.
+   *
+   * It is kept out of the thread record on purpose: the shell snapshot carries
+   * every thread on the machine, and the sidebar must not pay for a command
+   * list per thread.
+   */
+  threadCommands(threadId: string): SlashCommandInfo[] | null {
+    const r: any = this.sql.prepare("SELECT json FROM thread_commands WHERE thread_id = ?").get(threadId);
+    return r ? JSON.parse(r.json) : null;
+  }
+  putThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
+    this.sql.prepare("INSERT OR REPLACE INTO thread_commands(thread_id,json) VALUES(?,?)")
+      .run(threadId, JSON.stringify(commands));
   }
 
   // ---- items --------------------------------------------------------------
@@ -257,6 +297,118 @@ export class Db {
   /** User items still carrying a delivery flag — a restart has to clear both. */
   flaggedUserItems(threadId: string, flag: "queued" | "folded"): TimelineItem[] {
     return (this.sql.prepare(`SELECT json FROM items WHERE thread_id=? AND json_extract(json,'$.kind')='user' AND json_extract(json,'$.${flag}')=1 ORDER BY seq`).all(threadId) as any[]).map((r) => JSON.parse(r.json));
+  }
+
+  // ---- turns (usage) ------------------------------------------------------
+  /**
+   * Record one finished turn. The figures are already per-turn deltas — the
+   * SDK counters are cumulative and `claude.ts` differences them.
+   *
+   * A turn row outlives the thread that produced it: `thread.delete` and
+   * `turn.revert` remove the conversation, but the tokens were still spent, so
+   * a total for last month must not change when the user tidies up.
+   */
+  putTurn(t: TurnRecord) {
+    this.sql.prepare(
+      `INSERT OR REPLACE INTO turns(thread_id,turn_id,project_id,started_at,ended_at,state,model,
+         input_tokens,output_tokens,cache_creation_input_tokens,cache_read_input_tokens,cost_usd,by_model)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      t.threadId, t.turnId, t.projectId, t.startedAt, t.endedAt, t.state, t.model,
+      t.inputTokens, t.outputTokens, t.cacheCreationInputTokens, t.cacheReadInputTokens,
+      t.estimatedCostUsd, JSON.stringify(t.byModel),
+    );
+  }
+
+  listTurns(threadId: string): TurnRecord[] {
+    return (this.sql.prepare(
+      `SELECT thread_id AS threadId, turn_id AS turnId, project_id AS projectId,
+              started_at AS startedAt, ended_at AS endedAt, state, model,
+              input_tokens AS inputTokens, output_tokens AS outputTokens,
+              cache_creation_input_tokens AS cacheCreationInputTokens,
+              cache_read_input_tokens AS cacheReadInputTokens,
+              cost_usd AS estimatedCostUsd, by_model AS byModel
+       FROM turns WHERE thread_id = ? ORDER BY ended_at`,
+    ).all(threadId) as any[]).map((r) => ({ ...r, byModel: JSON.parse(r.byModel) as ModelCounts[] }));
+  }
+
+  /** `ended_at >= since AND ended_at < until`, either bound optional. */
+  private window(since?: string | null, until?: string | null): { where: string; args: string[] } {
+    const parts: string[] = [];
+    const args: string[] = [];
+    if (since) { parts.push("ended_at >= ?"); args.push(since); }
+    if (until) { parts.push("ended_at < ?"); args.push(until); }
+    return { where: parts.length ? `WHERE ${parts.join(" AND ")}` : "", args };
+  }
+
+  usageTotals(since?: string | null, until?: string | null): UsageTotals {
+    const { where, args } = this.window(since, until);
+    const r: any = this.sql.prepare(
+      `SELECT COUNT(*) AS turns,
+              COALESCE(SUM(input_tokens),0) AS inputTokens,
+              COALESCE(SUM(output_tokens),0) AS outputTokens,
+              COALESCE(SUM(cache_creation_input_tokens),0) AS cacheCreationInputTokens,
+              COALESCE(SUM(cache_read_input_tokens),0) AS cacheReadInputTokens,
+              COALESCE(SUM(cost_usd),0) AS estimatedCostUsd
+       FROM turns ${where}`,
+    ).get(...args);
+    return {
+      turns: Number(r.turns),
+      inputTokens: Number(r.inputTokens),
+      outputTokens: Number(r.outputTokens),
+      cacheCreationInputTokens: Number(r.cacheCreationInputTokens),
+      cacheReadInputTokens: Number(r.cacheReadInputTokens),
+      estimatedCostUsd: Number(r.estimatedCostUsd),
+    };
+  }
+
+  /**
+   * Totals per thread, per project, or per model. Grouping by machine is not
+   * done here: one database holds one machine's turns, so `usageTotals` is
+   * already that answer.
+   *
+   * A thread or project that has since been deleted keeps its row and loses
+   * only its name, because the spend is still real.
+   */
+  usageGroups(groupBy: Exclude<UsageGroupBy, "machine">, since?: string | null, until?: string | null): UsageGroup[] {
+    const { where, args } = this.window(since, until);
+    const sums = `COUNT(*) AS turns,
+       COALESCE(SUM(t.input_tokens),0) AS inputTokens,
+       COALESCE(SUM(t.output_tokens),0) AS outputTokens,
+       COALESCE(SUM(t.cache_creation_input_tokens),0) AS cacheCreationInputTokens,
+       COALESCE(SUM(t.cache_read_input_tokens),0) AS cacheReadInputTokens,
+       COALESCE(SUM(t.cost_usd),0) AS estimatedCostUsd`;
+    // `by_model` is the authority for the model split: one turn may have run
+    // on several models, so its row cannot be attributed to just one of them.
+    const modelSums = `COUNT(DISTINCT t.thread_id || ':' || t.turn_id) AS turns,
+       COALESCE(SUM(json_extract(e.value,'$.inputTokens')),0) AS inputTokens,
+       COALESCE(SUM(json_extract(e.value,'$.outputTokens')),0) AS outputTokens,
+       COALESCE(SUM(json_extract(e.value,'$.cacheCreationInputTokens')),0) AS cacheCreationInputTokens,
+       COALESCE(SUM(json_extract(e.value,'$.cacheReadInputTokens')),0) AS cacheReadInputTokens,
+       COALESCE(SUM(json_extract(e.value,'$.estimatedCostUsd')),0) AS estimatedCostUsd`;
+    const sql =
+      groupBy === "thread"
+        ? `SELECT t.thread_id AS key, COALESCE(json_extract(th.json,'$.title'), '(deleted thread)') AS label, ${sums}
+           FROM turns t LEFT JOIN threads th ON th.id = t.thread_id ${where.replace(/ended_at/g, "t.ended_at")}
+           GROUP BY t.thread_id`
+        : groupBy === "project"
+        ? `SELECT t.project_id AS key, COALESCE(json_extract(p.json,'$.title'), '(deleted project)') AS label, ${sums}
+           FROM turns t LEFT JOIN projects p ON p.id = t.project_id ${where.replace(/ended_at/g, "t.ended_at")}
+           GROUP BY t.project_id`
+        : `SELECT json_extract(e.value,'$.model') AS key, json_extract(e.value,'$.model') AS label, ${modelSums}
+           FROM turns t, json_each(t.by_model) e ${where.replace(/ended_at/g, "t.ended_at")}
+           GROUP BY json_extract(e.value,'$.model')`;
+    return (this.sql.prepare(`${sql} ORDER BY estimatedCostUsd DESC, outputTokens DESC`).all(...args) as any[])
+      .map((r) => ({
+        key: String(r.key ?? ""),
+        label: String(r.label ?? r.key ?? ""),
+        turns: Number(r.turns),
+        inputTokens: Number(r.inputTokens),
+        outputTokens: Number(r.outputTokens),
+        cacheCreationInputTokens: Number(r.cacheCreationInputTokens),
+        cacheReadInputTokens: Number(r.cacheReadInputTokens),
+        estimatedCostUsd: Number(r.estimatedCostUsd),
+      }));
   }
 
   // ---- transcripts (SDK session store mirror) -----------------------------

@@ -1,7 +1,8 @@
 import { query, type Options, type Query, type SDKMessage, type SDKUserMessage, type PermissionResult, type PermissionMode as SdkPermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
-import type { PermissionMode, TimelineItem, ToolCallItem, ToolBackground, ApprovalItem, QuestionItem, QuestionAsk, Attachment } from "@covey/protocol";
+import type { PermissionMode, TimelineItem, ToolCallItem, ToolBackground, ApprovalItem, QuestionItem, QuestionAsk, Attachment, SlashCommandInfo, ModelCounts, TurnUsage } from "@covey/protocol";
 import { summariseTool } from "./toolSummary.js";
+import { toCommandInfos } from "./slashCommands.js";
 import { attachmentBlocks } from "./attachments.js";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
 
@@ -16,9 +17,11 @@ export interface SessionSink {
   upsertItem(item: TimelineItem, opts?: { streaming?: boolean }): void;
   getItemByToolUse(toolUseId: string): ToolCallItem | null;
   onStatus(status: "starting" | "running" | "waiting" | "idle" | "error" | "interrupted", error?: string): void;
-  onTurnComplete(info: { costUsd: number; inputTokens: number; outputTokens: number; isError: boolean; result: string; userMessageUuid: string | null }): void;
+  onTurnComplete(info: { usage: TurnUsage; isError: boolean; result: string; userMessageUuid: string | null }): void;
   onSessionInit(info: { model: string; claudeCodeVersion: string; permissionMode: string }): void;
   onModelUsed(model: string): void;
+  /** The whole `/` menu for this thread, replacing whatever it held before. */
+  onCommands(commands: SlashCommandInfo[]): void;
   now(): string;
 }
 
@@ -33,6 +36,8 @@ export interface SessionParams {
   permissionModeExplicit: boolean;
   /** True when a transcript for this session already exists (resume). */
   resume: boolean;
+  /** Forward incremental text for this thread. Changeable while it runs. */
+  streaming: boolean;
   sessionStore: SessionStore;
   additionalDirectories?: string[];
 }
@@ -45,8 +50,12 @@ interface Pending {
   input: Record<string, unknown>;
 }
 
-/** Incremental text streaming, off unless explicitly asked for. */
-const STREAMING = process.env.COVEY_STREAM === "1";
+/**
+ * How a session reaches the SDK. Real sessions use `query`; a test hands in a
+ * stand-in, so what this class does with the SDK's messages can be checked
+ * without a Claude subprocess.
+ */
+export type QueryFactory = (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
 
 export class ClaudeSession {
   private q: Query | null = null;
@@ -70,11 +79,32 @@ export class ClaudeSession {
    * background the moment it finished.
    */
   private backgrounded = new Set<string>();
-  /** Streaming block state for the in-flight assistant message. */
-  private blocks: { itemId: string; kind: "text" | "thinking" | "tool"; text: string; json: string; toolName?: string; toolUseId?: string }[] = [];
+  /**
+   * Commands the session reported as bound to the terminal that runs the CLI.
+   * The init message names them; `supportedCommands()` and the
+   * `commands_changed` push both need them to filter their answer.
+   */
+  private terminalCommands: string[] = [];
+  /**
+   * Block state for the API message in flight, indexed by the block's place in
+   * that message — the same number the `assistant` message for that block
+   * resolves to. `done` marks a block the `assistant` message has already
+   * written, whose text is authoritative.
+   */
+  private blocks: { itemId: string; kind: "text" | "thinking" | "tool"; text: string; json: string; done?: boolean; toolName?: string; toolUseId?: string }[] = [];
+  /** The API message the stream is inside, from `message_start`. */
+  private streamMessageId: string | null = null;
+  /** How many blocks of one API message the `assistant` messages have named. */
+  private ordinals = { messageId: "", n: 0 };
   private turnStartedAt = Date.now();
+  /**
+   * The last result's `modelUsage`, which the SDK reports as a running total
+   * for the whole session rather than for the turn. The next result is
+   * differenced against this, so each turn gets what it alone spent.
+   */
+  private usageBase: Record<string, ModelUsageLike> = {};
 
-  constructor(private params: SessionParams, private sink: SessionSink) {}
+  constructor(private params: SessionParams, private sink: SessionSink, private spawn: QueryFactory = query) {}
 
   get running(): boolean {
     return this.q !== null && !this.closed;
@@ -86,10 +116,14 @@ export class ClaudeSession {
   start() {
     const opts: Options = {
       cwd: this.params.cwd,
-      // Off by default: responses land whole, rather than token by token.
-      // The transcript shows a live activity line instead.
-      // Set COVEY_STREAM=1 to get incremental text back.
-      includePartialMessages: STREAMING,
+      // Always asked for, even when the thread does not want incremental text.
+      // The SDK takes this at start time only — `Query` has no control request
+      // for it — so a thread that could not ask for it here could never turn
+      // streaming on without a restart. The gate is `params.streaming`, which
+      // `setStreaming` moves at any time, and which the `stream_event` case
+      // reads. The extra messages cross a pipe to a subprocess on this machine;
+      // nothing goes on the wire to a client until an item changes.
+      includePartialMessages: true,
       permissionMode: toSdkMode(this.params.permissionMode),
       // Consent flag, not an override: the SDK requires it to be true *before*
       // `bypassPermissions` can be selected, and it is a start-time-only option.
@@ -111,7 +145,7 @@ export class ClaudeSession {
       },
     };
     this.sink.onStatus("starting");
-    this.q = query({ prompt: this.input(), options: opts });
+    this.q = this.spawn({ prompt: this.input(), options: opts });
     void this.pump();
   }
 
@@ -199,6 +233,31 @@ export class ClaudeSession {
   async setModel(model: string | null) {
     this.params.model = model;
     await this.q?.setModel(model ?? undefined).catch(() => {});
+  }
+
+  /**
+   * Turn incremental text on or off, live. Mid-turn is safe in both
+   * directions:
+   *
+   *  - On: the blocks already open have no entry in `blocks`, so their deltas
+   *    are dropped until the next block starts. The `assistant` message at the
+   *    end of the message still writes every block whole.
+   *  - Off: the blocks already open are finished here, so no row is left with
+   *    a cursor on it that never moves. The `assistant` message then writes
+   *    those same rows whole, because the id of a row comes from the block's
+   *    place in the message and not from which path wrote it.
+   */
+  setStreaming(streaming: boolean) {
+    if (this.params.streaming === streaming) return;
+    this.params.streaming = streaming;
+    if (streaming) return;
+    const now = this.sink.now();
+    const base = { threadId: this.params.threadId, turnId: this.currentTurnId, seq: 0, createdAt: now, updatedAt: now };
+    for (const b of this.blocks) {
+      if (!b || b.done) continue;
+      if (b.kind === "text") this.sink.upsertItem({ ...base, id: b.itemId, kind: "assistant", text: b.text, streaming: false, model: this.params.model });
+      else if (b.kind === "thinking") this.sink.upsertItem({ ...base, id: b.itemId, kind: "thinking", text: b.text, streaming: false });
+    }
   }
 
   stop() {
@@ -318,6 +377,20 @@ export class ClaudeSession {
     return this.pending.get(requestId)?.item ?? null;
   }
 
+  /**
+   * Read the `/` menu off the live query. A session that is starting, or one
+   * that ended between the init message and this call, has nothing to say:
+   * the thread keeps its last known list rather than losing it to an error.
+   */
+  private async readCommands(): Promise<void> {
+    try {
+      const commands = await this.q?.supportedCommands();
+      if (commands) this.sink.onCommands(toCommandInfos(commands, this.terminalCommands));
+    } catch {
+      /* the list stays as it was */
+    }
+  }
+
   // ------------------------------------------------------------------------
 
   private async pump() {
@@ -340,6 +413,30 @@ export class ClaudeSession {
 
   private newItemId() {
     return `${this.params.threadId.slice(0, 8)}:${randomUUID()}`;
+  }
+
+  /**
+   * The item id for one block of one API message.
+   *
+   * The CLI sends a separate `assistant` message for every content block, and
+   * each one holds a single-entry `content` array, so the index inside that
+   * array is always 0 and identifies nothing. What identifies a block is its
+   * place in the message: the stream event calls that `index`, and the
+   * `assistant` messages arrive in the same order, so counting them gives the
+   * same number. Both paths therefore name one row rather than two, a block
+   * cannot land on the row of the block before it, and a replay of the message
+   * names the same rows again.
+   */
+  private blockItemId(messageId: string | null, ordinal: number): string {
+    return messageId ? `${messageId}:${ordinal}` : this.newItemId();
+  }
+
+  /** The place of the next block of `messageId`, counted across the several
+   *  `assistant` messages that share that id. */
+  private nextOrdinal(messageId: string | null): number {
+    if (!messageId) return 0;
+    if (this.ordinals.messageId !== messageId) this.ordinals = { messageId, n: 0 };
+    return this.ordinals.n++;
   }
 
   /** A task has left the foreground: remember it, and say so on its row. */
@@ -378,6 +475,19 @@ export class ClaudeSession {
       case "system": {
         if (msg.subtype === "init") {
           this.sink.onSessionInit({ model: msg.model, claudeCodeVersion: msg.claude_code_version, permissionMode: msg.permissionMode });
+          this.terminalCommands = msg.terminal_slash_commands ?? [];
+          // The init message names the commands but not their descriptions, so
+          // the menu still needs the full list. Ask for it here, where the
+          // session is known to be up, and let the answer arrive late.
+          void this.readCommands();
+        } else if (msg.subtype === "commands_changed") {
+          // The SDK found more skills. It replaces its list rather than
+          // patching it, so we replace ours.
+          this.sink.onCommands(toCommandInfos(msg.commands, this.terminalCommands));
+        } else if (msg.subtype === "local_command_output") {
+          // A command the CLI answered itself, such as /usage. Without this the
+          // user runs the command and sees nothing at all.
+          this.sink.upsertItem({ ...base, id: this.newItemId(), kind: "assistant", text: msg.content, streaming: false, model: null });
         } else if (msg.subtype === "compact_boundary") {
           this.sink.upsertItem({ ...base, id: this.newItemId(), kind: "note", tone: "info", text: `Context compacted (${msg.compact_metadata.trigger})` });
         } else if (msg.subtype === "task_started") {
@@ -413,13 +523,24 @@ export class ClaudeSession {
       case "stream_event": {
         if (msg.parent_tool_use_id) return; // subagent internals: skip
         const ev = msg.event as any;
+        // Empty the block table on every message, whether the thread streams
+        // or not. A turn interrupted part way through a message leaves entries
+        // behind, and the `assistant` case reads a leftover entry as "this
+        // block streamed" and writes the next message over the older item.
+        if (ev.type === "message_start") {
+          this.blocks = [];
+          this.streamMessageId = (ev.message?.id as string | undefined) ?? null;
+          return;
+        }
+        // The thread does not want incremental text. Dropping the rest of the
+        // case leaves `blocks` empty, which is the state the `assistant` case
+        // below reads as "nothing streamed": it then derives the item ids from
+        // the API message id and writes each block once, whole.
+        if (!this.params.streaming) return;
         switch (ev.type) {
-          case "message_start":
-            this.blocks = [];
-            return;
           case "content_block_start": {
             const cb = ev.content_block;
-            const itemId = this.newItemId();
+            const itemId = this.blockItemId(this.streamMessageId, ev.index);
             if (cb.type === "text") {
               this.blocks[ev.index] = { itemId, kind: "text", text: cb.text ?? "", json: "" };
               this.sink.upsertItem({ ...base, id: itemId, kind: "assistant", text: cb.text ?? "", streaming: true, model: this.params.model }, { streaming: true });
@@ -449,7 +570,10 @@ export class ClaudeSession {
           }
           case "content_block_stop": {
             const b = this.blocks[ev.index];
-            if (!b) return;
+            // The `assistant` message for this block arrives before its stop
+            // event and carries the text in full. Writing the accumulated text
+            // over it would undo that, so the reconciled block is left alone.
+            if (!b || b.done) return;
             if (b.kind === "text") {
               this.sink.upsertItem({ ...base, id: b.itemId, kind: "assistant", text: b.text, streaming: false, model: this.params.model });
             } else if (b.kind === "thinking") {
@@ -470,26 +594,25 @@ export class ClaudeSession {
         // Authoritative reconciliation of the streamed blocks (covers the case
         // where partial events were dropped, e.g. on resume replay).
         const content = (msg.message.content ?? []) as any[];
-        // Derive ids from the API message id where possible: with streaming off
-        // there is no earlier item to reconcile against, and a replayed
-        // assistant message would otherwise mint duplicates.
-        const blockId = (idx: number) => (msg.message.id ? `${msg.message.id}:${idx}` : this.newItemId());
-        content.forEach((cb, idx) => {
-          const b = this.blocks[idx];
+        const messageId = (msg.message.id as string | undefined) ?? null;
+        for (const cb of content) {
+          // Every block takes the next place in the message, whatever its
+          // type, so this number keeps step with the stream's block indices.
+          const ordinal = this.nextOrdinal(messageId);
+          const blockId = this.blockItemId(messageId, ordinal);
+          const b = this.blocks[ordinal];
+          if (b) b.done = true;
           if (cb.type === "text") {
-            const id = b?.kind === "text" ? b.itemId : blockId(idx);
-            this.sink.upsertItem({ ...base, id, kind: "assistant", text: cb.text, streaming: false, model: msg.message.model ?? this.params.model });
+            this.sink.upsertItem({ ...base, id: blockId, kind: "assistant", text: cb.text, streaming: false, model: msg.message.model ?? this.params.model });
           } else if (cb.type === "thinking") {
-            const id = b?.kind === "thinking" ? b.itemId : blockId(idx);
-            this.sink.upsertItem({ ...base, id, kind: "thinking", text: cb.thinking ?? "", streaming: false });
+            this.sink.upsertItem({ ...base, id: blockId, kind: "thinking", text: cb.thinking ?? "", streaming: false });
           } else if (cb.type === "tool_use") {
             const existing = this.sink.getItemByToolUse(cb.id);
-            const id = existing?.id ?? (b?.kind === "tool" ? b.itemId : blockId(idx));
+            const id = existing?.id ?? blockId;
             this.sink.upsertItem({ ...base, ...(existing ?? {}), id, kind: "tool", toolUseId: cb.id, toolName: cb.name, input: cb.input, summary: summariseTool(cb.name, cb.input), status: existing?.status ?? "running", output: existing?.output ?? null, isError: existing?.isError ?? false, parentToolUseId: null, durationMs: existing?.durationMs ?? null, updatedAt: now });
           }
-        });
+        }
         if (msg.message.model) this.sink.onModelUsed(msg.message.model);
-        this.blocks = [];
         return;
       }
       case "user": {
@@ -509,10 +632,9 @@ export class ClaudeSession {
       }
       case "result": {
         const r: any = msg;
+        const usage = this.turnUsage(r.modelUsage);
         this.sink.onTurnComplete({
-          costUsd: r.total_cost_usd ?? 0,
-          inputTokens: r.usage?.input_tokens ?? 0,
-          outputTokens: r.usage?.output_tokens ?? 0,
+          usage,
           isError: !!r.is_error,
           result: r.result ?? "",
           userMessageUuid: r.user_message_uuid ?? r.user_message_uuids?.[0] ?? null,
@@ -527,6 +649,73 @@ export class ClaudeSession {
         return;
     }
   }
+
+  /** This turn's share of the session's running totals. */
+  private turnUsage(modelUsage: unknown): TurnUsage {
+    const now = (modelUsage ?? {}) as Record<string, ModelUsageLike>;
+    const usage = turnUsageDelta(this.usageBase, now);
+    // Copy, not keep: the SDK may hand back the same object each time.
+    this.usageBase = Object.fromEntries(Object.entries(now).map(([m, u]) => [m, { ...u }]));
+    return usage;
+  }
+}
+
+/** The fields of the SDK's `ModelUsage` that a total needs. */
+export interface ModelUsageLike {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cacheReadInputTokens?: number;
+  costUSD?: number;
+}
+
+/**
+ * What one turn spent, from two readings of the session's running totals.
+ *
+ * `modelUsage` covers the main loop, subagents and sidechains, which `usage`
+ * does not, so it is the figure to account from. It is cumulative for the
+ * whole session, so the turn's own spend is the difference from the last
+ * result. A counter that went down means the session reset its totals (a
+ * resume, or a `/clear`), and the new value is then the whole delta.
+ *
+ * Tokens spent by a turn that reported no result — an interrupt, say — are not
+ * lost: they stay in the running total and land on the next turn that reports.
+ */
+export function turnUsageDelta(
+  before: Record<string, ModelUsageLike>,
+  after: Record<string, ModelUsageLike>,
+): TurnUsage {
+  const byModel: ModelCounts[] = [];
+  const total: TurnUsage = { inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, estimatedCostUsd: 0, byModel };
+  const sub = (a: number | undefined, b: number | undefined) => {
+    const now = a ?? 0;
+    const was = b ?? 0;
+    return now < was ? now : now - was;
+  };
+  for (const [model, u] of Object.entries(after)) {
+    const was = before[model];
+    const row: ModelCounts = {
+      model,
+      inputTokens: sub(u?.inputTokens, was?.inputTokens),
+      outputTokens: sub(u?.outputTokens, was?.outputTokens),
+      cacheCreationInputTokens: sub(u?.cacheCreationInputTokens, was?.cacheCreationInputTokens),
+      cacheReadInputTokens: sub(u?.cacheReadInputTokens, was?.cacheReadInputTokens),
+      estimatedCostUsd: sub(u?.costUSD, was?.costUSD),
+    };
+    // A model the turn did not touch keeps its totals from the turn before it.
+    if (row.inputTokens === 0 && row.outputTokens === 0 && row.cacheCreationInputTokens === 0
+      && row.cacheReadInputTokens === 0 && row.estimatedCostUsd === 0) continue;
+    byModel.push(row);
+    total.inputTokens += row.inputTokens;
+    total.outputTokens += row.outputTokens;
+    total.cacheCreationInputTokens += row.cacheCreationInputTokens;
+    total.cacheReadInputTokens += row.cacheReadInputTokens;
+    total.estimatedCostUsd += row.estimatedCostUsd;
+  }
+  // The model that did most of the work comes first; the engine labels the
+  // turn's row with it.
+  byModel.sort((a, b) => b.outputTokens - a.outputTokens);
+  return total;
 }
 
 /**

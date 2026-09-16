@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
-import { existsSync, statSync, rmSync } from "node:fs";
+import { basename, resolve, sep } from "node:path";
+import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
@@ -12,7 +12,7 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport } from "@covey/protocol";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -72,7 +72,7 @@ export class Engine {
       const idx = items.findIndex((i) => i.id === s.latest.id);
       if (idx >= 0) items[idx] = s.latest; else items.push(s.latest);
     }
-    return { seq: this.db.threadSeq(threadId), thread, items, hasMore };
+    return { seq: this.db.threadSeq(threadId), thread, items, hasMore, commands: this.db.threadCommands(threadId) };
   }
 
   // ---- emit helpers ---------------------------------------------------------
@@ -142,6 +142,7 @@ export class Engine {
         this.machine.settings = saveMachineSettings({
           ...(cmd.defaultModel !== undefined ? { defaultModel: cmd.defaultModel } : {}),
           ...(cmd.defaultPermissionMode !== undefined ? { defaultPermissionMode: cmd.defaultPermissionMode } : {}),
+          ...(cmd.defaultStreaming !== undefined ? { defaultStreaming: cmd.defaultStreaming } : {}),
         });
         return this.emitShell({ kind: "machine.updated", machine: this.machine });
       }
@@ -201,6 +202,7 @@ export class Engine {
           // an opinion do we honour the user's own settings default.
           permissionMode: cmd.permissionMode ?? machineMode ?? resolveDefaultPermissionMode(p.workspaceRoot),
           permissionModeExplicit: cmd.permissionMode !== undefined || machineMode !== null,
+          streaming: cmd.streaming ?? this.machine.settings.defaultStreaming ?? false,
           branch, worktreePath, status: "idle", lastError: null, pendingApprovals: 0, queuedTurns: 0, latestTurn: null,
           lastMessageAt: null, archivedAt: null, pinnedAt: null, movedTo: null, createdAt: now, updatedAt: now,
         };
@@ -244,6 +246,13 @@ export class Engine {
       case "thread.setModel": {
         await this.sessions.get(cmd.threadId)?.setModel(cmd.model);
         return this.mutateThread(cmd.threadId, (t) => { t.model = cmd.model; });
+      }
+      case "thread.setStreaming": {
+        // No restart, and no wait for the turn to end: the session already
+        // receives the partial messages and only decides whether to pass them
+        // on, so the next token of the turn in flight goes the new way.
+        this.sessions.get(cmd.threadId)?.setStreaming(cmd.streaming);
+        return this.mutateThread(cmd.threadId, (t) => { t.streaming = cmd.streaming; });
       }
       case "turn.send": {
         const t = this.db.getThread(cmd.threadId);
@@ -473,6 +482,53 @@ export class Engine {
     });
   }
 
+  /**
+   * Keep the finished turn. One row per turn is what makes "how much did last
+   * week cost" answerable at all — the thread itself holds only the latest
+   * turn, and the next turn overwrites it.
+   *
+   * A turn the user interrupted is kept too: it still spent tokens.
+   */
+  private recordTurn(t: Thread, usage: TurnUsage) {
+    const turn = t.latestTurn!;
+    const state = turn.state === "running" ? "completed" : turn.state;
+    this.db.putTurn({
+      threadId: t.id,
+      turnId: turn.turnId,
+      projectId: t.projectId,
+      startedAt: turn.startedAt,
+      endedAt: turn.completedAt ?? new Date().toISOString(),
+      state,
+      // The model that did most of the work. `byModel` keeps the rest, so a
+      // turn that changed model, or ran a subagent elsewhere, can be re-priced.
+      model: usage.byModel[0]?.model ?? t.model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheCreationInputTokens: usage.cacheCreationInputTokens,
+      cacheReadInputTokens: usage.cacheReadInputTokens,
+      estimatedCostUsd: usage.estimatedCostUsd,
+      byModel: usage.byModel,
+    });
+  }
+
+  /**
+   * Totals for the turns this machine ran inside a window. The client owns the
+   * clock and sends absolute instants, so several machines asked the same
+   * question answer about the same period.
+   */
+  usageReport(q: UsageQuery): UsageReport {
+    const since = q.since ?? null;
+    const until = q.until ?? null;
+    const groupBy: UsageGroupBy = q.groupBy ?? "thread";
+    const total = this.db.usageTotals(since, until);
+    const groups = groupBy === "machine"
+      // One database holds one machine's turns, so the machine's own total is
+      // the whole answer.
+      ? [{ key: this.machine.machineId, label: this.machine.name, ...total }]
+      : this.db.usageGroups(groupBy, since, until);
+    return { machineId: this.machine.machineId, machineName: this.machine.name, since, until, groupBy, total, groups };
+  }
+
   /** Drop transcript entries at or after an ISO timestamp (fallback when no uuid is known). */
   private truncateTranscriptByTime(projectKey: string, sessionId: string, iso: string): number {
     const rows = this.db.loadTranscript(projectKey, sessionId, "") ?? [];
@@ -502,6 +558,30 @@ export class Engine {
     const [summary, patch] = await Promise.all([diffCheckpoints(cwd, cp.beforeTree, cp.afterTree), patchBetween(cwd, cp.beforeTree, cp.afterTree)]);
     if (!summary) return null;
     return { turnId: cp.turnId, ...summary, patch: patch ?? "" };
+  }
+
+  /**
+   * One directory under a thread's working directory, for the `@` menu.
+   *
+   * The whole directory comes back, not the matches for what is typed so far:
+   * the client filters as the reader types, so a word costs one request rather
+   * than one per keystroke. Nothing outside the working directory is offered —
+   * a mention names the thread's own files.
+   */
+  listThreadDir(threadId: string, dir: string, limit = 500): { dir: string; entries: PathEntry[]; truncated: boolean } {
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    const root = this.gitCwd(t, p);
+    const target = resolve(root, dir || ".");
+    if (target !== root && !target.startsWith(root + sep)) throw new EngineError("bad_path", `${dir} is outside the thread's directory`);
+    // Half a directory name is not an error; it is what typing looks like.
+    if (!existsSync(target) || !statSync(target).isDirectory()) return { dir, entries: [], truncated: false };
+    const all = readdirSync(target, { withFileTypes: true })
+      .map((d) => ({ name: d.name, isDir: d.isDirectory() }))
+      .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
+    return { dir, entries: all.slice(0, limit), truncated: all.length > limit };
   }
 
   private mutateThread(threadId: string, fn: (t: Thread) => void): number {
@@ -568,6 +648,7 @@ export class Engine {
       {
         threadId: t.id, sessionId: t.sessionId, cwd: t.worktreePath ?? p.workspaceRoot,
         model: t.model, permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
+        streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
       },
       this.sinkFor(t.id),
@@ -607,9 +688,14 @@ export class Engine {
         if (t.latestTurn && t.latestTurn.state === "running") {
           t.latestTurn.state = info.isError ? "error" : "completed";
           t.latestTurn.completedAt = new Date().toISOString();
-          t.latestTurn.costUsd = info.costUsd;
-          t.latestTurn.inputTokens = info.inputTokens;
-          t.latestTurn.outputTokens = info.outputTokens;
+        }
+        if (t.latestTurn) {
+          // These are this turn's own figures, not the session's running total.
+          t.latestTurn.usage = info.usage;
+          t.latestTurn.costUsd = info.usage.estimatedCostUsd;
+          t.latestTurn.inputTokens = info.usage.inputTokens;
+          t.latestTurn.outputTokens = info.usage.outputTokens;
+          this.recordTurn(t, info.usage);
         }
         t.status = "idle";
         t.lastMessageAt = new Date().toISOString();
@@ -624,7 +710,24 @@ export class Engine {
         if (t && !t.model) { t.model = info.model; this.putThreadAndEmit(t); }
       },
       onModelUsed: () => {},
+      onCommands: (commands) => this.setThreadCommands(threadId, commands),
     };
+  }
+
+  /**
+   * Replace the thread's `/` menu and tell the clients watching it. An
+   * unchanged list is dropped here, because the SDK re-sends the whole list
+   * on every session start and a thread event costs a seq.
+   *
+   * The list is stored, so a thread that has run before still has a menu after
+   * the daemon restarts. A thread that has never run keeps `null` — "not known
+   * yet" — until a session answers for it.
+   */
+  setThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
+    const before = this.db.threadCommands(threadId);
+    if (before && sameCommands(before, commands)) return;
+    this.db.putThreadCommands(threadId, commands);
+    this.emitThread(threadId, { kind: "commands.updated", commands });
   }
 
   private recountPending(threadId: string) {
@@ -724,3 +827,8 @@ function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): R
 }
 
 export type { PermissionMode };
+
+/** Two menus are the same when they hold the same commands in the same order. */
+function sameCommands(a: SlashCommandInfo[], b: SlashCommandInfo[]): boolean {
+  return a.length === b.length && a.every((c, i) => c.name === b[i]!.name && c.description === b[i]!.description && c.argumentHint === b[i]!.argumentHint);
+}

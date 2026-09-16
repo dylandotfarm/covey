@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import type { MachineUpdate, UpdateStep } from "@covey/protocol";
-import { browseRows, type Overlay } from "../store.js";
+import { browseRows, sumUsage, usageRows, fmtTokens, fmtCost, USAGE_WINDOWS, type Overlay } from "../store.js";
 import { T } from "../theme.js";
 import { truncate, SPINNER } from "../lines.js";
 
@@ -97,7 +97,73 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
         </Box>
       ), "enter open dir · space select this dir · ctrl+n new folder · esc cancel");
     }
+    case "usage":
+      return frame("Usage — estimated", <UsageBody overlay={overlay} width={w} maxRows={maxRows} />,
+        "←→ period · g group by thread/project/model/machine · esc close");
   }
+}
+
+/** Column widths: estimated cost, turns, input, output, cache. */
+const COLS = [8, 7, 8, 8, 8] as const;
+
+/**
+ * Totals for every connected machine, in one table.
+ *
+ * Every cost here is the SDK's own estimate at list prices. On a subscription
+ * plan no such money is charged, so the column says `estimated` and each
+ * figure carries a `~`. It must not read as a bill.
+ */
+function UsageBody({ overlay, width, maxRows }: { overlay: Extract<Overlay, { kind: "usage" }>; width: number; maxRows: number }) {
+  const period = USAGE_WINDOWS[overlay.window] ?? USAGE_WINDOWS[0]!;
+  const total = sumUsage(overlay.reports.map((r) => r.total));
+  const rows = usageRows(overlay.reports, overlay.groupBy);
+  // The frame keeps two columns for its border and two more for its padding.
+  // Cost, turns and the three token columns are fixed; the label takes the
+  // rest. One column over and every row wraps onto a second line.
+  const inner = width - 4;
+  const labelW = Math.max(12, inner - COLS.reduce((n, c) => n + c, 0));
+  const cell = (s: string, n: number) => truncate(s, n).padStart(n);
+  return (
+    <Box flexDirection="column">
+      <Box>
+        {USAGE_WINDOWS.map((w, i) => (
+          <Text key={w.id} color={i === overlay.window ? T.text : T.subtle} backgroundColor={i === overlay.window ? T.selection : undefined}>
+            {` ${w.label} `}
+          </Text>
+        ))}
+      </Box>
+      <Box marginTop={1}>
+        <Text color={T.muted}>
+          {"by " + overlay.groupBy}
+          {overlay.loading ? <Text color={T.subtle}> · reading…</Text> : null}
+        </Text>
+      </Box>
+      <Text color={T.subtle}>
+        {truncate(`${period.label}, all machines`, labelW).padEnd(labelW)}
+        {cell("est.", COLS[0])}{cell("turns", COLS[1])}{cell("in", COLS[2])}{cell("out", COLS[3])}{cell("cache", COLS[4])}
+      </Text>
+      <Text color={T.text} bold>
+        {truncate("Total", labelW).padEnd(labelW)}
+        {cell(fmtCost(total.estimatedCostUsd), COLS[0])}{cell(String(total.turns), COLS[1])}
+        {cell(fmtTokens(total.inputTokens), COLS[2])}{cell(fmtTokens(total.outputTokens), COLS[3])}
+        {cell(fmtTokens(total.cacheReadInputTokens + total.cacheCreationInputTokens), COLS[4])}
+      </Text>
+      {rows.slice(0, maxRows).map((r) => (
+        <Text key={r.key} color={T.muted}>
+          {truncate(r.machine ? `${r.label} · ${r.machine}` : r.label, labelW).padEnd(labelW)}
+          {cell(fmtCost(r.total.estimatedCostUsd), COLS[0])}{cell(String(r.total.turns), COLS[1])}
+          {cell(fmtTokens(r.total.inputTokens), COLS[2])}{cell(fmtTokens(r.total.outputTokens), COLS[3])}
+          {cell(fmtTokens(r.total.cacheReadInputTokens + r.total.cacheCreationInputTokens), COLS[4])}
+        </Text>
+      ))}
+      {!overlay.loading && rows.length === 0 && <Text color={T.subtle} italic> no turns in this period</Text>}
+      {rows.length > maxRows && <Text color={T.faint}>{` …and ${rows.length - maxRows} more`}</Text>}
+      {overlay.errors.map((e) => <Text key={e.machine} color={T.danger}>{truncate(` ${e.machine}: ${e.message}`, width - 2)}</Text>)}
+      <Box marginTop={1}>
+        <Text color={T.faint}>{truncate("est. = the SDK's list-price estimate, not money charged", width - 2)}</Text>
+      </Box>
+    </Box>
+  );
 }
 
 function stateSuffix(u: MachineUpdate): string {
@@ -133,7 +199,7 @@ export function filterOptions<O extends { label: string; hint?: string }>(option
 
 const HELP: [string, string][] = [
   ["tab", "switch focus: sidebar ↔ composer"],
-  ["ctrl+k", "command palette (move, rename, model, mode, machines…)"],
+  ["ctrl+k", "command palette (move, rename, model, mode, streaming, machines…)"],
   ["shift+tab", "cycle permission mode (→ bypass = never ask)"],
   ["ctrl+n", "new thread in current project"],
   ["ctrl+t", "toggle sidebar"],
@@ -152,6 +218,7 @@ const HELP: [string, string][] = [
   ["", "  archiving hands back the worktree, keeping its branch"],
   ["  D", "delete thread"],
   ["ctrl+k", "…also: revert to before a turn, model, permission mode"],
+  ["ctrl+k", "…and: usage — tokens and estimated cost, per period"],
   ["machine panel", ""],
   ["  enter", "on a machine row: update (pull, rebuild, restart),"],
   ["", "  restart, default model, default mode"],
@@ -178,5 +245,6 @@ const HELP: [string, string][] = [
   ["mouse", ""],
   ["  click", "sidebar: open that row, as enter would"],
   ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
+  ["  alt+click", "reveal the file, or open the URL (ctrl+click does it too)"],
   ["  wheel", "scroll a line · +alt a page · sidebar: move the cursor"],
 ];
