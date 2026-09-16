@@ -31,8 +31,10 @@ test("a rebuild while the client runs turns it stale", async (t) => {
 
   newest = 2_000;
   await settle(30);
-  assert.equal(store.getState().clientStale, true);
-  assert.match(store.getState().notice?.text ?? "", /newer build/);
+  assert.equal(store.getState().clientStale, true,
+    "somebody rebuilt while the client ran; the client keeps its code in memory and cannot feel it, so it has to be told");
+  assert.match(store.getState().notice?.text ?? "", /newer build/,
+    "and the reader is told once, in words, not only by a mark in the header");
 });
 
 test("a client with no build to watch never claims to be stale", async (t) => {

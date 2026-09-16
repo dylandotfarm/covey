@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { buildDirs, buildInfo, buildLabel, newestBuildMtime } from "./build.js";
+import { buildDirs, buildInfo, buildIsNewerThan, buildLabel, newestBuildMtime } from "./build.js";
 
 const execFile = promisify(execFileCb);
 
@@ -56,6 +56,39 @@ test("a rebuild of another package moves the newest mtime", (t) => {
   setMtime(tui, 1_000_500);
   assert.equal(newestBuildMtime([cli]), before, "the CLI's own directory misses it");
   assert.ok(newestBuildMtime(dirs) > before, "every package together catches it");
+});
+
+/**
+ * Regression test for the second half of issue #7: the check that decides
+ * whether a running process is behind the build on disk.
+ *
+ * Revert `buildIsNewerThan` to the one-file form it replaced —
+ * `statSync(join(entryDir, "index.js")).mtimeMs > at` — and the second
+ * assertion fails: a rebuild of another package leaves the entry file alone.
+ */
+test("a rebuild of any package counts, not only the one the process started from", (t) => {
+  const root = scratchTree();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cli = join(root, "packages", "cli", "dist");
+  for (const d of buildDirs(cli)) setMtime(join(d, "index.js"), 1_000_000);
+  // The daemon started half a second after that build, so it runs it.
+  const startedAt = new Date(1_000_500_000).toISOString();
+  assert.equal(buildIsNewerThan(cli, startedAt), false, "nothing was rebuilt after the process started");
+
+  // The keybinding case from the issue: `tsc -b` rewrites packages/tui only.
+  setMtime(join(root, "packages", "tui", "dist", "index.js"), 1_001_000);
+  assert.equal(buildIsNewerThan(cli, startedAt), true,
+    "a rebuild of another package leaves packages/cli/dist/index.js alone, and must still count");
+});
+
+test("buildIsNewerThan claims nothing without a start time it can read", (t) => {
+  const root = scratchTree();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cli = join(root, "packages", "cli", "dist");
+  for (const d of buildDirs(cli)) setMtime(join(d, "index.js"), 2_000_000);
+  assert.equal(buildIsNewerThan(cli, null), false);
+  assert.equal(buildIsNewerThan(cli, undefined), false);
+  assert.equal(buildIsNewerThan(cli, "not a date"), false);
 });
 
 test("newestBuildMtime walks into subdirectories and ignores what is not code", (t) => {
