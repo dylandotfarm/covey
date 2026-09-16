@@ -59,7 +59,9 @@ export function attachmentBlocks(atts: Attachment[]): { blocks: unknown[]; noteL
       });
       noteLines.push(`Attached image: ${a.name} (${a.path})`);
     } else {
-      noteLines.push(`Attached file: ${a.path}`);
+      // The daemon renamed the file to a uuid when it copied it, so the line
+      // has to carry the name the file was dropped under as well as the path.
+      noteLines.push(`Attached file: ${a.name} (${a.path})`);
     }
   }
   return { blocks, noteLines };
