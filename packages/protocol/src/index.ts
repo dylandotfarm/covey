@@ -875,6 +875,11 @@ export interface RunPullRequest {
  * What a brief template may say. Every token is replaced per member, so the
  * brief an agent reads names its own port, its own directories and its own
  * branch — and no other member's.
+ *
+ * A template may also carry `{{#issue}}…{{/issue}}` and `{{^issue}}…{{/issue}}`
+ * around a block that belongs only to a task with an issue number, or only to
+ * one without. A task typed as a line of text has no issue, and a brief that
+ * tells the agent to write `Closes ` is worse than one that says nothing.
  */
 export const BRIEF_TOKENS: { token: string; means: string }[] = [
   { token: "{{run}}", means: "the run's name" },
@@ -943,6 +948,12 @@ export interface RunMemberInit {
   machineId: MachineId;
   projectId: ProjectId | null;
   resources: MemberResources;
+  /**
+   * Set when placement could not meet the task's requirements and put the
+   * member somewhere anyway. The operator has to see that before dispatch,
+   * because the machine cannot do the work.
+   */
+  note?: string | null;
 }
 
 /**

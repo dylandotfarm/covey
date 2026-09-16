@@ -69,7 +69,7 @@ function appState(threads: Thread[]): AppState {
   const m = {
     key: "pi", saved: { name: "pi", url: "ws://pi:3790" }, conn: "connected", error: null,
     info: { name: "pi", os: "linux" }, projects: new Map([["p", project("p")]]),
-    threads: new Map(threads.map((t) => [t.id, t])), update: null, restarting: false,
+    threads: new Map(threads.map((t) => [t.id, t])), runs: new Map(), update: null, restarting: false,
   } as unknown as MachineState;
   return {
     machines: new Map([["pi", m]]), order: ["pi"], selected: null, view: null, focus: "sidebar",

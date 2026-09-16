@@ -46,7 +46,9 @@ export function parseRequirements(line: string): { rest: string; requires: TaskR
  */
 export function parseTaskList(text: string): RunTask[] {
   const tasks: RunTask[] = [];
-  for (const raw of text.split("\n")) {
+  // `;` separates tasks as a newline does, because the prompt that asks for
+  // the list is one line tall and a run of plain tasks has to fit in it.
+  for (const raw of text.split(/[\n;]/)) {
     const line = raw.trim();
     if (!line || line.startsWith("//")) continue;
     const { rest, requires } = parseRequirements(line);
@@ -147,11 +149,13 @@ function requirementText(r: TaskRequirement): string {
  * order the operator wrote, and a task that no machine can take says so rather
  * than landing somewhere that cannot do it.
  */
-export function placeTasks(tasks: RunTask[], machines: PlacementMachine[]): Placement[] {
+export function placeTasks(tasks: RunTask[], machines: PlacementMachine[], carrying?: Map<string, number>): Placement[] {
   // Fastest first, by cores; a stable tiebreak on the name so two runs of the
   // same task list place the same way.
   const fastest = [...machines].sort((a, b) => b.cpuCount - a.cpuCount || a.name.localeCompare(b.name));
-  const load = new Map<string, number>(fastest.map((m) => [m.machineId, 0]));
+  // `carrying` is what the machines already hold, so a task added to a run in
+  // flight lands where there is room rather than on top of the full machine.
+  const load = new Map<string, number>(fastest.map((m) => [m.machineId, carrying?.get(m.machineId) ?? 0]));
   return tasks.map((task) => {
     const eligible = fastest.filter((m) => firstUnmet(m, task) === null);
     if (eligible.length === 0) {
@@ -188,33 +192,51 @@ export const RUN_PORT_MIN = 3800;
 export const RUN_PORT_MAX = 3999;
 
 /**
- * The first port of a run's block. Runs are spread over the range by their id,
- * so two runs on one machine are unlikely to meet; inside a run the block is
- * contiguous, so no two members can ever share a port.
+ * The port a run's block starts at, before anything else is taken into account.
+ * Runs are spread over the range by their id, so two runs are unlikely to start
+ * in the same place — but unlikely is not never, which is what `allocatePorts`
+ * is for.
  */
-export function runPortBase(runId: string, count: number): number {
+export function runPortBase(runId: string): number {
   const span = RUN_PORT_MAX - RUN_PORT_MIN + 1;
-  const room = Math.max(1, span - Math.min(count, span));
   const h = createHash("sha256").update(runId).digest();
-  return RUN_PORT_MIN + (h.readUInt32BE(0) % room);
+  return RUN_PORT_MIN + (h.readUInt32BE(0) % span);
+}
+
+/**
+ * `count` ports for a run's members: contiguous from the run's own base, and
+ * clear of every port in `taken` — the ports the members of other runs still at
+ * work are using.
+ *
+ * This is the defect that made issue #44 necessary. The brief of 2026-09-16
+ * gave all fifteen agents the same throwaway port, and one of them ran
+ * `covey stop --port 3799` and stopped a daemon another agent had started. Two
+ * runs whose ids happened to hash close together would do the same thing again,
+ * and one pair did on the third run ever created.
+ */
+export function allocatePorts(runId: string, count: number, taken: ReadonlySet<number> = new Set()): number[] {
+  const span = RUN_PORT_MAX - RUN_PORT_MIN + 1;
+  const base = runPortBase(runId) - RUN_PORT_MIN;
+  const block = (start: number) => Array.from({ length: count }, (_, i) => RUN_PORT_MIN + ((start + i) % span));
+  // Shift the whole block along until it clears what is in use. A run larger
+  // than the range can clear nothing, so it settles for its own base: the range
+  // wants widening, and pretending otherwise would hide that.
+  for (let shift = 0; shift < span && count <= span; shift++) {
+    const ports = block(base + shift);
+    if (ports.every((port) => !taken.has(port))) return ports;
+  }
+  return block(base);
 }
 
 /**
  * One member's own port, `COVEY_HOME` and `COVEY_CONFIG`.
  *
- * This is the defect that made issue #44 necessary. The brief of 2026-09-16
- * gave all fifteen agents the same throwaway port, and one of them ran
- * `covey stop --port 3799` and stopped a daemon another agent had started.
- *
- * `index` is the member's place in the run and is what makes the answer unique.
- * `tmpDir` is the member machine's own, so the paths exist where the agent runs.
+ * `port` comes from `allocatePorts`, which is what keeps it unique. `tmpDir` is
+ * the member machine's own, so the paths exist where the agent runs, and `slug`
+ * carries the member's place in the run, so two tasks with one title still get
+ * two directories.
  */
-export function allocateResources(runId: string, index: number, count: number, tmpDir: string, slug: string): MemberResources {
-  const span = RUN_PORT_MAX - RUN_PORT_MIN + 1;
-  // The block is contiguous, so members 0..n-1 take n ports in a row. A run of
-  // more than 200 members wraps and two of them would share a port; a run that
-  // large needs more than a wider range, so it wraps rather than pretending.
-  const port = RUN_PORT_MIN + ((runPortBase(runId, count) - RUN_PORT_MIN + index) % span);
+export function allocateResources(runId: string, port: number, tmpDir: string, slug: string): MemberResources {
   const name = `covey-run-${runId.slice(0, 8)}-${slug}`;
   return {
     port,
@@ -256,9 +278,20 @@ export interface BriefContext {
 }
 
 /**
- * Write one member's brief. Every token in `BRIEF_TOKENS` is replaced, so the
- * brief an agent reads names its own port and its own directories and no other
- * member's. A token the template does not use costs nothing.
+ * Write one member's brief.
+ *
+ * Two shapes are replaced:
+ *
+ *  - `{{name}}` — that member's own value. Every member gets its own port and
+ *    its own directories, which is the whole reason a run exists rather than a
+ *    loop over `turn.send`.
+ *  - `{{#name}}…{{/name}}` and `{{^name}}…{{/name}}` — a block kept only when
+ *    the value is there, or only when it is not. A task typed as a line of text
+ *    has no issue number, and a brief that says "`Closes `" and
+ *    "`gh issue view .`" is worse than one that says neither.
+ *
+ * A token this does not know is left alone rather than blanked, so a typo in a
+ * template is visible instead of silent.
  */
 export function renderBrief(template: string, c: BriefContext): string {
   const values: Record<string, string> = {
@@ -274,7 +307,18 @@ export function renderBrief(template: string, c: BriefContext): string {
     config: c.resources.coveyConfig,
     member: `${c.position} of ${c.total}`,
   };
-  return template.replace(/\{\{(\w+)\}\}/g, (whole, name: string) => (name in values ? values[name]! : whole));
+  // Sections first: dropping one has to take its tokens with it.
+  const sections = /\{\{([#^])(\w+)\}\}([\s\S]*?)\{\{\/\2\}\}/g;
+  const withSections = template.replace(sections, (whole, sense: string, name: string, body: string) => {
+    if (!(name in values)) return whole;
+    const present = values[name]!.length > 0;
+    return (sense === "#") === present ? body : "";
+  });
+  return withSections
+    .replace(/\{\{(\w+)\}\}/g, (whole, name: string) => (name in values ? values[name]! : whole))
+    // A dropped section leaves the blank line above it beside the blank line
+    // below it. One blank line between paragraphs, never three.
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 /**
@@ -284,16 +328,16 @@ export function renderBrief(template: string, c: BriefContext): string {
  * 2026-09-16: the shared port, the shared broken file, the test that could not
  * fail, the merge nobody owned. It is a template, so the operator edits it.
  */
-export const DEFAULT_BRIEF = `Work on {{issue}} — {{task}}
+export const DEFAULT_BRIEF = `{{#issue}}Work on {{issue}} — {{task}}{{/issue}}{{^issue}}Your task: {{task}}{{/issue}}
 
 This is member {{member}} of the run "{{run}}".
 Goal of the run: {{goal}}
 
 Read CLAUDE.md first. You are on {{machine}}, on branch {{branch}}.
 
-Read the issue in full before you start: \`gh issue view {{issue}}\`.
+{{#issue}}Read the issue in full before you start: \`gh issue view {{issue}}\`.
 
-**Your own resources.** These are yours alone and you must not use any other,
+{{/issue}}**Your own resources.** These are yours alone and you must not use any other,
 because a second agent in this run has its own:
 
 - port {{port}}
@@ -313,13 +357,16 @@ the pull request. Do it before you open the pull request, not after.
 
 **\`pnpm run check\` must be green.**
 
-**Report on the issue as you learn**, with \`gh issue comment\`. The issue is the
-durable record; your thread is not.
+{{#issue}}**Report on the issue as you learn**, with \`gh issue comment {{issue}}\`. The
+issue is the durable record; your thread is not.
 
 **Finish with a pull request against \`main\` that says \`Closes {{issue}}\`.** Do
 not merge it yourself — one party merges. Before you open it, \`git fetch origin\`
 and merge \`origin/main\` into your branch if main has moved.
-`;
+{{/issue}}{{^issue}}**Finish with a pull request against \`main\`** that says what you changed
+and why. Do not merge it yourself — one party merges. Before you open it,
+\`git fetch origin\` and merge \`origin/main\` into your branch if main has moved.
+{{/issue}}`;
 
 // ---------------------------------------------------------------------------
 // Reading a run back

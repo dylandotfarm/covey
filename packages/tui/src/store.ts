@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { isFinalMemberState } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
-import { DEFAULT_BRIEF, allocateResources, memberSlug, placeTasks, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
+import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
@@ -96,6 +96,11 @@ export type Overlay =
       filter?: boolean;
       /** Label for a checkbox row under the list, flipped with tab. */
       toggle?: string;
+      /**
+       * Where esc goes. Without it esc closes everything, which throws the
+       * reader out of the run panel they opened the pick from.
+       */
+      onCancel?: () => void;
     }
   /** `onCancel` lets esc go back where the input came from instead of closing
    *  everything — the folder prompt returns to the directory it was opened on. */
@@ -1035,14 +1040,21 @@ export class Store {
     repositoryIdentity: string | null;
     briefTemplate?: string;
     workspaceMode?: WorkspaceMode;
+    /** The run's id. Supplied only by a test that needs a known one. */
+    runId?: string;
   }): Promise<string | null> {
     const client = this.clients.get(o.machine);
     if (!client) { this.notify("start a run from a connected machine", "error"); return null; }
     const machines = this.placementMachines(o.repositoryIdentity);
     if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return null; }
-    const runId = randomUUID();
-    const placed = placeTasks(o.tasks, machines);
+    const runId = o.runId ?? randomUUID();
+    // Placed against what every other run's live members already hold, the same
+    // way `addTasks` is. A machine's concurrency limit is the machine's, not
+    // each run's: two runs started in a row would otherwise both fill the Mac
+    // to its limit and put twice the limit on it.
+    const placed = placeTasks(o.tasks, machines, this.membersPerMachine());
     const byId = new Map(machines.map((m) => [m.machineId, m]));
+    const ports = allocatePorts(runId, placed.length, this.portsInUse());
     const members = placed.map((p, i) => {
       // A task no machine can take still gets a member, on the fastest machine,
       // so the operator sees it and decides. Dropping it silently is how a task
@@ -1053,7 +1065,10 @@ export class Store {
         task: p.task,
         machineId: target.machineId,
         projectId: target.projectId,
-        resources: allocateResources(runId, i, placed.length, target.tmpDir, memberSlug(p.task, i)),
+        resources: allocateResources(runId, ports[i]!, target.tmpDir, memberSlug(p.task, i)),
+        // A member the rule could not place says so on its own row. Moving it
+        // is the operator's call, and they cannot make it without the reason.
+        note: p.machineId === null ? `not placed by the rule: ${p.reason} — move it or change the task` : null,
       };
     });
     try {
@@ -1073,6 +1088,37 @@ export class Store {
     } catch (e: any) { this.notify(e.message, "error"); return null; }
   }
 
+  /**
+   * The ports the members of every run this client can see are still using.
+   *
+   * Two runs whose ids hash close together would otherwise hand the same port
+   * to two agents — which is issue #8 happening again, one level up. A member
+   * that is merged or withdrawn has given its port back.
+   */
+  private portsInUse(): Set<number> {
+    const ports = new Set<number>();
+    for (const key of this.state.order) {
+      for (const run of this.state.machines.get(key)?.runs.values() ?? []) {
+        for (const m of run.members) if (!isFinalMemberState(m.state)) ports.add(m.resources.port);
+      }
+    }
+    return ports;
+  }
+
+  /**
+   * How many live members every machine already carries, across every run this
+   * client can see. Placement starts from this rather than from zero.
+   */
+  private membersPerMachine(): Map<string, number> {
+    const load = new Map<string, number>();
+    for (const key of this.state.order) {
+      for (const run of this.state.machines.get(key)?.runs.values() ?? []) {
+        for (const m of run.members) if (!isFinalMemberState(m.state)) load.set(m.machineId, (load.get(m.machineId) ?? 0) + 1);
+      }
+    }
+    return load;
+  }
+
   /** Change one member's row. Everything about a run is one of these. */
   async patchMember(machine: string, runId: string, memberId: string, patch: RunMemberPatch): Promise<string | null> {
     return this.threadCommand({ type: "run.member.patch", runId, memberId, patch }, machine);
@@ -1090,9 +1136,10 @@ export class Store {
     await this.patchMember(machine, runId, memberId, {
       machineId: to.machineId,
       projectId: to.projectId,
-      // The port and the directories follow the member: they are named for the
-      // machine they will be used on, and `/tmp` is not `/tmp` everywhere.
-      resources: allocateResources(runId, index, run.members.length, to.tmpDir, memberSlug(m.task, index)),
+      // The port is the member's and goes with it. The directories are rebuilt,
+      // because they are named for the machine they will be used on and `/tmp`
+      // is not `/tmp` everywhere.
+      resources: allocateResources(runId, m.resources.port, to.tmpDir, memberSlug(m.task, index)),
     });
     this.notify(`${m.task.key} → ${to.name}`, "success");
   }
@@ -1153,6 +1200,13 @@ export class Store {
         title: m.task.title,
         workspaceMode: run.workspaceMode,
       });
+      // Write the thread onto the member the moment it exists, before the brief
+      // is even composed. A failure after this point leaves a thread and a
+      // worktree on that machine, and a run that did not record them is the
+      // defect of 2026-09-16 from the other end: work nobody knew was there,
+      // found later by `git rev-list`. It also stops a second dispatch making a
+      // second worktree for the same task.
+      await this.patchMember(machine, runId, memberId, { threadId });
       // Read the thread back rather than waiting for the shell push: the branch
       // the daemon minted goes into the brief, and the brief is the next thing
       // sent. One round trip, and the agent's first message names its branch.
@@ -1181,6 +1235,46 @@ export class Store {
     } catch (e: any) {
       return e?.message ?? String(e);
     }
+  }
+
+  /**
+   * Add tasks to a run in flight.
+   *
+   * Scope changes in the middle: on the day this came from, one task was
+   * cancelled outright and another was added, and the run had to absorb both
+   * without being torn down. A new task is placed by the same rule as the
+   * others and gets resources nobody else in the run has.
+   */
+  async addTasks(machine: string, runId: string, tasks: RunTask[]) {
+    const run = this.run(machine, runId);
+    if (!run) return;
+    const machines = this.placementMachines(this.runRepository(machine, runId));
+    if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return; }
+    // Placed against what the machines already carry, so a task added to a run
+    // in flight lands where there is room and not on top of the full machine.
+    const placed = placeTasks(tasks, machines, this.membersPerMachine());
+    // The new members clear every port this run already holds, as well as every
+    // other run's — an added task must not take the port of a member at work.
+    const taken = this.portsInUse();
+    for (const m of run.members) taken.add(m.resources.port);
+    const ports = allocatePorts(runId, tasks.length, taken);
+    for (let i = 0; i < tasks.length; i++) {
+      const index = run.members.length + i;
+      const target = machines.find((x) => x.machineId === placed[i]!.machineId) ?? machines[0]!;
+      const err = await this.threadCommand({
+        type: "run.member.add",
+        runId,
+        member: {
+          id: randomUUID(),
+          task: tasks[i]!,
+          machineId: target.machineId,
+          projectId: target.projectId,
+          resources: allocateResources(runId, ports[i]!, target.tmpDir, memberSlug(tasks[i]!, index)),
+        },
+      }, machine);
+      if (err) return;
+    }
+    this.notify(`added ${tasks.length} task${tasks.length === 1 ? "" : "s"} — press d to dispatch`, "success");
   }
 
   /**
@@ -1425,7 +1519,7 @@ export function tallyThreads(threads: Iterable<Thread>): ThreadTally {
 
 export interface SidebarRow {
   key: string;
-  kind: "machine" | "project" | "thread" | "empty" | "archived";
+  kind: "machine" | "project" | "thread" | "empty" | "archived" | "run" | "member";
   machine: string;
   projectId?: string;
   thread?: Thread;
@@ -1434,17 +1528,33 @@ export interface SidebarRow {
   archived?: boolean;
   /** How many threads the archived folder holds. */
   count?: number;
+  /** Set on a run row and on every member row inside it. */
+  run?: Run;
+  member?: RunMember;
   depth: number;
 }
 
 /** `expanded` key for a project's archived folder. Furled unless toggled. */
 export function archiveKey(machine: string, projectId: string): string { return `${machine}:${projectId}:archived`; }
 
+/** `expanded` key for a run's members. Open unless furled. */
+export function runKey(machine: string, runId: string): string { return `${machine}:run:${runId}`; }
+
 export function sidebarRows(s: AppState): SidebarRow[] {
   const rows: SidebarRow[] = [];
   for (const key of s.order) {
     const m = s.machines.get(key)!;
     rows.push({ key: `m:${key}`, kind: "machine", machine: key, depth: 0 });
+    // Runs sit above the projects: a run is the reason the threads under it
+    // exist, and it is what the operator is watching. Closed runs stay, so the
+    // record of what a run did does not vanish the moment it finishes.
+    for (const run of [...m.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      rows.push({ key: `r:${key}:${run.id}`, kind: "run", machine: key, run, depth: 1 });
+      if (!(s.expanded[runKey(key, run.id)] ?? true)) continue;
+      for (const member of run.members) {
+        rows.push({ key: `rm:${key}:${run.id}:${member.id}`, kind: "member", machine: key, run, member, depth: 2 });
+      }
+    }
     const projects = [...m.projects.values()].sort((a, b) => a.title.localeCompare(b.title));
     if (projects.length === 0 && m.conn === "connected") rows.push({ key: `e:${key}`, kind: "empty", machine: key, depth: 1 });
     for (const p of projects) {
