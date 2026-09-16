@@ -85,6 +85,23 @@ test("a second copy of a tool is reported after the one the PATH resolves", asyn
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("a file the daemon cannot run is not a tool the machine has", async (t) => {
+  if (process.platform === "win32") return t.skip("the fake tools are shell scripts");
+  // A name on the PATH is not enough: an agent inherits the PATH *and* the
+  // permissions. Reporting a file it cannot execute sends `needs=gh` work to a
+  // machine that cannot do it, which is the same wrong answer the ssh probe
+  // gave about pnpm, arrived at from the other side.
+  const dir = mkdtempSync(join(tmpdir(), "covey-tools-"));
+  try {
+    writeFileSync(join(dir, "gh"), "#!/bin/sh\necho 1.0\n");
+    chmodSync(join(dir, "gh"), 0o644);
+    fakeTool(dir, "pnpm", "12.4.0");
+    const r = await machineResources({ path: dir, extraDirs: [] });
+    assert.equal(hasTool(r, "gh"), false, "the daemon cannot run it, so the machine does not have it");
+    assert.equal(hasTool(r, "pnpm"), true, "and the one it can run is still reported");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("the probe reports what the machine is made of, and how many members it should take", async () => {
   const r = await machineResources();
   assert.equal(r.cpuCount, cpus().length);

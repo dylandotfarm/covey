@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import { cpus, totalmem, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
@@ -84,7 +84,12 @@ function resolveIn(dir: string, name: string): string | null {
 
 function isExecutable(file: string): boolean {
   try {
-    return existsSync(file) && statSync(file).isFile();
+    // The execute bit, not only the name. A file the daemon cannot run is a
+    // tool an agent cannot type, and placement that believes otherwise sends
+    // an `os=darwin needs=gh` task to a machine that cannot do it.
+    if (!statSync(file).isFile()) return false;
+    accessSync(file, constants.X_OK);
+    return true;
   } catch {
     return false;
   }

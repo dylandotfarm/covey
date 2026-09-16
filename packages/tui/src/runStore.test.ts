@@ -21,12 +21,16 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-run-"));
 
+import React from "react";
+import { render } from "ink";
 import type { Command, MachineInfo, Project, Run, RunMember, Thread } from "@covey/protocol";
 import { Store, nextStateForPr, sidebarRows, runKey, type AppState, type MachineState } from "./store.js";
 import { sidebarCells } from "./sidebar.js";
 import { parseTaskList } from "./run.js";
+import { App } from "./components/App.js";
 
 const MAC = "ws://mac:3790";
 const PI = "ws://pi:3790";
@@ -36,6 +40,8 @@ class FakeClient {
   commands: Command[] = [];
   snapshots: string[] = [];
   branch: string | null = "covey/aaaaaaaa";
+  /** Make `thread.snapshot` fail, the way a machine that went away does. */
+  failSnapshot = false;
   /** The run this fake keeps, so `run.member.patch` behaves as a daemon would. */
   run: Run | null = null;
   constructor(private store: Store, private key: string) {}
@@ -47,6 +53,7 @@ class FakeClient {
   async rpc(method: string, params: any): Promise<any> {
     if (method === "thread.snapshot") {
       this.snapshots.push(params.threadId);
+      if (this.failSnapshot) throw new Error("the machine went away");
       return { seq: 1, thread: { id: params.threadId, branch: this.branch, worktreePath: "/w" } as Thread, items: [], hasMore: false, commands: null };
     }
     if (method === "run.issues") return { issues: [], error: null };
@@ -228,6 +235,34 @@ test("dispatch does not start a member twice", async () => {
   assert.equal(mac.commands.filter((c) => c.type === "thread.create").length, 2);
 });
 
+test("a dispatch that fails after the thread exists still records the thread", async () => {
+  // The run of 2026-09-16 lost a 211-line test on a branch nobody knew about,
+  // and an audit with `git rev-list` is what found it. A dispatch that made a
+  // thread and a worktree and then failed must not leave the same hole: the
+  // run knows which thread owns which task, or the work is invisible.
+  const { store, mac } = twoMachines();
+  const id = await runOf(store, "44");
+  mac.failSnapshot = true;
+  await store.dispatchRun(MAC, id);
+  const m = store.run(MAC, id)!.members[0]!;
+  assert.equal(mac.commands.filter((c) => c.type === "thread.create").length, 1, "the thread was made");
+  assert.ok(m.threadId, "and the run knows which one — a thread nobody recorded is work nobody can find");
+  assert.equal(m.state, "blocked");
+  // …and a second dispatch does not make a second worktree for the same task.
+  await store.dispatchRun(MAC, id);
+  assert.equal(mac.commands.filter((c) => c.type === "thread.create").length, 1);
+});
+
+test("a second run is placed against what the first run's members already carry", async () => {
+  // A machine's concurrency limit is the machine's, not each run's. The Mac
+  // takes twelve; a second run that started from zero would put twelve more on
+  // it, which is the Pi taking five by hand all over again, one level up.
+  const { store } = twoMachines();
+  await runOf(store, Array.from({ length: 12 }, (_, i) => `Task ${i}`).join("; "), COLLIDING[0]);
+  const b = await runOf(store, "Another task", COLLIDING[1]);
+  assert.equal(store.run(MAC, b)!.members[0]!.machineId, "pi", "the Mac is full, so the second run's task goes to the Pi");
+});
+
 test("one message reaches every member — the largest manual cost of the real run", async () => {
   const { store, mac } = twoMachines();
   const id = await runOf(store, "44 45 46");
@@ -352,13 +387,75 @@ test("a run is a sidebar row that opens to its members", async () => {
   assert.equal(sidebarRows(state).filter((r) => r.kind === "member").length, 0);
 });
 
-test("the painted lines and the click hit test see the same rows", async () => {
+test("sidebarCells gives one line to a run row and one to each member", async () => {
   const { store } = twoMachines();
   await runOf(store, "44 45");
   const rows = sidebarRows(store.state as AppState);
   const cells = sidebarCells(rows, 0, 40);
-  // Every row the painter draws maps back to the row a click would find, and
-  // the run rows did not shift the threads under them by a line.
   const painted = cells.filter((c) => c.kind === "row").map((c) => (c as any).index);
   assert.deepEqual(painted, rows.map((_, i) => i));
+});
+
+/**
+ * Mount App over a store and hand back the frame it painted and its stdin.
+ *
+ * `sidebarCells` is the hit test's own idea of the list, so asking it where a
+ * row is and then asking it again proves nothing. This reads the *terminal
+ * output* — the thing a person clicks — and clicks the line a row was really
+ * drawn on. A run row that painted two lines would move every row below it and
+ * fail here, which is the whole reason `CLAUDE.md` says to change the renderer
+ * and the hit test together or not at all.
+ */
+async function paint(store: Store) {
+  const stdin: any = new PassThrough();
+  stdin.isTTY = true; stdin.setRawMode = () => stdin; stdin.ref = () => stdin; stdin.unref = () => stdin;
+  const chunks: string[] = [];
+  const stdout: any = new PassThrough();
+  stdout.isTTY = true; stdout.columns = 120; stdout.rows = 30;
+  stdout.on("data", (c: Buffer) => chunks.push(c.toString()));
+  const app = render(React.createElement(App, { store }), { stdin, stdout, patchConsole: false, exitOnCtrlC: false });
+  await new Promise((r) => setTimeout(r, 200));
+  const frame = chunks.join("").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n");
+  /** The 1-based terminal row a piece of text was drawn on, in the sidebar. */
+  const rowOf = (text: string) => {
+    const at = frame.findIndex((l) => l.slice(0, 33).includes(text));
+    assert.ok(at >= 0, `"${text}" was never painted — the frame was:\n${frame.join("\n")}`);
+    return at + 1;
+  };
+  /** One SGR press and release, in the sidebar's columns. */
+  const click = async (row: number) => {
+    stdin.write(`\x1b[<0;12;${row}M`);
+    await new Promise((r) => setTimeout(r, 40));
+    stdin.write(`\x1b[<0;12;${row}m`);
+    await new Promise((r) => setTimeout(r, 120));
+  };
+  return { rowOf, click, unmount: () => app.unmount() };
+}
+
+test("a click lands on the row that was painted there, run rows and all", async () => {
+  const { store } = twoMachines();
+  const id = await runOf(store, "44 45");
+  // A thread under the project, below the run rows. If a run row took two
+  // lines, this is the row that would move and the click that would miss.
+  const ms = store.state.machines.get(MAC)!;
+  ms.threads.set("th1", { id: "th1", projectId: "p-mac", title: "ZZ the thread", status: "idle",
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z", archivedAt: null } as unknown as Thread);
+  const opened: string[] = [];
+  (store as any).select = async (sel: { threadId: string }) => { opened.push(sel.threadId); };
+
+  // `createRun` leaves the run panel open; the sidebar is what this is about.
+  store.setOverlay(null);
+
+  const { rowOf, click, unmount } = await paint(store);
+  try {
+    await click(rowOf("ZZ the thread"));
+    assert.deepEqual(opened, ["th1"], "the click opened the thread that was painted on that line");
+    assert.equal(store.getState().overlay, null);
+
+    await click(rowOf("covey issues"));
+    const ov = store.getState().overlay;
+    assert.equal(ov?.kind, "run", "the line the run was painted on opens the run");
+    assert.equal(ov?.kind === "run" ? ov.runId : null, id);
+    assert.deepEqual(opened, ["th1"], "and opened no thread on the way");
+  } finally { unmount(); }
 });

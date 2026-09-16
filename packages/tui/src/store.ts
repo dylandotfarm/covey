@@ -1048,7 +1048,11 @@ export class Store {
     const machines = this.placementMachines(o.repositoryIdentity);
     if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return null; }
     const runId = o.runId ?? randomUUID();
-    const placed = placeTasks(o.tasks, machines);
+    // Placed against what every other run's live members already hold, the same
+    // way `addTasks` is. A machine's concurrency limit is the machine's, not
+    // each run's: two runs started in a row would otherwise both fill the Mac
+    // to its limit and put twice the limit on it.
+    const placed = placeTasks(o.tasks, machines, this.membersPerMachine());
     const byId = new Map(machines.map((m) => [m.machineId, m]));
     const ports = allocatePorts(runId, placed.length, this.portsInUse());
     const members = placed.map((p, i) => {
@@ -1099,6 +1103,20 @@ export class Store {
       }
     }
     return ports;
+  }
+
+  /**
+   * How many live members every machine already carries, across every run this
+   * client can see. Placement starts from this rather than from zero.
+   */
+  private membersPerMachine(): Map<string, number> {
+    const load = new Map<string, number>();
+    for (const key of this.state.order) {
+      for (const run of this.state.machines.get(key)?.runs.values() ?? []) {
+        for (const m of run.members) if (!isFinalMemberState(m.state)) load.set(m.machineId, (load.get(m.machineId) ?? 0) + 1);
+      }
+    }
+    return load;
   }
 
   /** Change one member's row. Everything about a run is one of these. */
@@ -1182,6 +1200,13 @@ export class Store {
         title: m.task.title,
         workspaceMode: run.workspaceMode,
       });
+      // Write the thread onto the member the moment it exists, before the brief
+      // is even composed. A failure after this point leaves a thread and a
+      // worktree on that machine, and a run that did not record them is the
+      // defect of 2026-09-16 from the other end: work nobody knew was there,
+      // found later by `git rev-list`. It also stops a second dispatch making a
+      // second worktree for the same task.
+      await this.patchMember(machine, runId, memberId, { threadId });
       // Read the thread back rather than waiting for the shell push: the branch
       // the daemon minted goes into the brief, and the brief is the next thing
       // sent. One round trip, and the agent's first message names its branch.
@@ -1227,9 +1252,7 @@ export class Store {
     if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return; }
     // Placed against what the machines already carry, so a task added to a run
     // in flight lands where there is room and not on top of the full machine.
-    const carrying = new Map<string, number>();
-    for (const m of run.members) if (!isFinalMemberState(m.state)) carrying.set(m.machineId, (carrying.get(m.machineId) ?? 0) + 1);
-    const placed = placeTasks(tasks, machines, carrying);
+    const placed = placeTasks(tasks, machines, this.membersPerMachine());
     // The new members clear every port this run already holds, as well as every
     // other run's — an added task must not take the port of a member at work.
     const taken = this.portsInUse();
