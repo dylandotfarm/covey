@@ -134,6 +134,20 @@ export class MachineClient {
     return snap;
   }
 
+  /**
+   * Watch a thread the caller already holds items for, from the seq it holds
+   * them at. No snapshot: `thread.subscribe` replays the events after that seq,
+   * and the daemon resends a snapshot as upserts when the gap is too large to
+   * replay. So a revisit costs nothing on the path to the first paint — which
+   * over a tailnet is the whole cost, because there the round trip is the bill.
+   */
+  resumeThread(threadId: string, afterSeq: number) {
+    this.watchGen++; // a snapshot still in flight must not take the stream back
+    void this.unwatchThread();
+    this.threadSub = { threadId, subId: null, seq: afterSeq };
+    if (this.state === "connected") void this.openThreadSub(threadId, afterSeq).catch(() => {});
+  }
+
   async unwatchThread() {
     const sub = this.threadSub;
     this.threadSub = null;

@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDroppedPaths, imageMime, readDroppedImages } from "./attachments.js";
+import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readClipboardImage, type RunReader } from "./attachments.js";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -28,15 +28,15 @@ test("recognises the image types the model accepts", () => {
 });
 
 test("ordinary pasted prose is not mistaken for a drop", () => {
-  assert.equal(readDroppedImages("look at src/app.png and tell me why").attachments.length, 0);
-  assert.equal(readDroppedImages("just some text").attachments.length, 0);
+  assert.equal(readDroppedFiles("look at src/app.png and tell me why").attachments.length, 0);
+  assert.equal(readDroppedFiles("just some text").attachments.length, 0);
 });
 
 test("reads a real dropped file into a base64 attachment", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const png = join(dir, "shot 1.png");
   writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
-  const { attachments, errors } = readDroppedImages(`'${png}'`);
+  const { attachments, errors } = readDroppedFiles(`'${png}'`);
   assert.equal(errors.length, 0);
   assert.equal(attachments.length, 1);
   assert.equal(attachments[0]!.name, "shot 1.png");
@@ -45,7 +45,104 @@ test("reads a real dropped file into a base64 attachment", () => {
 });
 
 test("a missing file reports an error rather than attaching", () => {
-  const { attachments, errors } = readDroppedImages("/nope/missing.png");
+  const { attachments, errors } = readDroppedFiles("/nope/missing.png");
   assert.equal(attachments.length, 0);
   assert.equal(errors.length, 1);
+});
+
+test("labels a non-image by extension, and anything unknown generically", () => {
+  assert.equal(fileMime("/a/b.PDF"), "application/pdf");
+  assert.equal(fileMime("/a/b.log"), "text/plain");
+  assert.equal(fileMime("/a/b.png"), "image/png");
+  assert.equal(fileMime("/a/b.sqlite3"), "application/octet-stream");
+});
+
+test("a dropped non-image attaches too", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const pdf = join(dir, "report 1.pdf");
+  writeFileSync(pdf, "%PDF-1.7\n");
+  const { attachments, errors } = readDroppedFiles(`'${pdf}'`);
+  assert.equal(errors.length, 0);
+  assert.equal(attachments.length, 1);
+  assert.equal(attachments[0]!.name, "report 1.pdf");
+  assert.equal(attachments[0]!.mimeType, "application/pdf");
+  assert.equal(Buffer.from(attachments[0]!.data!, "base64").toString(), "%PDF-1.7\n");
+});
+
+test("a drop of an image and a non-image together attaches both", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, "shot.png");
+  const log = join(dir, "run.log");
+  writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
+  writeFileSync(log, "boom\n");
+  const { attachments, errors } = readDroppedFiles(`${png} ${log}`);
+  assert.equal(errors.length, 0);
+  assert.deepEqual(attachments.map((a) => a.mimeType), ["image/png", "text/plain"]);
+});
+
+test("a non-image path only counts as a drop when the file is really there", () => {
+  // An absolute path to nothing is prose, not a drop — unlike a missing image,
+  // whose extension says a drop was meant.
+  assert.equal(readDroppedFiles("/nope/missing.pdf").attachments.length, 0);
+  assert.equal(readDroppedFiles("/nope/missing.pdf").errors.length, 0);
+});
+
+test("a dropped directory stays text", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const { attachments, errors } = readDroppedFiles(dir);
+  assert.equal(attachments.length, 0);
+  assert.equal(errors.length, 0);
+});
+
+test("a relative filename that exists is prose, not a drop", () => {
+  // Terminals always paste an absolute path on a drop, so a bare name that
+  // happens to match a file in the cwd must still go in as text.
+  assert.equal(readDroppedFiles("package.json").attachments.length, 0);
+});
+
+test("an oversized drop reports its size instead of attaching", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const big = join(dir, "huge.log");
+  writeFileSync(big, Buffer.alloc(6 * 1024 * 1024));
+  const { attachments, errors } = readDroppedFiles(big);
+  assert.equal(attachments.length, 0);
+  assert.match(errors[0]!, /huge\.log is 6 MB \(limit 5 MB\)/);
+});
+
+// --- clipboard -------------------------------------------------------------
+
+const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+const reader = (r: { stdout?: Buffer; status?: number; error?: NodeJS.ErrnoException }): RunReader =>
+  () => ({ stdout: r.stdout ?? null, status: r.status ?? 0, error: r.error });
+const enoent = (): NodeJS.ErrnoException => Object.assign(new Error("spawnSync ENOENT"), { code: "ENOENT" });
+
+test("a clipboard image becomes an attachment with real bytes on disk", () => {
+  const { attachment, error } = readClipboardImage(reader({ stdout: PNG }));
+  assert.equal(error, undefined);
+  assert.ok(attachment);
+  assert.equal(attachment!.mimeType, "image/png");
+  assert.match(attachment!.name, /^clipboard-\d{14}\.png$/);
+  assert.equal(Buffer.from(attachment!.data!, "base64").toString("hex"), PNG.toString("hex"));
+  assert.deepEqual(readFileSync(attachment!.path), PNG, "the path should point at the bytes");
+});
+
+test("a missing reader names the one to install rather than failing", () => {
+  const { attachment, error } = readClipboardImage(() => ({ stdout: null, status: null, error: enoent() }));
+  assert.equal(attachment, undefined);
+  assert.match(error!, /pngpaste|wl-clipboard|xclip/);
+});
+
+test("an empty clipboard says so", () => {
+  assert.match(readClipboardImage(reader({ stdout: Buffer.alloc(0) })).error!, /no image/);
+  assert.match(readClipboardImage(reader({ status: 1 })).error!, /no image/);
+});
+
+test("output that is not a PNG is not attached", () => {
+  // pngpaste writes its usage line to stdout on some failures.
+  assert.match(readClipboardImage(reader({ stdout: Buffer.from("Usage: pngpaste") })).error!, /no image/);
+});
+
+test("an oversized clipboard image reports its size", () => {
+  const big = Buffer.concat([PNG, Buffer.alloc(6 * 1024 * 1024)]);
+  assert.match(readClipboardImage(reader({ stdout: big })).error!, /limit 5 MB/);
 });
