@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Project, Thread } from "@covey/protocol";
 import { sidebarRows, archiveKey, tallyThreads, byRecency, type AppState, type MachineState, type SidebarRow } from "./store.js";
-import { sidebarCells, rowAtScreenRow } from "./sidebar.js";
+import { sidebarCells, rowAtScreenRow, cursorIndex } from "./sidebar.js";
 
 const project = (id: string, title = id): Project => ({
   id, title, workspaceRoot: `/repos/${id}`, repositoryIdentity: null, defaultModel: null,
@@ -137,6 +137,38 @@ test("a click lands on the row that is painted there, not on the nth row", () =>
   assert.equal(rowAtScreenRow(cells, 4, 2), 1);
   assert.equal(rowAtScreenRow(cells, 7, 2), 4);
   assert.equal(rowAtScreenRow(cells, 40, 2), null, "below the list");
+});
+
+test("the cursor holds its thread when another thread's message re-sorts the list", () => {
+  // a spoke last, then b, then c — the order the sidebar paints them in.
+  const threads = (cLast: string) => [
+    thread("a", "p", { lastMessageAt: "2026-01-03T00:00:00Z" }),
+    thread("b", "p", { lastMessageAt: "2026-01-02T00:00:00Z" }),
+    thread("c", "p", { lastMessageAt: cLast }),
+  ];
+  const at = (rows: SidebarRow[], id: string) => rows.findIndex((r) => r.thread?.id === id);
+
+  const before = sidebarRows(appState([project("p")], threads("2026-01-01T00:00:00Z")));
+  const index = at(before, "b");
+  const key = before[index]!.key;
+
+  // c takes a turn. It goes to the top of the project and pushes a and b down.
+  const after = sidebarRows(appState([project("p")], threads("2026-01-04T00:00:00Z")));
+  assert.deepEqual(after.filter((r) => r.kind === "thread").map((r) => r.thread!.id), ["c", "a", "b"]);
+  assert.equal(after[index]!.thread!.id, "a", "the old index now points at another thread");
+  assert.equal(cursorIndex(after, key, index), at(after, "b"));
+  assert.equal(after[cursorIndex(after, key, index)]!.thread!.id, "b", "the key keeps the cursor on b");
+});
+
+test("a cursor whose row has gone falls back to the row that took its place", () => {
+  assert.equal(cursorIndex(tree(), "t1", 0), 3, "the key wins over the remembered index");
+  // t1 is archived away, so t2 moves up into row 3.
+  const gone = [row("machine", "m"), row("project", "p"), row("thread", "t0"), row("thread", "t2")];
+  assert.equal(cursorIndex(gone, "t1", 3), 3);
+  assert.equal(gone[cursorIndex(gone, "t1", 3)]!.key, "t2");
+  // Nothing below it left: the cursor stops on the last row rather than running off.
+  assert.equal(cursorIndex([row("machine", "m")], "t1", 3), 0);
+  assert.equal(cursorIndex([], "t1", 3), 0, "an empty tree has no row to point at");
 });
 
 test("tallyThreads counts an approval as waiting even while the turn runs", () => {

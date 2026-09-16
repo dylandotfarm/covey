@@ -76,6 +76,23 @@ export function buildDirs(from = dirname(fileURLToPath(import.meta.url))): strin
 }
 
 /**
+ * Is the build on disk newer than a process that started at `startedAt`?
+ *
+ * `entryDir` is the directory the process was loaded from. The walk covers
+ * every package beside it, and that is the whole point: `tsc -b` rewrites only
+ * the packages that changed, so a check on the one entry file misses a rebuild
+ * of any other package. A new keybinding moves `packages/tui/dist` and leaves
+ * `packages/cli/dist/index.js` exactly where it was.
+ */
+export function buildIsNewerThan(entryDir: string, startedAt: string | null | undefined): boolean {
+  if (!startedAt) return false;
+  const at = Date.parse(startedAt);
+  if (!Number.isFinite(at)) return false;
+  const built = newestBuildMtime(buildDirs(entryDir));
+  return built > 0 && built > at;
+}
+
+/**
  * Newest mtime, in milliseconds, of the code files under `dirs`. 0 when there
  * are none — an unknown build never counts as newer than anything.
  */
