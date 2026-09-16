@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import type { ToolCallItem } from "@covey/protocol";
 import { selectionBounds, type Selection, type ThreadView } from "../store.js";
-import { renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line } from "../lines.js";
+import { renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
 import { hyperlinksEnabled, osc8, type LinkContext } from "../links.js";
 import { T } from "../theme.js";
 
@@ -44,13 +44,13 @@ export const toolGroupKey = (turnId: string) => `tools:${turnId}`;
  * `links` marks the paths and the URLs. It is the caller's job because whether
  * a path is openable depends on which machine the thread runs on.
  */
-export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, questionCursor = 0, toolsExpanded = false, links?: LinkContext): TranscriptLayout {
+export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, toolsExpanded = false, links?: LinkContext): TranscriptLayout {
   const lines: Line[] = [];
   const itemStarts: TranscriptLayout["itemStarts"] = [];
   const toggles = new Map<number, string>();
   if (!view) return { lines, itemStarts, toggles };
   const items = [...view.items.values()].sort((a, b) => a.seq - b.seq);
-  const opts = { width, expanded, questionCursor, links };
+  const opts = { width, expanded, question, links };
 
   const liveTurn = view.thread?.latestTurn?.turnId ?? null;
   const groups = new Map<string, ToolCallItem[]>();

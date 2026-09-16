@@ -57,7 +57,7 @@ test("unfolding a group puts the calls back where they were, under an open heade
 
 test("ctrl+o overrides every fold at once", () => {
   const items = [user("a", "go"), tool("a", "ls"), tool("a", "cat"), say("a", "done"), user("b", "ok")];
-  const out = text(layoutTranscript(view(items, "b"), 80, new Set(), 0, true));
+  const out = text(layoutTranscript(view(items, "b"), 80, new Set(), undefined, true));
   assert.doesNotMatch(out, />_/);
   assert.match(out, /ls/);
   assert.match(out, /cat/);

@@ -8,9 +8,11 @@ import { diffToLines, selectedText, activityLine, linkAt, truncate } from "../li
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
+import { buildLine, buildSkew } from "../build.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
 import { Transcript, layoutTranscript } from "./Transcript.js";
+import { currentAsk, takeAnswer } from "../question.js";
 import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
@@ -68,6 +70,9 @@ export function App({ store }: { store: Store }) {
   // is preserved across the interruption.
   const [answerDraft, setAnswerDraft] = useState("");
   const [questionCursor, setQuestionCursor] = useState(0);
+  // An AskUserQuestion call carries up to four questions, stepped through one
+  // at a time. The answers collect here and go to the daemon in one command.
+  const [answersGiven, setAnswersGiven] = useState<string[]>([]);
   const [quitArmed, setQuitArmed] = useState(false);
   const quitTimer = useRef<NodeJS.Timeout | null>(null);
   /** Transcript line the mouse went down on, so a click can fold what it hit. */
@@ -90,13 +95,14 @@ export function App({ store }: { store: Store }) {
     ? 3 + (pending.kind === "question" && answerDraft.length > 0 ? 1 : 0)
     : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0);
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
+  const questionUi = useMemo(() => ({ cursor: questionCursor, answered: answersGiven }), [questionCursor, answersGiven]);
   // A path in the transcript belongs to the daemon's host, and the file
   // manager belongs to this one. So paths are only openable when the thread's
   // machine is the loopback one; a URL is openable from any machine.
   const viewMachine = state.view?.machine ?? null;
   const viewHome = viewMachine ? (state.machines.get(viewMachine)?.info?.homeDir ?? undefined) : undefined;
   const linkCtx = useMemo<LinkContext>(() => ({ localFiles: !!viewMachine && isLoopbackUrl(viewMachine), homeDir: viewHome }), [viewMachine, viewHome]);
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionCursor, state.toolsExpanded, linkCtx), [state.view, mainW, state.expandedItems, questionCursor, state.toolsExpanded, linkCtx]);
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded, linkCtx), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded, linkCtx]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
@@ -130,7 +136,7 @@ export function App({ store }: { store: Store }) {
   // Reset the answer buffer when a different request comes up, so a stale
   // half-typed answer never carries into the next question.
   const pendingId = pending && (pending.kind === "approval" || pending.kind === "question") ? pending.requestId : null;
-  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); }, [pendingId]);
+  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); setAnswersGiven([]); }, [pendingId]);
   // A relaunch is the CLI's job (it rebuilds and re-execs); all we do is
   // unmount cleanly so the terminal is handed back in one piece.
   useEffect(() => { if (state.relaunch) { store.shutdown(); exit(); } }, [state.relaunch, store, exit]);
@@ -307,14 +313,17 @@ export function App({ store }: { store: Store }) {
     const modelLabel = settings.defaultModel
       ? (KNOWN_MODELS.find((k) => k.id === settings.defaultModel)?.label ?? settings.defaultModel)
       : "from Claude settings";
+    // "behind" is the reason most updates get run, so say it where the finger
+    // already is instead of only in the summary behind it.
+    const skew = buildSkew(state.clientBuild, info.build);
     const opts: PickOption[] = [
-      { id: "update", label: "Update — pull, rebuild, restart", hint: busy ? "interrupts running turns" : "" },
+      { id: "update", label: "Update — pull, rebuild, restart", hint: skew === "behind" ? "older build than your client" : busy ? "interrupts running turns" : "" },
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
       { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
-    openPick(`${info.name} — ${info.os}/${info.arch} · daemon ${info.daemonVersion}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
+    openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
       switch (id) {
         case "update": return void confirmUpdate(machineKey!);
         case "restart": return confirmRestart(machineKey!);
@@ -843,21 +852,30 @@ export function App({ store }: { store: Store }) {
         // Answers use their own buffer, never the composer draft — otherwise
         // whatever you were part-way through typing is consumed as the answer
         // and lost. This branch returns unconditionally so `draft` survives.
-        const opts = pending.options ?? [];
+        // One question at a time: the keys below always act on the question the
+        // user has reached, and only the last answer sends the set.
+        const opts = currentAsk(pending, answersGiven)?.options ?? [];
         const customRow = opts.length;
+        const take = (a: string) => {
+          const { answered, send } = takeAnswer(pending, answersGiven, a);
+          setAnswersGiven(answered);
+          setAnswerDraft("");
+          setQuestionCursor(0);
+          if (send) void store.respondQuestion(send);
+        };
         // Functional updates throughout: a batched chunk is replayed character
         // by character here, so reading state from the closure would let each
         // replay clobber the last instead of accumulating.
         if (key.upArrow) { setQuestionCursor((c) => Math.max(0, c - 1)); return; }
         if (key.downArrow) { setQuestionCursor((c) => Math.min(customRow, c + 1)); return; }
         if (key.return) {
-          if (questionCursor < opts.length) { void store.respondQuestion(opts[questionCursor]!.label); return; }
+          if (questionCursor < opts.length) { take(opts[questionCursor]!.label); return; }
           const a = answerDraft.trim();
-          if (a) { void store.respondQuestion(a); setAnswerDraft(""); }
+          if (a) take(a);
           return;
         }
         if (answerDraft.length === 0 && /^[1-9]$/.test(input) && Number(input) <= opts.length) {
-          void store.respondQuestion(opts[Number(input) - 1]!.label);
+          take(opts[Number(input) - 1]!.label);
           return;
         }
         if (key.backspace || key.delete) { setAnswerDraft((d) => d.slice(0, -1)); return; }

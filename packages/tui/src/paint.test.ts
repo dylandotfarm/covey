@@ -39,7 +39,7 @@ async function paint(text: string, width: number, links?: LinkContext): Promise<
     machine: "ws://127.0.0.1:3790", threadId: "t", thread: null,
     items: new Map([["a", item]]), loading: false, error: null, hasMore: false, loadingOlder: false,
   } as unknown as ThreadView;
-  const layout = layoutTranscript(view, width - 2, new Set(), 0, true, links);
+  const layout = layoutTranscript(view, width - 2, new Set(), { cursor: 0, answered: [] }, true, links);
 
   let out = "";
   const stdout = new Writable({ write(c, _e, cb) { out += String(c); cb(); } }) as unknown as NodeJS.WriteStream;
