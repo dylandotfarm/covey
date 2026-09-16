@@ -7,18 +7,18 @@ import type { MachineInfo, Project, SlashCommandInfo, Thread, ThreadEvent } from
 import { Db } from "./db.js";
 import { Engine } from "./engine.js";
 
-const MACHINE = {
+const MACHINE: MachineInfo = {
   machineId: "m1", name: "test", os: "darwin", arch: "arm64", homeDir: "/tmp", daemonVersion: "0",
   protocolVersion: 1, capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
-  settings: { defaultModel: null, defaultPermissionMode: null },
-} as MachineInfo;
+  settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
+};
 
-const THREAD = {
+const THREAD: Thread = {
   id: "t1", projectId: "p1", title: "t", provider: "claude", sessionId: "s1", model: null,
   permissionMode: "default", branch: null, worktreePath: null, status: "idle", lastError: null,
   pendingApprovals: 0, queuedTurns: 0, latestTurn: null, lastMessageAt: null, archivedAt: null,
   pinnedAt: null, movedTo: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
-} as Thread;
+};
 
 const COMPACT: SlashCommandInfo = { name: "compact", description: "Compact the conversation", argumentHint: "", source: "sdk" };
 const USAGE: SlashCommandInfo = { name: "usage", description: "Cost and limits", argumentHint: "", source: "sdk" };

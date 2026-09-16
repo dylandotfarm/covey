@@ -1,5 +1,8 @@
 name: ci
-on: [push, pull_request]
+# `merge_group` is required for the merge queue: GitHub runs the checks on the
+# queued merge result, not on the pull request branch. Without this trigger a
+# queued pull request waits for a check that never starts.
+on: [push, pull_request, merge_group]
 jobs:
   check:
     runs-on: ubuntu-latest

@@ -42,7 +42,7 @@ class Client {
 
 async function startDaemon(port: number, name: string): Promise<{ proc: ChildProcess; home: string }> {
   const home = tempDir("covey-test-");
-  const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", name], { env: { ...process.env, COVEY_HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", name], { env: { ...process.env, COVEY_HOME: home, COVEY_STREAM: "" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   proc.stderr!.on("data", (d) => { log += d.toString(); });
   for (let i = 0; i < 100; i++) {
@@ -286,17 +286,17 @@ test("a project remembers where new threads should run", async () => {
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {
   const settings = async () => (await a.rpc("hello", { protocolVersion: 1, client: "test" })).settings;
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null }, "no opinion until one is set");
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "no opinion until one is set");
 
   await a.rpc("shell.subscribe", {});
   a.pushes.length = 0;
-  await a.command({ type: "machine.settings", defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions" });
+  await a.command({ type: "machine.settings", defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true });
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(
     a.pushes.some((p) => p.push === "shell" && p.event.kind === "machine.updated" && p.event.machine.settings.defaultModel === "claude-opus-5"),
     "the change is broadcast, so every client's panel follows",
   );
-  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions" });
+  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true });
   const onDisk = JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8"));
   assert.equal(onDisk.defaultModel, "claude-opus-5", "settings survive a daemon restart");
   assert.ok(onDisk.machineId, "writing settings does not clobber the rest of daemon.json");
@@ -308,15 +308,38 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal(t.model, "claude-opus-5");
   assert.equal(t.permissionMode, "bypassPermissions");
   assert.equal(t.permissionModeExplicit, true, "a machine default is a choice, so the SDK is told about it");
+  assert.equal(t.streaming, true);
 
   const explicit = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: explicit, sessionId: randomUUID(), workspaceMode: "checkout", model: "claude-haiku-4-5-20251001", permissionMode: "plan" });
+  await a.command({ type: "thread.create", projectId, threadId: explicit, sessionId: randomUUID(), workspaceMode: "checkout", model: "claude-haiku-4-5-20251001", permissionMode: "plan", streaming: false });
   const e = (await a.rpc("thread.snapshot", { threadId: explicit })).thread;
   assert.equal(e.model, "claude-haiku-4-5-20251001", "an explicit model still wins");
   assert.equal(e.permissionMode, "plan");
+  assert.equal(e.streaming, false, "an explicit choice still wins");
 
-  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null });
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null }, "and can be cleared again");
+  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null });
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "and can be cleared again");
+});
+
+test("streaming is a per-thread switch that needs no restart", async () => {
+  const projectId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === repoA)!.id;
+  const threadId = randomUUID();
+  await a.command({ type: "thread.create", projectId, threadId, sessionId: randomUUID(), workspaceMode: "checkout" });
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).thread.streaming, false, "off until asked for");
+
+  await a.rpc("thread.subscribe", { threadId, sinceSeq: 0 });
+  a.pushes.length = 0;
+  await a.command({ type: "thread.setStreaming", threadId, streaming: true });
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).thread.streaming, true);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(
+    a.pushes.some((p) => p.push === "shell" && p.event.kind === "thread.upserted" && p.event.thread.id === threadId && p.event.thread.streaming),
+    "the switch is broadcast, so a second client's palette agrees",
+  );
+
+  await a.command({ type: "thread.setStreaming", threadId, streaming: false });
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).thread.streaming, false);
+  await a.command({ type: "thread.delete", threadId });
 });
 
 test("machine.source points at the checkout the daemon runs from", async () => {
@@ -325,6 +348,28 @@ test("machine.source points at the checkout the daemon runs from", async () => {
   assert.equal(src.root, root);
   assert.equal(typeof src.commit, "string");
   assert.equal(src.canUpdate, !!src.remote, "nothing to pull from without a remote");
+});
+
+test("usage.report answers for its own machine, with an empty total before any turn", async () => {
+  const info = await a.rpc("hello", { protocolVersion: 1, client: "test" });
+  const r = await a.rpc("usage.report", { since: "2026-01-01T00:00:00.000Z", until: "2026-01-02T00:00:00.000Z", groupBy: "thread" });
+  assert.equal(r.machineId, info.machineId);
+  assert.equal(r.machineName, "alpha");
+  assert.equal(r.since, "2026-01-01T00:00:00.000Z");
+  assert.equal(r.groupBy, "thread");
+  assert.deepEqual(r.total, { turns: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, estimatedCostUsd: 0 });
+  assert.deepEqual(r.groups, []);
+
+  // One database holds one machine's turns, so grouping by machine is that
+  // machine's own total under its own name.
+  const byMachine = await a.rpc("usage.report", { groupBy: "machine" });
+  assert.equal(byMachine.groups.length, 1);
+  assert.equal(byMachine.groups[0]!.key, info.machineId);
+  assert.equal(byMachine.groups[0]!.label, "alpha");
+  assert.deepEqual(byMachine.groups[0]!.turns, byMachine.total.turns);
+  // No window is open ended, not an error.
+  assert.equal(byMachine.since, null);
+  assert.equal(byMachine.until, null);
 });
 
 /**
@@ -375,6 +420,19 @@ test("live: a real turn streams items, folds a second message in, and captures a
   assert.equal(t.archivedAt, null, "sending a message unarchived the thread");
   assert.equal(t.queuedTurns, 0, "nothing waits behind a running turn any more");
   assert.equal(t.latestTurn.state, "completed");
+  // The turn carries what it alone spent, cache figures and model split
+  // included — not the session's running total.
+  assert.ok(t.latestTurn.usage, "the turn reports its usage");
+  assert.ok(t.latestTurn.usage.outputTokens > 0, "a turn that replied spent output tokens");
+  assert.ok(t.latestTurn.usage.byModel.length > 0, "the split names at least one model");
+  const used = await b.rpc("usage.report", { groupBy: "thread" });
+  assert.ok(used.total.turns > 0, "the turn was recorded");
+  assert.ok(used.total.outputTokens >= t.latestTurn.usage.outputTokens);
+  const mine = used.groups.find((g) => g.key === threadId);
+  assert.ok(mine, "the thread shows in the totals");
+  const byModel = await b.rpc("usage.report", { groupBy: "model" });
+  assert.ok(Math.abs(byModel.groups.reduce((n, g) => n + g.estimatedCostUsd, 0) - byModel.total.estimatedCostUsd) < 1e-6,
+    "the model split adds up to the total");
   const folded = b.pushes.map((p) => p.event?.item).filter((i) => i?.kind === "user" && i.text.startsWith("Reply with"));
   assert.ok(folded.some((i) => i.folded === true), "the second message went into the running turn");
   assert.ok(folded.every((i) => i.turnId === editTurn), "and belongs to that turn, not one of its own");

@@ -46,7 +46,7 @@ async function run(messages: unknown[], commands: unknown[] = []): Promise<Seen 
   const store = { append: () => {}, load: () => null, listSessions: () => [] } as unknown as SessionStore;
   const { q, calls } = fakeQuery(messages, commands);
   const session = new ClaudeSession(
-    { threadId: "t1", sessionId: "s1", cwd: "/tmp", model: null, permissionMode: "default", permissionModeExplicit: false, resume: false, sessionStore: store },
+    { threadId: "t1", sessionId: "s1", cwd: "/tmp", model: null, permissionMode: "default", permissionModeExplicit: false, streaming: false, resume: false, sessionStore: store },
     sink,
     () => q,
   );

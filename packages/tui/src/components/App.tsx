@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
-import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
+import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, linkAt, truncate } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, type MouseEvent } from "../mouse.js";
@@ -43,6 +43,9 @@ const MACHINE_MODES: PickOption[] = [
   { id: "acceptEdits", label: "Auto", hint: "file edits go through, other tools ask" },
   { id: "bypassPermissions", label: "Bypass", hint: "never ask" },
 ];
+
+/** What `g` cycles through in the usage overlay. */
+const USAGE_GROUPINGS: UsageGroupBy[] = ["thread", "project", "model", "machine"];
 
 export function App({ store }: { store: Store }) {
   const state = useSyncExternalStore(store.subscribe, store.getState);
@@ -351,7 +354,7 @@ export function App({ store }: { store: Store }) {
     if (!m) return;
     if (m.conn !== "connected" || !m.info) { store.notify(`${m.saved.name} is ${m.conn}`, "error"); return; }
     const info = m.info;
-    const settings = info.settings ?? { defaultModel: null, defaultPermissionMode: null };
+    const settings = info.settings ?? { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null };
     const busy = runningTurns(machineKey!);
     const modelLabel = settings.defaultModel
       ? (KNOWN_MODELS.find((k) => k.id === settings.defaultModel)?.label ?? settings.defaultModel)
@@ -364,6 +367,7 @@ export function App({ store }: { store: Store }) {
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
       { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
+      { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
     openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
@@ -386,6 +390,13 @@ export function App({ store }: { store: Store }) {
           void store.setMachineDefaults(machineKey!, { defaultPermissionMode: mode });
           store.notify(`${info.name}: new threads start in ${permissionModeLabel(mode)}`, mode === "bypassPermissions" ? "error" : "info");
         });
+        case "streaming": {
+          store.setOverlay(null);
+          const on = !settings.defaultStreaming;
+          void store.setMachineDefaults(machineKey!, { defaultStreaming: on });
+          store.notify(`${info.name}: new threads ${on ? "show text as it arrives" : "show each reply whole"}`);
+          return;
+        }
         case "log": { store.setOverlay({ kind: "update", machine: machineKey! }); return; }
       }
     });
@@ -462,6 +473,7 @@ export function App({ store }: { store: Store }) {
       opts.push({ id: "rename", label: "Rename thread", hint: "r" });
       opts.push({ id: "model", label: `Model: ${t.model ?? "default"}` });
       opts.push({ id: "mode", label: `Permission mode: ${t.permissionMode}` });
+      opts.push({ id: "streaming", label: t.streaming ? "Streaming: on — text arrives token by token" : "Streaming: off — each reply lands whole", hint: "this thread" });
       opts.push({ id: "diff", label: "Show changes from the last turn", hint: "d" });
       if (t.latestTurn?.state === "running") opts.push({ id: "background", label: "Background the running tool calls", hint: "ctrl+b" });
       opts.push({ id: "revert", label: "Revert to before a turn… (files + conversation)" });
@@ -473,6 +485,7 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "newwt", label: "New thread in git worktree", hint: "N" });
     if (contextProject) opts.push({ id: "startmode", label: `New threads here: ${workspaceModeLabel(project(contextMachine, contextProject)?.defaultWorkspaceMode)}` });
     opts.push({ id: "addproject", label: "Add project", hint: "a" });
+    opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults", hint: "enter on a machine" });
     opts.push({ id: "updateclient", label: "Update covey — pull, rebuild, relaunch this client", hint: store.clientSource?.commit ?? "" });
     opts.push({ id: "addmachine", label: "Add machine (ws://host:port)" });
@@ -486,6 +499,7 @@ export function App({ store }: { store: Store }) {
         case "rename": return openInput("Rename thread", (v) => { store.setOverlay(null); void store.threadCommand({ type: "thread.rename", threadId: t!.id, title: v }); }, t!.title);
         case "model": return openPick("Model", [{ id: "", label: "Default (from Claude settings)" }, ...KNOWN_MODELS.map((m) => ({ id: m.id, label: m.label, hint: m.id }))], (mid) => { store.setOverlay(null); void store.threadCommand({ type: "thread.setModel", threadId: t!.id, model: mid || null }); });
         case "mode": return openPick("Permission mode", PERMISSION_CYCLE.map((m) => ({ id: m, label: m, hint: m === "bypassPermissions" ? "runs tools without asking" : m === t!.permissionMode ? "current" : "" })), (m) => { store.setOverlay(null); void store.setPermissionMode(t!.id, m as PermissionMode); });
+        case "streaming": return void store.setStreaming(t!.id, !t!.streaming);
         case "diff": return void store.toggleDiff();
         case "background": return void store.background();
         case "revert": {
@@ -507,6 +521,7 @@ export function App({ store }: { store: Store }) {
         case "newwt": return void newThread(contextMachine, contextProject, "worktree-head");
         case "startmode": return void chooseDefaultWorkspace();
         case "addproject": return addProject();
+        case "usage": return void store.loadUsage(0, "thread");
         case "machine": return machinePanel();
         case "updateclient": return updateClient();
         case "addmachine": return openInput("Machine URL", (v) => { store.setOverlay(null); const [url, token] = v.split(/\s+/); if (url) store.addMachine({ name: new URL(url).hostname, url, token }); }, "ws://", "ws://host.tailnet.ts.net:3790 [token]");
@@ -840,6 +855,16 @@ export function App({ store }: { store: Store }) {
     const ov = state.overlay!;
     if (key.escape) { store.setOverlay(null); setOvFilter(""); if (ov.kind === "input") ov.onCancel?.(); return; }
     if (ov.kind === "help" || ov.kind === "update") return;
+    if (ov.kind === "usage") {
+      const last = USAGE_WINDOWS.length - 1;
+      if (key.leftArrow || input === "h") return void store.loadUsage(Math.max(0, ov.window - 1), ov.groupBy);
+      if (key.rightArrow || input === "l") return void store.loadUsage(Math.min(last, ov.window + 1), ov.groupBy);
+      if (input === "g") {
+        const next = USAGE_GROUPINGS[(USAGE_GROUPINGS.indexOf(ov.groupBy) + 1) % USAGE_GROUPINGS.length]!;
+        return void store.loadUsage(ov.window, next);
+      }
+      return;
+    }
     if (ov.kind === "input") {
       if (key.return) { ov.onSubmit(ovFilter.trim()); setOvFilter(""); return; }
       if (key.backspace || key.delete) { setOvFilter((f) => f.slice(0, -1)); return; }
