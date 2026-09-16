@@ -182,6 +182,8 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
       }
       case "models.list":
         return KNOWN_MODELS;
+      case "thread.listDir":
+        return engine.listThreadDir(p.threadId, String(p.dir ?? ""));
       case "project.git":
         return engine.projectGit(p.projectId);
       case "turn.diff":

@@ -161,6 +161,8 @@ const HELP: [string, string][] = [
   ["  cmd+⌫ / ⌦", "delete to start / end of line"],
   ["  alt+⌫ / ⌦", "delete word back / forward"],
   ["  ctrl+u / w", "delete to line start / word back"],
+  ["  ctrl+v", "attach the clipboard image (needs pngpaste / wl-paste / xclip)"],
+  ["", "  drag a file onto the window to attach it — any type"],
   ["  alt+← / →", "move the caret by word (esc b / esc f too)"],
   ["  cmd+← / →", "start / end of line"],
   ["  ctrl+a / e", "start / end of line"],
@@ -176,5 +178,6 @@ const HELP: [string, string][] = [
   ["mouse", ""],
   ["  click", "sidebar: open that row, as enter would"],
   ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
-  ["  wheel", "scroll the conversation, or move the sidebar cursor"],
+  ["  alt+click", "reveal the file, or open the URL (ctrl+click does it too)"],
+  ["  wheel", "scroll a line · +alt a page · sidebar: move the cursor"],
 ];

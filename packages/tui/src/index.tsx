@@ -1,6 +1,6 @@
 import React from "react";
 import { render } from "ink";
-import type { MachineSource, SavedMachine } from "@covey/protocol";
+import type { BuildInfo, MachineSource, SavedMachine } from "@covey/protocol";
 import { Store, type RelaunchRequest } from "./store.js";
 import { App } from "./components/App.js";
 import { enableMouse, disableMouse } from "./mouse.js";
@@ -9,6 +9,10 @@ export interface RunTuiOptions {
   machines: SavedMachine[];
   /** The checkout this client runs from, so it can offer to update itself. */
   source?: MachineSource | null;
+  /** The build this client runs, to compare with each machine's. */
+  build?: BuildInfo | null;
+  /** Reads the newest mtime of the files this client was loaded from, in ms. */
+  watchBuild?: () => number;
   /** The CLI sets this when it can relaunch us after we exit. */
   canRelaunch?: boolean;
   /** A line to show on arrival, e.g. the result of the update we just did. */
@@ -21,7 +25,7 @@ export interface RunTuiResult {
 }
 
 export async function runTui(opts: RunTuiOptions): Promise<RunTuiResult> {
-  const store = new Store(opts.machines, { source: opts.source, canRelaunch: opts.canRelaunch, notice: opts.notice });
+  const store = new Store(opts.machines, { source: opts.source, build: opts.build, watchBuild: opts.watchBuild, canRelaunch: opts.canRelaunch, notice: opts.notice });
   // alternate screen so the TUI doesn't pollute scrollback
   process.stdout.write("\x1b[?1049h\x1b[H");
   // Take over the mouse so selection can be scoped to one pane. Shift+drag
@@ -56,4 +60,5 @@ export async function runTui(opts: RunTuiOptions): Promise<RunTuiResult> {
 }
 
 export { loadConfig, saveConfig, localMachine } from "./config.js";
+export { buildSkew, buildLine, type BuildSkew } from "./build.js";
 export type { RelaunchRequest } from "./store.js";

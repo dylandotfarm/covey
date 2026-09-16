@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
-import { existsSync, statSync, rmSync } from "node:fs";
+import { basename, resolve, sep } from "node:path";
+import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
@@ -12,7 +12,7 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry } from "@covey/protocol";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -72,7 +72,7 @@ export class Engine {
       const idx = items.findIndex((i) => i.id === s.latest.id);
       if (idx >= 0) items[idx] = s.latest; else items.push(s.latest);
     }
-    return { seq: this.db.threadSeq(threadId), thread, items, hasMore };
+    return { seq: this.db.threadSeq(threadId), thread, items, hasMore, commands: this.db.threadCommands(threadId) };
   }
 
   // ---- emit helpers ---------------------------------------------------------
@@ -382,7 +382,7 @@ export class Engine {
         if (!pending) throw new EngineError("not_found", "request no longer pending");
         const res = cmd.type === "approval.respond"
           ? s.buildResponse(cmd.requestId, cmd.behavior, { updatedPermissions: cmd.updatedPermissions, message: cmd.message })
-          : s.buildResponse(cmd.requestId, "allow", { answer: cmd.answer });
+          : s.buildResponse(cmd.requestId, "allow", { answer: cmd.answer, answers: cmd.answers });
         if (!res) throw new EngineError("not_found", "request no longer pending");
         s.respond(cmd.requestId, res);
         return this.db.shellSeq();
@@ -513,6 +513,30 @@ export class Engine {
     return { turnId: cp.turnId, ...summary, patch: patch ?? "" };
   }
 
+  /**
+   * One directory under a thread's working directory, for the `@` menu.
+   *
+   * The whole directory comes back, not the matches for what is typed so far:
+   * the client filters as the reader types, so a word costs one request rather
+   * than one per keystroke. Nothing outside the working directory is offered —
+   * a mention names the thread's own files.
+   */
+  listThreadDir(threadId: string, dir: string, limit = 500): { dir: string; entries: PathEntry[]; truncated: boolean } {
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    const root = this.gitCwd(t, p);
+    const target = resolve(root, dir || ".");
+    if (target !== root && !target.startsWith(root + sep)) throw new EngineError("bad_path", `${dir} is outside the thread's directory`);
+    // Half a directory name is not an error; it is what typing looks like.
+    if (!existsSync(target) || !statSync(target).isDirectory()) return { dir, entries: [], truncated: false };
+    const all = readdirSync(target, { withFileTypes: true })
+      .map((d) => ({ name: d.name, isDir: d.isDirectory() }))
+      .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
+    return { dir, entries: all.slice(0, limit), truncated: all.length > limit };
+  }
+
   private mutateThread(threadId: string, fn: (t: Thread) => void): number {
     const t = this.db.getThread(threadId);
     if (!t) throw new EngineError("not_found", "thread not found");
@@ -634,7 +658,24 @@ export class Engine {
         if (t && !t.model) { t.model = info.model; this.putThreadAndEmit(t); }
       },
       onModelUsed: () => {},
+      onCommands: (commands) => this.setThreadCommands(threadId, commands),
     };
+  }
+
+  /**
+   * Replace the thread's `/` menu and tell the clients watching it. An
+   * unchanged list is dropped here, because the SDK re-sends the whole list
+   * on every session start and a thread event costs a seq.
+   *
+   * The list is stored, so a thread that has run before still has a menu after
+   * the daemon restarts. A thread that has never run keeps `null` — "not known
+   * yet" — until a session answers for it.
+   */
+  setThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
+    const before = this.db.threadCommands(threadId);
+    if (before && sameCommands(before, commands)) return;
+    this.db.putThreadCommands(threadId, commands);
+    this.emitThread(threadId, { kind: "commands.updated", commands });
   }
 
   private recountPending(threadId: string) {
@@ -734,3 +775,8 @@ function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): R
 }
 
 export type { PermissionMode };
+
+/** Two menus are the same when they hold the same commands in the same order. */
+function sameCommands(a: SlashCommandInfo[], b: SlashCommandInfo[]): boolean {
+  return a.length === b.length && a.every((c, i) => c.name === b[i]!.name && c.description === b[i]!.description && c.argumentHint === b[i]!.argumentHint);
+}

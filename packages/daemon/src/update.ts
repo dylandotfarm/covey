@@ -47,7 +47,8 @@ export function sourceRoot(from = dirname(fileURLToPath(import.meta.url))): stri
   }
 }
 
-async function git(cwd: string, args: string[]): Promise<string | null> {
+/** One git command in `cwd`, trimmed, or null when git fails. */
+export async function git(cwd: string, args: string[]): Promise<string | null> {
   try {
     const { stdout } = await run("git", args, { cwd, timeout: 15_000, env: gitEnv() });
     return stdout.trim();

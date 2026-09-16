@@ -1,7 +1,8 @@
 import { query, type Options, type Query, type SDKMessage, type SDKUserMessage, type PermissionResult, type PermissionMode as SdkPermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
-import type { PermissionMode, TimelineItem, ToolCallItem, ToolBackground, ApprovalItem, QuestionItem, Attachment } from "@covey/protocol";
+import type { PermissionMode, TimelineItem, ToolCallItem, ToolBackground, ApprovalItem, QuestionItem, QuestionAsk, Attachment, SlashCommandInfo } from "@covey/protocol";
 import { summariseTool } from "./toolSummary.js";
+import { toCommandInfos } from "./slashCommands.js";
 import { attachmentBlocks } from "./attachments.js";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
 
@@ -19,6 +20,8 @@ export interface SessionSink {
   onTurnComplete(info: { costUsd: number; inputTokens: number; outputTokens: number; isError: boolean; result: string; userMessageUuid: string | null }): void;
   onSessionInit(info: { model: string; claudeCodeVersion: string; permissionMode: string }): void;
   onModelUsed(model: string): void;
+  /** The whole `/` menu for this thread, replacing whatever it held before. */
+  onCommands(commands: SlashCommandInfo[]): void;
   now(): string;
 }
 
@@ -47,6 +50,13 @@ interface Pending {
   input: Record<string, unknown>;
 }
 
+/**
+ * How a session reaches the SDK. Real sessions use `query`; a test hands in a
+ * stand-in, so what this class does with the SDK's messages can be checked
+ * without a Claude subprocess.
+ */
+export type QueryFactory = (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
+
 export class ClaudeSession {
   private q: Query | null = null;
   private abort = new AbortController();
@@ -70,10 +80,16 @@ export class ClaudeSession {
    */
   private backgrounded = new Set<string>();
   /**
-   * Streaming block state for the API message in flight, indexed by the
-   * block's place in that message — the same number the `assistant` message
-   * for that block resolves to. `done` marks a block the `assistant` message
-   * has already written, whose text is authoritative.
+   * Commands the session reported as bound to the terminal that runs the CLI.
+   * The init message names them; `supportedCommands()` and the
+   * `commands_changed` push both need them to filter their answer.
+   */
+  private terminalCommands: string[] = [];
+  /**
+   * Block state for the API message in flight, indexed by the block's place in
+   * that message — the same number the `assistant` message for that block
+   * resolves to. `done` marks a block the `assistant` message has already
+   * written, whose text is authoritative.
    */
   private blocks: { itemId: string; kind: "text" | "thinking" | "tool"; text: string; json: string; done?: boolean; toolName?: string; toolUseId?: string }[] = [];
   /** The API message the stream is inside, from `message_start`. */
@@ -82,7 +98,7 @@ export class ClaudeSession {
   private ordinals = { messageId: "", n: 0 };
   private turnStartedAt = Date.now();
 
-  constructor(private params: SessionParams, private sink: SessionSink) {}
+  constructor(private params: SessionParams, private sink: SessionSink, private spawn: QueryFactory = query) {}
 
   get running(): boolean {
     return this.q !== null && !this.closed;
@@ -123,7 +139,7 @@ export class ClaudeSession {
       },
     };
     this.sink.onStatus("starting");
-    this.q = query({ prompt: this.input(), options: opts });
+    this.q = this.spawn({ prompt: this.input(), options: opts });
     void this.pump();
   }
 
@@ -273,15 +289,12 @@ export class ClaudeSession {
     const base = { id: `req:${requestId}`, threadId: this.params.threadId, turnId: this.currentTurnId, seq: 0, createdAt: now, updatedAt: now };
     let item: ApprovalItem | QuestionItem;
     if (toolName === "AskUserQuestion") {
-      const qs = (input.questions as any[]) ?? [];
-      const first = qs[0] ?? {};
       item = {
         ...base,
         kind: "question",
         requestId,
-        prompt: qs.map((q: any) => q.question).join("\n"),
-        options: first.options ? first.options.map((op: any) => ({ label: op.label, description: op.description })) : null,
-        answer: null,
+        questions: asksOf(input),
+        answers: [],
         status: "pending",
       };
     } else {
@@ -311,8 +324,11 @@ export class ClaudeSession {
     });
     const decidedAt = this.sink.now();
     if (item.kind === "question") {
-      const answer = result.behavior === "allow" ? String((result.updatedInput as any)?.answers ? Object.values((result.updatedInput as any).answers)[0] : "") : null;
-      this.sink.upsertItem({ ...item, status: result.behavior === "allow" ? "answered" : "expired", answer, updatedAt: decidedAt });
+      // Read the answers back off the map that went to the CLI, so the
+      // transcript shows exactly what the agent was told.
+      const given = result.behavior === "allow" ? ((result.updatedInput as any)?.answers as Record<string, string> | undefined) ?? {} : {};
+      const answers = item.questions.map((q) => given[q.question] ?? "");
+      this.sink.upsertItem({ ...item, status: result.behavior === "allow" ? "answered" : "expired", answers, updatedAt: decidedAt });
     } else {
       this.sink.upsertItem({ ...item, status: result.behavior === "allow" ? "allowed" : "denied", decidedAt, updatedAt: decidedAt });
     }
@@ -321,24 +337,31 @@ export class ClaudeSession {
   }
 
   /** Build the PermissionResult for an approval/question response. */
-  buildResponse(requestId: string, behavior: "allow" | "deny", extra: { updatedPermissions?: unknown[]; message?: string; answer?: string }): PermissionResult | null {
+  buildResponse(requestId: string, behavior: "allow" | "deny", extra: { updatedPermissions?: unknown[]; message?: string; answer?: string; answers?: string[] }): PermissionResult | null {
     const p = this.pending.get(requestId);
     if (!p) return null;
     if (behavior === "deny") return { behavior: "deny", message: extra.message ?? "User denied", interrupt: false };
     if (p.item.kind === "question") {
       // `updatedInput` is validated against AskUserQuestionInput, which requires
       // at least one question — so the original input has to be passed through
-      // rather than rebuilt. We only answer the question we actually presented
-      // (the first); its text is the key the CLI looks the answer up by.
+      // rather than rebuilt.
       const questions = Array.isArray(p.input.questions) ? (p.input.questions as any[]) : [];
-      const first = questions[0];
-      const answer = extra.answer ?? "";
-      const answers: Record<string, string> = first?.question ? { [first.question]: answer } : {};
-      // A freeform answer is reported separately from a structured choice.
-      const chosen = (first?.options ?? []).some((op: any) => op?.label === answer);
+      // The question text is the key the CLI reads the answer by. It drops any
+      // question it finds no key for, and never tells the agent it did, so
+      // every question the user answered needs an entry here.
+      const given = extra.answers ?? (extra.answer !== undefined ? [extra.answer] : []);
+      const answers: Record<string, string> = {};
+      questions.forEach((q: any, i: number) => {
+        if (q?.question && given[i]) answers[q.question] = given[i]!;
+      });
+      // A freeform answer is reported separately from a structured choice, but
+      // only for a lone question: the CLI prefers `response` over the whole
+      // answers map, so on a multi-question ask it would hide every choice.
+      const lone = questions.length === 1 ? given[0] : undefined;
+      const chosen = (questions[0]?.options ?? []).some((op: any) => op?.label === lone);
       return {
         behavior: "allow",
-        updatedInput: { ...p.input, answers, ...(chosen ? {} : { response: answer }) },
+        updatedInput: { ...p.input, answers, ...(lone && !chosen ? { response: lone } : {}) },
       };
     }
     return { behavior: "allow", updatedPermissions: (extra.updatedPermissions as any) ?? undefined };
@@ -346,6 +369,20 @@ export class ClaudeSession {
 
   pendingItem(requestId: string): ApprovalItem | QuestionItem | null {
     return this.pending.get(requestId)?.item ?? null;
+  }
+
+  /**
+   * Read the `/` menu off the live query. A session that is starting, or one
+   * that ended between the init message and this call, has nothing to say:
+   * the thread keeps its last known list rather than losing it to an error.
+   */
+  private async readCommands(): Promise<void> {
+    try {
+      const commands = await this.q?.supportedCommands();
+      if (commands) this.sink.onCommands(toCommandInfos(commands, this.terminalCommands));
+    } catch {
+      /* the list stays as it was */
+    }
   }
 
   // ------------------------------------------------------------------------
@@ -432,6 +469,19 @@ export class ClaudeSession {
       case "system": {
         if (msg.subtype === "init") {
           this.sink.onSessionInit({ model: msg.model, claudeCodeVersion: msg.claude_code_version, permissionMode: msg.permissionMode });
+          this.terminalCommands = msg.terminal_slash_commands ?? [];
+          // The init message names the commands but not their descriptions, so
+          // the menu still needs the full list. Ask for it here, where the
+          // session is known to be up, and let the answer arrive late.
+          void this.readCommands();
+        } else if (msg.subtype === "commands_changed") {
+          // The SDK found more skills. It replaces its list rather than
+          // patching it, so we replace ours.
+          this.sink.onCommands(toCommandInfos(msg.commands, this.terminalCommands));
+        } else if (msg.subtype === "local_command_output") {
+          // A command the CLI answered itself, such as /usage. Without this the
+          // user runs the command and sees nothing at all.
+          this.sink.upsertItem({ ...base, id: this.newItemId(), kind: "assistant", text: msg.content, streaming: false, model: null });
         } else if (msg.subtype === "compact_boundary") {
           this.sink.upsertItem({ ...base, id: this.newItemId(), kind: "note", tone: "info", text: `Context compacted (${msg.compact_metadata.trigger})` });
         } else if (msg.subtype === "task_started") {
@@ -594,6 +644,21 @@ export class ClaudeSession {
         return;
     }
   }
+}
+
+/**
+ * Read the questions out of an `AskUserQuestion` input. The tool accepts one to
+ * four, and a question with no choices takes free text.
+ */
+function asksOf(input: Record<string, unknown>): QuestionAsk[] {
+  const qs = Array.isArray(input.questions) ? (input.questions as any[]) : [];
+  return qs.map((q: any) => ({
+    question: String(q?.question ?? ""),
+    ...(q?.header ? { header: String(q.header) } : {}),
+    options: Array.isArray(q?.options) && q.options.length > 0
+      ? q.options.map((op: any) => ({ label: String(op?.label ?? ""), ...(op?.description ? { description: String(op.description) } : {}) }))
+      : null,
+  }));
 }
 
 function toSdkMode(m: PermissionMode): SdkPermissionMode {
