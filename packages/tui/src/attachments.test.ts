@@ -126,10 +126,16 @@ test("a clipboard image becomes an attachment with real bytes on disk", () => {
   assert.deepEqual(readFileSync(attachment!.path), PNG, "the path should point at the bytes");
 });
 
-test("a missing reader names the one to install rather than failing", () => {
+test("a missing reader asks for an install, it does not report the spawn failure", () => {
   const { attachment, error } = readClipboardImage(() => ({ stdout: null, status: null, error: enoent() }));
   assert.equal(attachment, undefined);
+  // covey depends on no clipboard binary, so "none installed" is an ordinary
+  // state. The line has to be an instruction the reader can act on. Matching
+  // the binary name alone is not enough: "pngpaste failed: spawnSync ENOENT"
+  // contains it too, and that is the degradation this test exists to stop.
+  assert.match(error!, /^to paste an image: /);
   assert.match(error!, /pngpaste|wl-clipboard|xclip/);
+  assert.doesNotMatch(error!, /ENOENT|spawnSync|failed/);
 });
 
 test("an empty clipboard says so", () => {

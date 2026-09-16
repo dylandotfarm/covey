@@ -33,15 +33,23 @@ test("keeps explicit newlines as row breaks, including empty lines", () => {
 test("a pasted tab never makes a row wider than the budget", () => {
   const w = 60;
   const pasted = "\t\t\t\tconst result = compute(alpha, beta, gamma, delta);";
-  // the defect: the raw paste measures 54 columns and paints 82
-  assert.ok(painted(pasted) > w, "the sample paste must overflow, or it tests nothing");
-  const value = normalisePaste(pasted);
-  assert.ok(!value.includes("\t"), "paste still holds a tab");
-  for (const row of wrapEditorLines(value, w)) {
-    assert.ok(painted(row.text) <= w, `row paints ${painted(row.text)} columns in a ${w} column budget`);
+  // Guard, not the assertion under test: if the sample stopped overflowing the
+  // case below would pass against any implementation and protect nothing.
+  assert.ok(painted(pasted) > w, `the sample paste must overflow ${w} columns, or this case tests nothing`);
+  // The defect is the painted width of a row, so assert exactly that. Checking
+  // that no tab survived would pass for any expansion that drops tabs without
+  // making one character one column, and would hide the overflow behind it.
+  for (const row of wrapEditorLines(normalisePaste(pasted), w)) {
+    const paints = painted(row.text);
+    assert.ok(
+      paints <= w,
+      `row paints ${paints} columns into a ${w} column budget, so ${paints - w} columns land on the sidebar: ${JSON.stringify(row.text)}`,
+    );
   }
 });
 
+// Not a regression case: the CRLF rule moved here from `App.tsx` unchanged.
+// This pins the moved behaviour, and the indent depth the tab rule produces.
 test("normalisePaste keeps indent depth and still folds CRLF", () => {
   assert.equal(normalisePaste("\ta\r\n\t\tb\rc"), "  a\n    b\nc");
 });

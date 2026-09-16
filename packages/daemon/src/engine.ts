@@ -373,7 +373,7 @@ export class Engine {
         if (!pending) throw new EngineError("not_found", "request no longer pending");
         const res = cmd.type === "approval.respond"
           ? s.buildResponse(cmd.requestId, cmd.behavior, { updatedPermissions: cmd.updatedPermissions, message: cmd.message })
-          : s.buildResponse(cmd.requestId, "allow", { answer: cmd.answer });
+          : s.buildResponse(cmd.requestId, "allow", { answer: cmd.answer, answers: cmd.answers });
         if (!res) throw new EngineError("not_found", "request no longer pending");
         s.respond(cmd.requestId, res);
         return this.db.shellSeq();
