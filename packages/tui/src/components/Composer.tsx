@@ -1,9 +1,10 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { Thread, TimelineItem, Attachment } from "@covey/protocol";
+import type { Thread, TimelineItem } from "@covey/protocol";
 import { T } from "../theme.js";
 import { fmtMs } from "../lines.js";
 import { caretToVisual, type VisualLine } from "../editor.js";
+import { menuWindowStart, MENU_ROWS, type MenuView } from "../composerMenu.js";
 
 export interface ComposerProps {
   thread: Thread | null;
@@ -16,13 +17,14 @@ export interface ComposerProps {
   /** Word-wrapped rows, computed in App so it can size the box to match. */
   rows: VisualLine[];
   maxRows: number;
-  attachments: Attachment[];
   /** Free-text answer being typed for a pending question. */
   answerDraft: string;
+  /** The prefix menu — `/` commands, `@` files — while one is open. */
+  menu: MenuView | null;
 }
 
 /** Renders the multi-line editor. Editing state lives in App (useInput). */
-export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, attachments, answerDraft }: ComposerProps) {
+export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, answerDraft, menu }: ComposerProps) {
   const running = thread?.latestTurn?.state === "running";
   const lines = editorLines(rows, value, cursor, focused, maxRows);
   const borderColor = pending ? T.warning : focused ? T.accentDim : T.border;
@@ -36,6 +38,7 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   const queued = thread?.queuedTurns ?? 0;
   return (
     <Box flexDirection="column" width={width}>
+      {menu && <PrefixMenu menu={menu} width={width} />}
       <Box flexDirection="column" borderStyle="round" borderColor={borderColor} paddingX={1}>
         {pending ? (
           pending.kind === "approval"
@@ -44,12 +47,6 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
         ) : null}
         {pending?.kind === "question" && answerDraft.length > 0 && (
           <Text>{answerDraft}<Text inverse> </Text></Text>
-        )}
-        {!pending && attachments.length > 0 && (
-          <Text color={T.success} wrap="truncate">
-            {attachments.map((a) => `⎘ ${a.name}`).join("  ")}
-            <Text color={T.faint}>  ⌫ to remove</Text>
-          </Text>
         )}
         {!pending && lines.map((l, i) => <Text key={i}>{l}</Text>)}
         {!pending && value.length === 0 && !focused ? null : null}
@@ -70,6 +67,44 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
           {running ? <Text color={T.working}>working… <Text color={T.subtle}>esc interrupt{width > 100 ? " · ctrl+b background" : ""} · enter joins in</Text></Text> : <Text color={T.faint}>{stats}</Text>}
           <Text color={T.faint}>{running ? "" : width > 110 ? "  enter send · shift+enter newline" : ""}</Text>
         </Box>
+      </Box>
+    </Box>
+  );
+}
+
+/**
+ * The prefix menu, above the draft.
+ *
+ * Above, because Ink cannot paint under `position="absolute"`: a list that
+ * overlaps the transcript is not available, so the composer grows upwards and
+ * the transcript gives up the rows. The heavy full-view picker is the wrong
+ * shape for something that re-filters on every keystroke.
+ */
+function PrefixMenu({ menu, width }: { menu: MenuView; width: number }) {
+  const { rows, index } = menu;
+  if (rows.length === 0) {
+    return <Box paddingX={2}><Text color={T.subtle} wrap="truncate">{menu.empty}</Text></Box>;
+  }
+  const first = menuWindowStart(rows.length, index);
+  const shown = rows.slice(first, first + MENU_ROWS);
+  const labelW = Math.min(30, Math.max(...shown.map((r) => r.label.length)));
+  const hintW = Math.max(0, width - 4 - labelW - 2);
+  return (
+    <Box flexDirection="column" paddingX={2}>
+      {shown.map((r, i) => {
+        const selected = first + i === index;
+        return (
+          <Text key={r.key} wrap="truncate">
+            <Text color={T.accent} bold>{selected ? "\u276f " : "  "}</Text>
+            <Text color={selected ? T.text : T.muted} bold={selected} backgroundColor={selected ? T.selection : undefined}>{r.label.padEnd(labelW).slice(0, labelW)}</Text>
+            <Text color={T.subtle} backgroundColor={selected ? T.selection : undefined}>{"  " + r.hint.slice(0, hintW)}</Text>
+          </Text>
+        );
+      })}
+      <Box paddingX={2}>
+        <Text color={T.faint} wrap="truncate">
+          {`\u2191\u2193 choose \u00b7 tab or enter completes \u00b7 esc closes${rows.length > MENU_ROWS ? `  (${index + 1}/${rows.length})` : ""}`}
+        </Text>
       </Box>
     </Box>
   );

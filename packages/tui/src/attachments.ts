@@ -224,3 +224,76 @@ function saveClipboardImage(buf: Buffer): Attachment {
   writeFileSync(path, buf);
   return { name: `clipboard-${stamp}.png`, path, mimeType: "image/png", data: buf.toString("base64") };
 }
+
+/**
+ * A pending attachment and the exact text that stands for it in the draft.
+ *
+ * The tag is ordinary text. Nothing protects it from an edit, and that is the
+ * point: if the user deletes the tag, `keepTagged` drops the file on send. The
+ * tag never reaches the wire — `Attachment` on the protocol has no `tag` field.
+ */
+export interface TaggedAttachment extends Attachment {
+  tag: string;
+}
+
+/**
+ * Build the tag for a file. `taken` is the text the tag must not appear in:
+ * the draft, plus the tags already in use. A second `shot.png` therefore gets
+ * `[shot.png 2]`, and so does a first one when the user typed `[shot.png]`
+ * into the draft by hand.
+ */
+export function makeTag(name: string, taken: string): string {
+  // A bracket or a newline in the name would break the tag into two pieces of
+  // text, and then no exact match can find it again.
+  const safe = name.replace(/[[\]\r\n]/g, "_").trim() || "file";
+  let tag = `[${safe}]`;
+  for (let n = 2; taken.includes(tag); n++) tag = `[${safe} ${n}]`;
+  return tag;
+}
+
+/** Give each attachment a tag that is unique against `taken` and the others. */
+export function tagAttachments(atts: Attachment[], taken: string): TaggedAttachment[] {
+  const out: TaggedAttachment[] = [];
+  let seen = taken;
+  for (const a of atts) {
+    const tag = makeTag(a.name, seen);
+    seen += `\n${tag}`;
+    out.push({ ...a, tag });
+  }
+  return out;
+}
+
+/**
+ * Put the tags into `value` at `caret`, so the file reads as a word in the
+ * sentence. Adds the space on each side only when the draft lacks one. The
+ * trailing space goes in at the end of the draft too, because the user types
+ * the next word there and it must not touch the tag.
+ */
+export function spliceTags(value: string, caret: number, tags: string[]): { value: string; caret: number } {
+  const before = value.slice(0, caret);
+  const after = value.slice(caret);
+  const lead = before.length > 0 && !/\s$/.test(before) ? " " : "";
+  const trail = /^\s/.test(after) ? "" : " ";
+  const chunk = lead + tags.join(" ") + trail;
+  return { value: before + chunk + after, caret: caret + chunk.length };
+}
+
+/** Keep the attachments whose tag is still in the text. */
+export function keepTagged<T extends TaggedAttachment>(text: string, atts: T[]): T[] {
+  return atts.filter((a) => text.includes(a.tag));
+}
+
+/**
+ * Work out what a drop does to the composer: the tags go into the draft at the
+ * caret, and the pending list comes back with the new files on the end.
+ *
+ * A drop first forgets the files whose tag the user already deleted, so a name
+ * that is free again is free to use, and the count the composer holds matches
+ * what the draft says.
+ */
+export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[]): { value: string; caret: number; attachments: TaggedAttachment[] } {
+  const live = keepTagged(draft, pending);
+  const tagged = tagAttachments(dropped, [draft, ...live.map((a) => a.tag)].join("\n"));
+  const text = spliceTags(draft, caret, tagged.map((a) => a.tag));
+  return { ...text, attachments: [...live, ...tagged] };
+}

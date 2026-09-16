@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readClipboardImage, type RunReader } from "./attachments.js";
+import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readClipboardImage, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, type RunReader } from "./attachments.js";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -151,4 +151,62 @@ test("output that is not a PNG is not attached", () => {
 test("an oversized clipboard image reports its size", () => {
   const big = Buffer.concat([PNG, Buffer.alloc(6 * 1024 * 1024)]);
   assert.match(readClipboardImage(reader({ stdout: big })).error!, /limit 5 MB/);
+});
+
+const att = (name: string) => ({ name, path: `/a/${name}`, mimeType: "image/png" });
+
+test("a file becomes a tag named after the file", () => {
+  assert.equal(makeTag("shot.png", ""), "[shot.png]");
+});
+
+test("two files with one name get two tags", () => {
+  const tags = tagAttachments([att("shot.png"), att("shot.png"), att("shot.png")], "").map((a) => a.tag);
+  assert.deepEqual(tags, ["[shot.png]", "[shot.png 2]", "[shot.png 3]"]);
+});
+
+test("a tag the user typed by hand does not collide", () => {
+  assert.equal(makeTag("shot.png", "why is [shot.png] red?"), "[shot.png 2]");
+});
+
+test("a bracket in the name cannot split the tag", () => {
+  assert.equal(makeTag("a[1].png", ""), "[a_1_.png]");
+});
+
+test("the tag lands at the caret, spaced off the words around it", () => {
+  assert.deepEqual(spliceTags("look at and say why", 8, ["[shot.png]"]), { value: "look at [shot.png] and say why", caret: 19 });
+  // At the end of the draft the trailing space still goes in, so the next word
+  // the user types does not touch the tag.
+  assert.deepEqual(spliceTags("look at this", 12, ["[shot.png]"]), { value: "look at this [shot.png] ", caret: 24 });
+  assert.deepEqual(spliceTags("", 0, ["[shot.png]"]), { value: "[shot.png] ", caret: 11 });
+  // The draft already has the space, so do not add a second one.
+  assert.deepEqual(spliceTags("look at  rest", 8, ["[one.png]", "[two.png]"]), { value: "look at [one.png] [two.png] rest", caret: 27 });
+});
+
+test("an attachment goes when the user deletes its tag", () => {
+  const atts = tagAttachments([att("shot.png"), att("shot.png")], "");
+  assert.deepEqual(keepTagged("compare [shot.png] with [shot.png 2]", atts).length, 2);
+  assert.deepEqual(keepTagged("compare [shot.png] with nothing", atts).map((a) => a.tag), ["[shot.png]"]);
+  assert.deepEqual(keepTagged("", atts), []);
+});
+
+test("a dropped file lands in the draft as a tag at the caret", () => {
+  const drop = applyDrop("look at and say why", 8, [att("shot.png")], []);
+  assert.equal(drop.value, "look at [shot.png] and say why", "the file belongs where it was dropped, not on a line of its own");
+  assert.equal(drop.caret, 19);
+  assert.deepEqual(drop.attachments.map((a) => a.tag), ["[shot.png]"]);
+});
+
+test("two files with one name get two tags the user can tell apart", () => {
+  const first = applyDrop("compare", 7, [att("shot.png")], []);
+  const second = applyDrop(first.value, first.caret, [att("shot.png")], first.attachments);
+  const tags = second.attachments.map((a) => a.tag);
+  assert.equal(new Set(tags).size, 2, `two files called shot.png need two tags, got ${JSON.stringify(tags)}`);
+  assert.equal(second.value, "compare [shot.png] [shot.png 2] ");
+});
+
+test("a drop forgets the file whose tag the user already deleted", () => {
+  const first = applyDrop("", 0, [att("shot.png")], []);
+  // The user selects the tag and deletes it, then drops the same file again.
+  const second = applyDrop("", 0, [att("shot.png")], first.attachments);
+  assert.deepEqual(second.attachments.map((a) => a.tag), ["[shot.png]"], "the freed name is free to use again");
 });

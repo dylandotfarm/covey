@@ -15,7 +15,7 @@ const tool = (turnId: string, summary: string, extra: Record<string, unknown> = 
 
 function view(items: TimelineItem[], latestTurn: string | null): ThreadView {
   const thread = { latestTurn: latestTurn ? { turnId: latestTurn, state: "completed", startedAt: "", completedAt: "" } : null } as Thread;
-  return { machine: "m", threadId: "t", thread, items: new Map(items.map((i) => [i.id, i])), loading: false, error: null, hasMore: false, loadingOlder: false, seq: items.length };
+  return { machine: "m", threadId: "t", thread, items: new Map(items.map((i) => [i.id, i])), loading: false, error: null, hasMore: false, loadingOlder: false, seq: items.length, commands: null, dirs: new Map() };
 }
 
 const text = (l: ReturnType<typeof layoutTranscript>) => l.lines.map(lineText).join("\n");
@@ -80,4 +80,17 @@ test("a failed call is called out on the folded row, so nothing hides a problem"
 test("a call still running in the background is counted on the folded row", () => {
   const items = [user("a", "go"), tool("a", "ls"), tool("a", "npm test", { background: { taskId: "k", state: "running", summary: null } }), user("b", "ok")];
   assert.match(text(layoutTranscript(view(items, "b"), 80, new Set())), /1 in the background/);
+});
+
+test("an attachment the text names inline needs no footer line", () => {
+  const withTag = base("user", "a", { text: "why is [shot.png] red?", attachments: [{ name: "shot.png", path: "/d/1.png", mimeType: "image/png" }] });
+  const out = text(layoutTranscript(view([withTag], "a"), 80, new Set()));
+  assert.match(out, /why is \[shot\.png\] red\?/);
+  assert.doesNotMatch(out, /⎘/, "the tag already says which file this is");
+});
+
+test("a message from before tags existed keeps its footer line", () => {
+  const old = base("user", "a", { text: "look at this", attachments: [{ name: "shot.png", path: "/d/1.png", mimeType: "image/png" }] });
+  const out = text(layoutTranscript(view([old], "a"), 80, new Set()));
+  assert.match(out, /⎘ shot\.png/);
 });
