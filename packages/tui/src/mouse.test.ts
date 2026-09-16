@@ -72,21 +72,16 @@ test("a sideways notch mixed into a vertical scroll does not reverse it", () => 
   assert.equal(evs.reduce((n, e) => n + wheelDelta(e, 10), 0), -3);
 });
 
-// The terminal delivers a fast scroll as one chunk, and App replays it notch by
-// notch. Each notch has to measure from the store, because `state` is the last
-// render's snapshot and does not move inside the loop.
-test("a batch of notches in one chunk moves the whole distance", () => {
+// The terminal delivers a fast scroll as one chunk. The parser has to split it
+// into one event a notch, or the rows the chunk is worth are lost before any
+// handler sees them. That the handler then *applies* all five is a separate
+// claim, and one this file cannot make: it lives in a React closure, so
+// wheel.test.ts mounts App and asserts it there.
+test("one chunk parses into one event a notch", () => {
   const evs = parseMouse("[<64;40;10M" + "\x1b[<64;40;10M".repeat(4));
   assert.equal(evs.length, 5);
   assert.equal(evs.every((e) => e.kind === "wheel"), true);
-
-  // App folds the chunk the way this loop does, over `store.getState()`. It
-  // used to fold it over the render snapshot, which does not move inside the
-  // loop, so all five notches added to 0 and the chunk moved one row.
-  const max = 100;
-  let offset = 0;
-  for (const e of evs) offset = Math.min(max, Math.max(0, offset + wheelDelta(e, 10)));
-  assert.equal(offset, 5);
+  assert.equal(evs.reduce((n, e) => n + wheelDelta(e, 10), 0), 5, "five notches are worth five rows");
 });
 
 test("parses a batch of motion events from one chunk", () => {
