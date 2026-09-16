@@ -88,6 +88,7 @@ function session() {
     onTurnComplete: (info) => { turns.push(turnFigures(info)); },
     onSessionInit: () => {},
     onModelUsed: () => {},
+    onCommands: () => {},
     now: () => new Date().toISOString(),
   };
   const s = new ClaudeSession({

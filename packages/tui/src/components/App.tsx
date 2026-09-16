@@ -15,6 +15,9 @@ import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
 import * as Ed from "../editor.js";
+import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
+import { menuHeight, type MenuView } from "../composerMenu.js";
+import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
 import { readClipboardImage, readDroppedFiles } from "../attachments.js";
 import { T } from "../theme.js";
 
@@ -74,6 +77,10 @@ export function App({ store }: { store: Store }) {
   // An AskUserQuestion call carries up to four questions, stepped through one
   // at a time. The answers collect here and go to the daemon in one command.
   const [answersGiven, setAnswersGiven] = useState<string[]>([]);
+  // The prefix menu: which row is under the cursor, and whether esc has shut
+  // it for the name being typed.
+  const [menuIndex, setMenuIndex] = useState(0);
+  const [menuClosed, setMenuClosed] = useState(false);
   const [quitArmed, setQuitArmed] = useState(false);
   const quitTimer = useRef<NodeJS.Timeout | null>(null);
   /** Transcript line the mouse went down on, so a click can fold what it hit. */
@@ -92,9 +99,39 @@ export function App({ store }: { store: Store }) {
   const editorRows = useMemo(() => Ed.wrapEditorLines(draft, mainW - 4), [draft, mainW]);
   const maxEditorRows = 10;
   const attachmentCount = state.view ? store.attachments(state.view.threadId).length : 0;
-  const composerRows = pending
+  // A prefix menu is a property of the draft, not a mode: it is open whenever
+  // the draft is part way through a command name or a file mention, and esc
+  // has not shut it. `/` wins, because a draft cannot be both.
+  // Not while the diff panel is up: it takes the keys, so a draft left over
+  // from before must not hold a menu open or take tab off the focus.
+  const composerActive = state.focus === "composer" && !state.overlay && !state.diffView && !pending && !!state.view;
+  const token = composerActive ? commandToken(draft) : null;
+  const mention = composerActive && token === null ? mentionAt(draft, caret) : null;
+  // The directory being completed. The daemon reads it once; the leaf filters
+  // it here, so a word costs one request rather than one per keystroke.
+  const mentionDirPath = mention ? mentionDir(mention.text) : null;
+  const listing = mentionDirPath !== null ? state.view?.dirs.get(mentionDirPath) : undefined;
+  const commandItems = useMemo(
+    () => (token === null ? [] : commandMenu(state.view?.commands ?? null, LOCAL_COMMANDS, token)),
+    [token, state.view?.commands],
+  );
+  const mentionItems = useMemo(
+    () => (mention === null ? [] : filterEntries(listing?.entries ?? [], mentionLeaf(mention.text))),
+    [mention?.text, listing],
+  );
+  const menuKind = menuClosed ? null : token !== null ? "command" : mention !== null ? "mention" : null;
+  const menuItems: unknown[] = menuKind === "command" ? commandItems : menuKind === "mention" ? mentionItems : [];
+  const menu: MenuView | null = menuKind === null ? null : {
+    rows: menuKind === "command" ? commandRows(commandItems) : entryRows(mentionItems),
+    index: Math.min(menuIndex, Math.max(0, menuItems.length - 1)),
+    empty: menuKind === "command"
+      ? (state.view?.commands == null ? "the commands arrive when this thread starts its first turn" : "no command matches")
+      : listing?.loading ? "reading the directory…" : listing?.error ? listing.error : "no file matches",
+  };
+  const composerRows = (pending
     ? 3 + (pending.kind === "question" && answerDraft.length > 0 ? 1 : 0)
-    : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0);
+    : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0))
+    + (menu ? menuHeight(menu) : 0);
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
   const questionUi = useMemo(() => ({ cursor: questionCursor, answered: answersGiven }), [questionCursor, answersGiven]);
   const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded]);
@@ -139,6 +176,13 @@ export function App({ store }: { store: Store }) {
   const threadKey = state.selected?.threadId ?? "";
   useEffect(() => { setDraft(store.draft(threadKey)); setCaret(store.draft(threadKey).length); }, [threadKey, store]);
   useEffect(() => { store.setDraft(threadKey, draft); }, [draft, threadKey, store]);
+  // A different name is a different question, so the cursor goes back to the
+  // top and a menu the reader shut comes back.
+  const menuKey = token !== null ? `/${token}` : mention ? `@${mention.text}` : null;
+  useEffect(() => { setMenuIndex(0); setMenuClosed(false); }, [menuKey]);
+  // The daemon holds the files, so the directory behind an `@` has to be
+  // fetched. `loadDir` reads each one once.
+  useEffect(() => { if (mentionDirPath !== null) void store.loadDir(mentionDirPath); }, [mentionDirPath, threadKey, store]);
 
   const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle }); };
   const openInput = (title: string, onSubmit: (v: string) => void, initial = "", placeholder?: string, onCancel?: () => void) => { setOvFilter(initial); store.setOverlay({ kind: "input", title, onSubmit, initial, placeholder, onCancel }); };
@@ -747,6 +791,10 @@ export function App({ store }: { store: Store }) {
     // taking too long. It keeps running and reports back when it is done.
     if (key.ctrl && input === "b") { void store.background(); return; }
     if (key.ctrl && input === "n") { void newThread(); return; }
+    // Tab completes the highlighted command before it cycles the focus. The
+    // menu is only ever open with the composer focused and a command name in
+    // the draft, so this costs the focus key nothing anywhere else.
+    if (key.tab && !key.shift && menu && menu.rows.length > 0) { acceptMenu(); return; }
     if (key.tab) {
       store.setFocus(sidebarVisible && state.focus === "composer" ? "sidebar" : "composer");
       return;
@@ -830,6 +878,17 @@ export function App({ store }: { store: Store }) {
 
   function handleComposerKey(input: string, key: any) {
     const running = state.view?.thread?.latestTurn?.state === "running";
+    // While the `/` menu is open it takes the keys that mean "choose", and
+    // nothing else: every other key edits the draft, and editing the draft is
+    // what filters the list.
+    if (menu) {
+      if (key.escape) { setMenuClosed(true); return; }
+      if (menu.rows.length > 0) {
+        if (key.upArrow) { setMenuIndex(Math.max(0, menu.index - 1)); return; }
+        if (key.downArrow) { setMenuIndex(Math.min(menu.rows.length - 1, menu.index + 1)); return; }
+        if (key.return && !key.shift && !key.ctrl && !key.meta && !key.super) { acceptMenu(); return; }
+      }
+    }
     if (key.escape) { if (running) void store.interrupt(); return; }
     if (pending) {
       if (pending.kind === "approval") {
@@ -920,6 +979,21 @@ export function App({ store }: { store: Store }) {
     if (key.ctrl && input === "v") return pasteClipboardImage();
     if (input && !key.ctrl && !key.meta && !key.super) insert(input);
   }
+  /**
+   * Take the highlighted row. A command replaces the whole draft, because the
+   * menu is only open while the draft is the command name; a file replaces the
+   * `@word` the caret is in, wherever in the sentence that is.
+   */
+  function acceptMenu() {
+    if (!menu) return;
+    if (menuKind === "command") {
+      const c = commandItems[menu.index];
+      if (c) applyEdit(acceptCommand(c));
+      return;
+    }
+    const e = mentionItems[menu.index];
+    if (e && mention) applyEdit(acceptMention(draft, mention, e));
+  }
   /** Hand new attachments to the store. Returns false when there were none. */
   function attach(attachments: Attachment[]): boolean {
     if (attachments.length === 0 || !state.view) return false;
@@ -972,7 +1046,7 @@ export function App({ store }: { store: Store }) {
                 ? <Summary state={state} row={summaryRow} width={mainW} height={transcriptH} />
                 : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={state.scrollFromBottom} width={mainW} selection={state.selection} />}
         </Box>
-        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} attachments={state.view ? store.attachments(state.view.threadId) : []} answerDraft={answerDraft} />
+        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} attachments={state.view ? store.attachments(state.view.threadId) : []} answerDraft={answerDraft} menu={menu} />
       </Box>
     </Box>
   );

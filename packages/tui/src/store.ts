@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { ViewCache } from "./viewCache.js";
@@ -51,6 +51,26 @@ export interface ThreadView {
    * sends only what changed. Zero until the first snapshot lands.
    */
   seq: number;
+  /**
+   * The `/` menu the daemon reported for this thread. `null` means the daemon
+   * does not know yet — the thread has never run a session — which the menu
+   * says rather than showing an empty list.
+   */
+  commands: ThreadCommands;
+  /**
+   * Directories read for the `@` menu, keyed by their path relative to the
+   * thread's working directory (`""` is that directory). One request per
+   * directory, not per keystroke: the filtering happens here.
+   */
+  dirs: Map<string, DirListing>;
+}
+
+export interface DirListing {
+  entries: PathEntry[];
+  loading: boolean;
+  /** The directory holds more names than the daemon was willing to send. */
+  truncated: boolean;
+  error: string | null;
 }
 
 export type Focus = "sidebar" | "composer";
@@ -370,6 +390,8 @@ export class Store {
       case "item.upserted": v.items.set(ev.item.id, ev.item); break;
       case "item.removed": v.items.delete(ev.itemId); break;
       case "thread.updated": v.thread = ev.thread; break;
+      // The SDK replaces its command list rather than patching it, so we do too.
+      case "commands.updated": v.commands = ev.commands; break;
     }
     // A resent snapshot carries each item's own seq, which is older than the
     // subscription's, so take the highest and never go backwards.
@@ -389,7 +411,7 @@ export class Store {
   private cacheCurrentView() {
     const v = this.state.view;
     if (!v || v.loading || v.error || v.seq === 0) return;
-    this.viewCache.put(v.machine, v.threadId, { thread: v.thread, items: v.items, hasMore: v.hasMore, seq: v.seq });
+    this.viewCache.put(v.machine, v.threadId, { thread: v.thread, items: v.items, hasMore: v.hasMore, seq: v.seq, commands: v.commands });
   }
 
   /**
@@ -423,13 +445,16 @@ export class Store {
       const view: ThreadView = {
         machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? cached.thread,
         items: cached.items, loading: false, error: null, hasMore: cached.hasMore, loadingOlder: false, seq: cached.seq,
+        // The menu comes back with the items; the directories are read again,
+        // because a file may have appeared since the reader was last here.
+        commands: cached.commands, dirs: new Map(),
       };
       this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
       client?.resumeThread(sel.threadId, cached.seq);
       return;
     }
 
-    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0 };
+    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0, commands: null, dirs: new Map() };
     this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     try {
       const snap: ThreadSnapshot | undefined = await client?.watchThread(sel.threadId, limit);
@@ -443,6 +468,7 @@ export class Store {
         for (const [id, it] of view.items) if (!merged.has(id) || (merged.get(id)!.updatedAt < it.updatedAt)) merged.set(id, it);
         view.items = merged;
         view.hasMore = snap.hasMore;
+        view.commands = snap.commands;
         // Events that landed while the snapshot was in flight already carried
         // the view past the snapshot's seq, so keep the higher of the two.
         view.seq = Math.max(view.seq, snap.seq);
@@ -796,6 +822,34 @@ export class Store {
       this.notify(`moved to ${dstInfo.name}`, "success");
       await this.select({ machine: to.machine, threadId: r.threadId });
     } catch (e: any) { this.notify(`move failed: ${e.message}`, "error"); }
+  }
+
+  /**
+   * Read one directory under the open thread for the `@` menu, once. The
+   * listing is kept for as long as the thread is open: a mention is typed in
+   * seconds, and a request per keystroke over a tailnet is not worth the
+   * newer answer.
+   */
+  async loadDir(dir: string) {
+    const v = this.state.view;
+    if (!v || v.dirs.has(dir)) return;
+    const client = this.clients.get(v.machine);
+    if (!client) return;
+    const threadId = v.threadId;
+    v.dirs.set(dir, { entries: [], loading: true, truncated: false, error: null });
+    this.touch();
+    const put = (l: DirListing) => {
+      const cur = this.state.view;
+      if (!cur || cur.threadId !== threadId) return;
+      cur.dirs.set(dir, l);
+      this.set({ view: { ...cur } });
+    };
+    try {
+      const r = await client.rpc("thread.listDir", { threadId, dir });
+      put({ entries: r.entries, loading: false, truncated: r.truncated, error: null });
+    } catch (e: any) {
+      put({ entries: [], loading: false, truncated: false, error: e.message });
+    }
   }
 
   async browse(machine: string, path: string, onPick: (p: string) => void) {

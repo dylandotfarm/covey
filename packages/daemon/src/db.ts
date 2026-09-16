@@ -8,6 +8,7 @@ import type {
   ShellEvent,
   ThreadEvent,
   ShellEventBody,
+  SlashCommandInfo,
   ModelCounts,
   TurnRecord,
   UsageGroup,
@@ -77,6 +78,8 @@ export class Db {
         ON transcripts(project_key, session_id, subpath, uuid) WHERE uuid IS NOT NULL;
       CREATE TABLE IF NOT EXISTS command_receipts (
         command_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS thread_commands (
+        thread_id TEXT PRIMARY KEY, json TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS turn_checkpoints (
         thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, before_tree TEXT, after_tree TEXT,
         cwd TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY (thread_id, turn_id));
@@ -149,9 +152,27 @@ export class Db {
   }
   deleteThread(id: string) {
     this.sql.prepare("DELETE FROM items WHERE thread_id = ?").run(id);
+    this.sql.prepare("DELETE FROM thread_commands WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM thread_events WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM thread_seq WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM threads WHERE id = ?").run(id);
+  }
+
+  /**
+   * The `/` menu last read off the thread's session. `null` means nobody has
+   * asked the SDK yet, which is a different answer from an empty list.
+   *
+   * It is kept out of the thread record on purpose: the shell snapshot carries
+   * every thread on the machine, and the sidebar must not pay for a command
+   * list per thread.
+   */
+  threadCommands(threadId: string): SlashCommandInfo[] | null {
+    const r: any = this.sql.prepare("SELECT json FROM thread_commands WHERE thread_id = ?").get(threadId);
+    return r ? JSON.parse(r.json) : null;
+  }
+  putThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
+    this.sql.prepare("INSERT OR REPLACE INTO thread_commands(thread_id,json) VALUES(?,?)")
+      .run(threadId, JSON.stringify(commands));
   }
 
   // ---- items --------------------------------------------------------------
