@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { findTargets, hyperlinksEnabled, linkSpans, openCommand, osc8, safeUri, targetUri, toolLink, type LinkContext } from "./links.js";
 import { linkAt, markdownToLines, renderItem, wrapSpans, width } from "./lines.js";
+import type { TimelineItem } from "@covey/protocol";
 
 const ESC = "\u001b";
 const local: LinkContext = { localFiles: true, homeDir: "/Users/d" };
@@ -111,6 +112,19 @@ test("a tool row takes its link from the input, not from the truncated summary",
   // a directory that exists, with the file name cut off.
   assert.deepEqual(links(lines[0]!), ["file://" + path], "the link is the whole path");
   assert.ok(lines[0]!.some((sp) => sp.text.startsWith("Read") && sp.link), "the summary words carry it, not only the path");
+});
+
+test("a question's prompt is linked too", () => {
+  // #27 rewrote this block for multi-question items. The link context has to
+  // be re-applied to the rewritten wrap, and nothing else would notice if a
+  // later merge dropped it again.
+  const item = {
+    id: "q", threadId: "x", turnId: null, seq: 1, createdAt: "", updatedAt: "",
+    kind: "question", requestId: "r", status: "pending",
+    questions: [{ question: "Edit /Users/d/a.ts?", options: null }], answers: [],
+  } as TimelineItem;
+  const lines = renderItem(item, { width: 80, expanded: new Set(), links: local });
+  assert.deepEqual(links(lines[0]!), ["file:///Users/d/a.ts"]);
 });
 
 test("a tool row on a remote machine gets no file link", () => {
