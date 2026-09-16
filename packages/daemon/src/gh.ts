@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { RunIssue, RunPullRequest } from "@covey/protocol";
+import { assertReadOnly } from "./integrate/gh.js";
 
 const run = promisify(execFile);
 
@@ -13,6 +14,9 @@ const run = promisify(execFile);
  * another machine has none of the three.
  */
 async function gh(cwd: string, args: string[]): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
+  // This helper reads. The guard makes that a rule rather than an intention:
+  // a mutating command throws here instead of reaching the process table.
+  assertReadOnly(args);
   try {
     const { stdout } = await run("gh", args, { cwd, timeout: 20_000, maxBuffer: 8 << 20 });
     return { ok: true, out: stdout };

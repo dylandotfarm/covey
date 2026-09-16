@@ -201,6 +201,24 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
         return engine.runIssues(String(p.projectId), Array.isArray(p.numbers) ? p.numbers.map(Number) : []);
       case "run.pullRequest":
         return engine.runPullRequest(String(p.threadId));
+      case "run.gate":
+        return engine.runGate(String(p.threadId), String(p.label ?? ""), p.state, p.evidence ?? null);
+      case "run.memberDiff":
+        return engine.runMemberDiff(String(p.threadId));
+      case "run.queue":
+        return engine.runQueue(Array.isArray(p.entries) ? p.entries : []);
+      case "run.merge":
+        return engine.runMerge({
+          threadId: String(p.threadId),
+          label: String(p.label ?? ""),
+          state: p.state,
+          evidence: p.evidence ?? null,
+          actor: p.actor,
+          method: p.method,
+          queue: p.queue,
+        });
+      case "run.audit":
+        return engine.runAudit(String(p.threadId), String(p.label ?? ""));
       case "machine.restart": {
         const pid = process.pid;
         scheduleRestart(o.log);
