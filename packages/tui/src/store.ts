@@ -381,9 +381,9 @@ export class Store {
   draft(threadId: string) { return this.state.drafts.get(threadId) ?? ""; }
 
   attachments(threadId: string) { return this.state.pendingAttachments.get(threadId) ?? []; }
-  addAttachments(threadId: string, atts: TaggedAttachment[]) {
-    if (atts.length === 0) return;
-    this.state.pendingAttachments.set(threadId, [...this.attachments(threadId), ...atts]);
+  setAttachments(threadId: string, atts: TaggedAttachment[]) {
+    if (atts.length === 0) this.state.pendingAttachments.delete(threadId);
+    else this.state.pendingAttachments.set(threadId, atts);
     this.touch();
   }
   /**

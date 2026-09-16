@@ -13,7 +13,7 @@ import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
 import * as Ed from "../editor.js";
-import { readDroppedImages, spliceTags, tagAttachments } from "../attachments.js";
+import { readDroppedImages, applyDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
 const SIDEBAR_W = 34;
@@ -628,13 +628,10 @@ export function App({ store }: { store: Store }) {
         const { attachments, errors } = readDroppedImages(rawInput);
         for (const e of errors) store.notify(e, "error");
         if (attachments.length > 0) {
-          // The file goes into the sentence as a tag, where the user dropped
-          // it. Tag against the live draft and the tags already in it, so two
-          // files with one name stay apart.
-          const live = store.syncAttachments(state.view.threadId, draft);
-          const tagged = tagAttachments(attachments, [draft, ...live.map((a) => a.tag)].join("\n"));
-          store.addAttachments(state.view.threadId, tagged);
-          applyEdit(spliceTags(draft, caret, tagged.map((a) => a.tag)));
+          // The file goes into the sentence as a tag, where the user dropped it.
+          const drop = applyDrop(draft, caret, attachments, store.attachments(state.view.threadId));
+          store.setAttachments(state.view.threadId, drop.attachments);
+          applyEdit({ value: drop.value, caret: drop.caret });
           return;
         }
         if (errors.length > 0) return;

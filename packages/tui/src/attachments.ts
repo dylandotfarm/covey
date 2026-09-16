@@ -146,3 +146,18 @@ export function spliceTags(value: string, caret: number, tags: string[]): { valu
 export function keepTagged<T extends TaggedAttachment>(text: string, atts: T[]): T[] {
   return atts.filter((a) => text.includes(a.tag));
 }
+
+/**
+ * Work out what a drop does to the composer: the tags go into the draft at the
+ * caret, and the pending list comes back with the new files on the end.
+ *
+ * A drop first forgets the files whose tag the user already deleted, so a name
+ * that is free again is free to use, and the count the composer holds matches
+ * what the draft says.
+ */
+export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[]): { value: string; caret: number; attachments: TaggedAttachment[] } {
+  const live = keepTagged(draft, pending);
+  const tagged = tagAttachments(dropped, [draft, ...live.map((a) => a.tag)].join("\n"));
+  const text = spliceTags(draft, caret, tagged.map((a) => a.tag));
+  return { ...text, attachments: [...live, ...tagged] };
+}
