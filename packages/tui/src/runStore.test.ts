@@ -413,7 +413,12 @@ async function paint(store: Store) {
   const stdout: any = new PassThrough();
   stdout.isTTY = true; stdout.columns = 120; stdout.rows = 30;
   stdout.on("data", (c: Buffer) => chunks.push(c.toString()));
-  const app = render(React.createElement(App, { store }), { stdin, stdout, patchConsole: false, exitOnCtrlC: false });
+  // `interactive` on purpose: Ink writes only the final frame when it thinks
+  // it is in CI, and this test reads the frames. Without it the case passes on
+  // a laptop and fails on the runner, which is worse than no case at all.
+  const app = render(React.createElement(App, { store }), {
+    stdin, stdout, patchConsole: false, exitOnCtrlC: false, interactive: true,
+  });
   await new Promise((r) => setTimeout(r, 200));
   const frame = chunks.join("").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").split("\n");
   /** The 1-based terminal row a piece of text was drawn on, in the sidebar. */
