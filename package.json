@@ -17,12 +17,13 @@
     "node": ">=22",
     "pnpm": ">=12"
   },
+  "//test-timeout": "420s, per test. Chosen on this project's four-core Raspberry Pi under deliberate heavy load, because that is the machine that loses these races (issue #53); an idle CI runner does the whole suite in ~25s. Measured there at load average 25, the slowest single test took 54.3s and a bare `covey stop` against an empty port took 30.9s, so the 60s this started as would have been a flake, not a bound. 420s is ~8x the slowest measured test, and it also clears the sum of the inner bounds in that test — a 60s daemon start, a 150s CLI run, a 30s wait for an exit — so a real fault is named by the bound that knows what went wrong rather than by this one. Too tight is a flake on slow hardware, which is worse than the hang it replaces. Note what it does not cover: a test file whose tests have all finished but whose process cannot exit. Node bounds a test, not a lingering process — measured, an unfixed run with --test-timeout=30000 still ran 238916ms. That is packages/daemon/test/daemons.ts's job.",
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "build": "tsc -b",
     "watch": "tsc -b --watch",
     "typecheck": "tsc -b",
-    "test": "node --import tsx --test \"packages/*/src/**/*.test.ts\" \"packages/*/test/**/*.test.ts\"",
+    "test": "node --import tsx --test --test-timeout=420000 \"packages/*/src/**/*.test.ts\" \"packages/*/test/**/*.test.ts\"",
     "check": "pnpm run check:age && pnpm run typecheck && pnpm test",
     "check:age": "node scripts/pkg-age.mjs check",
     "deps:refresh": "rm -rf node_modules pnpm-lock.yaml && pnpm install",

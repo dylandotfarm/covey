@@ -55,6 +55,11 @@
 - A run's capability data is read *in the daemon* (`packages/daemon/src/resources.ts`), never
   over ssh: the daemon starts from a login shell, an ssh session does not, and an agent
   inherits the daemon's `PATH`. Keep it that way.
+- A test that starts a daemon must start it with `packages/daemon/test/daemons.ts`,
+  and the file must `after(stopAll)`. It unrefs the child so a daemon nobody stopped
+  can never hold the runner open — that, not a slow test, is what hung a gate run
+  for eleven minutes (#53). `--test-timeout` does not cover it: node bounds a test,
+  not a process that lingers once the tests are over.
 - Dependencies: `pnpm add <pkg>`; pnpm refuses versions younger than 7 days
   (`minimumReleaseAge` in pnpm-workspace.yaml). Keep `pnpm run check:age` green. Install
   scripts are blocked (`onlyBuiltDependencies: []`); never use npm in this repo.
