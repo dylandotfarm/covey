@@ -86,8 +86,17 @@ export class ClaudeSession {
    * `commands_changed` push both need them to filter their answer.
    */
   private terminalCommands: string[] = [];
-  /** Streaming block state for the in-flight assistant message. */
-  private blocks: { itemId: string; kind: "text" | "thinking" | "tool"; text: string; json: string; toolName?: string; toolUseId?: string }[] = [];
+  /**
+   * Block state for the API message in flight, indexed by the block's place in
+   * that message — the same number the `assistant` message for that block
+   * resolves to. `done` marks a block the `assistant` message has already
+   * written, whose text is authoritative.
+   */
+  private blocks: { itemId: string; kind: "text" | "thinking" | "tool"; text: string; json: string; done?: boolean; toolName?: string; toolUseId?: string }[] = [];
+  /** The API message the stream is inside, from `message_start`. */
+  private streamMessageId: string | null = null;
+  /** How many blocks of one API message the `assistant` messages have named. */
+  private ordinals = { messageId: "", n: 0 };
   private turnStartedAt = Date.now();
 
   constructor(private params: SessionParams, private sink: SessionSink, private spawn: QueryFactory = query) {}
@@ -372,6 +381,30 @@ export class ClaudeSession {
     return `${this.params.threadId.slice(0, 8)}:${randomUUID()}`;
   }
 
+  /**
+   * The item id for one block of one API message.
+   *
+   * The CLI sends a separate `assistant` message for every content block, and
+   * each one holds a single-entry `content` array, so the index inside that
+   * array is always 0 and identifies nothing. What identifies a block is its
+   * place in the message: the stream event calls that `index`, and the
+   * `assistant` messages arrive in the same order, so counting them gives the
+   * same number. Both paths therefore name one row rather than two, a block
+   * cannot land on the row of the block before it, and a replay of the message
+   * names the same rows again.
+   */
+  private blockItemId(messageId: string | null, ordinal: number): string {
+    return messageId ? `${messageId}:${ordinal}` : this.newItemId();
+  }
+
+  /** The place of the next block of `messageId`, counted across the several
+   *  `assistant` messages that share that id. */
+  private nextOrdinal(messageId: string | null): number {
+    if (!messageId) return 0;
+    if (this.ordinals.messageId !== messageId) this.ordinals = { messageId, n: 0 };
+    return this.ordinals.n++;
+  }
+
   /** A task has left the foreground: remember it, and say so on its row. */
   private goneToBackground(taskId: string) {
     this.backgrounded.add(taskId);
@@ -459,10 +492,12 @@ export class ClaudeSession {
         switch (ev.type) {
           case "message_start":
             this.blocks = [];
+            // The id of every row in this message is built from this.
+            this.streamMessageId = (ev.message?.id as string | undefined) ?? null;
             return;
           case "content_block_start": {
             const cb = ev.content_block;
-            const itemId = this.newItemId();
+            const itemId = this.blockItemId(this.streamMessageId, ev.index);
             if (cb.type === "text") {
               this.blocks[ev.index] = { itemId, kind: "text", text: cb.text ?? "", json: "" };
               this.sink.upsertItem({ ...base, id: itemId, kind: "assistant", text: cb.text ?? "", streaming: true, model: this.params.model }, { streaming: true });
@@ -492,7 +527,10 @@ export class ClaudeSession {
           }
           case "content_block_stop": {
             const b = this.blocks[ev.index];
-            if (!b) return;
+            // The `assistant` message for this block arrives before its stop
+            // event and carries the text in full. Writing the accumulated text
+            // over it would undo that, so the reconciled block is left alone.
+            if (!b || b.done) return;
             if (b.kind === "text") {
               this.sink.upsertItem({ ...base, id: b.itemId, kind: "assistant", text: b.text, streaming: false, model: this.params.model });
             } else if (b.kind === "thinking") {
@@ -513,26 +551,25 @@ export class ClaudeSession {
         // Authoritative reconciliation of the streamed blocks (covers the case
         // where partial events were dropped, e.g. on resume replay).
         const content = (msg.message.content ?? []) as any[];
-        // Derive ids from the API message id where possible: with streaming off
-        // there is no earlier item to reconcile against, and a replayed
-        // assistant message would otherwise mint duplicates.
-        const blockId = (idx: number) => (msg.message.id ? `${msg.message.id}:${idx}` : this.newItemId());
-        content.forEach((cb, idx) => {
-          const b = this.blocks[idx];
+        const messageId = (msg.message.id as string | undefined) ?? null;
+        for (const cb of content) {
+          // Every block takes the next place in the message, whatever its
+          // type, so this number keeps step with the stream's block indices.
+          const ordinal = this.nextOrdinal(messageId);
+          const blockId = this.blockItemId(messageId, ordinal);
+          const b = this.blocks[ordinal];
+          if (b) b.done = true;
           if (cb.type === "text") {
-            const id = b?.kind === "text" ? b.itemId : blockId(idx);
-            this.sink.upsertItem({ ...base, id, kind: "assistant", text: cb.text, streaming: false, model: msg.message.model ?? this.params.model });
+            this.sink.upsertItem({ ...base, id: blockId, kind: "assistant", text: cb.text, streaming: false, model: msg.message.model ?? this.params.model });
           } else if (cb.type === "thinking") {
-            const id = b?.kind === "thinking" ? b.itemId : blockId(idx);
-            this.sink.upsertItem({ ...base, id, kind: "thinking", text: cb.thinking ?? "", streaming: false });
+            this.sink.upsertItem({ ...base, id: blockId, kind: "thinking", text: cb.thinking ?? "", streaming: false });
           } else if (cb.type === "tool_use") {
             const existing = this.sink.getItemByToolUse(cb.id);
-            const id = existing?.id ?? (b?.kind === "tool" ? b.itemId : blockId(idx));
+            const id = existing?.id ?? blockId;
             this.sink.upsertItem({ ...base, ...(existing ?? {}), id, kind: "tool", toolUseId: cb.id, toolName: cb.name, input: cb.input, summary: summariseTool(cb.name, cb.input), status: existing?.status ?? "running", output: existing?.output ?? null, isError: existing?.isError ?? false, parentToolUseId: null, durationMs: existing?.durationMs ?? null, updatedAt: now });
           }
-        });
+        }
         if (msg.message.model) this.sink.onModelUsed(msg.message.model);
-        this.blocks = [];
         return;
       }
       case "user": {
