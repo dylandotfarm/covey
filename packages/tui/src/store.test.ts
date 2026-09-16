@@ -43,3 +43,45 @@ test("a client with no build to watch never claims to be stale", async (t) => {
   await settle(30);
   assert.equal(store.getState().clientStale, false);
 });
+
+/** A client that answers a command the way the daemon does: silence or a refusal. */
+class CommandClient {
+  sent: unknown[] = [];
+  constructor(private refusal: string | null = null) {}
+  async command(cmd: unknown) {
+    this.sent.push(cmd);
+    if (this.refusal) throw new Error(this.refusal);
+  }
+  stop() {}
+}
+
+/** The store with one machine, answered by a client we control, and a thread open. */
+function storeWithClient(store: Store, client: CommandClient) {
+  (store as any).clients.set("ws://fake", client);
+  store.state.selected = { machine: "ws://fake", threadId: "t" };
+}
+
+test("a rewind the daemon refuses never says it reverted", async (t) => {
+  const { store, cleanup } = scratchStore();
+  t.after(cleanup);
+  // What `turn.revert` throws while the thread is busy (daemon engine.ts).
+  const c = new CommandClient("interrupt the running turn first");
+  storeWithClient(store, c);
+
+  assert.equal(await store.revertTurn("t", "turn-1"), false);
+  assert.equal(store.getState().notice?.text, "interrupt the running turn first",
+    "the refusal is the answer the reader gets, and nothing may paint over it");
+  assert.equal(store.getState().notice?.tone, "error");
+});
+
+test("a rewind that goes through says it reverted", async (t) => {
+  const { store, cleanup } = scratchStore();
+  t.after(cleanup);
+  const c = new CommandClient();
+  storeWithClient(store, c);
+
+  assert.equal(await store.revertTurn("t", "turn-1"), true);
+  assert.deepEqual(c.sent, [{ type: "turn.revert", threadId: "t", turnId: "turn-1" }]);
+  assert.equal(store.getState().notice?.text, "reverted");
+  assert.equal(store.getState().notice?.tone, "success");
+});

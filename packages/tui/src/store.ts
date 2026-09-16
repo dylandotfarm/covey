@@ -761,11 +761,37 @@ export class Store {
     await client.command({ type: "question.respond", threadId: v.threadId, requestId: it.requestId, answer: answers[0] ?? "", answers }).catch((e) => this.notify(e.message, "error"));
   }
 
-  async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string) {
+  /**
+   * Send a command about a thread. The refusal is put on the notice line and
+   * also returned, because a caller that says "done" afterwards must first
+   * know that the command went through. Null means it did.
+   */
+  async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string): Promise<string | null> {
     const key = machine ?? this.state.selected?.machine;
     const client = key && this.clients.get(key);
-    if (!client) return;
-    await client.command(cmd).catch((e) => this.notify(e.message, "error"));
+    if (!client) return "no machine";
+    try {
+      await client.command(cmd);
+      return null;
+    } catch (e: any) {
+      const msg = e?.message ?? "the machine refused the command";
+      this.notify(msg, "error");
+      return msg;
+    }
+  }
+
+  /**
+   * Rewind a thread to before a turn: the files, the conversation and the
+   * transcript. The daemon refuses while the thread is busy ("interrupt the
+   * running turn first"), and that refusal is an ordinary answer — it is
+   * already on the notice line. Thus only a command that went through says
+   * "reverted". Both routes to a rewind, `ctrl+k` and `esc` `esc`, come here.
+   */
+  async revertTurn(threadId: string, turnId: string): Promise<boolean> {
+    const err = await this.threadCommand({ type: "turn.revert", threadId, turnId });
+    if (err) return false;
+    this.notify("reverted", "success");
+    return true;
   }
 
   /** Move the selected thread to another machine + project. */
