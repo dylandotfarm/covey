@@ -414,6 +414,12 @@ export interface SlashCommandInfo {
   source: "sdk" | "covey";
 }
 
+/** One candidate for the `@` menu: a name in a directory under the thread. */
+export interface PathEntry {
+  name: string;
+  isDir: boolean;
+}
+
 /**
  * The commands a thread knows about. `null` is "not known yet" — the thread
  * has never had a session, so nobody has asked the SDK. An empty array is
@@ -616,6 +622,18 @@ export interface RpcMethods {
    */
   "fs.mkdir": { params: { path: string; name: string }; result: { path: string } };
   "models.list": { params: Record<string, never>; result: { id: string; label: string }[] };
+  /**
+   * One directory under a thread's working directory, for the `@` menu. The
+   * candidates are on the daemon's machine, so the client cannot read them
+   * itself. `dir` is relative to that working directory and may not leave it;
+   * `""` is the working directory itself. A directory that is not there
+   * answers with no entries rather than an error, because the reader is part
+   * way through typing its name.
+   */
+  "thread.listDir": {
+    params: { threadId: ThreadId; dir: string };
+    result: { dir: string; entries: PathEntry[]; truncated: boolean };
+  };
   /** Live branch state, asked for when offering where a new thread should run. */
   "project.git": { params: { projectId: ProjectId }; result: ProjectGit };
   /** Full patch for a turn; `turnId` omitted = latest turn with a diff. */

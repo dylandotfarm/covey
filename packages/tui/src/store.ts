@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands } from "@covey/protocol";
+import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 
@@ -50,6 +50,20 @@ export interface ThreadView {
    * says rather than showing an empty list.
    */
   commands: ThreadCommands;
+  /**
+   * Directories read for the `@` menu, keyed by their path relative to the
+   * thread's working directory (`""` is that directory). One request per
+   * directory, not per keystroke: the filtering happens here.
+   */
+  dirs: Map<string, DirListing>;
+}
+
+export interface DirListing {
+  entries: PathEntry[];
+  loading: boolean;
+  /** The directory holds more names than the daemon was willing to send. */
+  truncated: boolean;
+  error: string | null;
 }
 
 export type Focus = "sidebar" | "composer";
@@ -336,7 +350,7 @@ export class Store {
     if (!sel) { this.set({ selected: null, view: null }); return; }
     const client = this.clients.get(sel.machine);
     const ms = this.state.machines.get(sel.machine);
-    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, commands: null };
+    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, commands: null, dirs: new Map() };
     this.state.attention.delete(`${sel.machine}:${sel.threadId}`);
     this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     this.config.prefs.lastSelected = sel; this.persist();
@@ -671,6 +685,34 @@ export class Store {
       this.notify(`moved to ${dstInfo.name}`, "success");
       await this.select({ machine: to.machine, threadId: r.threadId });
     } catch (e: any) { this.notify(`move failed: ${e.message}`, "error"); }
+  }
+
+  /**
+   * Read one directory under the open thread for the `@` menu, once. The
+   * listing is kept for as long as the thread is open: a mention is typed in
+   * seconds, and a request per keystroke over a tailnet is not worth the
+   * newer answer.
+   */
+  async loadDir(dir: string) {
+    const v = this.state.view;
+    if (!v || v.dirs.has(dir)) return;
+    const client = this.clients.get(v.machine);
+    if (!client) return;
+    const threadId = v.threadId;
+    v.dirs.set(dir, { entries: [], loading: true, truncated: false, error: null });
+    this.touch();
+    const put = (l: DirListing) => {
+      const cur = this.state.view;
+      if (!cur || cur.threadId !== threadId) return;
+      cur.dirs.set(dir, l);
+      this.set({ view: { ...cur } });
+    };
+    try {
+      const r = await client.rpc("thread.listDir", { threadId, dir });
+      put({ entries: r.entries, loading: false, truncated: r.truncated, error: null });
+    } catch (e: any) {
+      put({ entries: [], loading: false, truncated: false, error: e.message });
+    }
   }
 
   async browse(machine: string, path: string, onPick: (p: string) => void) {

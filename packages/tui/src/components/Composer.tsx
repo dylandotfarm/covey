@@ -4,7 +4,7 @@ import type { Thread, TimelineItem, Attachment } from "@covey/protocol";
 import { T } from "../theme.js";
 import { fmtMs } from "../lines.js";
 import { caretToVisual, type VisualLine } from "../editor.js";
-import { commandLabel, menuWindowStart, MENU_ROWS, type CommandMenuView } from "../commands.js";
+import { menuWindowStart, MENU_ROWS, type MenuView } from "../composerMenu.js";
 
 export interface ComposerProps {
   thread: Thread | null;
@@ -20,8 +20,8 @@ export interface ComposerProps {
   attachments: Attachment[];
   /** Free-text answer being typed for a pending question. */
   answerDraft: string;
-  /** The `/` menu, while the draft is a command name. */
-  menu: CommandMenuView | null;
+  /** The prefix menu — `/` commands, `@` files — while one is open. */
+  menu: MenuView | null;
 }
 
 /** Renders the multi-line editor. Editing state lives in App (useInput). */
@@ -39,7 +39,7 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   const queued = thread?.queuedTurns ?? 0;
   return (
     <Box flexDirection="column" width={width}>
-      {menu && <CommandMenu menu={menu} width={width} />}
+      {menu && <PrefixMenu menu={menu} width={width} />}
       <Box flexDirection="column" borderStyle="round" borderColor={borderColor} paddingX={1}>
         {pending ? (
           pending.kind === "approval"
@@ -80,44 +80,37 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
 }
 
 /**
- * The `/` menu, above the draft.
+ * The prefix menu, above the draft.
  *
  * Above, because Ink cannot paint under `position="absolute"`: a list that
  * overlaps the transcript is not available, so the composer grows upwards and
  * the transcript gives up the rows. The heavy full-view picker is the wrong
  * shape for something that re-filters on every keystroke.
  */
-function CommandMenu({ menu, width }: { menu: CommandMenuView; width: number }) {
-  const { items, index } = menu;
-  if (items.length === 0) {
-    return (
-      <Box paddingX={2}>
-        <Text color={T.subtle} wrap="truncate">
-          {menu.known ? "no command matches" : "the commands arrive when this thread starts its first turn"}
-        </Text>
-      </Box>
-    );
+function PrefixMenu({ menu, width }: { menu: MenuView; width: number }) {
+  const { rows, index } = menu;
+  if (rows.length === 0) {
+    return <Box paddingX={2}><Text color={T.subtle} wrap="truncate">{menu.empty}</Text></Box>;
   }
-  const first = menuWindowStart(items.length, index);
-  const shown = items.slice(first, first + MENU_ROWS);
-  const nameW = Math.min(28, Math.max(...shown.map((c) => commandLabel(c).length)));
-  const descW = Math.max(0, width - 4 - nameW - 2);
+  const first = menuWindowStart(rows.length, index);
+  const shown = rows.slice(first, first + MENU_ROWS);
+  const labelW = Math.min(30, Math.max(...shown.map((r) => r.label.length)));
+  const hintW = Math.max(0, width - 4 - labelW - 2);
   return (
     <Box flexDirection="column" paddingX={2}>
-      {shown.map((c, i) => {
+      {shown.map((r, i) => {
         const selected = first + i === index;
-        const label = commandLabel(c).padEnd(nameW).slice(0, nameW);
         return (
-          <Text key={c.name} wrap="truncate">
+          <Text key={r.key} wrap="truncate">
             <Text color={T.accent} bold>{selected ? "\u276f " : "  "}</Text>
-            <Text color={selected ? T.text : T.muted} bold={selected} backgroundColor={selected ? T.selection : undefined}>{label}</Text>
-            <Text color={T.subtle} backgroundColor={selected ? T.selection : undefined}>{"  " + c.description.slice(0, descW)}</Text>
+            <Text color={selected ? T.text : T.muted} bold={selected} backgroundColor={selected ? T.selection : undefined}>{r.label.padEnd(labelW).slice(0, labelW)}</Text>
+            <Text color={T.subtle} backgroundColor={selected ? T.selection : undefined}>{"  " + r.hint.slice(0, hintW)}</Text>
           </Text>
         );
       })}
       <Box paddingX={2}>
         <Text color={T.faint} wrap="truncate">
-          {`\u2191\u2193 choose \u00b7 tab or enter completes \u00b7 esc closes${items.length > MENU_ROWS ? `  (${index + 1}/${items.length})` : ""}`}
+          {`\u2191\u2193 choose \u00b7 tab or enter completes \u00b7 esc closes${rows.length > MENU_ROWS ? `  (${index + 1}/${rows.length})` : ""}`}
         </Text>
       </Box>
     </Box>

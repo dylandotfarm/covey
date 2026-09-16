@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { MachineInfo, SlashCommandInfo, Thread, ThreadEvent } from "@covey/protocol";
+import type { MachineInfo, Project, SlashCommandInfo, Thread, ThreadEvent } from "@covey/protocol";
 import { Db } from "./db.js";
 import { Engine } from "./engine.js";
 
@@ -89,4 +89,63 @@ test("a thread that has run keeps its menu when the daemon restarts", async (t) 
   await settle();
   const again = new Engine(new Db(s.dir), MACHINE);
   assert.deepEqual(again.threadSnapshot("t1").commands, [COMPACT]);
+});
+
+// ---- the `@` menu ---------------------------------------------------------
+
+/** A project directory with a few names in it, and a thread that works there. */
+function withFiles(): { engine: Engine; root: string; cleanup: () => void } {
+  const s = setup();
+  const root = mkdtempSync(join(tmpdir(), "covey-files-"));
+  mkdirSync(join(root, "src"));
+  writeFileSync(join(root, "src", "index.ts"), "");
+  writeFileSync(join(root, "README.md"), "");
+  writeFileSync(join(root, ".gitignore"), "");
+  s.db.putProject({
+    id: "p1", title: "p", workspaceRoot: root, repositoryIdentity: null, defaultModel: null,
+    defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  } as Project);
+  return { engine: s.engine, root, cleanup: () => { s.cleanup(); rmSync(root, { recursive: true, force: true }); } };
+}
+
+test("the thread's own directory lists, directories before files", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  const r = s.engine.listThreadDir("t1", "");
+  assert.deepEqual(r.entries, [
+    { name: "src", isDir: true },
+    { name: ".gitignore", isDir: false },
+    { name: "README.md", isDir: false },
+  ]);
+  assert.equal(r.truncated, false);
+});
+
+test("a directory inside it lists too", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  assert.deepEqual(s.engine.listThreadDir("t1", "src/").entries, [{ name: "index.ts", isDir: false }]);
+});
+
+test("a name half typed is not an error: it is what typing looks like", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  assert.deepEqual(s.engine.listThreadDir("t1", "sr").entries, []);
+  // A file is not a directory, and asking for its contents is the same case.
+  assert.deepEqual(s.engine.listThreadDir("t1", "README.md").entries, []);
+});
+
+test("a mention cannot walk out of the thread's directory", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  assert.throws(() => s.engine.listThreadDir("t1", "../"), /outside the thread/);
+  assert.throws(() => s.engine.listThreadDir("t1", "src/../../"), /outside the thread/);
+});
+
+test("a directory larger than the cap comes back short, and says so", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  for (let i = 0; i < 12; i++) writeFileSync(join(s.root, `f${i}.ts`), "");
+  const r = s.engine.listThreadDir("t1", "", 5);
+  assert.equal(r.entries.length, 5);
+  assert.equal(r.truncated, true);
 });

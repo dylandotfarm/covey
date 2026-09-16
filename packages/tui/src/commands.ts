@@ -1,4 +1,5 @@
 import type { SlashCommandInfo, ThreadCommands } from "@covey/protocol";
+import type { MenuRow } from "./composerMenu.js";
 
 /**
  * The `/` prefix in the composer.
@@ -22,9 +23,6 @@ import type { SlashCommandInfo, ThreadCommands } from "@covey/protocol";
  * command with the same name as an SDK one hides the SDK one.
  */
 export const LOCAL_COMMANDS: SlashCommandInfo[] = [];
-
-/** How many rows of the menu paint at once. */
-export const MENU_ROWS = 8;
 
 /** A command name holds letters, digits and these; a path does not. */
 const NAME_CHARS = /^[A-Za-z0-9:_-]*$/;
@@ -92,36 +90,10 @@ export function acceptCommand(command: SlashCommandInfo): { value: string; caret
 }
 
 /** The row to paint for a command: `/name <args>` and what it does. */
-export function commandLabel(c: SlashCommandInfo): string {
-  return c.argumentHint ? `/${c.name} ${c.argumentHint}` : `/${c.name}`;
-}
-
-/** What the composer paints, and what the keys act on. */
-export interface CommandMenuView {
-  items: SlashCommandInfo[];
-  /** Row the reader is on. Always in range while `items` is not empty. */
-  index: number;
-  /** False while the daemon has never had a session to ask. */
-  known: boolean;
-}
-
-/**
- * Rows the menu takes on screen, including the one line it always keeps for
- * the hint or for the reason the list is empty. `App` sizes the transcript
- * from this and `Composer` paints from it, so the two never disagree.
- */
-export function commandMenuHeight(m: CommandMenuView): number {
-  // An empty menu is one line saying why it is empty, and no hint to give.
-  if (m.items.length === 0) return 1;
-  return Math.min(MENU_ROWS, m.items.length) + 1;
-}
-
-/**
- * First row of the window onto `items`, so the row under the cursor is always
- * painted. The window moves by as little as it can: the list only scrolls once
- * the cursor reaches an edge.
- */
-export function menuWindowStart(count: number, index: number): number {
-  if (count <= MENU_ROWS) return 0;
-  return Math.max(0, Math.min(index - MENU_ROWS + 1, count - MENU_ROWS));
+export function commandRows(commands: SlashCommandInfo[]): MenuRow[] {
+  return commands.map((c) => ({
+    key: c.name,
+    label: c.argumentHint ? `/${c.name} ${c.argumentHint}` : `/${c.name}`,
+    hint: c.description,
+  }));
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
-import { existsSync, statSync, rmSync } from "node:fs";
+import { basename, resolve, sep } from "node:path";
+import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
@@ -12,7 +12,7 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry } from "@covey/protocol";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -502,6 +502,30 @@ export class Engine {
     const [summary, patch] = await Promise.all([diffCheckpoints(cwd, cp.beforeTree, cp.afterTree), patchBetween(cwd, cp.beforeTree, cp.afterTree)]);
     if (!summary) return null;
     return { turnId: cp.turnId, ...summary, patch: patch ?? "" };
+  }
+
+  /**
+   * One directory under a thread's working directory, for the `@` menu.
+   *
+   * The whole directory comes back, not the matches for what is typed so far:
+   * the client filters as the reader types, so a word costs one request rather
+   * than one per keystroke. Nothing outside the working directory is offered —
+   * a mention names the thread's own files.
+   */
+  listThreadDir(threadId: string, dir: string, limit = 500): { dir: string; entries: PathEntry[]; truncated: boolean } {
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    const root = this.gitCwd(t, p);
+    const target = resolve(root, dir || ".");
+    if (target !== root && !target.startsWith(root + sep)) throw new EngineError("bad_path", `${dir} is outside the thread's directory`);
+    // Half a directory name is not an error; it is what typing looks like.
+    if (!existsSync(target) || !statSync(target).isDirectory()) return { dir, entries: [], truncated: false };
+    const all = readdirSync(target, { withFileTypes: true })
+      .map((d) => ({ name: d.name, isDir: d.isDirectory() }))
+      .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
+    return { dir, entries: all.slice(0, limit), truncated: all.length > limit };
   }
 
   private mutateThread(threadId: string, fn: (t: Thread) => void): number {

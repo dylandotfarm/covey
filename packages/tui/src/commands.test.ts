@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SlashCommandInfo } from "@covey/protocol";
-import { acceptCommand, commandLabel, commandMenu, commandMenuHeight, commandToken, menuWindowStart, MENU_ROWS } from "./commands.js";
+import { acceptCommand, commandMenu, commandRows, commandToken } from "./commands.js";
 
 const sdk = (name: string, description = "", argumentHint = "", aliases?: string[]): SlashCommandInfo => ({
   name, description, argumentHint, ...(aliases ? { aliases } : {}), source: "sdk",
@@ -102,27 +102,9 @@ test("taking a row replaces the draft with the name and a space, which closes th
 });
 
 test("a row shows the argument hint when the command takes arguments", () => {
-  assert.equal(commandLabel(sdk("compact", "", "<instructions>")), "/compact <instructions>");
-  assert.equal(commandLabel(sdk("resume")), "/resume");
-});
-
-// ---- the shape on screen --------------------------------------------------
-
-test("the menu is as tall as its rows plus the hint, and never taller than the window", () => {
-  assert.equal(commandMenuHeight({ items: LIST.slice(0, 3), index: 0, known: true }), 4);
-  const many = Array.from({ length: 40 }, (_, i) => sdk(`c${i}`));
-  assert.equal(commandMenuHeight({ items: many, index: 0, known: true }), MENU_ROWS + 1);
-});
-
-test("an empty menu is one line saying why", () => {
-  assert.equal(commandMenuHeight({ items: [], index: 0, known: false }), 1);
-});
-
-test("the window follows the cursor, and stops at the ends of the list", () => {
-  const n = 20;
-  assert.equal(menuWindowStart(n, 0), 0);
-  assert.equal(menuWindowStart(n, MENU_ROWS - 1), 0);
-  assert.equal(menuWindowStart(n, MENU_ROWS), 1);
-  assert.equal(menuWindowStart(n, n - 1), n - MENU_ROWS);
-  assert.equal(menuWindowStart(3, 2), 0);
+  const rows = commandRows([sdk("compact", "Free up context", "<instructions>"), sdk("resume", "Pick up a thread")]);
+  assert.deepEqual(rows, [
+    { key: "compact", label: "/compact <instructions>", hint: "Free up context" },
+    { key: "resume", label: "/resume", hint: "Pick up a thread" },
+  ]);
 });
