@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import type { QuestionItem, TimelineItem } from "@covey/protocol";
+import { questionAnswers, questionAsks, type QuestionItem, type TimelineItem } from "@covey/protocol";
 import { ClaudeSession, type SessionParams, type SessionSink } from "./claude.js";
 
 /**
@@ -60,10 +60,11 @@ function open(input: Record<string, unknown>) {
 
 test("a single question keeps its shape: one ask, one answer, a freeform response", async () => {
   const call = open(ask({ question: "Which database?", header: "Database", options: OPTS }));
-  assert.equal(call.item.questions.length, 1);
-  assert.equal(call.item.questions[0]!.question, "Which database?");
-  assert.equal(call.item.questions[0]!.header, "Database");
-  assert.deepEqual(call.item.questions[0]!.options, [{ label: "Postgres", description: "a server" }, { label: "SQLite", description: "a file" }]);
+  const asks = questionAsks(call.item);
+  assert.equal(asks.length, 1);
+  assert.equal(asks[0]!.question, "Which database?");
+  assert.equal(asks[0]!.header, "Database");
+  assert.deepEqual(asks[0]!.options, [{ label: "Postgres", description: "a server" }, { label: "SQLite", description: "a file" }]);
 
   const input = await call.answer(["DuckDB"]);
   assert.deepEqual(input.answers, { "Which database?": "DuckDB" });
@@ -92,14 +93,13 @@ const FOUR = ask(
  * alone. Questions two to four were gone before the user ever saw them.
  */
 test("the item keeps every question the tool asked, each with its own options", async () => {
-  const call = open(FOUR);
-  assert.deepEqual(call.item.questions.map((q) => q.question), [
+  const asks = questionAsks(open(FOUR).item);
+  assert.deepEqual(asks.map((q) => q.question), [
     "Which database?", "Which port?", "Which cache?", "Which log level?",
   ]);
-  assert.deepEqual(call.item.questions[2]!.options, [{ label: "Postgres", description: "a server" }, { label: "SQLite", description: "a file" }]);
+  assert.deepEqual(asks[2]!.options, [{ label: "Postgres", description: "a server" }, { label: "SQLite", description: "a file" }]);
   // A question the tool gave no choices for takes free text.
-  assert.equal(call.item.questions[1]!.options, null);
-  await call.answer(["SQLite", "3790", "Postgres", "debug"]);
+  assert.equal(asks[1]!.options, null);
 });
 
 /**
@@ -135,7 +135,7 @@ test("the answered item carries one answer for each question, in order", async (
   await call.answer(["Postgres", "SQLite"]);
   const done = call.items[call.items.length - 1] as QuestionItem;
   assert.equal(done.status, "answered");
-  assert.deepEqual(done.answers, ["Postgres", "SQLite"]);
+  assert.deepEqual(questionAnswers(done), ["Postgres", "SQLite"]);
 });
 
 test("a question left blank gets no key, rather than an empty answer", async () => {
