@@ -4,7 +4,7 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
-import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
+import { parseMouse, wheelDelta, copyToClipboard, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow } from "../sidebar.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
@@ -506,15 +506,20 @@ export function App({ store }: { store: Store }) {
    * the sign flips there.
    */
   function scrollPane(lines: number) {
-    if (state.diffView) {
+    // The live state, not the render snapshot: a held key arrives as one
+    // batched chunk and is replayed key by key, so each repeat has to measure
+    // from the one before it. `store.set` writes and notifies synchronously,
+    // so `getState()` is already the result of the last repeat.
+    const live = store.getState();
+    if (live.diffView) {
       const max = Math.max(0, diffLines.length - Math.max(1, transcriptH - 2));
-      store.setDiffScroll(Math.max(0, Math.min(max, state.diffView.scroll + lines)));
+      store.setDiffScroll(Math.max(0, Math.min(max, live.diffView.scroll + lines)));
       return;
     }
     const max = Math.max(0, layout.lines.length - transcriptH);
-    const next = Math.max(0, Math.min(max, state.scrollFromBottom - lines));
+    const next = Math.max(0, Math.min(max, live.scrollFromBottom - lines));
     store.setScroll(next);
-    if (lines < 0 && next >= max && state.view?.hasMore) void store.loadOlder();
+    if (lines < 0 && next >= max && live.view?.hasMore) void store.loadOlder();
   }
 
   /** Fold or unfold the most recent tool call or thinking block. */
@@ -529,7 +534,11 @@ export function App({ store }: { store: Store }) {
     const inTranscript = ev.row >= TRANSCRIPT_TOP && ev.row < TRANSCRIPT_TOP + transcriptH && !inSidebar;
 
     if (ev.kind === "wheel") {
-      const delta = ev.wheel === "up" ? 3 : -3;
+      // One row a notch, alt for half a page. 0 is a sideways notch, which
+      // nothing here scrolls; it must not take the focus or load older lines
+      // either, so leave before any of that.
+      const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
+      if (delta === 0) return;
       // Over the sidebar the wheel moves the cursor rather than scrolling a
       // viewport of its own: the cursor is what the window is centred on, and
       // one source of truth means the preview follows the wheel too.
@@ -538,11 +547,16 @@ export function App({ store }: { store: Store }) {
         setCursor((c) => Math.max(0, Math.min(rows.length - 1, c - delta)));
         return;
       }
-      if (state.diffView) return store.setDiffScroll(state.diffView.scroll - delta);
+      // Same rule as `scrollPane`: a chunk holds several notches and is
+      // replayed one at a time, so every notch measures from the store rather
+      // than from `state`, which is the last render's snapshot and does not
+      // move inside the loop. Read the snapshot and five notches move one row.
+      const live = store.getState();
+      if (live.diffView) return store.setDiffScroll(live.diffView.scroll - delta);
       const max = Math.max(0, layout.lines.length - transcriptH);
-      const next = Math.min(max, Math.max(0, state.scrollFromBottom + delta));
+      const next = Math.min(max, Math.max(0, live.scrollFromBottom + delta));
       store.setScroll(next);
-      if (next >= max && state.view?.hasMore) void store.loadOlder();
+      if (next >= max && live.view?.hasMore) void store.loadOlder();
       return;
     }
 
