@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { openSync, mkdirSync, statSync } from "node:fs";
 import { DEFAULT_PORT } from "@covey/protocol";
 import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } from "@covey/tui";
-import { runDaemon, dataDir, loadDaemonConfig, Updater, sourceInfo } from "@covey/daemon";
+import { runDaemon, dataDir, loadDaemonConfig, Updater, sourceInfo, buildInfo, buildDirs, newestBuildMtime } from "@covey/daemon";
 
 const argv = process.argv.slice(2);
 // A leading flag belongs to `tui`, except for help: `covey --help` has to
@@ -30,9 +30,15 @@ async function main() {
       // The TUI cannot rebuild the code it is running from, so it asks us to:
       // it quits with a relaunch request and we do the work out here, with a
       // plain terminal to report into.
+      // `buildDirs` covers every package, not just ours: `tsc -b` rewrites only
+      // what changed, so a new keybinding moves packages/tui and leaves this
+      // file's mtime alone.
+      const dirs = buildDirs(here());
       const { relaunch } = await runTui({
         machines,
         source: await sourceInfo(here()).catch(() => null),
+        build: await buildInfo(here()).catch(() => null),
+        watchBuild: () => newestBuildMtime(dirs),
         canRelaunch: true,
         notice: takeNotice(),
       });
