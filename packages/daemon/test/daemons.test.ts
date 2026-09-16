@@ -86,9 +86,10 @@ test("a daemon started for a test is stopped even when the assertion in the midd
     try {
       assert.fail("the assertion in the middle of the test");
     } finally {
-      // One daemon is stopped before the sweep and one is not, so the sweep has
-      // to cope with both — an already-stopped daemon must not throw and take
-      // the other one down with it, which is how five daemons were left behind.
+      // One daemon is stopped before the sweep and one is not, so the sweep
+      // has to cope with both. What it does *not* cover is a stop that throws:
+      // `stop` takes its daemon out of the set, so the sweep never meets an
+      // already-stopped one. The test below covers that.
       await one.stop();
       await stopAll();
     }
@@ -99,6 +100,37 @@ test("a daemon started for a test is stopped even when the assertion in the midd
     await assert.rejects(fetch(`http://127.0.0.1:${ports[i]}/health`, { signal: AbortSignal.timeout(2000) }),
       `and nothing should still be listening on port ${ports[i]}`);
   }
+});
+
+test("stopAll stops every daemon even when one stop throws", async () => {
+  // This is how five daemons were left listening in #53: the teardown ran as
+  // one sequence, the first step threw, and every kill behind it was skipped.
+  // `stopAll` has to isolate each stop from the others.
+  //
+  // A stop that throws is hard to arrange for real — `rmSync` is forced and a
+  // kill on your own child does not fail — so the test substitutes one. The
+  // daemon is real, the throw stands in for any teardown step that fails. A
+  // green run therefore prints one `covey test teardown: a daemon would not
+  // stop` line, which belongs to this test and is not a fault.
+  const bad = await startDaemon({ name: "throws-on-stop" });
+  const good = await startDaemon({ name: "stops-cleanly" });
+  const badPid = bad.proc.pid!, goodPid = good.proc.pid!;
+  const stopForReal = bad.stop.bind(bad);
+  // `bad` went into the set first, so a sweep that runs as one sequence reaches
+  // it first and never gets to `good`.
+  bad.stop = async () => { await stopForReal(); throw new Error("a teardown step that throws"); };
+
+  const raised = await stopAll().then(() => undefined, (e: Error) => e);
+
+  // The daemons first, so the failure names the harm and not only its cause.
+  for (const [name, pid] of [["throws-on-stop", badPid], ["stops-cleanly", goodPid]] as const) {
+    assert.equal(alive(pid), false,
+      `${name} (pid ${pid}) must be stopped: one stop that throws may not skip the rest`
+      + (raised ? ` (stopAll raised: ${raised.message})` : ""));
+  }
+  // And it reports a stop that fails rather than raising it: a teardown that
+  // fails the file hides the failure the file was reporting.
+  assert.equal(raised, undefined, `stopAll must report a stop that would not finish, not raise it: ${raised?.message}`);
 });
 
 test("a daemon that dies at birth is reported at once, not at the end of the budget", async () => {
