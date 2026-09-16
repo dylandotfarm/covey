@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { appendFileSync } from "node:fs";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, questionAsks, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
+import { KNOWN_MODELS, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
 import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
@@ -9,6 +9,7 @@ import { sidebarCells, rowAtScreenRow } from "../sidebar.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
 import { Transcript, layoutTranscript } from "./Transcript.js";
+import { currentAsk, takeAnswer } from "../question.js";
 import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
@@ -785,19 +786,16 @@ export function App({ store }: { store: Store }) {
         // Answers use their own buffer, never the composer draft — otherwise
         // whatever you were part-way through typing is consumed as the answer
         // and lost. This branch returns unconditionally so `draft` survives.
-        // One question at a time: the keys below always act on the question at
-        // `answersGiven.length`, and the last answer sends the whole set.
-        const asks = questionAsks(pending);
-        const opts = asks[answersGiven.length]?.options ?? [];
+        // One question at a time: the keys below always act on the question the
+        // user has reached, and only the last answer sends the set.
+        const opts = currentAsk(pending, answersGiven)?.options ?? [];
         const customRow = opts.length;
         const take = (a: string) => {
-          const next = [...answersGiven, a];
-          setAnswersGiven(next);
+          const { answered, send } = takeAnswer(pending, answersGiven, a);
+          setAnswersGiven(answered);
           setAnswerDraft("");
           setQuestionCursor(0);
-          // The CLI drops a question it gets no answer for and never says so,
-          // so the command carries an answer for every question.
-          if (next.length >= asks.length) void store.respondQuestion(next);
+          if (send) void store.respondQuestion(send);
         };
         // Functional updates throughout: a batched chunk is replayed character
         // by character here, so reading state from the closure would let each

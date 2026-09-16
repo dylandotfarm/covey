@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { QuestionItem, TimelineItem } from "@covey/protocol";
 import { renderItem, lineText, type QuestionUi } from "./lines.js";
+import { currentAsk, takeAnswer } from "./question.js";
 
 const OPTS = [{ label: "Postgres", description: "a server" }, { label: "SQLite", description: "a file" }];
 
@@ -87,4 +88,46 @@ test("a question stored before the list reads through the old fields", () => {
   assert.match(out, /\? Which database\?/);
   assert.match(out, /1\. Postgres — a server/);
   assert.match(out, /→ SQLite/);
+});
+
+/**
+ * Regression, the client's stepping: every answer used to go straight out as
+ * the whole response, so a call with more than one question was answered by
+ * the first choice the user made and the rest were never asked.
+ */
+test("a three-question call sends nothing until the last question is answered", () => {
+  const it = item({ questions: [
+    { question: "Which database?", options: OPTS },
+    { question: "Which cache?", options: OPTS },
+    { question: "Which log level?", options: null },
+  ] });
+
+  const one = takeAnswer(it, [], "SQLite");
+  assert.equal(one.send, null, "the first of three answers is not the response");
+  assert.deepEqual(one.answered, ["SQLite"]);
+
+  const two = takeAnswer(it, one.answered, "Postgres");
+  assert.equal(two.send, null, "the second of three answers is not the response either");
+
+  const three = takeAnswer(it, two.answered, "debug");
+  assert.deepEqual(three.send, ["SQLite", "Postgres", "debug"], "the last answer sends the whole set");
+});
+
+test("a lone question still sends on its only answer", () => {
+  const it = item({ questions: [{ question: "Which database?", options: OPTS }] });
+  assert.deepEqual(takeAnswer(it, [], "SQLite").send, ["SQLite"]);
+});
+
+/**
+ * Regression, the client's stepping: the options offered used to come from the
+ * first question every time, so questions two to four could not be answered.
+ */
+test("the cursor walks on to the next question's own options", () => {
+  const it = item({ questions: [
+    { question: "Which database?", options: OPTS },
+    { question: "Which cache?", options: [{ label: "Redis" }, { label: "Memcached" }] },
+  ] });
+  assert.equal(currentAsk(it, [])?.question, "Which database?");
+  assert.deepEqual(currentAsk(it, ["SQLite"])?.options?.map((o) => o.label), ["Redis", "Memcached"]);
+  assert.equal(currentAsk(it, ["SQLite", "Redis"]), null, "nothing is left to ask");
 });

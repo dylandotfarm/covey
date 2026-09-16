@@ -79,17 +79,36 @@ test("picking an option on a single question sends no freeform response", async 
   assert.equal("response" in input, false);
 });
 
-test("every question of a four-question call reaches the CLI", async () => {
-  const call = open(ask(
-    { question: "Which database?", options: OPTS },
-    { question: "Which port?" },
-    { question: "Which cache?", options: OPTS },
-    { question: "Which log level?" },
-  ));
-  assert.equal(call.item.questions.length, 4);
+const FOUR = ask(
+  { question: "Which database?", options: OPTS },
+  { question: "Which port?" },
+  { question: "Which cache?", options: OPTS },
+  { question: "Which log level?" },
+);
+
+/**
+ * Regression, `canUseTool`: the item used to hold one prompt, made by joining
+ * every question text with newlines, and the options of the first question
+ * alone. Questions two to four were gone before the user ever saw them.
+ */
+test("the item keeps every question the tool asked, each with its own options", async () => {
+  const call = open(FOUR);
+  assert.deepEqual(call.item.questions.map((q) => q.question), [
+    "Which database?", "Which port?", "Which cache?", "Which log level?",
+  ]);
+  assert.deepEqual(call.item.questions[2]!.options, [{ label: "Postgres", description: "a server" }, { label: "SQLite", description: "a file" }]);
   // A question the tool gave no choices for takes free text.
   assert.equal(call.item.questions[1]!.options, null);
+  await call.answer(["SQLite", "3790", "Postgres", "debug"]);
+});
 
+/**
+ * Regression, `buildResponse`: the map used to carry one entry, for the first
+ * question. The CLI drops every question it finds no key for and tells the
+ * agent nothing, so the other three answers were lost in silence.
+ */
+test("every question of a four-question call reaches the CLI", async () => {
+  const call = open(FOUR);
   const input = await call.answer(["SQLite", "3790", "Postgres", "debug"]);
   assert.deepEqual(input.answers, {
     "Which database?": "SQLite",
@@ -97,9 +116,18 @@ test("every question of a four-question call reaches the CLI", async () => {
     "Which cache?": "Postgres",
     "Which log level?": "debug",
   });
-  // `response` would make the CLI ignore the whole map, so it stays off here
-  // even though two of the four answers are free text.
-  assert.equal("response" in input, false);
+});
+
+/**
+ * Regression, `buildResponse`: a free-text answer used to set `response`
+ * whatever the question count. The CLI reads `response` *instead of* the
+ * answers map, so one typed answer threw away every other choice.
+ */
+test("a typed answer to the first of several questions sends no response", async () => {
+  const call = open(ask({ question: "Which database?", options: OPTS }, { question: "Which cache?", options: OPTS }));
+  const input = await call.answer(["DuckDB", "Postgres"]);
+  assert.equal("response" in input, false, "`response` would hide the answers map from the CLI");
+  assert.deepEqual(input.answers, { "Which database?": "DuckDB", "Which cache?": "Postgres" });
 });
 
 test("the answered item carries one answer for each question, in order", async () => {
