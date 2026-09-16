@@ -391,6 +391,37 @@ export function isImageMime(m: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Commands typed in the composer (the `/` prefix)
+// ---------------------------------------------------------------------------
+
+/**
+ * One entry of the `/` menu.
+ *
+ * The SDK owns most of the list: `Query.supportedCommands()` gives it at the
+ * start of a session, and the SDK pushes a whole new list when it finds more
+ * skills. `source` keeps a place beside that list for covey's own commands,
+ * which the client answers itself instead of sending to the agent.
+ */
+export interface SlashCommandInfo {
+  /** Command name, without the leading slash. */
+  name: string;
+  description: string;
+  /** Hint for the arguments, e.g. `<file>`. Empty when the command takes none. */
+  argumentHint: string;
+  /** Other names for the same command, e.g. `cost` for `usage`. */
+  aliases?: string[];
+  /** `sdk` = send the line to the agent. `covey` = the client acts on it. */
+  source: "sdk" | "covey";
+}
+
+/**
+ * The commands a thread knows about. `null` is "not known yet" — the thread
+ * has never had a session, so nobody has asked the SDK. An empty array is
+ * "the session answered, and it has no commands".
+ */
+export type ThreadCommands = SlashCommandInfo[] | null;
+
+// ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
 
@@ -407,6 +438,13 @@ export interface ThreadSnapshot {
   items: TimelineItem[];
   /** True when older items exist beyond `items[0]`. */
   hasMore: boolean;
+  /**
+   * The `/` menu for this thread, or `null` while it is not known yet. It
+   * rides the thread subscription rather than the `Thread` record, because the
+   * shell snapshot carries every thread on the machine and the sidebar must
+   * not pay for a command list per thread.
+   */
+  commands: ThreadCommands;
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +545,10 @@ export type ShellEvent =
 export type ThreadEvent =
   | { seq: number; kind: "item.upserted"; item: TimelineItem }
   | { seq: number; kind: "item.removed"; itemId: ItemId }
-  | { seq: number; kind: "thread.updated"; thread: Thread };
+  | { seq: number; kind: "thread.updated"; thread: Thread }
+  /** The whole `/` menu, every time. The SDK replaces its list rather than
+   *  patching it, so this event replaces the client's copy too. */
+  | { seq: number; kind: "commands.updated"; commands: SlashCommandInfo[] };
 
 /** Distributive Omit that preserves discriminated unions. */
 export type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;

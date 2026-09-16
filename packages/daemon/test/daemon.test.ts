@@ -119,6 +119,14 @@ test("thread subscription replays after a seq and synchronizes", async () => {
   assert.ok(a.pushes.some((p) => p.push === "thread.synchronized"));
 });
 
+test("a thread that has never run reports no `/` menu, which is not an empty one", async () => {
+  const snap = await a.rpc("shell.snapshot", {});
+  const threadId = snap.threads[0]!.id;
+  // null is "nobody has asked the SDK yet". The composer says so rather than
+  // showing a menu with nothing in it.
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).commands, null);
+});
+
 test("export → import on another daemon → markMoved tombstones the source", async () => {
   const snapA = await a.rpc("shell.snapshot", {});
   const threadId = snapA.threads[0]!.id;

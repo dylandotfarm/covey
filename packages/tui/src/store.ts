@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings } from "@covey/protocol";
+import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 
@@ -44,6 +44,12 @@ export interface ThreadView {
   /** Older items exist before the earliest loaded one. */
   hasMore: boolean;
   loadingOlder: boolean;
+  /**
+   * The `/` menu the daemon reported for this thread. `null` means the daemon
+   * does not know yet — the thread has never run a session — which the menu
+   * says rather than showing an empty list.
+   */
+  commands: ThreadCommands;
 }
 
 export type Focus = "sidebar" | "composer";
@@ -304,6 +310,8 @@ export class Store {
       case "item.upserted": v.items.set(ev.item.id, ev.item); break;
       case "item.removed": v.items.delete(ev.itemId); break;
       case "thread.updated": v.thread = ev.thread; break;
+      // The SDK replaces its command list rather than patching it, so we do too.
+      case "commands.updated": v.commands = ev.commands; break;
     }
     this.set({ view: { ...v } });
   }
@@ -328,7 +336,7 @@ export class Store {
     if (!sel) { this.set({ selected: null, view: null }); return; }
     const client = this.clients.get(sel.machine);
     const ms = this.state.machines.get(sel.machine);
-    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false };
+    const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, commands: null };
     this.state.attention.delete(`${sel.machine}:${sel.threadId}`);
     this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
     this.config.prefs.lastSelected = sel; this.persist();
@@ -344,6 +352,7 @@ export class Store {
         for (const [id, it] of view.items) if (!merged.has(id) || (merged.get(id)!.updatedAt < it.updatedAt)) merged.set(id, it);
         view.items = merged;
         view.hasMore = snap.hasMore;
+        view.commands = snap.commands;
       }
       view.loading = false;
       this.set({ view: { ...view } });

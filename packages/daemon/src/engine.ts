@@ -12,7 +12,7 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo } from "@covey/protocol";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -72,7 +72,7 @@ export class Engine {
       const idx = items.findIndex((i) => i.id === s.latest.id);
       if (idx >= 0) items[idx] = s.latest; else items.push(s.latest);
     }
-    return { seq: this.db.threadSeq(threadId), thread, items, hasMore };
+    return { seq: this.db.threadSeq(threadId), thread, items, hasMore, commands: this.db.threadCommands(threadId) };
   }
 
   // ---- emit helpers ---------------------------------------------------------
@@ -624,7 +624,24 @@ export class Engine {
         if (t && !t.model) { t.model = info.model; this.putThreadAndEmit(t); }
       },
       onModelUsed: () => {},
+      onCommands: (commands) => this.setThreadCommands(threadId, commands),
     };
+  }
+
+  /**
+   * Replace the thread's `/` menu and tell the clients watching it. An
+   * unchanged list is dropped here, because the SDK re-sends the whole list
+   * on every session start and a thread event costs a seq.
+   *
+   * The list is stored, so a thread that has run before still has a menu after
+   * the daemon restarts. A thread that has never run keeps `null` — "not known
+   * yet" — until a session answers for it.
+   */
+  setThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
+    const before = this.db.threadCommands(threadId);
+    if (before && sameCommands(before, commands)) return;
+    this.db.putThreadCommands(threadId, commands);
+    this.emitThread(threadId, { kind: "commands.updated", commands });
   }
 
   private recountPending(threadId: string) {
@@ -724,3 +741,8 @@ function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): R
 }
 
 export type { PermissionMode };
+
+/** Two menus are the same when they hold the same commands in the same order. */
+function sameCommands(a: SlashCommandInfo[], b: SlashCommandInfo[]): boolean {
+  return a.length === b.length && a.every((c, i) => c.name === b[i]!.name && c.description === b[i]!.description && c.argumentHint === b[i]!.argumentHint);
+}
