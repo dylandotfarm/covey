@@ -662,8 +662,8 @@ export function App({ store }: { store: Store }) {
         }
         if (errors.length > 0) return;
       }
-      // paste: normalise CRLF and insert
-      insert(rawInput.replace(/\r\n?/g, "\n"));
+      // paste: normalise line endings and tabs, then insert
+      insert(Ed.normalisePaste(rawInput));
       return;
     }
     handleKey(rawInput, rawKey);

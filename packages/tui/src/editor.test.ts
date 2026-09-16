@@ -4,10 +4,19 @@ import {
   wrapEditorLines, caretToVisual, visualToCaret, moveVisualRow,
   lineStart, lineEnd, wordStart, wordEnd,
   deleteBack, deleteForward, deleteToLineStart, deleteToLineEnd,
-  deleteWordBack, deleteWordForward, insert,
+  deleteWordBack, deleteWordForward, insert, normalisePaste,
 } from "./editor.js";
+import { width } from "./lines.js";
 
 const texts = (v: string, w: number) => wrapEditorLines(v, w).map((l) => l.text);
+
+/** Columns a terminal really paints for `s`, with tab stops every 8. This is
+ *  what `width()` cannot do, because it gets no starting column. */
+const painted = (s: string) => {
+  let col = 0;
+  for (const ch of s) col = ch === "\t" ? col + (8 - (col % 8)) : col + width(ch);
+  return col;
+};
 
 test("wraps at word boundaries instead of splitting mid-word", () => {
   assert.deepEqual(texts("the quick brown fox jumps", 10), ["the quick", "brown fox", "jumps"]);
@@ -19,6 +28,22 @@ test("hard-breaks a single token longer than the line", () => {
 
 test("keeps explicit newlines as row breaks, including empty lines", () => {
   assert.deepEqual(texts("a\n\nb", 10), ["a", "", "b"]);
+});
+
+test("a pasted tab never makes a row wider than the budget", () => {
+  const w = 60;
+  const pasted = "\t\t\t\tconst result = compute(alpha, beta, gamma, delta);";
+  // the defect: the raw paste measures 54 columns and paints 82
+  assert.ok(painted(pasted) > w, "the sample paste must overflow, or it tests nothing");
+  const value = normalisePaste(pasted);
+  assert.ok(!value.includes("\t"), "paste still holds a tab");
+  for (const row of wrapEditorLines(value, w)) {
+    assert.ok(painted(row.text) <= w, `row paints ${painted(row.text)} columns in a ${w} column budget`);
+  }
+});
+
+test("normalisePaste keeps indent depth and still folds CRLF", () => {
+  assert.equal(normalisePaste("\ta\r\n\t\tb\rc"), "  a\n    b\nc");
 });
 
 test("every caret offset maps to exactly one row", () => {

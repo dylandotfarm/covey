@@ -31,6 +31,34 @@ export interface VisualLine {
 const isSpace = (c: string | undefined) => c === " " || c === "\t";
 
 // ---------------------------------------------------------------------------
+// Paste
+// ---------------------------------------------------------------------------
+
+/** How many spaces a pasted tab becomes.
+ *
+ *  Two, not the eight a terminal uses. The composer is a narrow pane beside
+ *  the sidebar, and eight columns for each tab wraps an indented paste on its
+ *  first row. Two is also the indent of this repo, so pasted code keeps the
+ *  shape it had. */
+const TAB_WIDTH = 2;
+
+/** Make a pasted chunk safe to put in the draft.
+ *
+ *  Line endings become LF, and tabs become spaces. The tab matters because
+ *  `width()` counts it as one column but a terminal paints it out to the next
+ *  tab stop, which is up to eight. The wrap in `wrapEditorLines` then makes a
+ *  row that is too wide, the row overflows the main pane, and the overflow
+ *  paints over the sidebar.
+ *
+ *  `width()` cannot correct this itself. The width of a tab depends on the
+ *  column it starts at, and `width()` gets a string with no column. So the tab
+ *  is removed at the door instead. After this, one character of a pasted line
+ *  is one column, and the caret arithmetic below stays correct. */
+export function normalisePaste(s: string): string {
+  return s.replace(/\r\n?/g, "\n").replace(/\t/g, " ".repeat(TAB_WIDTH));
+}
+
+// ---------------------------------------------------------------------------
 // Wrapping
 // ---------------------------------------------------------------------------
 
