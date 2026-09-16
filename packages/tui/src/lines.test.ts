@@ -23,6 +23,12 @@ test("markdownToLines handles fences, bullets and inline code", () => {
   assert.ok(texts.some((t) => t.startsWith("const a = 1;")));
 });
 
+test("markdownToLines renders a link's label, not its raw source", () => {
+  // Before link support `inline()` had no case for `[text](url)`, so the whole
+  // markdown form reached the screen as characters.
+  assert.equal(markdownToLines("read [the notes](https://example.com/n) today", 60).map(text).join(""), "read the notes today");
+});
+
 test("a backgrounded tool row says the work is still going, not that it is done", () => {
   const item = { id: "t", threadId: "x", turnId: null, seq: 1, createdAt: "", updatedAt: "", kind: "tool", toolUseId: "u", toolName: "Bash", input: {}, summary: "npm test", status: "completed", output: "running in the background", isError: false, parentToolUseId: null, durationMs: 4 } as const;
   const running = renderItem({ ...item, background: { taskId: "k", state: "running", summary: null } }, { width: 80, expanded: new Set() });
