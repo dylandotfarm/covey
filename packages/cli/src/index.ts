@@ -7,6 +7,7 @@ import { openSync, mkdirSync, statSync } from "node:fs";
 import { DEFAULT_PORT } from "@covey/protocol";
 import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } from "@covey/tui";
 import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive } from "@covey/daemon";
+import { daemonArgs } from "./daemonArgs.js";
 
 const argv = process.argv.slice(2);
 // A leading flag belongs to `tui`, except for help: `covey --help` has to
@@ -286,10 +287,7 @@ async function spawnDaemon() {
   const logDir = join(dataDir(), "logs"); mkdirSync(logDir, { recursive: true });
   const out = openSync(join(logDir, "daemon.log"), "a");
   const port = localPort();
-  // Always pass --port, even for the default. The port then shows in `ps` and
-  // in the command line that `pkill -f` reads, so two daemons never look the
-  // same. `covey stop --port N` remains the safe way to stop one of them.
-  const args = [join(here(), "index.js"), "daemon", "--port", String(port)];
+  const args = daemonArgs(here(), port);
   const child = spawn(process.execPath, args, { detached: true, stdio: ["ignore", out, out], env: process.env });
   child.unref();
   for (let i = 0; i < 40; i++) { if (await healthy(port)) return; await new Promise((r) => setTimeout(r, 250)); }

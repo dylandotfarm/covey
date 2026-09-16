@@ -78,39 +78,66 @@ after(() => {
   for (const d of [A?.home, B?.home, repoA, repoB]) if (d) rmSync(d, { recursive: true, force: true });
 });
 
-test("a daemon names itself by port: a pid file, and a line in the log when it stops", async () => {
-  // Every daemon runs `node <dir>/index.js daemon`, so a pattern such as
-  // `pkill -f "index.js daemon"` matches all of them. A session once killed
-  // the daemon that hosted it that way. A pid file for each port is the name
-  // that `covey stop --port N` uses instead.
-  const port = PORT_A + 25;
+/**
+ * A daemon on `port`, started the way the CLI starts one. Returns the process
+ * and the log it writes, so a test can read both.
+ */
+async function stoppableDaemon(port: number): Promise<{ proc: ChildProcess; home: string; log: () => string }> {
   const home = tempDir("covey-test-stop-");
   const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", "stoppable"], { env: { ...process.env, COVEY_HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   proc.stderr!.on("data", (d) => { log += d.toString(); });
+  for (let i = 0; i < 100; i++) {
+    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) break; } catch { /* retry */ }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return { proc, home, log: () => log };
+}
+
+function reap(proc: ChildProcess, home: string) {
+  if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+  rmSync(home, { recursive: true, force: true });
+}
+
+// Issue #8: every daemon runs `node <dir>/index.js daemon`, so a pattern such
+// as `pkill -f "index.js daemon"` matches all of them. A session killed the
+// daemon that hosted it that way, and the stop left no line in the log.
+
+test("a daemon writes a pid file for its port, and takes it away when it stops", async () => {
+  // The pid file is the name that `covey stop --port N` uses, in place of a
+  // pattern over the command line.
+  const port = PORT_A + 25;
+  const { proc, home, log } = await stoppableDaemon(port);
   try {
-    for (let i = 0; i < 100; i++) {
-      try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) break; } catch { /* retry */ }
-      await new Promise((r) => setTimeout(r, 100));
-    }
     const pidFile = join(home, `daemon-${port}.pid`);
-    assert.ok(existsSync(pidFile), `expected a pid file at ${pidFile}\n${log}`);
+    assert.ok(existsSync(pidFile), `expected a pid file at ${pidFile}\n${log()}`);
     const rec = JSON.parse(readFileSync(pidFile, "utf8"));
     assert.equal(rec.pid, proc.pid, "the pid file names the daemon process");
     assert.equal(rec.port, port, "and the port it listens on");
-    // A second daemon on a second port keeps its own file.
+    // A daemon on another port keeps its own file, under its own data dir.
     assert.equal(existsSync(join(A.home, `daemon-${PORT_A}.pid`)), true);
+    assert.notEqual(join(A.home, `daemon-${PORT_A}.pid`), pidFile);
 
-    // Stop it the way `covey stop` does: one signal, to one pid.
     proc.kill("SIGTERM");
     await new Promise<void>((res) => proc.once("exit", () => res()));
-
-    assert.match(log, new RegExp(`stopping: signal=SIGTERM pid=${proc.pid} port=${port} at \\d{4}-`),
-      `a silent stop costs hours to explain; the log must say why. Got:\n${log}`);
     assert.equal(existsSync(pidFile), false, "the pid file goes when the daemon goes");
   } finally {
-    if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
-    rmSync(home, { recursive: true, force: true });
+    reap(proc, home);
+  }
+});
+
+test("a daemon says why it stopped, so the log does not just end", async () => {
+  // The stop used to be silent. The log ended in the middle of the work with
+  // no error and no shutdown line, and the daemon looked like it vanished.
+  const port = PORT_A + 26;
+  const { proc, home, log } = await stoppableDaemon(port);
+  try {
+    proc.kill("SIGTERM");
+    await new Promise<void>((res) => proc.once("exit", () => res()));
+    assert.match(log(), new RegExp(`stopping: signal=SIGTERM pid=${proc.pid} port=${port} at \\d{4}-`),
+      `a silent stop costs hours to explain; the log must name the signal, the pid and the time. Got:\n${log()}`);
+  } finally {
+    reap(proc, home);
   }
 });
 
