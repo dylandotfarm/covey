@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { ViewCache } from "./viewCache.js";
@@ -122,6 +122,10 @@ export interface AppState {
    * process cannot rebuild and re-exec itself from inside its own event loop.
    */
   relaunch: RelaunchRequest | null;
+  /** The build this client runs, to compare with each machine's. */
+  clientBuild: BuildInfo | null;
+  /** A build newer than the one this client loaded now sits on disk. */
+  clientStale: boolean;
 }
 
 export interface RelaunchRequest {
@@ -131,9 +135,23 @@ export interface RelaunchRequest {
   restartDaemon: boolean;
 }
 
+/** How often the client asks whether a newer build has landed on disk. */
+const BUILD_POLL_MS = 30_000;
+
 export interface StoreOptions {
   /** The checkout this client runs from, as worked out by the CLI. */
   source?: MachineSource | null;
+  /** The build this client runs, so the sidebar can flag a machine behind it. */
+  build?: BuildInfo | null;
+  /**
+   * Newest mtime of the files this client was loaded from, in milliseconds.
+   * Polled rather than read once: a client goes stale while it runs. Somebody
+   * rebuilds in another terminal, this process keeps the code it loaded, and
+   * every keybinding stays at the old behaviour with nothing to show for it.
+   */
+  watchBuild?: () => number;
+  /** How often to ask. Only a test needs to move it. */
+  buildPollMs?: number;
   /** False when nothing can relaunch us (the TUI was not started by the CLI). */
   canRelaunch?: boolean;
   /** Carried over from the process we were relaunched from. */
@@ -180,6 +198,7 @@ export class Store {
   /** The checkout this client runs from; null when it is not a git checkout. */
   readonly clientSource: MachineSource | null;
   readonly canRelaunch: boolean;
+  private buildTimer: NodeJS.Timeout | null = null;
 
   constructor(machines: SavedMachine[], opts: StoreOptions = {}) {
     this.config = loadConfig();
@@ -192,10 +211,34 @@ export class Store {
       toolsExpanded: this.config.prefs.toolsExpanded ?? false, overlay: null, notice: null,
       scrollFromBottom: 0, drafts: new Map(), pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
       selection: null, relaunch: null,
+      clientBuild: opts.build ?? null, clientStale: false,
     };
     for (const m of machines) this.addMachine(m, false);
     setInterval(() => this.set({ tick: this.state.tick + 1 }), 700).unref();
+    if (opts.watchBuild) this.watchOwnBuild(opts.watchBuild, opts.buildPollMs ?? BUILD_POLL_MS);
     if (opts.notice) this.notify(opts.notice.text, opts.notice.tone);
+  }
+
+  /**
+   * Watch the files this client was loaded from. A file with a later mtime than
+   * the one we started with means the build on disk is not the build we run —
+   * and nothing else in the process can tell, because the code is in memory.
+   * One report is enough, so the timer stops on the first.
+   */
+  private watchOwnBuild(read: () => number, every: number) {
+    const at = read();
+    if (at <= 0) return;
+    this.buildTimer = setInterval(() => {
+      if (read() <= at) return;
+      this.stopWatchingBuild();
+      this.set({ clientStale: true });
+      this.notify("a newer build is on disk — this client still runs the old one. ctrl+k → \"Update covey\"", "error");
+    }, every);
+    this.buildTimer.unref();
+  }
+
+  private stopWatchingBuild() {
+    if (this.buildTimer) { clearInterval(this.buildTimer); this.buildTimer = null; }
   }
 
   /** Quit in a way the CLI reads as "come back", optionally rebuilt first. */
@@ -722,11 +765,14 @@ export class Store {
     await client.command({ type: "approval.respond", threadId: v.threadId, requestId: it.requestId, behavior, ...(always ? { updatedPermissions: it.suggestions } : {}) }).catch((e) => this.notify(e.message, "error"));
   }
 
-  async respondQuestion(answer: string) {
+  /** One answer for each question on the pending item, in order. */
+  async respondQuestion(answers: string[]) {
     const v = this.state.view; const it = this.pendingRequest();
     const client = v && this.clients.get(v.machine);
     if (!v || !client || !it || it.kind !== "question") return;
-    await client.command({ type: "question.respond", threadId: v.threadId, requestId: it.requestId, answer }).catch((e) => this.notify(e.message, "error"));
+    // `answer` carries the first one as well, so a daemon that predates the
+    // list still answers a single question.
+    await client.command({ type: "question.respond", threadId: v.threadId, requestId: it.requestId, answer: answers[0] ?? "", answers }).catch((e) => this.notify(e.message, "error"));
   }
 
   async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string) {
@@ -779,7 +825,11 @@ export class Store {
     } catch (e: any) { this.notify(e.message, "error"); }
   }
 
-  shutdown() { for (const c of this.clients.values()) c.stop(); }
+  shutdown() {
+    this.stopWatchingBuild();
+    if (this.noticeTimer) { clearTimeout(this.noticeTimer); this.noticeTimer = null; }
+    for (const c of this.clients.values()) c.stop();
+  }
 }
 
 // ---- derived helpers --------------------------------------------------------

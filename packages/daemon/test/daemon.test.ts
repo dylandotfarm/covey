@@ -314,6 +314,31 @@ test("usage.report answers for its own machine, with an empty total before any t
   assert.equal(byMachine.until, null);
 });
 
+/**
+ * Regression test for the first half of issue #7. Put `daemonVersion: "0.0.1"`
+ * back in `runDaemon` and this fails: the package version never moves, so no
+ * client can tell that a machine runs older code than it does.
+ */
+test("a machine reports the build it runs, not a package version that never moves", async () => {
+  const info = (await a.rpc("shell.snapshot", {})).machine;
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: here, encoding: "utf8" }).trim();
+  const commit = git("rev-parse", "--short", "HEAD");
+  const expected = git("status", "--porcelain") ? `${commit}-dirty` : commit;
+
+  assert.notEqual(info.daemonVersion, "0.0.1", "the package version identifies no build");
+  assert.equal(info.daemonVersion, expected, "daemonVersion is the commit of the build the daemon runs");
+
+  assert.ok(info.build, "MachineInfo.build is what lets a client order two machines");
+  assert.equal(info.build!.commit, commit);
+  assert.ok(info.build!.committedAt && Number.isFinite(Date.parse(info.build!.committedAt)),
+    "the commit date is the only field that orders builds across machines with their own clocks");
+
+  // Two daemons out of one checkout run the same build, and the client says so
+  // rather than guessing from a local mtime.
+  const other = (await b.rpc("shell.snapshot", {})).machine;
+  assert.equal(other.build!.commit, info.build!.commit);
+});
+
 test("live: a real turn streams items, folds a second message in, and captures a diff", { skip: !process.env.COVEY_LIVE_TESTS }, async () => {
   const snapB = await b.rpc("shell.snapshot", {});
   const projectId = snapB.projects[0]!.id;

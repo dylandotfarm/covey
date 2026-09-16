@@ -2,7 +2,7 @@ import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import type { ToolCallItem } from "@covey/protocol";
 import { selectionBounds, type Selection, type ThreadView } from "../store.js";
-import { renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line } from "../lines.js";
+import { renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
 import { T } from "../theme.js";
 
 /** Apply a pane-scoped selection to the visible slice of a line array. */
@@ -40,13 +40,13 @@ export const toolGroupKey = (turnId: string) => `tools:${turnId}`;
  * its calls into one `>_ N tool calls` row, placed where the first of them
  * was. `toolsExpanded` (ctrl+o) overrides the lot.
  */
-export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, questionCursor = 0, toolsExpanded = false): TranscriptLayout {
+export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, toolsExpanded = false): TranscriptLayout {
   const lines: Line[] = [];
   const itemStarts: TranscriptLayout["itemStarts"] = [];
   const toggles = new Map<number, string>();
   if (!view) return { lines, itemStarts, toggles };
   const items = [...view.items.values()].sort((a, b) => a.seq - b.seq);
-  const opts = { width, expanded, questionCursor };
+  const opts = { width, expanded, question };
 
   const liveTurn = view.thread?.latestTurn?.turnId ?? null;
   const groups = new Map<string, ToolCallItem[]>();
