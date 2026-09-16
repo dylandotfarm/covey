@@ -50,7 +50,10 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
       // pid and startedAt let the CLI replace a daemon that is running older
       // code than the build on disk — otherwise a long-lived daemon silently
       // serves stale behaviour forever, since the CLI reuses any healthy one.
-      res.end(JSON.stringify({ ok: true, machineId: o.config.machineId, name: o.config.name, pid: process.pid, startedAt: STARTED_AT }));
+      // `sessions` says how many Claude subprocesses this daemon owns, and the
+      // two limits that govern that number. A process list with more `claude`
+      // processes than `sessions.live` holds something this daemon did not start.
+      res.end(JSON.stringify({ ok: true, machineId: o.config.machineId, name: o.config.name, pid: process.pid, startedAt: STARTED_AT, sessions: o.engine.sessionCensus() }));
       return;
     }
     res.writeHead(404); res.end();

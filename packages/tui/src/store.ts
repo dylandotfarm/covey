@@ -241,6 +241,8 @@ export class Store {
   readonly clientSource: MachineSource | null;
   readonly canRelaunch: boolean;
   private buildTimer: NodeJS.Timeout | null = null;
+  /** Drives `state.tick`, which animates the spinner. */
+  private tickTimer: NodeJS.Timeout | null = null;
 
   constructor(machines: SavedMachine[], opts: StoreOptions = {}) {
     this.config = loadConfig();
@@ -256,7 +258,8 @@ export class Store {
       clientBuild: opts.build ?? null, clientStale: false,
     };
     for (const m of machines) this.addMachine(m, false);
-    setInterval(() => this.set({ tick: this.state.tick + 1 }), 700).unref();
+    this.tickTimer = setInterval(() => this.set({ tick: this.state.tick + 1 }), 700);
+    this.tickTimer.unref();
     if (opts.watchBuild) this.watchOwnBuild(opts.watchBuild, opts.buildPollMs ?? BUILD_POLL_MS);
     if (opts.notice) this.notify(opts.notice.text, opts.notice.tone);
   }
@@ -1275,6 +1278,7 @@ export class Store {
   shutdown() {
     this.stopWatchingBuild();
     if (this.noticeTimer) { clearTimeout(this.noticeTimer); this.noticeTimer = null; }
+    if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
     for (const c of this.clients.values()) c.stop();
   }
 }

@@ -6,11 +6,11 @@ import type {
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
 } from "@covey/protocol";
 import { Db } from "./db.js";
-import { ClaudeSession, type SessionSink } from "./claude.js";
+import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
 import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree } from "./git.js";
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
-import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
+import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
@@ -48,6 +48,19 @@ function newMember(init: import("@covey/protocol").RunMemberInit, now: string): 
 type ShellListener = (ev: ShellEvent) => void;
 type ThreadListener = (threadId: string, ev: ThreadEvent) => void;
 
+/** How often the daemon looks for sessions nobody needs. */
+const SWEEP_INTERVAL_MS = 30_000;
+
+export interface EngineOptions {
+  /** How a session reaches the SDK. A test hands in a stand-in, so nothing
+   *  spawns a Claude subprocess. */
+  spawn?: QueryFactory;
+  /** The clock the idle sweep reads, in milliseconds. A test moves it by hand. */
+  now?: () => number;
+  /** Where the daemon writes its own lines. */
+  log?: (m: string) => void;
+}
+
 /**
  * The daemon's brain. Owns the db, live sessions, sequencing and fan-out.
  * Commands mutate projections + append events in one transaction, then
@@ -55,6 +68,14 @@ type ThreadListener = (threadId: string, ev: ThreadEvent) => void;
  */
 export class Engine {
   private sessions = new Map<string, ClaudeSession>();
+  /** When each live session was last of use, in milliseconds. The idle sweep
+   *  and the live-session budget both read it. */
+  private touchedAt = new Map<string, number>();
+  /** Threads whose session this daemon released while they were idle, so the
+   *  turn that starts one again can say where the wait comes from. Memory
+   *  only: after a restart nothing here was released, it simply never ran. */
+  private released = new Set<string>();
+  private sweepTimer: NodeJS.Timeout | null = null;
   /** Turns waiting behind a running one, per thread. */
   private queues = new Map<string, { turnId: string; text: string; attachments: Attachment[] }[]>();
   private shellListeners = new Set<ShellListener>();
@@ -66,7 +87,7 @@ export class Engine {
   private titling = new Map<string, AbortController>();
   private sessionStore;
 
-  constructor(readonly db: Db, readonly machine: MachineInfo) {
+  constructor(readonly db: Db, readonly machine: MachineInfo, private opts: EngineOptions = {}) {
     this.sessionStore = makeSessionStore(db);
     // Anything that was running when we last exited is now idle.
     for (const t of db.listThreads()) {
@@ -78,6 +99,14 @@ export class Engine {
       const latestTurn = t.latestTurn?.state === "running" ? { ...t.latestTurn, state: "interrupted" as const, completedAt: new Date().toISOString() } : t.latestTurn;
       if (t.status !== "idle" && t.status !== "error" || latestTurn !== t.latestTurn) this.db.putThread({ ...t, status: "idle", latestTurn, queuedTurns: queued.length });
     }
+    // `unref` so the sweep never holds the process open: a daemon with no work
+    // left must still exit, and a test must not wait on this timer.
+    this.sweepTimer = setInterval(() => this.sweepSessions(), SWEEP_INTERVAL_MS);
+    this.sweepTimer.unref?.();
+  }
+
+  private now(): number {
+    return this.opts.now ? this.opts.now() : Date.now();
   }
 
   onShell(l: ShellListener) { this.shellListeners.add(l); return () => this.shellListeners.delete(l); }
@@ -172,6 +201,11 @@ export class Engine {
 
   private async apply(cmd: Command): Promise<number> {
     const now = new Date().toISOString();
+    // Any command about a thread is use of that thread, so the idle clock for
+    // its session starts again here — before the command runs, because some of
+    // them (`session.stop`, `thread.delete`) end the session instead.
+    const about = (cmd as { threadId?: string }).threadId;
+    if (about) this.touch(about);
     switch (cmd.type) {
       case "machine.settings": {
         // Mutated in place: `machine` is the same object the server hands to
@@ -180,7 +214,12 @@ export class Engine {
           ...(cmd.defaultModel !== undefined ? { defaultModel: cmd.defaultModel } : {}),
           ...(cmd.defaultPermissionMode !== undefined ? { defaultPermissionMode: cmd.defaultPermissionMode } : {}),
           ...(cmd.defaultStreaming !== undefined ? { defaultStreaming: cmd.defaultStreaming } : {}),
+          ...(cmd.sessionIdleMinutes !== undefined ? { sessionIdleMinutes: clampSetting(cmd.sessionIdleMinutes, 0) } : {}),
+          ...(cmd.maxLiveSessions !== undefined ? { maxLiveSessions: clampSetting(cmd.maxLiveSessions, 1) } : {}),
         });
+        // A lower limit applies to the sessions already live, not only to the
+        // next one: the user asked for less memory now.
+        this.sweepSessions();
         return this.emitShell({ kind: "machine.updated", machine: this.machine });
       }
       case "project.create": {
@@ -256,8 +295,7 @@ export class Engine {
         // un-archives it) puts the worktree back at the same path.
         if (cmd.archived) {
           if (t.latestTurn?.state === "running") throw new EngineError("busy", "interrupt the running turn before archiving");
-          this.sessions.get(t.id)?.stop();
-          this.sessions.delete(t.id);
+          this.dropSession(t.id);
           await this.releaseWorktree(t);
         }
         return this.mutateThread(cmd.threadId, (x) => { x.archivedAt = cmd.archived ? now : null; });
@@ -266,8 +304,7 @@ export class Engine {
       case "thread.delete": {
         const t = this.db.getThread(cmd.threadId);
         if (!t) return this.db.shellSeq();
-        this.sessions.get(t.id)?.stop();
-        this.sessions.delete(t.id);
+        this.dropSession(t.id);
         this.queues.delete(t.id);
         const proj = this.db.getProject(t.projectId);
         if (proj) void deleteCheckpointRefs(this.gitCwd(t, proj), t.id);
@@ -352,8 +389,7 @@ export class Engine {
           if (touched === null) throw new EngineError("git", "could not restore working tree");
         }
         // 2. conversation: drop the live process and truncate the transcript
-        this.sessions.get(t.id)?.stop();
-        this.sessions.delete(t.id);
+        this.dropSession(t.id);
         let dropped = 0;
         if (cp.userMessageUuid) dropped = this.db.truncateTranscriptAt(t.id, t.sessionId, cp.userMessageUuid);
         else {
@@ -425,8 +461,7 @@ export class Engine {
         return this.db.shellSeq();
       }
       case "session.stop": {
-        this.sessions.get(cmd.threadId)?.stop();
-        this.sessions.delete(cmd.threadId);
+        this.dropSession(cmd.threadId);
         return this.mutateThread(cmd.threadId, (t) => { t.status = "idle"; });
       }
       // ---- runs -------------------------------------------------------------
@@ -857,10 +892,18 @@ export class Engine {
 
   private ensureSession(t: Thread): ClaudeSession {
     const live = this.sessions.get(t.id);
-    if (live?.running) return live;
+    if (live?.running) { this.touch(t.id); return live; }
+    // A session that stopped answering still owns a subprocess until somebody
+    // aborts it. Replacing it without that leaves a process no map names.
+    if (live) this.dropSession(t.id);
     const p = this.db.getProject(t.projectId);
     if (!p) throw new EngineError("not_found", "project not found");
     const hasTranscript = this.db.loadTranscript(t.id, t.sessionId, "") !== null;
+    // Say where the wait comes from before the wait starts, so a slow first
+    // turn reads as a resume rather than as a thread that hangs.
+    if (this.released.delete(t.id) && hasTranscript) {
+      this.note(t.id, "info", "Resumed this thread's Claude session from its transcript. The session was released while the thread was idle, so this first reply is slower.");
+    }
     // Fixed projectKey (= thread id) so the transcript key is cwd independent.
     const store = makeSessionStore(this.db);
     const storeForThread = {
@@ -876,16 +919,144 @@ export class Engine {
         resume: hasTranscript, sessionStore: storeForThread,
       },
       this.sinkFor(t.id),
+      // `undefined` selects the SDK's own `query`, which is what a daemon uses.
+      this.opts.spawn,
     );
     this.sessions.set(t.id, session);
+    this.touch(t.id);
     session.start();
+    this.opts.log?.(`session started thread=${t.id.slice(0, 8)} resume=${hasTranscript} live=${this.sessions.size}/${this.liveSessionLimit()}`);
+    // The new session is the most recent, so the budget never takes the one
+    // the user is about to talk to.
+    this.enforceBudget();
     return session;
+  }
+
+  // ---- releasing an idle session -------------------------------------------
+
+  /**
+   * How many Claude sessions this daemon holds, and what it allows.
+   *
+   * `/health` reports both, so "how many session processes should this machine
+   * have" has an answer to compare a process list against.
+   */
+  sessionCensus(): { live: number; limit: number; idleMinutes: number } {
+    return { live: this.sessions.size, limit: this.liveSessionLimit(), idleMinutes: this.idleLimitMinutes() };
+  }
+
+  /** This session is of use right now; the idle sweep counts from here. */
+  private touch(threadId: string) {
+    if (this.sessions.has(threadId)) this.touchedAt.set(threadId, this.now());
+  }
+
+  /** Stop a session and forget it. The abort kills the subprocess. */
+  private dropSession(threadId: string) {
+    this.sessions.get(threadId)?.stop();
+    this.sessions.delete(threadId);
+    this.touchedAt.delete(threadId);
+    this.released.delete(threadId);
+  }
+
+  /** Minutes of idleness this machine allows; `0` keeps sessions for ever. */
+  private idleLimitMinutes(): number {
+    const v = this.machine.settings.sessionIdleMinutes;
+    return v === null || v === undefined ? DEFAULT_SESSION_IDLE_MINUTES : Math.max(0, Math.floor(v));
+  }
+
+  /** How many sessions this machine keeps live at one time. */
+  private liveSessionLimit(): number {
+    const v = this.machine.settings.maxLiveSessions;
+    return v === null || v === undefined ? defaultLiveSessionLimit() : Math.max(1, Math.floor(v));
+  }
+
+  /**
+   * Whether the session owes anybody anything. A thread that waits on an
+   * approval or a question is idle by status and must not be reaped: the user
+   * reads the request, and the answer needs the same process.
+   */
+  private sessionBusy(threadId: string): boolean {
+    const s = this.sessions.get(threadId);
+    if (!s) return false;
+    if (s.busy) return true;
+    // A queued turn needs no rule of its own: it starts the moment the running
+    // one ends, and the running one holds the session. (A queue left over from
+    // a daemon restart drains only when the user writes again, so a rule on the
+    // queue alone would pin such a thread's session for ever.)
+    const t = this.db.getThread(threadId);
+    if (!t) return false;
+    return t.latestTurn?.state === "running" || t.pendingApprovals > 0
+      || t.status === "running" || t.status === "starting" || t.status === "waiting";
+  }
+
+  /**
+   * Stop the sessions nobody needs, and say so in the threads that lose one.
+   *
+   * Two rules, in order: a session idle beyond the machine's limit goes, and
+   * then, while more sessions are live than the budget allows, the least
+   * recently used ones go. A busy session never goes, under either rule — the
+   * budget is a target, not a promise, because a machine may have more turns
+   * in flight than its memory would like.
+   *
+   * @returns the threads whose session it released.
+   */
+  sweepSessions(): string[] {
+    const released: string[] = [];
+    const limit = this.idleLimitMinutes();
+    if (limit > 0) {
+      const now = this.now();
+      for (const threadId of [...this.sessions.keys()]) {
+        const idleMs = now - (this.touchedAt.get(threadId) ?? now);
+        if (idleMs < limit * 60_000) continue;
+        if (this.sessionBusy(threadId)) continue;
+        const minutes = Math.round(idleMs / 60_000);
+        this.release(threadId, `idle for ${minutes} minute${minutes === 1 ? "" : "s"}`,
+          `Released this thread's Claude session after ${minutes} minute${minutes === 1 ? "" : "s"} idle, to give its memory back to the machine.`);
+        released.push(threadId);
+      }
+    }
+    return [...released, ...this.enforceBudget()];
+  }
+
+  /** Release the least recently used sessions until the budget is met. */
+  private enforceBudget(): string[] {
+    const max = this.liveSessionLimit();
+    let over = this.sessions.size - max;
+    if (over <= 0) return [];
+    const released: string[] = [];
+    const oldestFirst = [...this.sessions.keys()]
+      .filter((id) => !this.sessionBusy(id))
+      .sort((a, b) => (this.touchedAt.get(a) ?? 0) - (this.touchedAt.get(b) ?? 0));
+    for (const threadId of oldestFirst) {
+      if (over <= 0) break;
+      this.release(threadId, `over the limit of ${max} live sessions`,
+        `Released this thread's Claude session: this machine keeps ${max} session${max === 1 ? "" : "s"} live, and other threads worked more recently.`);
+      released.push(threadId);
+      over--;
+    }
+    return released;
+  }
+
+  /** Stop one session, write the reason in its thread, and log it. */
+  private release(threadId: string, why: string, text: string) {
+    this.dropSession(threadId);
+    this.released.add(threadId);
+    this.note(threadId, "info", `${text} The next message starts a new process and resumes the transcript, so nothing is lost — that first reply takes a second or so longer.`);
+    this.opts.log?.(`session released thread=${threadId.slice(0, 8)} reason=${why} live=${this.sessions.size}/${this.liveSessionLimit()}`);
+  }
+
+  /** One line in a thread's timeline, from the daemon rather than the model. */
+  private note(threadId: string, tone: "info" | "warning", text: string) {
+    const now = new Date().toISOString();
+    this.persistItem({ id: `note:${randomUUID()}`, threadId, turnId: null, seq: 0, createdAt: now, updatedAt: now, kind: "note", tone, text });
   }
 
   private sinkFor(threadId: string): SessionSink {
     return {
       now: () => new Date().toISOString(),
       upsertItem: (item, opts) => {
+        // Work is use: a turn that runs for an hour keeps its own session, and
+        // the idle clock starts from the last line the agent wrote.
+        this.touch(threadId);
         this.upsertItem(item, opts);
         if (item.kind === "approval" || item.kind === "question") this.recountPending(threadId);
       },
@@ -1020,8 +1191,7 @@ export class Engine {
   markMoved(threadId: string, machineId: string, newThreadId: string): void {
     const t = this.db.getThread(threadId);
     if (!t) return;
-    this.sessions.get(threadId)?.stop();
-    this.sessions.delete(threadId);
+    this.dropSession(threadId);
     t.movedTo = { machineId, threadId: newThreadId };
     t.status = "idle";
     t.archivedAt = t.archivedAt ?? new Date().toISOString();
@@ -1029,11 +1199,21 @@ export class Engine {
   }
 
   shutdown() {
+    if (this.sweepTimer) { clearInterval(this.sweepTimer); this.sweepTimer = null; }
     for (const s of this.sessions.values()) s.stop();
     this.sessions.clear();
+    this.touchedAt.clear();
+    this.released.clear();
     for (const a of this.titling.values()) a.abort();
     this.titling.clear();
   }
+}
+
+/** A whole number at or above `min`, or `null` for "no opinion". A client that
+ *  sends nonsense gets the daemon's default rather than a broken limit. */
+function clampSetting(v: number | null, min: number): number | null {
+  if (v === null || !Number.isFinite(v)) return null;
+  return Math.max(min, Math.floor(v));
 }
 
 /** Whether covey still owns this thread's title. Threads from before
