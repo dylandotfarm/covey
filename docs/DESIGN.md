@@ -170,6 +170,16 @@ without committing to anything:
   Claude versions, tailnet name, the defaults new threads inherit there, the
   last update, and a line per project.
 
+The cursor is a row *key*, not an index into the row list. The tree re-sorts
+under it — `byRecency` moves a thread to the top of its project on every turn
+that starts and every turn that finishes, on any machine — so an index points
+at a different thread a moment later, and the preview opens a conversation
+nobody asked for. `cursorIndex` in `sidebar.ts` turns the key back into an
+index, because the painter and the hit test below still speak in rows. When the
+row a key names goes — archived, deleted, moved, folded away with its project —
+the cursor falls back to the index that row was on, and App writes the key of
+whatever is there back, so the next re-sort has a live key to hold.
+
 A preview fetches a screen's worth of the thread, not the thread. The page is
 `previewPage(height)` items for a transcript pane `height` lines tall: an item
 is at least one line, so that always covers the pane, and in practice covers it

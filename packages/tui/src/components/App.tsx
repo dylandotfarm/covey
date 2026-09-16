@@ -5,7 +5,7 @@ import { KNOWN_MODELS, type PermissionMode, type WorkspaceMode } from "@covey/pr
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
 import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
-import { sidebarCells, rowAtScreenRow } from "../sidebar.js";
+import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
 import { Transcript, layoutTranscript } from "./Transcript.js";
@@ -48,7 +48,15 @@ export function App({ store }: { store: Store }) {
     return () => { stdout.off("resize", on); };
   }, [stdout]);
 
-  const [cursor, setCursor] = useState(0);
+  /**
+   * The sidebar cursor is a row key, not an index. The tree re-sorts under it
+   * — a turn on any machine moves its thread to the top of its project — and
+   * an index would then point at a different thread than it did a moment ago,
+   * with the preview opening a conversation nobody asked for.
+   */
+  const [cursorKey, setCursorKey] = useState("");
+  /** The index that key was on, for when the row it names goes away. */
+  const lastCursor = useRef(0);
   const [ovCursor, setOvCursor] = useState(0);
   const [ovFilter, setOvFilter] = useState("");
   const [ovToggle, setOvToggle] = useState(false);
@@ -64,6 +72,7 @@ export function App({ store }: { store: Store }) {
   const pressedLine = useRef<number | null>(null);
 
   const rows = useMemo(() => sidebarRows(state), [state]);
+  const cursor = cursorIndex(rows, cursorKey, lastCursor.current);
   const sidebarVisible = !state.sidebarCollapsed && size.cols >= 70;
   // Hoisted out of Sidebar for the same reason the transcript's lines are:
   // the click hit test and the painter have to agree on which row is where.
@@ -103,8 +112,13 @@ export function App({ store }: { store: Store }) {
   const diffLines = useMemo(() => (state.diffView?.diff ? diffToLines(state.diffView.diff.patch, mainW - 2) : []), [state.diffView?.diff, mainW]);
   const machineName = state.view ? (state.machines.get(state.view.machine)?.info?.name ?? "") : "";
 
-  // keep sidebar cursor on the active thread when the list changes
-  useEffect(() => { if (cursor >= rows.length) setCursor(Math.max(0, rows.length - 1)); }, [rows.length, cursor]);
+  useEffect(() => { lastCursor.current = cursor; }, [cursor]);
+  // The key has to name a row that exists. When the row it named has gone,
+  // `cursorIndex` has already fallen back to the nearest surviving one; write
+  // that row's key back, or the cursor is an index again until the next move.
+  useEffect(() => {
+    if (rows.length > 0 && !rows.some((r) => r.key === cursorKey)) setCursorKey(rows[cursor]!.key);
+  }, [rows, cursorKey, cursor]);
   // Reset the answer buffer when a different request comes up, so a stale
   // half-typed answer never carries into the next question.
   const pendingId = pending && (pending.kind === "approval" || pending.kind === "question") ? pending.requestId : null;
@@ -122,6 +136,19 @@ export function App({ store }: { store: Store }) {
 
   // ---- actions ----------------------------------------------------------------
   const currentRow = rows[cursor];
+
+  /**
+   * Move the cursor `delta` rows and remember the row it lands on. The update
+   * is functional because Ink hands a batched chunk of j/k — or of wheel
+   * events — to one handler call: reading `cursor` from the closure would make
+   * the whole chunk one step.
+   */
+  const moveCursor = (delta: number) => setCursorKey((k) => {
+    const to = rows[Math.max(0, Math.min(rows.length - 1, cursorIndex(rows, k, lastCursor.current) + delta))];
+    return to ? to.key : k;
+  });
+  /** Put the cursor on a row the mouse found, by index. */
+  const pointCursor = (index: number) => { const r = rows[index]; if (r) setCursorKey(r.key); };
   const contextMachine = state.selected?.machine ?? currentRow?.machine ?? state.order[0];
   const contextProject = state.view?.thread?.projectId ?? currentRow?.projectId;
 
@@ -535,7 +562,7 @@ export function App({ store }: { store: Store }) {
       // one source of truth means the preview follows the wheel too.
       if (inSidebar) {
         store.setFocus("sidebar");
-        setCursor((c) => Math.max(0, Math.min(rows.length - 1, c - delta)));
+        moveCursor(-delta);
         return;
       }
       if (state.diffView) return store.setDiffScroll(state.diffView.scroll - delta);
@@ -556,7 +583,7 @@ export function App({ store }: { store: Store }) {
         store.setFocus("sidebar");
         const idx = rowAtScreenRow(cells, ev.row, SIDEBAR_TOP);
         if (idx == null) return;
-        setCursor(idx);
+        pointCursor(idx);
         activateRow(rows[idx]);
         return;
       }
@@ -743,10 +770,10 @@ export function App({ store }: { store: Store }) {
 
   function handleSidebarKey(input: string, key: any) {
     const row = rows[cursor];
-    if (key.upArrow || input === "k") return setCursor((c) => Math.max(0, c - 1));
-    if (key.downArrow || input === "j") return setCursor((c) => Math.min(rows.length - 1, c + 1));
-    if (key.pageUp) return setCursor((c) => Math.max(0, c - 10));
-    if (key.pageDown) return setCursor((c) => Math.min(rows.length - 1, c + 10));
+    if (key.upArrow || input === "k") return moveCursor(-1);
+    if (key.downArrow || input === "j") return moveCursor(1);
+    if (key.pageUp) return moveCursor(-10);
+    if (key.pageDown) return moveCursor(10);
     if (input === "?") return store.setOverlay({ kind: "help" });
     if (!row) return;
     if (key.return || input === "l" || key.rightArrow) return activateRow(row);
