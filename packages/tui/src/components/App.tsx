@@ -4,11 +4,13 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
-import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
+import { parseMouse, wheelDelta, copyToClipboard, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
+import { buildLine, buildSkew } from "../build.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
 import { Transcript, layoutTranscript } from "./Transcript.js";
+import { currentAsk, takeAnswer } from "../question.js";
 import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
@@ -69,8 +71,11 @@ export function App({ store }: { store: Store }) {
   // is preserved across the interruption.
   const [answerDraft, setAnswerDraft] = useState("");
   const [questionCursor, setQuestionCursor] = useState(0);
-  // The `/` menu: which row is under the cursor, and whether esc has shut it
-  // for the name being typed.
+  // An AskUserQuestion call carries up to four questions, stepped through one
+  // at a time. The answers collect here and go to the daemon in one command.
+  const [answersGiven, setAnswersGiven] = useState<string[]>([]);
+  // The prefix menu: which row is under the cursor, and whether esc has shut
+  // it for the name being typed.
   const [menuIndex, setMenuIndex] = useState(0);
   const [menuClosed, setMenuClosed] = useState(false);
   const [quitArmed, setQuitArmed] = useState(false);
@@ -125,7 +130,8 @@ export function App({ store }: { store: Store }) {
     : Math.min(maxEditorRows, Math.max(1, editorRows.length)) + 2 + (attachmentCount > 0 ? 1 : 0))
     + (menu ? menuHeight(menu) : 0);
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionCursor, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionCursor, state.toolsExpanded]);
+  const questionUi = useMemo(() => ({ cursor: questionCursor, answered: answersGiven }), [questionCursor, answersGiven]);
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
@@ -159,7 +165,7 @@ export function App({ store }: { store: Store }) {
   // Reset the answer buffer when a different request comes up, so a stale
   // half-typed answer never carries into the next question.
   const pendingId = pending && (pending.kind === "approval" || pending.kind === "question") ? pending.requestId : null;
-  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); }, [pendingId]);
+  useEffect(() => { setAnswerDraft(""); setQuestionCursor(0); setAnswersGiven([]); }, [pendingId]);
   // A relaunch is the CLI's job (it rebuilds and re-execs); all we do is
   // unmount cleanly so the terminal is handed back in one piece.
   useEffect(() => { if (state.relaunch) { store.shutdown(); exit(); } }, [state.relaunch, store, exit]);
@@ -343,14 +349,17 @@ export function App({ store }: { store: Store }) {
     const modelLabel = settings.defaultModel
       ? (KNOWN_MODELS.find((k) => k.id === settings.defaultModel)?.label ?? settings.defaultModel)
       : "from Claude settings";
+    // "behind" is the reason most updates get run, so say it where the finger
+    // already is instead of only in the summary behind it.
+    const skew = buildSkew(state.clientBuild, info.build);
     const opts: PickOption[] = [
-      { id: "update", label: "Update — pull, rebuild, restart", hint: busy ? "interrupts running turns" : "" },
+      { id: "update", label: "Update — pull, rebuild, restart", hint: skew === "behind" ? "older build than your client" : busy ? "interrupts running turns" : "" },
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
       { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
-    openPick(`${info.name} — ${info.os}/${info.arch} · daemon ${info.daemonVersion}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
+    openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
       switch (id) {
         case "update": return void confirmUpdate(machineKey!);
         case "restart": return confirmRestart(machineKey!);
@@ -577,15 +586,20 @@ export function App({ store }: { store: Store }) {
    * the sign flips there.
    */
   function scrollPane(lines: number) {
-    if (state.diffView) {
+    // The live state, not the render snapshot: a held key arrives as one
+    // batched chunk and is replayed key by key, so each repeat has to measure
+    // from the one before it. `store.set` writes and notifies synchronously,
+    // so `getState()` is already the result of the last repeat.
+    const live = store.getState();
+    if (live.diffView) {
       const max = Math.max(0, diffLines.length - Math.max(1, transcriptH - 2));
-      store.setDiffScroll(Math.max(0, Math.min(max, state.diffView.scroll + lines)));
+      store.setDiffScroll(Math.max(0, Math.min(max, live.diffView.scroll + lines)));
       return;
     }
     const max = Math.max(0, layout.lines.length - transcriptH);
-    const next = Math.max(0, Math.min(max, state.scrollFromBottom - lines));
+    const next = Math.max(0, Math.min(max, live.scrollFromBottom - lines));
     store.setScroll(next);
-    if (lines < 0 && next >= max && state.view?.hasMore) void store.loadOlder();
+    if (lines < 0 && next >= max && live.view?.hasMore) void store.loadOlder();
   }
 
   /** Fold or unfold the most recent tool call or thinking block. */
@@ -600,7 +614,11 @@ export function App({ store }: { store: Store }) {
     const inTranscript = ev.row >= TRANSCRIPT_TOP && ev.row < TRANSCRIPT_TOP + transcriptH && !inSidebar;
 
     if (ev.kind === "wheel") {
-      const delta = ev.wheel === "up" ? 3 : -3;
+      // One row a notch, alt for half a page. 0 is a sideways notch, which
+      // nothing here scrolls; it must not take the focus or load older lines
+      // either, so leave before any of that.
+      const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
+      if (delta === 0) return;
       // Over the sidebar the wheel moves the cursor rather than scrolling a
       // viewport of its own: the cursor is what the window is centred on, and
       // one source of truth means the preview follows the wheel too.
@@ -609,11 +627,16 @@ export function App({ store }: { store: Store }) {
         moveCursor(-delta);
         return;
       }
-      if (state.diffView) return store.setDiffScroll(state.diffView.scroll - delta);
+      // Same rule as `scrollPane`: a chunk holds several notches and is
+      // replayed one at a time, so every notch measures from the store rather
+      // than from `state`, which is the last render's snapshot and does not
+      // move inside the loop. Read the snapshot and five notches move one row.
+      const live = store.getState();
+      if (live.diffView) return store.setDiffScroll(live.diffView.scroll - delta);
       const max = Math.max(0, layout.lines.length - transcriptH);
-      const next = Math.min(max, Math.max(0, state.scrollFromBottom + delta));
+      const next = Math.min(max, Math.max(0, live.scrollFromBottom + delta));
       store.setScroll(next);
-      if (next >= max && state.view?.hasMore) void store.loadOlder();
+      if (next >= max && live.view?.hasMore) void store.loadOlder();
       return;
     }
 
@@ -863,21 +886,30 @@ export function App({ store }: { store: Store }) {
         // Answers use their own buffer, never the composer draft — otherwise
         // whatever you were part-way through typing is consumed as the answer
         // and lost. This branch returns unconditionally so `draft` survives.
-        const opts = pending.options ?? [];
+        // One question at a time: the keys below always act on the question the
+        // user has reached, and only the last answer sends the set.
+        const opts = currentAsk(pending, answersGiven)?.options ?? [];
         const customRow = opts.length;
+        const take = (a: string) => {
+          const { answered, send } = takeAnswer(pending, answersGiven, a);
+          setAnswersGiven(answered);
+          setAnswerDraft("");
+          setQuestionCursor(0);
+          if (send) void store.respondQuestion(send);
+        };
         // Functional updates throughout: a batched chunk is replayed character
         // by character here, so reading state from the closure would let each
         // replay clobber the last instead of accumulating.
         if (key.upArrow) { setQuestionCursor((c) => Math.max(0, c - 1)); return; }
         if (key.downArrow) { setQuestionCursor((c) => Math.min(customRow, c + 1)); return; }
         if (key.return) {
-          if (questionCursor < opts.length) { void store.respondQuestion(opts[questionCursor]!.label); return; }
+          if (questionCursor < opts.length) { take(opts[questionCursor]!.label); return; }
           const a = answerDraft.trim();
-          if (a) { void store.respondQuestion(a); setAnswerDraft(""); }
+          if (a) take(a);
           return;
         }
         if (answerDraft.length === 0 && /^[1-9]$/.test(input) && Number(input) <= opts.length) {
-          void store.respondQuestion(opts[Number(input) - 1]!.label);
+          take(opts[Number(input) - 1]!.label);
           return;
         }
         if (key.backspace || key.delete) { setAnswerDraft((d) => d.slice(0, -1)); return; }

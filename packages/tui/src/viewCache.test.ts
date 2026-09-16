@@ -83,6 +83,8 @@ test("dropping a machine leaves the other machines alone", () => {
 
 // ---- the store's use of it --------------------------------------------------
 
+/** Nothing listens here. A real client pointed at it fails, which is what the
+ *  disconnect test needs the store to see. */
 const MACHINE = "ws://127.0.0.1:1/fake";
 
 /** A client that counts what the store asks the daemon for. */
@@ -101,8 +103,8 @@ class FakeClient {
   stop() {}
 }
 
-function storeWith(client: FakeClient) {
-  const store = new Store([]);
+/** Put a connected machine in the store, answered by a client we can count. */
+function attach(store: Store, client: FakeClient) {
   (store as any).clients.set(MACHINE, client);
   const ms: MachineState = {
     key: MACHINE, saved: { name: "fake", url: MACHINE }, conn: "connected", error: null,
@@ -110,6 +112,12 @@ function storeWith(client: FakeClient) {
   };
   store.state.machines.set(MACHINE, ms);
   store.state.order.push(MACHINE);
+  return ms;
+}
+
+function storeWith(client: FakeClient) {
+  const store = new Store([]);
+  attach(store, client);
   return store;
 }
 
@@ -178,9 +186,37 @@ test("dropping a machine forgets its cached threads", async () => {
   const c = new FakeClient();
   const store = storeWith(c);
   await open(store, "a");
-  await open(store, "b");
+  await open(store, "b"); // a is now cached
   store.removeMachine(MACHINE);
-  const store2 = storeWith(c);
-  await store2.select({ machine: MACHINE, threadId: "a" });
-  assert.deepEqual(c.snapshots.map((s) => s.threadId), ["a", "b", "a"]);
+  // The same client, with the machine added back: the cache must not have
+  // outlived the machine it belongs to.
+  attach(store, c);
+  await open(store, "a");
+  assert.deepEqual(c.snapshots.map((s) => s.threadId), ["a", "b", "a"], "a came back from a cache that should have gone");
+});
+
+test("a machine that loses its connection loses its cached views", async () => {
+  // A real client, so that the store's own connection handler runs — that
+  // handler is what drops the cache, and it closes over the machine state the
+  // store made for it. The client points at a port nothing listens on and is
+  // stopped at the end; nothing here waits on it.
+  const store = new Store([{ name: "fake", url: MACHINE }]);
+  const real = store.client(MACHINE)!;
+  const ms = store.state.machines.get(MACHINE)!;
+  try {
+    const c = new FakeClient();
+    (store as any).clients.set(MACHINE, c); // the counting client answers the snapshots
+    ms.conn = "connected";
+    await open(store, "a");
+    await open(store, "b"); // a is now cached
+    // The connection drops, said the way MachineClient says it. A cached seq
+    // only means something against the database the daemon had when we read
+    // it, so what comes back cannot be trusted to continue from it.
+    (real as any).setState("disconnected");
+    ms.conn = "connected"; // …and the daemon comes back
+    await open(store, "a");
+    assert.deepEqual(c.snapshots.map((s) => s.threadId), ["a", "b", "a"], "a was painted from a cache the drop should have emptied");
+  } finally {
+    real.stop(); // no socket and no reconnect timer outlives the test
+  }
 });
