@@ -6,6 +6,7 @@ import { DEFAULT_PORT } from "@covey/protocol";
 import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } from "@covey/tui";
 import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive, buildInfo, buildDirs, newestBuildMtime, buildIsNewerThan } from "@covey/daemon";
 import { daemonArgs } from "./daemonArgs.js";
+import { childEnv, releaseNodeEnv } from "./nodeEnv.js";
 
 const argv = process.argv.slice(2);
 // A leading flag belongs to `tui`, except for help: `covey --help` has to
@@ -14,6 +15,10 @@ const help = ["-h", "--help", "help"];
 const cmd = argv[0] && (!argv[0].startsWith("-") || help.includes(argv[0])) ? argv[0] : "tui";
 const flag = (f: string) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
 const has = (f: string) => argv.includes(f);
+
+// React has read NODE_ENV by now — the imports above evaluated first — so every
+// command but the TUI can have its environment back. See `nodeEnv.ts`.
+if (cmd !== "tui" && cmd !== "open") releaseNodeEnv();
 
 async function main() {
   switch (cmd) {
@@ -41,6 +46,9 @@ async function main() {
         canRelaunch: true,
         notice: takeNotice(),
       });
+      // The TUI is off the screen, so React has no further use for NODE_ENV and
+      // the work below — a rebuild, a daemon, a relaunch — must not inherit it.
+      releaseNodeEnv();
       if (relaunch) return relaunchSelf(await applyRelaunch(relaunch));
       process.exit(0);
     }
@@ -302,7 +310,7 @@ async function spawnDaemon() {
   const out = openSync(join(logDir, "daemon.log"), "a");
   const port = localPort();
   const args = daemonArgs(here(), port);
-  const child = spawn(process.execPath, args, { detached: true, stdio: ["ignore", out, out], env: process.env });
+  const child = spawn(process.execPath, args, { detached: true, stdio: ["ignore", out, out], env: childEnv() });
   child.unref();
   for (let i = 0; i < 40; i++) { if (await healthy(port)) return; await new Promise((r) => setTimeout(r, 250)); }
   console.error(`local daemon did not start; see ${join(logDir, "daemon.log")}`);
