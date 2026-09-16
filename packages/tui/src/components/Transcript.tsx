@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import type { ToolCallItem } from "@covey/protocol";
 import { selectionBounds, type Selection, type ThreadView } from "../store.js";
 import { renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
+import { hyperlinksEnabled, osc8, type LinkContext } from "../links.js";
 import { T } from "../theme.js";
 
 /** Apply a pane-scoped selection to the visible slice of a line array. */
@@ -39,14 +40,17 @@ export const toolGroupKey = (turnId: string) => `tools:${turnId}`;
  * its calls is the point. Every turn before it keeps its prose and collapses
  * its calls into one `>_ N tool calls` row, placed where the first of them
  * was. `toolsExpanded` (ctrl+o) overrides the lot.
+ *
+ * `links` marks the paths and the URLs. It is the caller's job because whether
+ * a path is openable depends on which machine the thread runs on.
  */
-export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, toolsExpanded = false): TranscriptLayout {
+export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, toolsExpanded = false, links?: LinkContext): TranscriptLayout {
   const lines: Line[] = [];
   const itemStarts: TranscriptLayout["itemStarts"] = [];
   const toggles = new Map<number, string>();
   if (!view) return { lines, itemStarts, toggles };
   const items = [...view.items.values()].sort((a, b) => a.seq - b.seq);
-  const opts = { width, expanded, question };
+  const opts = { width, expanded, question, links };
 
   const liveTurn = view.thread?.latestTurn?.turnId ?? null;
   const groups = new Map<string, ToolCallItem[]>();
@@ -131,12 +135,22 @@ export function Transcript({ view, layout, height, scrollFromBottom, width, sele
   );
 }
 
+/**
+ * Whether to write OSC 8 hyperlinks. Read once: it is an escape hatch for a
+ * terminal that mangles them, not a setting that changes while running.
+ */
+const HYPERLINKS = hyperlinksEnabled();
+
 const LineView = React.memo(function LineView({ line }: { line: Line }) {
   if (line.length === 0) return <Text> </Text>;
   return (
     <Text wrap="truncate">
       {line.map((s, i) => (
-        <Text key={i} color={s.color} backgroundColor={s.bg} bold={s.bold} dimColor={s.dim} italic={s.italic} inverse={s.inverse}>{s.text}</Text>
+        // The OSC 8 pair goes inside the <Text>, not around it. Ink measures
+        // with `string-width`, which gives the sequence a width of zero, so the
+        // layout is the same as it would be for the bare text. Verified
+        // against ink 7.1.1.
+        <Text key={i} color={s.color} backgroundColor={s.bg} bold={s.bold} dimColor={s.dim} italic={s.italic} inverse={s.inverse}>{s.link && HYPERLINKS ? osc8(s.link, s.text) : s.text}</Text>
       ))}
     </Text>
   );
