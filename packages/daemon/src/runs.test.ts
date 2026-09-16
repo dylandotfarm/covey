@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { isFinalMemberState, runState, tallyRun, type MachineInfo, type RunInit, type RunMemberInit } from "@covey/protocol";
+import { isFinalMemberState, runState, tallyRun, type MachineInfo, type RunInit, type RunMemberInit, type RunMemberReview } from "@covey/protocol";
 import { Db } from "./db.js";
 import { Engine, EngineError } from "./engine.js";
 
@@ -181,14 +181,36 @@ test("a dispatched member is withdrawn, never removed — its thread did the wor
 
 test("review state is carried whole and never read here — the seam for issue #45", async () => {
   const { engine: e, dir, close } = engine();
+  // The real shape, now that #45 owns the field. Typed on purpose: a fixture
+  // that is only `unknown` would keep passing while the two halves drifted.
+  const review: RunMemberReview = {
+    gate: {
+      memberId: "mem44", branch: "issue-44-run-model", ok: false, ci: "stale",
+      checks: [{ name: "check", workflow: "ci", state: "success", startedAt: "2026-09-16T16:33:12Z", url: null }],
+      refusals: [{ code: "ci-stale", message: "CI on #66 is green against an older base" }],
+      evidence: null,
+    },
+    evidence: {
+      reverted: "the placement loop in engine.ts",
+      test: "packages/daemon/src/runs.test.ts → a second run is placed against what the first one carries",
+      failure: "✖ a second run is placed against what the first one carries\nℹ fail 1",
+      recordedAt: "2026-09-16T17:00:00Z",
+    },
+    queue: {
+      memberId: "mem44", branch: "issue-44-run-model", label: "#44 run model",
+      position: 1, total: 2, size: 1438, meets: [], brief: "You are 1 of 2 in the merge queue.",
+    },
+    audit: null,
+    checkedAt: "2026-09-16T17:00:00Z",
+  };
   try {
     await send(e, { type: "run.create", run: runInit() });
-    await send(e, { type: "run.member.patch", runId: "run-1", memberId: "mem44", patch: { review: { gate: "regression-test", evidence: "reverted, watched it fail", position: 2 } } });
+    await send(e, { type: "run.member.patch", runId: "run-1", memberId: "mem44", patch: { review } });
     // It has to survive the round trip through SQLite as well as the patch.
     const runs = new Engine(new Db(dir), { ...MACHINE }).shellSnapshot().runs ?? [];
     assert.equal(runs.length, 1, "the run did not survive the restart — it is not in the daemon's database");
     const run = runs[0]!;
-    assert.deepEqual(run.members[0]!.review, { gate: "regression-test", evidence: "reverted, watched it fail", position: 2 });
+    assert.deepEqual(run.members[0]!.review, review, "every field came back, including the nested refusals and the brief");
     assert.equal(run.members[1]!.review, null);
   } finally { close(); }
 });
