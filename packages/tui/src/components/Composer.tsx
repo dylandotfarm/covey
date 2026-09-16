@@ -31,7 +31,8 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   const modeLabel = bypass ? "⏵⏵ bypass" : mode === "acceptEdits" ? "accept edits" : mode;
   const modeColor = bypass ? T.danger : mode === "plan" ? T.awaiting : T.subtle;
   const turn = thread?.latestTurn;
-  const stats = turn && turn.state !== "running" && turn.costUsd != null ? `$${turn.costUsd.toFixed(3)} · ${fmtMs(Date.parse(turn.completedAt ?? turn.startedAt) - Date.parse(turn.startedAt))}` : "";
+  // `~` because the figure is the SDK's list-price estimate, not money charged.
+  const stats = turn && turn.state !== "running" && turn.costUsd != null ? `~$${turn.costUsd.toFixed(3)} · ${fmtMs(Date.parse(turn.completedAt ?? turn.startedAt) - Date.parse(turn.startedAt))}` : "";
   const diff = turn?.diff && !turn.diff.unavailable && turn.diff.files.length > 0 ? turn.diff : null;
   const queued = thread?.queuedTurns ?? 0;
   return (

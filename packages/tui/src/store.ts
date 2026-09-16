@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings } from "@covey/protocol";
+import type { MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, Attachment, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { MachineClient, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 
@@ -66,7 +66,18 @@ export type Overlay =
   | { kind: "input"; title: string; placeholder?: string; initial?: string; onSubmit: (v: string) => void; onCancel?: () => void }
   /** Live progress of `machine.update`; closing it leaves the update running. */
   | { kind: "update"; machine: string }
-  | { kind: "browse"; machine: string; path: string; entries: DirEntry[]; onPick: (path: string) => void; loading?: boolean };
+  | { kind: "browse"; machine: string; path: string; entries: DirEntry[]; onPick: (path: string) => void; loading?: boolean }
+  /** Token and estimated-cost totals, asked of every connected machine. */
+  | {
+      kind: "usage";
+      /** Index into `USAGE_WINDOWS`. */
+      window: number;
+      groupBy: UsageGroupBy;
+      loading: boolean;
+      reports: UsageReport[];
+      /** Machines that could not answer, with the reason. */
+      errors: { machine: string; message: string }[];
+    };
 
 export interface DirEntry { name: string; isDir: boolean; isRepo: boolean }
 
@@ -511,6 +522,35 @@ export class Store {
       : e?.message ?? String(e);
   }
 
+  /**
+   * Ask every connected machine what its turns cost inside a window. The TUI
+   * cannot read a database on another machine, so each one answers for itself
+   * and the overlay adds the answers up.
+   *
+   * The client owns the clock: it sends absolute instants, so machines in
+   * different time zones still answer about the same period.
+   */
+  async loadUsage(window: number, groupBy: UsageGroupBy) {
+    const { since, until } = usageWindow(window);
+    const keys = this.state.order.filter((k) => this.state.machines.get(k)?.conn === "connected");
+    this.setOverlay({ kind: "usage", window, groupBy, loading: true, reports: [], errors: [] });
+    const answers = await Promise.all(keys.map(async (k) => {
+      const client = this.clients.get(k);
+      if (!client) return { machine: k, message: "not connected" };
+      try { return await client.rpc("usage.report", { since, until, groupBy }); }
+      catch (e: any) { return { machine: k, message: this.machineError(k, e) }; }
+    }));
+    // A window or grouping changed while the answers were in flight; that
+    // request owns the overlay now.
+    const ov = this.state.overlay;
+    if (ov?.kind !== "usage" || ov.window !== window || ov.groupBy !== groupBy) return;
+    this.setOverlay({
+      kind: "usage", window, groupBy, loading: false,
+      reports: answers.filter((a): a is UsageReport => "total" in a),
+      errors: answers.filter((a): a is { machine: string; message: string } => "message" in a),
+    });
+  }
+
   /** Pull, rebuild and restart that machine's daemon. Progress arrives as pushes. */
   async updateMachine(machine: string) {
     const client = this.clients.get(machine);
@@ -863,4 +903,84 @@ export function sidebarRows(s: AppState): SidebarRow[] {
     }
   }
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Usage windows and totals
+// ---------------------------------------------------------------------------
+
+/**
+ * The periods the usage overlay offers. A day starts at the reader's own
+ * midnight, so "today" means the day they are looking at, and "last 7 days"
+ * covers today and the six days before it.
+ */
+export const USAGE_WINDOWS: { id: string; label: string; days: number | null }[] = [
+  { id: "today", label: "Today", days: 1 },
+  { id: "7d", label: "Last 7 days", days: 7 },
+  { id: "30d", label: "Last 30 days", days: 30 },
+  { id: "all", label: "All time", days: null },
+];
+
+/** The window as absolute instants. `null` means no bound. */
+export function usageWindow(index: number, now = new Date()): { since: string | null; until: string | null } {
+  const w = USAGE_WINDOWS[index] ?? USAGE_WINDOWS[0]!;
+  if (w.days === null) return { since: null, until: null };
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - (w.days - 1));
+  return { since: start.toISOString(), until: null };
+}
+
+/** Add machine answers into one figure. */
+export function sumUsage(totals: UsageTotals[]): UsageTotals {
+  const z: UsageTotals = { turns: 0, inputTokens: 0, outputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, estimatedCostUsd: 0 };
+  for (const t of totals) {
+    z.turns += t.turns;
+    z.inputTokens += t.inputTokens;
+    z.outputTokens += t.outputTokens;
+    z.cacheCreationInputTokens += t.cacheCreationInputTokens;
+    z.cacheReadInputTokens += t.cacheReadInputTokens;
+    z.estimatedCostUsd += t.estimatedCostUsd;
+  }
+  return z;
+}
+
+/**
+ * The rows the usage overlay paints: every machine's groups in one list,
+ * biggest first, each tagged with the machine it came from. Grouping by
+ * machine gives one row per machine, so the tag is dropped there.
+ */
+export function usageRows(reports: UsageReport[], groupBy: UsageGroupBy): { key: string; label: string; machine: string; total: UsageTotals }[] {
+  // A machine row is named after its machine, and a model row is not a
+  // machine's at all — both would only repeat themselves with a tag.
+  const tagged = groupBy !== "machine" && groupBy !== "model";
+  const rows = reports.flatMap((r) => r.groups.map((g) => ({
+    key: `${r.machineId}:${g.key}`,
+    label: g.label,
+    machine: tagged ? r.machineName : "",
+    total: g as UsageTotals,
+  })));
+  // One model runs on several machines, so its rows belong together.
+  if (groupBy === "model") {
+    const byModel = new Map<string, { key: string; label: string; machine: string; total: UsageTotals }>();
+    for (const r of rows) {
+      const seen = byModel.get(r.label);
+      if (seen) seen.total = sumUsage([seen.total, r.total]);
+      else byModel.set(r.label, { ...r, key: r.label });
+    }
+    return [...byModel.values()].sort((a, b) => b.total.estimatedCostUsd - a.total.estimatedCostUsd);
+  }
+  return rows.sort((a, b) => b.total.estimatedCostUsd - a.total.estimatedCostUsd);
+}
+
+/** Tokens, short enough for a column: 1.2M, 340k, 812. */
+export function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+  return String(n);
+}
+
+/** Always with a `~`: the figure is the SDK's list-price estimate, not a bill. */
+export function fmtCost(usd: number): string {
+  if (usd === 0) return "~$0";
+  if (usd < 0.01) return "~$0.01";
+  return `~$${usd < 100 ? usd.toFixed(2) : Math.round(usd)}`;
 }

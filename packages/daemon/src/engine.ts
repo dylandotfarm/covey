@@ -12,7 +12,7 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, TurnUsage, UsageGroupBy, UsageQuery, UsageReport } from "@covey/protocol";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -473,6 +473,53 @@ export class Engine {
     });
   }
 
+  /**
+   * Keep the finished turn. One row per turn is what makes "how much did last
+   * week cost" answerable at all — the thread itself holds only the latest
+   * turn, and the next turn overwrites it.
+   *
+   * A turn the user interrupted is kept too: it still spent tokens.
+   */
+  private recordTurn(t: Thread, usage: TurnUsage) {
+    const turn = t.latestTurn!;
+    const state = turn.state === "running" ? "completed" : turn.state;
+    this.db.putTurn({
+      threadId: t.id,
+      turnId: turn.turnId,
+      projectId: t.projectId,
+      startedAt: turn.startedAt,
+      endedAt: turn.completedAt ?? new Date().toISOString(),
+      state,
+      // The model that did most of the work. `byModel` keeps the rest, so a
+      // turn that changed model, or ran a subagent elsewhere, can be re-priced.
+      model: usage.byModel[0]?.model ?? t.model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheCreationInputTokens: usage.cacheCreationInputTokens,
+      cacheReadInputTokens: usage.cacheReadInputTokens,
+      estimatedCostUsd: usage.estimatedCostUsd,
+      byModel: usage.byModel,
+    });
+  }
+
+  /**
+   * Totals for the turns this machine ran inside a window. The client owns the
+   * clock and sends absolute instants, so several machines asked the same
+   * question answer about the same period.
+   */
+  usageReport(q: UsageQuery): UsageReport {
+    const since = q.since ?? null;
+    const until = q.until ?? null;
+    const groupBy: UsageGroupBy = q.groupBy ?? "thread";
+    const total = this.db.usageTotals(since, until);
+    const groups = groupBy === "machine"
+      // One database holds one machine's turns, so the machine's own total is
+      // the whole answer.
+      ? [{ key: this.machine.machineId, label: this.machine.name, ...total }]
+      : this.db.usageGroups(groupBy, since, until);
+    return { machineId: this.machine.machineId, machineName: this.machine.name, since, until, groupBy, total, groups };
+  }
+
   /** Drop transcript entries at or after an ISO timestamp (fallback when no uuid is known). */
   private truncateTranscriptByTime(projectKey: string, sessionId: string, iso: string): number {
     const rows = this.db.loadTranscript(projectKey, sessionId, "") ?? [];
@@ -607,9 +654,14 @@ export class Engine {
         if (t.latestTurn && t.latestTurn.state === "running") {
           t.latestTurn.state = info.isError ? "error" : "completed";
           t.latestTurn.completedAt = new Date().toISOString();
-          t.latestTurn.costUsd = info.costUsd;
-          t.latestTurn.inputTokens = info.inputTokens;
-          t.latestTurn.outputTokens = info.outputTokens;
+        }
+        if (t.latestTurn) {
+          // These are this turn's own figures, not the session's running total.
+          t.latestTurn.usage = info.usage;
+          t.latestTurn.costUsd = info.usage.estimatedCostUsd;
+          t.latestTurn.inputTokens = info.usage.inputTokens;
+          t.latestTurn.outputTokens = info.usage.outputTokens;
+          this.recordTurn(t, info.usage);
         }
         t.status = "idle";
         t.lastMessageAt = new Date().toISOString();
