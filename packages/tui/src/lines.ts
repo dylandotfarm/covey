@@ -1,4 +1,5 @@
 import type { TimelineItem, ToolCallItem } from "@covey/protocol";
+import { linkSpans, targetUri, toolLink, type LinkContext } from "./links.js";
 import { T } from "./theme.js";
 
 /**
@@ -6,7 +7,21 @@ import { T } from "./theme.js";
  * gives us exact line counts, so the transcript can be scrolled and
  * virtualised (only visible lines become <Text> nodes).
  */
-export interface Span { text: string; color?: string; bg?: string; bold?: boolean; dim?: boolean; italic?: boolean; inverse?: boolean }
+export interface Span {
+  text: string;
+  color?: string;
+  bg?: string;
+  bold?: boolean;
+  dim?: boolean;
+  italic?: boolean;
+  inverse?: boolean;
+  /**
+   * What a click on this span opens, as a URI. Held apart from `text` on
+   * purpose: an OSC 8 escape inside `text` would be counted as printable
+   * columns by `width()` below, and the wrap would be wrong.
+   */
+  link?: string;
+}
 export type Line = Span[];
 
 export function width(s: string): number {
@@ -19,8 +34,15 @@ export function width(s: string): number {
   return w;
 }
 
-/** Word-wrap a single paragraph of spans to `w` columns. */
-export function wrapSpans(spans: Span[], w: number): Line[] {
+/**
+ * Word-wrap a single paragraph of spans to `w` columns.
+ *
+ * `links` turns on link detection, which runs *before* the wrap: a path that
+ * crosses a row boundary is scanned whole here, and each piece the wrap cuts
+ * keeps the `link` field, so both rows open the same file.
+ */
+export function wrapSpans(spans: Span[], w: number, links?: LinkContext): Line[] {
+  if (links) spans = linkSpans(spans, links);
   const lines: Line[] = [];
   let cur: Line = [];
   let curW = 0;
@@ -64,8 +86,8 @@ function trimLeading(l: Line): Line {
   return out;
 }
 
-/** Minimal markdown: fences, headers, bullets, inline code, bold. */
-export function markdownToLines(text: string, w: number, base: Partial<Span> = {}): Line[] {
+/** Minimal markdown: fences, headers, bullets, inline code, bold, links. */
+export function markdownToLines(text: string, w: number, base: Partial<Span> = {}, links?: LinkContext): Line[] {
   const out: Line[] = [];
   const src = text.replace(/\r\n/g, "\n").split("\n");
   let inFence = false;
@@ -79,33 +101,39 @@ export function markdownToLines(text: string, w: number, base: Partial<Span> = {
     }
     if (inFence) {
       const padded = raw.length < w ? raw + " ".repeat(Math.max(0, w - width(raw))) : raw;
-      for (const l of wrapSpans([{ text: padded, color: T.code, bg: T.surface }], w)) out.push(l);
+      for (const l of wrapSpans([{ text: padded, color: T.code, bg: T.surface }], w, links)) out.push(l);
       continue;
     }
     if (raw.trim() === "") { out.push([]); continue; }
     const h = raw.match(/^(#{1,6})\s+(.*)$/);
-    if (h) { out.push(...wrapSpans(inline(h[2]!, { ...base, bold: true, color: T.text }), w)); continue; }
+    if (h) { out.push(...wrapSpans(inline(h[2]!, { ...base, bold: true, color: T.text }, links), w, links)); continue; }
     const bullet = raw.match(/^(\s*)([-*•]|\d+\.)\s+(.*)$/);
     if (bullet) {
       const indent = bullet[1]!.length;
       const marker = bullet[2] === "-" || bullet[2] === "*" ? "•" : bullet[2]!;
       const lead = " ".repeat(indent) + marker + " ";
-      const body = wrapSpans(inline(bullet[3]!, base), Math.max(10, w - width(lead)));
+      const body = wrapSpans(inline(bullet[3]!, base, links), Math.max(10, w - width(lead)), links);
       body.forEach((l, i) => out.push([{ text: i === 0 ? lead : " ".repeat(width(lead)), color: T.subtle }, ...l]));
       continue;
     }
-    out.push(...wrapSpans(inline(raw, base), w));
+    out.push(...wrapSpans(inline(raw, base, links), w, links));
   }
   return out;
 }
 
-function inline(s: string, base: Partial<Span>): Span[] {
+function inline(s: string, base: Partial<Span>, links?: LinkContext): Span[] {
   const spans: Span[] = [];
-  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)/g;
+  const re = /(`[^`]+`)|(\*\*[^*]+\*\*)|(__[^_]+__)|\[([^\]]+)\]\(([^)\s]+)\)/g;
   let last = 0; let m: RegExpExecArray | null;
   while ((m = re.exec(s))) {
     if (m.index > last) spans.push({ ...base, text: s.slice(last, m.index) });
     if (m[1]) spans.push({ ...base, text: m[1].slice(1, -1), color: T.code });
+    // A markdown link hides its target, so the label is coloured to say that
+    // there is one. `[text](url)` used to render as its own raw source.
+    else if (m[4] !== undefined) {
+      const uri = links ? targetUri(m[5]!, links) : null;
+      spans.push(uri ? { ...base, text: m[4], color: T.info, link: uri } : { ...base, text: m[4], color: T.info });
+    }
     else spans.push({ ...base, text: m[0].slice(2, -2), bold: true, color: T.text });
     last = m.index + m[0].length;
   }
@@ -118,6 +146,8 @@ export interface RenderOpts {
   expanded: Set<string>;
   /** Highlighted row of a pending question; `options.length` = the free-text row. */
   questionCursor?: number;
+  /** Turns paths and URLs into links. Omit it to draw plain text. */
+  links?: LinkContext;
 }
 
 /** Render one item to lines, including its trailing blank line. */
@@ -126,7 +156,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
   switch (item.kind) {
     case "user": {
       const inner = Math.min(w - 4, Math.max(20, Math.floor(w * 0.8)));
-      const body = markdownToLines(item.text, inner, { color: T.text });
+      const body = markdownToLines(item.text, inner, { color: T.text }, o.links);
       const lines: Line[] = body.map((l) => {
         const lw = l.reduce((a, s) => a + width(s.text), 0);
         return [{ text: "  ", bg: T.userBg }, ...l.map((s) => ({ ...s, bg: T.userBg })), { text: " ".repeat(Math.max(0, inner - lw)) + "  ", bg: T.userBg }];
@@ -140,7 +170,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       return lines;
     }
     case "assistant": {
-      const lines = markdownToLines(item.text, w - 2, { color: T.text }).map((l) => [{ text: "  " }, ...l]);
+      const lines = markdownToLines(item.text, w - 2, { color: T.text }, o.links).map((l) => [{ text: "  " }, ...l]);
       if (item.streaming) { const last = lines[lines.length - 1] ?? []; lines[lines.length - 1] = [...last, { text: "▍", color: T.accent }]; }
       lines.push([]);
       return lines;
@@ -149,7 +179,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       const open = o.expanded.has(item.id);
       const head: Line = [{ text: "  ", }, { text: open ? "▾" : "▸", color: T.subtle }, { text: item.streaming ? " thinking…" : " thought", color: T.subtle, italic: true }];
       if (!open) return [head];
-      return [head, ...markdownToLines(item.text, w - 6, { color: T.subtle, italic: true }).map((l) => [{ text: "    " }, ...l])];
+      return [head, ...markdownToLines(item.text, w - 6, { color: T.subtle, italic: true }, o.links).map((l) => [{ text: "    " }, ...l])];
     }
     case "tool": {
       const bg = item.background;
@@ -158,7 +188,11 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       const color = bg ? (bg.state === "running" ? T.info : bg.state === "failed" ? T.danger : bg.state === "stopped" ? T.warning : T.success)
         : item.status === "running" ? T.working : item.status === "error" ? T.danger : item.status === "denied" ? T.warning : T.success;
       const open = o.expanded.has(item.id);
-      const head: Line = [{ text: "  " }, { text: icon, color }, { text: " " }, { text: item.summary, color: T.muted }];
+      // The summary is already cut to 80 characters by `summariseTool`, so a
+      // link found in *that* text would point at nothing. The target comes
+      // from the tool input, which travels whole on the item.
+      const link = toolLink(item.input, o.links);
+      const head: Line = [{ text: "  " }, { text: icon, color }, { text: " " }, { text: item.summary, color: T.muted, link }];
       // A backgrounded call has no duration worth showing until it settles —
       // the turn stopped waiting, the work did not stop.
       if (bg) head.push({ text: bg.state === "running" ? "  in the background" : bg.state === "completed" ? "  background · done" : `  background · ${bg.state}`, color: bg.state === "running" ? T.info : T.faint });
@@ -170,15 +204,15 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       const headLines = wrapSpans(head, w);
       if (!open) return headLines;
       const out = [...headLines];
-      if (bg?.summary) out.push(...wrapSpans([{ text: "    background: " + bg.summary, color: T.subtle }], w));
-      if (bg?.outputFile) out.push([{ text: "    output file " + bg.outputFile, color: T.faint }]);
+      if (bg?.summary) out.push(...wrapSpans([{ text: "    background: " + bg.summary, color: T.subtle }], w, o.links));
+      if (bg?.outputFile) out.push(...wrapSpans([{ text: "    output file " + bg.outputFile, color: T.faint }], w, o.links));
       const input = JSON.stringify(item.input, null, 2) ?? "";
       out.push([{ text: "    input", color: T.faint }]);
-      for (const l of input.split("\n").slice(0, 40)) out.push(...wrapSpans([{ text: "    " + l, color: T.subtle }], w));
+      for (const l of input.split("\n").slice(0, 40)) out.push(...wrapSpans([{ text: "    " + l, color: T.subtle }], w, o.links));
       if (item.output != null) {
         out.push([{ text: "    output", color: T.faint }]);
         const outLines = item.output.split("\n");
-        for (const l of outLines.slice(0, 60)) out.push(...wrapSpans([{ text: "    " + l, color: item.isError ? T.danger : T.subtle }], w));
+        for (const l of outLines.slice(0, 60)) out.push(...wrapSpans([{ text: "    " + l, color: item.isError ? T.danger : T.subtle }], w, o.links));
         if (outLines.length > 60) out.push([{ text: `    … ${outLines.length - 60} more lines`, color: T.faint }]);
       }
       out.push([]);
@@ -191,7 +225,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       const lines = wrapSpans([{ text: "  " }, { text: "⚠", color }, { text: ` ${item.toolName}: `, color: T.text, bold: pending }, { text: item.summary, color: T.muted }, { text: `  ${label}`, color }], w);
       if (pending) {
         const detail = item.toolName === "Bash" ? String((item.input as any)?.command ?? "") : JSON.stringify(item.input);
-        for (const l of detail.split("\n").slice(0, 12)) lines.push(...wrapSpans([{ text: "    " + l, color: T.code }], w));
+        for (const l of detail.split("\n").slice(0, 12)) lines.push(...wrapSpans([{ text: "    " + l, color: T.code }], w, o.links));
         lines.push([{ text: "    y", color: T.accent, bold: true }, { text: " allow  ", color: T.muted }, { text: "a", color: T.accent, bold: true }, { text: " always allow  ", color: T.muted }, { text: "n", color: T.accent, bold: true }, { text: " deny", color: T.muted }]);
       }
       return lines;
@@ -201,7 +235,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       const opts = item.options ?? [];
       const cursor = o.questionCursor ?? 0;
       const lines: Line[] = [];
-      lines.push(...wrapSpans([{ text: "  " }, { text: "?", color: T.awaiting, bold: true }, { text: " " + item.prompt, color: T.text }], w));
+      lines.push(...wrapSpans([{ text: "  " }, { text: "?", color: T.awaiting, bold: true }, { text: " " + item.prompt, color: T.text }], w, o.links));
       opts.forEach((op, i) => {
         const sel = pending && cursor === i;
         lines.push(...wrapSpans([
@@ -225,9 +259,9 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       return lines;
     }
     case "note":
-      return [...wrapSpans([{ text: "  ─ " + item.text, color: item.tone === "warning" ? T.warning : T.subtle, italic: true }], w), []];
+      return [...wrapSpans([{ text: "  ─ " + item.text, color: item.tone === "warning" ? T.warning : T.subtle, italic: true }], w, o.links), []];
     case "error":
-      return [...wrapSpans([{ text: "  ✗ " + item.text, color: T.danger }], w), []];
+      return [...wrapSpans([{ text: "  ✗ " + item.text, color: T.danger }], w, o.links), []];
   }
 }
 
@@ -330,6 +364,22 @@ export function colToIndex(line: Line, col: number): number {
     }
   }
   return i;
+}
+
+/**
+ * The link under a display column, for alt+click.
+ *
+ * The same column arithmetic as `colToIndex`, because the mouse reports a
+ * screen column and the wrap may have cut one link into several spans.
+ */
+export function linkAt(line: Line, col: number): string | undefined {
+  let w = 0;
+  for (const sp of line) {
+    const next = w + width(sp.text);
+    if (col >= w && col < next) return sp.link;
+    w = next;
+  }
+  return undefined;
 }
 
 /** Character index → display column, the inverse of `colToIndex`. */
