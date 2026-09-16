@@ -25,8 +25,9 @@
   so threads can move between machines).
 - A thread's session is a subprocess of about 300 MB. The engine releases one after
   `sessionIdleMinutes` (default 15) and holds at most `maxLiveSessions`; the next message
-  resumes it from the transcript. Never release a session that runs a turn or waits on an
-  approval — `Engine.sessionBusy` decides. `/health` reports `sessions.live`.
+  resumes it from the transcript. Never release a session that runs a turn, waits on an
+  approval, or still owns a background task — `Engine.sessionBusy` decides, and a background
+  task dies with its session. `/health` reports `sessions.live`.
 - The daemon listens on port 3790 by default. `COVEY_PORT` moves it.
 - A machine's control panel (enter on a sidebar machine row) makes the daemon pull, rebuild
   and restart itself (`packages/daemon/src/update.ts`). Restarting ends every turn that

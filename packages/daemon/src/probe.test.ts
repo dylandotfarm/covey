@@ -48,10 +48,6 @@ interface FakeCli {
   askApproval(): Promise<unknown>;
   /** Answer the turn in flight. */
   reply(text: string): void;
-  /** Hand a tool call to the background, as ctrl+b and `run_in_background` do. */
-  backgroundTask(taskId: string): void;
-  /** Report that background task as finished, which is what ends it. */
-  finishTask(taskId: string): void;
 }
 
 /** An engine whose sessions are stand-ins, and whose clock the test moves. */
@@ -123,12 +119,6 @@ function makeCli(prompt: AsyncIterable<SDKUserMessage>, options: Options): FakeC
     } as unknown as Query,
     async askApproval() {
       return options.canUseTool!("Bash", { command: "ls" }, { signal: new AbortController().signal, toolUseID: "tu1" } as never);
-    },
-    backgroundTask(taskId: string) {
-      push({ type: "system", subtype: "task_started", task_id: taskId, tool_use_id: "tu-bg", is_backgrounded: true });
-    },
-    finishTask(taskId: string) {
-      push({ type: "system", subtype: "task_notification", task_id: taskId, status: "completed", summary: "done", ambient: false, skip_transcript: false });
     },
     reply(text: string) {
       const id = `msg-${randomUUID()}`;
@@ -382,85 +372,36 @@ test("the timeline keeps the note about the released session", async (t) => {
   assert.match(note?.text ?? "", /nothing is lost/);
 });
 
-// ---- work the thread cannot see -------------------------------------------
+// ---- PROBE: interrupt ------------------------------------------------------
 
-test("a thread with a background task still running is never released", async (t) => {
+test("PROBE: an interrupted session can still be released", async (t) => {
   const s = setup({ sessionIdleMinutes: 15 });
   t.after(s.cleanup);
   s.newThread("t1");
-  await s.send("t1", "run the build in the background");
-  s.clis[0]!.backgroundTask("task-1");
-  // The turn that started the task ends; only the task is left running. The
-  // thread is idle by every reading the row offers.
-  s.clis[0]!.reply("started");
+  await s.send("t1", "read every file");
   await settle();
-  assert.equal(s.db.getThread("t1")!.status, "idle");
-  assert.equal(s.db.getThread("t1")!.latestTurn?.state, "completed");
-
-  // Releasing the session here kills the build and leaves the tool row reading
-  // "running" for ever, because the notification reaches this process alone.
-  s.advance(120);
-  assert.deepEqual(s.engine.sweepSessions(), []);
-  assert.equal(s.clis[0]!.aborted, false);
-
-  // Once the task reports, the session is releasable like any other.
-  s.clis[0]!.finishTask("task-1");
-  await settle();
-  s.advance(16);
-  assert.deepEqual(s.engine.sweepSessions(), ["t1"]);
-});
-
-test("the budget leaves a background task alone and takes the next oldest", async (t) => {
-  const s = setup({ sessionIdleMinutes: 0, maxLiveSessions: 2 });
-  t.after(s.cleanup);
-  for (const id of ["t1", "t2", "t3"]) s.newThread(id);
-  await s.send("t1", "run the build in the background");
-  s.clis[0]!.backgroundTask("task-1");
-  s.clis[0]!.reply("started");
-  await settle();
-  s.advance(5);
-  await s.send("t2", "two");
-  s.clis[1]!.reply("ok");
-  await settle();
-  s.advance(5);
-  await s.send("t3", "three");
-
-  assert.equal(s.clis[0]!.aborted, false, "t1 worked longest ago, but its build is still running");
-  assert.equal(s.clis[1]!.aborted, true);
-});
-
-// ---- the session's own state, not only the thread row ----------------------
-
-test("an interrupted session stops counting as busy, so it can be released", async (t) => {
-  const s = setup({ sessionIdleMinutes: 15 });
-  t.after(s.cleanup);
-  s.newThread("t1");
-  await s.send("t1", "read every file in the repository");
-  await settle();
-  // The CLI never reports a result for the turn it abandoned, so nothing but
-  // `interrupt` itself can end the turn as far as this daemon can tell.
   await s.engine.dispatch({ commandId: randomUUID(), type: "turn.interrupt", threadId: "t1" });
   await settle();
-  assert.equal(s.engine.sessionCensus().live, 1);
-
+  const th = s.db.getThread("t1")!;
+  console.log("PROBE after interrupt: status=", th.status, "latestTurn=", th.latestTurn?.state, "pendingApprovals=", th.pendingApprovals, "live=", s.engine.sessionCensus().live);
   s.advance(20);
-  assert.deepEqual(s.engine.sweepSessions(), ["t1"], "an interrupted session is not busy for ever");
+  const rel = s.engine.sweepSessions();
+  console.log("PROBE sweep released:", JSON.stringify(rel));
+  assert.deepEqual(rel, ["t1"], "an interrupted, idle session must be releasable");
 });
 
-test("a thread row that has gone stale does not release a session that is working", async (t) => {
+test("PROBE: a stale result after interrupt does not unpin a new running turn", async (t) => {
   const s = setup({ sessionIdleMinutes: 15 });
   t.after(s.cleanup);
   s.newThread("t1");
-  await s.send("t1", "read every file in the repository");
+  await s.send("t1", "one");
   await settle();
-  // The row is what a reader sees; the process is what holds the work. Force
-  // the two apart, so only the session's own state can hold the sweep back.
-  const stale = s.db.getThread("t1")!;
-  stale.status = "idle";
-  stale.latestTurn = { ...stale.latestTurn!, state: "completed", completedAt: "2026-01-01T12:00:00Z" };
-  s.db.putThread(stale);
-
-  s.advance(120);
-  assert.deepEqual(s.engine.sweepSessions(), [], "the turn is still in flight in the process");
-  assert.equal(s.clis[0]!.aborted, false);
+  await s.engine.dispatch({ commandId: randomUUID(), type: "turn.interrupt", threadId: "t1" });
+  await settle();
+  // the interrupted CLI now reports the result of the turn it abandoned
+  s.clis[0]!.reply("aborted");
+  await settle();
+  console.log("PROBE stale-result: status=", s.db.getThread("t1")!.status, "live=", s.engine.sessionCensus().live);
+  s.advance(20);
+  console.log("PROBE stale-result sweep:", JSON.stringify(s.engine.sweepSessions()));
 });

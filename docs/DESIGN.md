@@ -147,10 +147,18 @@ The engine therefore releases a session that nobody needs. Two rules, in this or
    running turn.
 
 A session is never released while it owes somebody an answer: a turn in flight, a tool
-approval on screen, or a question in front of the user. A thread that waits on an approval is
-idle by status, and the answer needs the same process, so status alone cannot decide this.
-`ClaudeSession.busy` reports what the process itself is doing and the thread row is read
-beside it.
+approval on screen, a question in front of the user, or a background task that still runs. A
+thread that waits on an approval is idle by status, and the answer needs the same process, so
+status alone cannot decide this. `ClaudeSession.busy` reports what the process itself is doing
+and the thread row is read beside it.
+
+A background task is the case the thread row cannot show at all. `run_in_background` and
+ctrl+b end the turn and leave the work running, so the status says idle while a build runs.
+The work is a child of the session subprocess and only that subprocess reads the
+`task_notification` that ends it. Measured against a live daemon: a `sleep 100` handed to the
+background died with the released session, its output file was never written, and the tool row
+still read "running in the background" five minutes later. So a live background task holds its
+session, and a task that never reports holds it for ever — 300 MB costs less than the build.
 
 Nothing is lost. The transcript lives in the session store, keyed by thread id, so the next
 message starts a new process with `resume` and the model reads the whole conversation back.
