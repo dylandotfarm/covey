@@ -1,7 +1,8 @@
 import { query, type Options, type Query, type SDKMessage, type SDKUserMessage, type PermissionResult, type PermissionMode as SdkPermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import { randomUUID } from "node:crypto";
-import type { PermissionMode, TimelineItem, ToolCallItem, ToolBackground, ApprovalItem, QuestionItem, QuestionAsk, Attachment } from "@covey/protocol";
+import type { PermissionMode, TimelineItem, ToolCallItem, ToolBackground, ApprovalItem, QuestionItem, QuestionAsk, Attachment, SlashCommandInfo } from "@covey/protocol";
 import { summariseTool } from "./toolSummary.js";
+import { toCommandInfos } from "./slashCommands.js";
 import { attachmentBlocks } from "./attachments.js";
 import type { SessionStore } from "@anthropic-ai/claude-agent-sdk";
 
@@ -19,6 +20,8 @@ export interface SessionSink {
   onTurnComplete(info: { costUsd: number; inputTokens: number; outputTokens: number; isError: boolean; result: string; userMessageUuid: string | null }): void;
   onSessionInit(info: { model: string; claudeCodeVersion: string; permissionMode: string }): void;
   onModelUsed(model: string): void;
+  /** The whole `/` menu for this thread, replacing whatever it held before. */
+  onCommands(commands: SlashCommandInfo[]): void;
   now(): string;
 }
 
@@ -48,6 +51,13 @@ interface Pending {
 /** Incremental text streaming, off unless explicitly asked for. */
 const STREAMING = process.env.COVEY_STREAM === "1";
 
+/**
+ * How a session reaches the SDK. Real sessions use `query`; a test hands in a
+ * stand-in, so what this class does with the SDK's messages can be checked
+ * without a Claude subprocess.
+ */
+export type QueryFactory = (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
+
 export class ClaudeSession {
   private q: Query | null = null;
   private abort = new AbortController();
@@ -70,11 +80,17 @@ export class ClaudeSession {
    * background the moment it finished.
    */
   private backgrounded = new Set<string>();
+  /**
+   * Commands the session reported as bound to the terminal that runs the CLI.
+   * The init message names them; `supportedCommands()` and the
+   * `commands_changed` push both need them to filter their answer.
+   */
+  private terminalCommands: string[] = [];
   /** Streaming block state for the in-flight assistant message. */
   private blocks: { itemId: string; kind: "text" | "thinking" | "tool"; text: string; json: string; toolName?: string; toolUseId?: string }[] = [];
   private turnStartedAt = Date.now();
 
-  constructor(private params: SessionParams, private sink: SessionSink) {}
+  constructor(private params: SessionParams, private sink: SessionSink, private spawn: QueryFactory = query) {}
 
   get running(): boolean {
     return this.q !== null && !this.closed;
@@ -111,7 +127,7 @@ export class ClaudeSession {
       },
     };
     this.sink.onStatus("starting");
-    this.q = query({ prompt: this.input(), options: opts });
+    this.q = this.spawn({ prompt: this.input(), options: opts });
     void this.pump();
   }
 
@@ -318,6 +334,20 @@ export class ClaudeSession {
     return this.pending.get(requestId)?.item ?? null;
   }
 
+  /**
+   * Read the `/` menu off the live query. A session that is starting, or one
+   * that ended between the init message and this call, has nothing to say:
+   * the thread keeps its last known list rather than losing it to an error.
+   */
+  private async readCommands(): Promise<void> {
+    try {
+      const commands = await this.q?.supportedCommands();
+      if (commands) this.sink.onCommands(toCommandInfos(commands, this.terminalCommands));
+    } catch {
+      /* the list stays as it was */
+    }
+  }
+
   // ------------------------------------------------------------------------
 
   private async pump() {
@@ -378,6 +408,19 @@ export class ClaudeSession {
       case "system": {
         if (msg.subtype === "init") {
           this.sink.onSessionInit({ model: msg.model, claudeCodeVersion: msg.claude_code_version, permissionMode: msg.permissionMode });
+          this.terminalCommands = msg.terminal_slash_commands ?? [];
+          // The init message names the commands but not their descriptions, so
+          // the menu still needs the full list. Ask for it here, where the
+          // session is known to be up, and let the answer arrive late.
+          void this.readCommands();
+        } else if (msg.subtype === "commands_changed") {
+          // The SDK found more skills. It replaces its list rather than
+          // patching it, so we replace ours.
+          this.sink.onCommands(toCommandInfos(msg.commands, this.terminalCommands));
+        } else if (msg.subtype === "local_command_output") {
+          // A command the CLI answered itself, such as /usage. Without this the
+          // user runs the command and sees nothing at all.
+          this.sink.upsertItem({ ...base, id: this.newItemId(), kind: "assistant", text: msg.content, streaming: false, model: null });
         } else if (msg.subtype === "compact_boundary") {
           this.sink.upsertItem({ ...base, id: this.newItemId(), kind: "note", tone: "info", text: `Context compacted (${msg.compact_metadata.trigger})` });
         } else if (msg.subtype === "task_started") {
