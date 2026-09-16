@@ -17,6 +17,8 @@ import { DiffPanel } from "./DiffPanel.js";
 import { Composer } from "./Composer.js";
 import { OverlayView, filterOptions } from "./Overlay.js";
 import * as Ed from "../editor.js";
+import { rewindAction } from "../rewind.js";
+import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
@@ -85,6 +87,14 @@ export function App({ store }: { store: Store }) {
   const [menuClosed, setMenuClosed] = useState(false);
   const [quitArmed, setQuitArmed] = useState(false);
   const quitTimer = useRef<NodeJS.Timeout | null>(null);
+  /** When esc last interrupted a turn, and when it last armed the rewind chord. */
+  const interruptedAt = useRef(0);
+  const armedAt = useRef(0);
+  /**
+   * The walk back through the messages this thread has sent. Null whenever the
+   * draft is the person's own text — see `history.ts`.
+   */
+  const [walk, setWalk] = useState<HistoryWalk | null>(null);
   /** Transcript line the mouse went down on, so a click can fold what it hit. */
   const pressedLine = useRef<number | null>(null);
 
@@ -181,7 +191,8 @@ export function App({ store }: { store: Store }) {
   useEffect(() => { if (state.relaunch) { store.shutdown(); exit(); } }, [state.relaunch, store, exit]);
   // per-thread drafts
   const threadKey = state.selected?.threadId ?? "";
-  useEffect(() => { setDraft(store.draft(threadKey)); setCaret(store.draft(threadKey).length); }, [threadKey, store]);
+  // A walk belongs to the thread it started in, thus a different thread ends it.
+  useEffect(() => { setDraft(store.draft(threadKey)); setCaret(store.draft(threadKey).length); setWalk(null); }, [threadKey, store]);
   useEffect(() => { store.setDraft(threadKey, draft); }, [draft, threadKey, store]);
   // A different name is a different question, so the cursor goes back to the
   // top and a menu the reader shut comes back.
@@ -502,17 +513,7 @@ export function App({ store }: { store: Store }) {
         case "streaming": return void store.setStreaming(t!.id, !t!.streaming);
         case "diff": return void store.toggleDiff();
         case "background": return void store.background();
-        case "revert": {
-          const turns = [...(state.view?.items.values() ?? [])].filter((i) => i.kind === "user" && i.turnId && !i.queued && !i.folded).sort((a, b) => b.seq - a.seq);
-          if (turns.length === 0) return store.notify("no turns to revert", "error");
-          return openPick("Revert to before which turn?", turns.map((u) => ({ id: u.turnId!, label: (u as any).text.split("\n")[0].slice(0, 70), hint: new Date(u.createdAt).toLocaleTimeString() })), (turnId) => {
-            const u = turns.find((x) => x.turnId === turnId)!;
-            openPick(`Revert files and conversation to before "${(u as any).text.slice(0, 40)}"?`, [{ id: "no", label: "Cancel" }, { id: "yes", label: "Revert — this turn and everything after it are discarded" }], (ans) => {
-              store.setOverlay(null);
-              if (ans === "yes") void store.threadCommand({ type: "turn.revert", threadId: t!.id, turnId }).then(() => store.notify("reverted", "success"));
-            });
-          });
-        }
+        case "revert": return openRewind();
         case "clearqueue": { for (const it of [...(state.view?.items.values() ?? [])]) if (it.kind === "user" && it.queued) void store.cancelQueued(it.turnId!); return; }
         case "quiet": return;
         case "archive": return void store.threadCommand({ type: "thread.archive", threadId: t!.id, archived: !t!.archivedAt });
@@ -924,6 +925,53 @@ export function App({ store }: { store: Store }) {
     if (input === "D" && row.kind === "project") return openPick(`Remove project "${row.project!.title}"?`, [{ id: "no", label: "Cancel" }, { id: "yes", label: "Remove project and all its threads" }], (id) => { store.setOverlay(null); if (id === "yes") void store.threadCommand({ type: "project.delete", projectId: row.projectId! }, row.machine); });
   }
 
+  /**
+   * esc in the composer, which is the last of its five jobs: the overlay, the
+   * diff pane and the `/` menu have all passed on the key before this runs.
+   * The draft is never written here — ctrl+c is the only key that empties it.
+   */
+  function handleEscape() {
+    const running = state.view?.thread?.latestTurn?.state === "running";
+    switch (rewindAction({
+      running,
+      pending: !!pending,
+      sinceInterruptMs: Date.now() - interruptedAt.current,
+      sinceArmMs: Date.now() - armedAt.current,
+    })) {
+      case "interrupt":
+        interruptedAt.current = Date.now();
+        armedAt.current = 0; // stopping work is not half of a chord
+        return void store.interrupt();
+      case "arm":
+        armedAt.current = Date.now();
+        return store.notify("press esc again to rewind");
+      case "open":
+        armedAt.current = 0;
+        return openRewind();
+      case "none":
+        return;
+    }
+  }
+
+  /**
+   * Which turn to rewind to, then a confirmation, then the daemon does the
+   * work. ctrl+k and esc esc both come here: two routes, one action. A rewind
+   * discards work and rewrites the working tree, so the confirmation stays
+   * whichever route opened it.
+   */
+  function openRewind() {
+    const t = state.view?.thread;
+    const turns = [...(state.view?.items.values() ?? [])].filter((i) => i.kind === "user" && i.turnId && !i.queued && !i.folded).sort((a, b) => b.seq - a.seq);
+    if (!t || turns.length === 0) return store.notify("no turns to revert", "error");
+    return openPick("Revert to before which turn?", turns.map((u) => ({ id: u.turnId!, label: (u as any).text.split("\n")[0].slice(0, 70), hint: new Date(u.createdAt).toLocaleTimeString() })), (turnId) => {
+      const u = turns.find((x) => x.turnId === turnId)!;
+      openPick(`Revert files and conversation to before "${(u as any).text.slice(0, 40)}"?`, [{ id: "no", label: "Cancel" }, { id: "yes", label: "Revert — this turn and everything after it are discarded" }], (ans) => {
+        store.setOverlay(null);
+        if (ans === "yes") void store.revertTurn(t.id, turnId);
+      });
+    });
+  }
+
   function handleComposerKey(input: string, key: any) {
     const running = state.view?.thread?.latestTurn?.state === "running";
     // While the `/` menu is open it takes the keys that mean "choose", and
@@ -937,7 +985,7 @@ export function App({ store }: { store: Store }) {
         if (key.return && !key.shift && !key.ctrl && !key.meta && !key.super) { acceptMenu(); return; }
       }
     }
-    if (key.escape) { if (running) void store.interrupt(); return; }
+    if (key.escape) { handleEscape(); return; }
     if (pending) {
       if (pending.kind === "approval") {
         if (input === "y") return void store.respondApproval("allow");
@@ -1009,9 +1057,16 @@ export function App({ store }: { store: Store }) {
     }
     if (key.leftArrow) return setCaret(key.meta ? Ed.wordStart(draft, caret) : key.super ? Ed.lineStart(draft, caret) : Math.max(0, caret - 1));
     if (key.rightArrow) return setCaret(key.meta ? Ed.wordEnd(draft, caret) : key.super ? Ed.lineEnd(draft, caret) : Math.min(draft.length, caret + 1));
-    // Move by *visual* row so a wrapped paragraph steps line by line; at the
-    // first and last row the caret parks at the start/end of the draft.
-    if (key.upArrow || key.downArrow) return setCaret(Ed.moveVisualRow({ value: draft, caret }, editorRows, key.upArrow ? -1 : 1));
+    // Move by *visual* row so a wrapped paragraph steps line by line. Only
+    // from the first row up, or the last row down, do the keys leave the draft
+    // and walk the messages this thread has sent. That walk fills the draft
+    // and does nothing else — it is not a rewind (`history.ts`).
+    if (key.upArrow || key.downArrow) {
+      const dir: -1 | 1 = key.upArrow ? -1 : 1;
+      const step = stepHistory(sentMessages(state.view?.items.values() ?? []), walk, draft, caret, editorRows, dir);
+      if (step.kind === "recall") { setDraft(step.draft); setCaret(step.caret); setWalk(step.walk); return; }
+      return setCaret(Ed.moveVisualRow({ value: draft, caret }, editorRows, dir));
+    }
     // Terminals that don't send a modified arrow for alt+←/→ send the readline
     // escapes instead (macOS Terminal ships that mapping), so honour both.
     if (key.meta && input === "b") return setCaret(Ed.wordStart(draft, caret));
@@ -1086,7 +1141,7 @@ export function App({ store }: { store: Store }) {
               : header ? (<><Text color={T.text} bold>{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {headerProject?.title}</Text>{header.movedTo && <Text color={T.warning}>  moved</Text>}</>)
               : <Text color={T.subtle}>covey — multi-agent TUI</Text>}
           </Box>
-          <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : state.scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : "ctrl+k commands")}</Text>
+          <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : state.scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
         </Box>
         <Box height={1}><Text color={T.border}>{"─".repeat(Math.max(0, mainW))}</Text></Box>
         <Box height={transcriptH} flexDirection="column">
