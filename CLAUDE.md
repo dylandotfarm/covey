@@ -9,6 +9,10 @@
 - `pnpm run setup` (`scripts/setup.mjs`) is the one-machine install: it installs, builds, and
   links `bin/covey` into a directory on the PATH. The launcher follows its own symlink back
   to the checkout, so a linked `covey` always runs that checkout — keep it that way.
+- `packages/cli/src/index.ts` sets `NODE_ENV=production` before it imports anything, and it has
+  to stay the last line before that import. React reads it when its module body runs, and the
+  development reconciler calls `performance.measure()` per commit — entries node never drops,
+  which grew the client to 4.2 GB (#61). Keep the entry free of static imports.
 - Ink 7 batches fast keystrokes and pastes into one `useInput` call; `App.tsx` splits them.
   Test the TUI in tmux with small delays between `send-keys`, and capture with
   `tmux capture-pane -p -e` to see colours.
