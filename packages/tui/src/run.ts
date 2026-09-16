@@ -46,7 +46,9 @@ export function parseRequirements(line: string): { rest: string; requires: TaskR
  */
 export function parseTaskList(text: string): RunTask[] {
   const tasks: RunTask[] = [];
-  for (const raw of text.split("\n")) {
+  // `;` separates tasks as a newline does, because the prompt that asks for
+  // the list is one line tall and a run of plain tasks has to fit in it.
+  for (const raw of text.split(/[\n;]/)) {
     const line = raw.trim();
     if (!line || line.startsWith("//")) continue;
     const { rest, requires } = parseRequirements(line);
@@ -147,11 +149,13 @@ function requirementText(r: TaskRequirement): string {
  * order the operator wrote, and a task that no machine can take says so rather
  * than landing somewhere that cannot do it.
  */
-export function placeTasks(tasks: RunTask[], machines: PlacementMachine[]): Placement[] {
+export function placeTasks(tasks: RunTask[], machines: PlacementMachine[], carrying?: Map<string, number>): Placement[] {
   // Fastest first, by cores; a stable tiebreak on the name so two runs of the
   // same task list place the same way.
   const fastest = [...machines].sort((a, b) => b.cpuCount - a.cpuCount || a.name.localeCompare(b.name));
-  const load = new Map<string, number>(fastest.map((m) => [m.machineId, 0]));
+  // `carrying` is what the machines already hold, so a task added to a run in
+  // flight lands where there is room rather than on top of the full machine.
+  const load = new Map<string, number>(fastest.map((m) => [m.machineId, carrying?.get(m.machineId) ?? 0]));
   return tasks.map((task) => {
     const eligible = fastest.filter((m) => firstUnmet(m, task) === null);
     if (eligible.length === 0) {
@@ -191,12 +195,15 @@ export const RUN_PORT_MAX = 3999;
  * The first port of a run's block. Runs are spread over the range by their id,
  * so two runs on one machine are unlikely to meet; inside a run the block is
  * contiguous, so no two members can ever share a port.
+ *
+ * It depends on the run's id alone, and not on how many members the run has.
+ * A run absorbs a task being added, and a base that moved when it did would
+ * hand a new member a port that a member already at work is using.
  */
-export function runPortBase(runId: string, count: number): number {
+export function runPortBase(runId: string): number {
   const span = RUN_PORT_MAX - RUN_PORT_MIN + 1;
-  const room = Math.max(1, span - Math.min(count, span));
   const h = createHash("sha256").update(runId).digest();
-  return RUN_PORT_MIN + (h.readUInt32BE(0) % room);
+  return RUN_PORT_MIN + (h.readUInt32BE(0) % span);
 }
 
 /**
@@ -209,12 +216,12 @@ export function runPortBase(runId: string, count: number): number {
  * `index` is the member's place in the run and is what makes the answer unique.
  * `tmpDir` is the member machine's own, so the paths exist where the agent runs.
  */
-export function allocateResources(runId: string, index: number, count: number, tmpDir: string, slug: string): MemberResources {
+export function allocateResources(runId: string, index: number, tmpDir: string, slug: string): MemberResources {
   const span = RUN_PORT_MAX - RUN_PORT_MIN + 1;
   // The block is contiguous, so members 0..n-1 take n ports in a row. A run of
   // more than 200 members wraps and two of them would share a port; a run that
-  // large needs more than a wider range, so it wraps rather than pretending.
-  const port = RUN_PORT_MIN + ((runPortBase(runId, count) - RUN_PORT_MIN + index) % span);
+  // large wants a wider range, so it wraps rather than pretending otherwise.
+  const port = RUN_PORT_MIN + ((runPortBase(runId) - RUN_PORT_MIN + index) % span);
   const name = `covey-run-${runId.slice(0, 8)}-${slug}`;
   return {
     port,

@@ -26,13 +26,24 @@ const EXTRA_DIRS = ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/bin", "
  * only one a run can place work with. An `ssh` probe said that machine had no
  * `pnpm`; it had `pnpm`, and the operator nearly installed a second one.
  */
-export async function machineResources(): Promise<MachineResources> {
-  const path = process.env.PATH ?? "";
+/**
+ * Where to look. The daemon passes nothing: its own environment is the answer,
+ * and that is the point. A test names the directories so it does not depend on
+ * what happens to be installed on the machine it runs on.
+ */
+export interface ProbeOptions {
+  path?: string;
+  extraDirs?: string[];
+}
+
+export async function machineResources(o: ProbeOptions = {}): Promise<MachineResources> {
+  const path = o.path ?? process.env.PATH ?? "";
+  const extraDirs = o.extraDirs ?? EXTRA_DIRS;
   const cpuCount = Math.max(1, cpus().length);
   const totalMemoryBytes = totalmem();
   const tools: MachineTool[] = [];
   for (const name of PROBED_TOOLS) {
-    for (const file of candidates(name, path)) {
+    for (const file of candidates(name, path, extraDirs)) {
       tools.push({ name, path: file, version: await toolVersion(file) });
     }
   }
@@ -49,21 +60,26 @@ export async function machineResources(): Promise<MachineResources> {
 
 /**
  * Every copy of `name` worth reporting, the one the `PATH` resolves first.
- * Later entries are the same program somewhere else, which is what lets a run
- * ask for the machine with the old `node` rather than for the newest one.
+ *
+ * A name the `PATH` does not resolve is reported not at all, even when a copy
+ * sits in `/usr/bin`: a run places work by asking "can an agent on that machine
+ * type `pnpm`", and an agent inherits the `PATH`, not this list. `EXTRA_DIRS`
+ * is only searched for a *second* copy of a name the `PATH` already has, which
+ * is how the machine with the old `/usr/bin/node` answers for itself.
  */
-function candidates(name: string, path: string): string[] {
-  const found: string[] = [];
-  for (const dir of [...path.split(delimiter), ...EXTRA_DIRS]) {
-    if (!dir || !isAbsolute(dir)) continue;
-    const file = join(dir, name);
-    if (found.includes(file) || !isExecutable(file)) continue;
-    found.push(file);
-    // Two copies is enough to say "there is another one"; a machine with
-    // `nvm` has a dozen and the list is for a person to read.
-    if (found.length === 2) break;
-  }
-  return found;
+function candidates(name: string, path: string, extraDirs: string[]): string[] {
+  const onPath = path.split(delimiter).map((dir) => resolveIn(dir, name)).find(Boolean);
+  if (!onPath) return [];
+  const other = extraDirs.map((dir) => resolveIn(dir, name)).find((f) => f && f !== onPath);
+  // Two copies is enough to say "there is another one"; a machine with `nvm`
+  // has a dozen and the list is for a person to read.
+  return other ? [onPath, other] : [onPath];
+}
+
+function resolveIn(dir: string, name: string): string | null {
+  if (!dir || !isAbsolute(dir)) return null;
+  const file = join(dir, name);
+  return isExecutable(file) ? file : null;
 }
 
 function isExecutable(file: string): boolean {

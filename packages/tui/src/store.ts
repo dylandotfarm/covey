@@ -1050,7 +1050,7 @@ export class Store {
         task: p.task,
         machineId: target.machineId,
         projectId: target.projectId,
-        resources: allocateResources(runId, i, placed.length, target.tmpDir, memberSlug(p.task, i)),
+        resources: allocateResources(runId, i, target.tmpDir, memberSlug(p.task, i)),
       };
     });
     try {
@@ -1089,7 +1089,7 @@ export class Store {
       projectId: to.projectId,
       // The port and the directories follow the member: they are named for the
       // machine they will be used on, and `/tmp` is not `/tmp` everywhere.
-      resources: allocateResources(runId, index, run.members.length, to.tmpDir, memberSlug(m.task, index)),
+      resources: allocateResources(runId, index, to.tmpDir, memberSlug(m.task, index)),
     });
     this.notify(`${m.task.key} → ${to.name}`, "success");
   }
@@ -1178,6 +1178,43 @@ export class Store {
     } catch (e: any) {
       return e?.message ?? String(e);
     }
+  }
+
+  /**
+   * Add tasks to a run in flight.
+   *
+   * Scope changes in the middle: on the day this came from, one task was
+   * cancelled outright and another was added, and the run had to absorb both
+   * without being torn down. A new task is placed by the same rule as the
+   * others and gets resources nobody else in the run has.
+   */
+  async addTasks(machine: string, runId: string, tasks: RunTask[]) {
+    const run = this.run(machine, runId);
+    if (!run) return;
+    const machines = this.placementMachines(this.runRepository(machine, runId));
+    if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return; }
+    // Placed against what the machines already carry, so a task added to a run
+    // in flight lands where there is room and not on top of the full machine.
+    const carrying = new Map<string, number>();
+    for (const m of run.members) if (!isFinalMemberState(m.state)) carrying.set(m.machineId, (carrying.get(m.machineId) ?? 0) + 1);
+    const placed = placeTasks(tasks, machines, carrying);
+    for (let i = 0; i < tasks.length; i++) {
+      const index = run.members.length + i;
+      const target = machines.find((x) => x.machineId === placed[i]!.machineId) ?? machines[0]!;
+      const err = await this.threadCommand({
+        type: "run.member.add",
+        runId,
+        member: {
+          id: randomUUID(),
+          task: tasks[i]!,
+          machineId: target.machineId,
+          projectId: target.projectId,
+          resources: allocateResources(runId, index, target.tmpDir, memberSlug(tasks[i]!, index)),
+        },
+      }, machine);
+      if (err) return;
+    }
+    this.notify(`added ${tasks.length} task${tasks.length === 1 ? "" : "s"} — press d to dispatch`, "success");
   }
 
   /**
@@ -1421,7 +1458,7 @@ export function tallyThreads(threads: Iterable<Thread>): ThreadTally {
 
 export interface SidebarRow {
   key: string;
-  kind: "machine" | "project" | "thread" | "empty" | "archived";
+  kind: "machine" | "project" | "thread" | "empty" | "archived" | "run" | "member";
   machine: string;
   projectId?: string;
   thread?: Thread;
@@ -1430,17 +1467,33 @@ export interface SidebarRow {
   archived?: boolean;
   /** How many threads the archived folder holds. */
   count?: number;
+  /** Set on a run row and on every member row inside it. */
+  run?: Run;
+  member?: RunMember;
   depth: number;
 }
 
 /** `expanded` key for a project's archived folder. Furled unless toggled. */
 export function archiveKey(machine: string, projectId: string): string { return `${machine}:${projectId}:archived`; }
 
+/** `expanded` key for a run's members. Open unless furled. */
+export function runKey(machine: string, runId: string): string { return `${machine}:run:${runId}`; }
+
 export function sidebarRows(s: AppState): SidebarRow[] {
   const rows: SidebarRow[] = [];
   for (const key of s.order) {
     const m = s.machines.get(key)!;
     rows.push({ key: `m:${key}`, kind: "machine", machine: key, depth: 0 });
+    // Runs sit above the projects: a run is the reason the threads under it
+    // exist, and it is what the operator is watching. Closed runs stay, so the
+    // record of what a run did does not vanish the moment it finishes.
+    for (const run of [...m.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      rows.push({ key: `r:${key}:${run.id}`, kind: "run", machine: key, run, depth: 1 });
+      if (!(s.expanded[runKey(key, run.id)] ?? true)) continue;
+      for (const member of run.members) {
+        rows.push({ key: `rm:${key}:${run.id}:${member.id}`, kind: "member", machine: key, run, member, depth: 2 });
+      }
+    }
     const projects = [...m.projects.values()].sort((a, b) => a.title.localeCompare(b.title));
     if (projects.length === 0 && m.conn === "connected") rows.push({ key: `e:${key}`, kind: "empty", machine: key, depth: 1 });
     for (const p of projects) {
