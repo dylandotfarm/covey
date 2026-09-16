@@ -138,6 +138,21 @@ test("streaming off: the blocks of one API message take separate rows", () => {
   assert.equal(rows.length, 2, "nothing is overwritten");
 });
 
+test("streaming off: a sentence before a tool call is not erased by it", () => {
+  // The case this costs on a default install: the model writes a line about
+  // what it is about to do and calls a tool in the same API message. Both
+  // blocks were given the id of block 0, so the tool row landed on the
+  // sentence and the sentence was gone from the transcript for good.
+  const h = harness(false);
+  h.feed(start("msg_1"));
+  h.feed(said("msg_1", text("I'll run a simple echo command.")));
+  h.feed(said("msg_1", { type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "echo hi" } }));
+
+  const rows = h.items();
+  assert.deepEqual(rows.map((i) => `${i.kind}@${i.id}`), ["assistant@msg_1:0", "tool@msg_1:1"], "the sentence keeps its row");
+  assert.equal(say(rows[0]).text, "I'll run a simple echo command.");
+});
+
 test("a second API message in the same turn starts its rows over again", () => {
   const h = harness(true);
   h.feed(start("msg_1"));
