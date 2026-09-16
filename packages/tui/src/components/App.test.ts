@@ -76,6 +76,9 @@ function appState(threads: Thread[]): AppState {
     sidebarCollapsed: false, expanded: {}, expandedItems: new Set(), toolsExpanded: false,
     overlay: null, notice: null, scrollFromBottom: 0, drafts: new Map(), pendingAttachments: new Map(),
     tick: 0, diffView: null, attention: new Map(), selection: null, relaunch: null,
+    // A client that does not run from a checkout, which is what Store starts
+    // with. This test says nothing about builds.
+    clientBuild: null, clientStale: false,
   };
 }
 
