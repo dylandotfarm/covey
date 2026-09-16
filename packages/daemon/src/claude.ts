@@ -112,6 +112,14 @@ export class ClaudeSession {
   get activeTurnId(): string | null {
     return this.currentTurnId;
   }
+  /**
+   * True while the session owes somebody an answer: a turn is in flight, or a
+   * tool approval or a question stands in front of the user. Such a session is
+   * never released for idleness, however long the user takes to read it.
+   */
+  get busy(): boolean {
+    return this.currentTurnId !== null || this.pending.size > 0;
+  }
 
   start() {
     const opts: Options = {
@@ -222,6 +230,10 @@ export class ClaudeSession {
       /* ignore */
     }
     this.failPending("interrupted");
+    // The turn is over even if the CLI has not reported its result yet. Without
+    // this the session would count as busy for ever after an interrupt, and the
+    // idle sweep would never release it.
+    this.currentTurnId = null;
     this.sink.onStatus("interrupted");
   }
 

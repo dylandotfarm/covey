@@ -128,6 +128,46 @@ so successive turns reuse the subprocess. Options that matter:
 - Tool results arrive as `user` messages with `tool_result` blocks and are joined to the tool
   item by `tool_use_id`.
 
+## Session lifetime
+
+A live session is a CLI subprocess that costs 270-390 MB of resident memory (measured on
+macOS with SDK 0.3.265). Before this rule existed a session lived from the first turn of a
+thread until the user stopped it by hand, so a machine that had run a dozen threads held
+gigabytes for conversations nobody was reading, and the machine went into swap.
+
+The engine therefore releases a session that nobody needs. Two rules, in this order:
+
+1. **The timer.** A thread idle longer than `MachineSettings.sessionIdleMinutes`
+   (default 15) loses its session. Idle means no command about that thread and no line from
+   the agent.
+2. **The budget.** While more sessions are live than `MachineSettings.maxLiveSessions`
+   allows, the least recently used ones go. The default comes from the machine's own memory:
+   15% of it at 300 MB a session, and never fewer than two nor more than eight. The budget is
+   a target, not a promise — a machine with more turns in flight than memory keeps every
+   running turn.
+
+A session is never released while it owes somebody an answer: a turn in flight, a tool
+approval on screen, or a question in front of the user. A thread that waits on an approval is
+idle by status, and the answer needs the same process, so status alone cannot decide this.
+`ClaudeSession.busy` reports what the process itself is doing and the thread row is read
+beside it.
+
+Nothing is lost. The transcript lives in the session store, keyed by thread id, so the next
+message starts a new process with `resume` and the model reads the whole conversation back.
+Measured: a resume costs about 0.3 s of start time on a 458 KB transcript, against 5 ms for a
+process that is already up. A session quiet for longer than the prompt cache lives (about five
+minutes) has no advantage left to hold, which is why the default limit can be a quarter of an
+hour.
+
+Both events are visible. The thread gets a note when its session goes, and another when a
+turn starts one again, so a slow first reply reads as a resume rather than as a thread that
+hangs. The daemon logs both lines, and `/health` reports `sessions: { live, limit,
+idleMinutes }` — the number to compare a `ps` list against when a machine holds more `claude`
+processes than this daemon started.
+
+`COVEY_SESSION_IDLE_MINUTES` and `COVEY_MAX_LIVE_SESSIONS` seed the two settings for a machine
+whose `daemon.json` says nothing. `sessionIdleMinutes: 0` keeps every session for ever.
+
 ## Remote access and auth
 
 The daemon binds to the tailnet IPv4 by default (plus loopback), never `0.0.0.0` unless
@@ -445,3 +485,6 @@ streaming, queueing, and diff capture.
   There is no reader for Windows, and no paste for a non-image on the clipboard.
 - **Rust client**: the protocol is the contract; a ratatui client can replace `packages/tui`
   without daemon changes. Worth doing once the protocol stops moving.
+- **A control for the session limits**: `sessionIdleMinutes` and `maxLiveSessions` are in
+  `MachineSettings`, and the machine control panel does not offer them yet. Until it does,
+  `daemon.json` or the two environment variables set them.

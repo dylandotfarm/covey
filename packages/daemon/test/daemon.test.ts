@@ -286,7 +286,7 @@ test("a project remembers where new threads should run", async () => {
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {
   const settings = async () => (await a.rpc("hello", { protocolVersion: 1, client: "test" })).settings;
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "no opinion until one is set");
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null }, "no opinion until one is set");
 
   await a.rpc("shell.subscribe", {});
   a.pushes.length = 0;
@@ -296,7 +296,7 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
     a.pushes.some((p) => p.push === "shell" && p.event.kind === "machine.updated" && p.event.machine.settings.defaultModel === "claude-opus-5"),
     "the change is broadcast, so every client's panel follows",
   );
-  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true });
+  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true, sessionIdleMinutes: null, maxLiveSessions: null });
   const onDisk = JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8"));
   assert.equal(onDisk.defaultModel, "claude-opus-5", "settings survive a daemon restart");
   assert.ok(onDisk.machineId, "writing settings does not clobber the rest of daemon.json");
@@ -317,8 +317,15 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal(e.permissionMode, "plan");
   assert.equal(e.streaming, false, "an explicit choice still wins");
 
-  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null });
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "and can be cleared again");
+  // The session limits live beside the rest, and a nonsense value reads as "no
+  // opinion" rather than as a limit that would release every session at once.
+  await a.command({ type: "machine.settings", sessionIdleMinutes: 30, maxLiveSessions: 0 });
+  assert.equal((await settings()).sessionIdleMinutes, 30);
+  assert.equal((await settings()).maxLiveSessions, 1, "one live session is the smallest budget there is");
+  assert.equal(JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8")).sessionIdleMinutes, 30, "and survives a restart");
+
+  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null });
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null }, "and can be cleared again");
 });
 
 test("streaming is a per-thread switch that needs no restart", async () => {
