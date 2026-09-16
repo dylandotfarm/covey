@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { Thread, TimelineItem, Attachment } from "@covey/protocol";
+import type { Thread, TimelineItem } from "@covey/protocol";
 import { T } from "../theme.js";
 import { fmtMs } from "../lines.js";
 import { caretToVisual, type VisualLine } from "../editor.js";
@@ -17,15 +17,29 @@ export interface ComposerProps {
   /** Word-wrapped rows, computed in App so it can size the box to match. */
   rows: VisualLine[];
   maxRows: number;
-  attachments: Attachment[];
   /** Free-text answer being typed for a pending question. */
   answerDraft: string;
   /** The prefix menu — `/` commands, `@` files — while one is open. */
   menu: MenuView | null;
 }
 
+/**
+ * The finished turn's cost and duration, for the footer. Empty while the turn
+ * runs, or when the daemon sent no figure.
+ *
+ * The `~` is not decoration. The figure is the SDK's own estimate at list
+ * prices, and on a subscription plan no such money is charged, so a bare `$`
+ * reads as a bill. It also belongs to this turn alone — the SDK reports a
+ * running total for the session, which the daemon differences per turn.
+ */
+export function turnStats(turn: Thread["latestTurn"] | undefined): string {
+  if (!turn || turn.state === "running" || turn.costUsd == null) return "";
+  const ms = Date.parse(turn.completedAt ?? turn.startedAt) - Date.parse(turn.startedAt);
+  return `~$${turn.costUsd.toFixed(3)} · ${fmtMs(ms)}`;
+}
+
 /** Renders the multi-line editor. Editing state lives in App (useInput). */
-export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, attachments, answerDraft, menu }: ComposerProps) {
+export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, answerDraft, menu }: ComposerProps) {
   const running = thread?.latestTurn?.state === "running";
   const lines = editorLines(rows, value, cursor, focused, maxRows);
   const borderColor = pending ? T.warning : focused ? T.accentDim : T.border;
@@ -34,7 +48,7 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   const modeLabel = bypass ? "⏵⏵ bypass" : mode === "acceptEdits" ? "accept edits" : mode;
   const modeColor = bypass ? T.danger : mode === "plan" ? T.awaiting : T.subtle;
   const turn = thread?.latestTurn;
-  const stats = turn && turn.state !== "running" && turn.costUsd != null ? `$${turn.costUsd.toFixed(3)} · ${fmtMs(Date.parse(turn.completedAt ?? turn.startedAt) - Date.parse(turn.startedAt))}` : "";
+  const stats = turnStats(turn);
   const diff = turn?.diff && !turn.diff.unavailable && turn.diff.files.length > 0 ? turn.diff : null;
   const queued = thread?.queuedTurns ?? 0;
   return (
@@ -48,12 +62,6 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
         ) : null}
         {pending?.kind === "question" && answerDraft.length > 0 && (
           <Text>{answerDraft}<Text inverse> </Text></Text>
-        )}
-        {!pending && attachments.length > 0 && (
-          <Text color={T.success} wrap="truncate">
-            {attachments.map((a) => `⎘ ${a.name}`).join("  ")}
-            <Text color={T.faint}>  ⌫ to remove</Text>
-          </Text>
         )}
         {!pending && lines.map((l, i) => <Text key={i}>{l}</Text>)}
         {!pending && value.length === 0 && !focused ? null : null}
