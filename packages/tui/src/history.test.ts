@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { TimelineItem } from "@covey/protocol";
+import type { AssistantMessageItem, UserMessageItem } from "@covey/protocol";
 import { sentMessages, stepHistory, type HistoryWalk } from "./history.js";
 import { wrapEditorLines, caretToVisual } from "./editor.js";
 
@@ -12,10 +12,17 @@ function press(entries: string[], walk: HistoryWalk | null, draft: string, caret
   return stepHistory(entries, walk, draft, caret, lines(draft), dir);
 }
 
-const userItem = (seq: number, text: string, over: Partial<Record<string, unknown>> = {}): TimelineItem => ({
+// Annotated, never asserted: `as` on a data literal hides a field the type
+// gained since the test was written, which is how main stopped compiling (#57).
+const userItem = (seq: number, text: string, over: Partial<UserMessageItem> = {}): UserMessageItem => ({
   id: `u${seq}`, threadId: "t", turnId: `t${seq}`, seq, createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z", kind: "user", text, attachments: [], ...over,
-} as unknown as TimelineItem);
+});
+
+const assistantItem = (seq: number, text: string): AssistantMessageItem => ({
+  id: `a${seq}`, threadId: "t", turnId: `t${seq}`, seq, createdAt: "2026-01-01T00:00:00Z",
+  updatedAt: "2026-01-01T00:00:00Z", kind: "assistant", text, streaming: false, model: null,
+});
 
 test("the entries are this thread's sent messages, newest first", () => {
   const items = [userItem(1, "first"), userItem(3, "third"), userItem(2, "second")];
@@ -28,7 +35,7 @@ test("a queued or folded message is in the walk, an empty one is not", () => {
     userItem(2, "queued", { queued: true }),
     userItem(3, "folded", { folded: true }),
     userItem(4, ""), // an image on its own
-    { ...userItem(5, "not a user message"), kind: "assistant" } as TimelineItem,
+    assistantItem(5, "not a user message"),
   ];
   assert.deepEqual(sentMessages(items), ["folded", "queued", "sent"]);
 });
