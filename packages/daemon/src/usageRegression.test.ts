@@ -93,7 +93,7 @@ function session() {
   };
   const s = new ClaudeSession({
     threadId: "t1", sessionId: "s1", cwd: "/tmp", model: OPUS,
-    permissionMode: "default", permissionModeExplicit: false, resume: false,
+    permissionMode: "default", permissionModeExplicit: false, streaming: false, resume: false,
     sessionStore: { append: () => {}, load: () => null } as any,
   }, sink);
   // `handle` is the SDK message pump's body. Driving it directly exercises the
@@ -165,7 +165,7 @@ function tempEngine(): { engine: Engine; db: Db; dir: string; threadId: string }
     machineId: "m1", name: "test", os: "darwin", arch: "arm64", homeDir: "/tmp",
     daemonVersion: "0.0.1", protocolVersion: 1,
     capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
-    settings: { defaultModel: null, defaultPermissionMode: null },
+    settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
   };
   const now = new Date().toISOString();
   const project: Project = { id: "p1", title: "covey", workspaceRoot: "/tmp/p1", repositoryIdentity: null, defaultModel: null, defaultWorkspaceMode: null, createdAt: now, updatedAt: now };
