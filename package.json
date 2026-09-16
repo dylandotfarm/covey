@@ -21,7 +21,7 @@
     "setup": "node scripts/setup.mjs",
     "build": "tsc -b",
     "watch": "tsc -b --watch",
-    "typecheck": "tsc -b --noEmit",
+    "typecheck": "tsc -b",
     "test": "node --import tsx --test \"packages/*/src/**/*.test.ts\" \"packages/*/test/**/*.test.ts\"",
     "check": "pnpm run check:age && pnpm run typecheck && pnpm test",
     "check:age": "node scripts/pkg-age.mjs check",
