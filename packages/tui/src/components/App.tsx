@@ -6,6 +6,7 @@ import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, work
 import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
 import { parseMouse, copyToClipboard, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
+import { buildLine, buildSkew } from "../build.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
 import { Transcript, layoutTranscript } from "./Transcript.js";
@@ -299,14 +300,17 @@ export function App({ store }: { store: Store }) {
     const modelLabel = settings.defaultModel
       ? (KNOWN_MODELS.find((k) => k.id === settings.defaultModel)?.label ?? settings.defaultModel)
       : "from Claude settings";
+    // "behind" is the reason most updates get run, so say it where the finger
+    // already is instead of only in the summary behind it.
+    const skew = buildSkew(state.clientBuild, info.build);
     const opts: PickOption[] = [
-      { id: "update", label: "Update — pull, rebuild, restart", hint: busy ? "interrupts running turns" : "" },
+      { id: "update", label: "Update — pull, rebuild, restart", hint: skew === "behind" ? "older build than your client" : busy ? "interrupts running turns" : "" },
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
       { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
-    openPick(`${info.name} — ${info.os}/${info.arch} · daemon ${info.daemonVersion}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
+    openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
       switch (id) {
         case "update": return void confirmUpdate(machineKey!);
         case "restart": return confirmRestart(machineKey!);
