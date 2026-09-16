@@ -178,5 +178,5 @@ const HELP: [string, string][] = [
   ["mouse", ""],
   ["  click", "sidebar: open that row, as enter would"],
   ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
-  ["  wheel", "scroll the conversation, or move the sidebar cursor"],
+  ["  wheel", "scroll a line · +alt a page · sidebar: move the cursor"],
 ];

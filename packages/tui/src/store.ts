@@ -725,11 +725,14 @@ export class Store {
     await client.command({ type: "approval.respond", threadId: v.threadId, requestId: it.requestId, behavior, ...(always ? { updatedPermissions: it.suggestions } : {}) }).catch((e) => this.notify(e.message, "error"));
   }
 
-  async respondQuestion(answer: string) {
+  /** One answer for each question on the pending item, in order. */
+  async respondQuestion(answers: string[]) {
     const v = this.state.view; const it = this.pendingRequest();
     const client = v && this.clients.get(v.machine);
     if (!v || !client || !it || it.kind !== "question") return;
-    await client.command({ type: "question.respond", threadId: v.threadId, requestId: it.requestId, answer }).catch((e) => this.notify(e.message, "error"));
+    // `answer` carries the first one as well, so a daemon that predates the
+    // list still answers a single question.
+    await client.command({ type: "question.respond", threadId: v.threadId, requestId: it.requestId, answer: answers[0] ?? "", answers }).catch((e) => this.notify(e.message, "error"));
   }
 
   async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string) {
