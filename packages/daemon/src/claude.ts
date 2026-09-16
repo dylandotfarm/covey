@@ -51,6 +51,13 @@ interface Pending {
 /** Incremental text streaming, off unless explicitly asked for. */
 const STREAMING = process.env.COVEY_STREAM === "1";
 
+/**
+ * How a session reaches the SDK. Real sessions use `query`; a test hands in a
+ * stand-in, so what this class does with the SDK's messages can be checked
+ * without a Claude subprocess.
+ */
+export type QueryFactory = (args: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => Query;
+
 export class ClaudeSession {
   private q: Query | null = null;
   private abort = new AbortController();
@@ -83,7 +90,7 @@ export class ClaudeSession {
   private blocks: { itemId: string; kind: "text" | "thinking" | "tool"; text: string; json: string; toolName?: string; toolUseId?: string }[] = [];
   private turnStartedAt = Date.now();
 
-  constructor(private params: SessionParams, private sink: SessionSink) {}
+  constructor(private params: SessionParams, private sink: SessionSink, private spawn: QueryFactory = query) {}
 
   get running(): boolean {
     return this.q !== null && !this.closed;
@@ -120,7 +127,7 @@ export class ClaudeSession {
       },
     };
     this.sink.onStatus("starting");
-    this.q = query({ prompt: this.input(), options: opts });
+    this.q = this.spawn({ prompt: this.input(), options: opts });
     void this.pump();
   }
 
