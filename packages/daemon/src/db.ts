@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type {
   Project,
+  Run,
   Thread,
   TimelineItem,
   ShellEvent,
@@ -21,6 +22,7 @@ import type {
  *
  * Tables:
  *  projects / threads / items       — current state (projections)
+ *  runs                             — a named group of threads with one goal
  *  turns                            — one row per finished turn (usage)
  *  shell_events / thread_events     — append log with seq for replay
  *  transcripts                      — SDK SessionStore mirror (raw JSONL rows)
@@ -96,6 +98,8 @@ export class Db {
         PRIMARY KEY (thread_id, turn_id));
       CREATE INDEX IF NOT EXISTS turns_ended ON turns(ended_at);
       CREATE INDEX IF NOT EXISTS turns_project ON turns(project_id, ended_at);
+      CREATE TABLE IF NOT EXISTS runs (
+        id TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     `);
     const cols = (this.sql.prepare("PRAGMA table_info(turn_checkpoints)").all() as any[]).map((c) => c.name);
     if (!cols.includes("user_message_uuid")) this.sql.exec("ALTER TABLE turn_checkpoints ADD COLUMN user_message_uuid TEXT");
@@ -173,6 +177,31 @@ export class Db {
   putThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
     this.sql.prepare("INSERT OR REPLACE INTO thread_commands(thread_id,json) VALUES(?,?)")
       .run(threadId, JSON.stringify(commands));
+  }
+
+  // ---- runs ---------------------------------------------------------------
+  /**
+   * A run is stored whole, as one JSON row.
+   *
+   * Its members carry ids that belong to other machines — a thread id on the
+   * Pi means nothing in this database — so there is nothing here to normalise
+   * into columns and nothing to join against. Oldest first: a run's place in
+   * the sidebar should not move while the operator works through it.
+   */
+  listRuns(): Run[] {
+    return this.sql.prepare("SELECT json FROM runs ORDER BY created_at").all()
+      .map((r: any) => JSON.parse(r.json));
+  }
+  getRun(id: string): Run | null {
+    const r: any = this.sql.prepare("SELECT json FROM runs WHERE id = ?").get(id);
+    return r ? JSON.parse(r.json) : null;
+  }
+  putRun(r: Run) {
+    this.sql.prepare("INSERT OR REPLACE INTO runs(id,json,created_at,updated_at) VALUES(?,?,?,?)")
+      .run(r.id, JSON.stringify(r), r.createdAt, r.updatedAt);
+  }
+  deleteRun(id: string) {
+    this.sql.prepare("DELETE FROM runs WHERE id = ?").run(id);
   }
 
   // ---- items --------------------------------------------------------------

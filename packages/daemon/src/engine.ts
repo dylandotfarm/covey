@@ -2,8 +2,8 @@ import { randomUUID } from "node:crypto";
 import { basename, resolve, sep } from "node:path";
 import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
 import type {
-  Command, CommandEnvelope, Project, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
-  ShellSnapshot, ThreadSnapshot, MachineInfo, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
+  Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
+  ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
 } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink } from "./claude.js";
@@ -12,10 +12,32 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest } from "@covey/protocol";
+import { readIssues, pullRequestFor } from "./gh.js";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
+}
+
+/** A placed member, before anything has been dispatched to it. */
+function newMember(init: import("@covey/protocol").RunMemberInit, now: string): RunMember {
+  return {
+    id: init.id,
+    task: init.task,
+    machineId: init.machineId,
+    projectId: init.projectId,
+    threadId: null,
+    branch: null,
+    worktreePath: null,
+    pullRequest: null,
+    state: "planned",
+    note: null,
+    resources: init.resources,
+    brief: null,
+    dispatchedAt: null,
+    updatedAt: now,
+    review: null,
+  };
 }
 
 type ShellListener = (ev: ShellEvent) => void;
@@ -59,7 +81,17 @@ export class Engine {
   // ---- snapshots ------------------------------------------------------------
 
   shellSnapshot(): ShellSnapshot {
-    return { seq: this.db.shellSeq(), machine: this.machine, projects: this.db.listProjects(), threads: this.db.listThreads() };
+    return { seq: this.db.shellSeq(), machine: this.machine, projects: this.db.listProjects(), threads: this.db.listThreads(), runs: this.db.listRuns() };
+  }
+
+  /**
+   * Publish what the daemon read about its own machine. The probe runs a
+   * program per tool, so it happens after the listener binds rather than
+   * before it; this is how the answer reaches clients that are already here.
+   */
+  setResources(resources: MachineResources) {
+    this.machine.resources = resources;
+    this.emitShell({ kind: "machine.updated", machine: this.machine });
   }
 
   threadSnapshot(threadId: string, limit = 200, beforeSeq?: number): ThreadSnapshot {
@@ -392,10 +424,112 @@ export class Engine {
         this.sessions.delete(cmd.threadId);
         return this.mutateThread(cmd.threadId, (t) => { t.status = "idle"; });
       }
+      // ---- runs -------------------------------------------------------------
+      // The run record lives here because a run outlives the client that
+      // started it. The client stays the party that dispatches: only it holds
+      // a connection to every machine the members run on.
+      case "run.create": {
+        const existing = this.db.getRun(cmd.run.runId);
+        // A retried create must not throw away a run that has been dispatched.
+        if (existing) return this.emitShell({ kind: "run.upserted", run: existing });
+        if (cmd.run.workspaceMode === "checkout")
+          throw new EngineError("bad_workspace", "a run works in worktrees; parallel agents in one checkout is the defect");
+        const run: Run = {
+          id: cmd.run.runId,
+          machineId: this.machine.machineId,
+          name: cmd.run.name,
+          goal: cmd.run.goal,
+          briefTemplate: cmd.run.briefTemplate,
+          workspaceMode: cmd.run.workspaceMode,
+          members: cmd.run.members.map((m) => newMember(m, now)),
+          closedAt: null,
+          createdAt: now,
+          updatedAt: now,
+        };
+        this.db.putRun(run);
+        return this.emitShell({ kind: "run.upserted", run });
+      }
+      case "run.update": {
+        const run = this.requireRun(cmd.runId);
+        if (cmd.name !== undefined) run.name = cmd.name;
+        if (cmd.goal !== undefined) run.goal = cmd.goal;
+        if (cmd.briefTemplate !== undefined) run.briefTemplate = cmd.briefTemplate;
+        if (cmd.closedAt !== undefined) run.closedAt = cmd.closedAt;
+        return this.saveRun(run, now);
+      }
+      case "run.member.add": {
+        const run = this.requireRun(cmd.runId);
+        // Scope changes in the middle of a run: one task was cancelled and
+        // another added on the day this issue came from. Adding is an ordinary
+        // edit, so adding a member that is already here changes nothing.
+        if (run.members.some((m) => m.id === cmd.member.id)) return this.emitShell({ kind: "run.upserted", run });
+        run.members.push(newMember(cmd.member, now));
+        return this.saveRun(run, now);
+      }
+      case "run.member.patch": {
+        const run = this.requireRun(cmd.runId);
+        const at = run.members.findIndex((m) => m.id === cmd.memberId);
+        if (at < 0) throw new EngineError("not_found", `run ${cmd.runId} has no member ${cmd.memberId}`);
+        // `review` is issue #45's field. It is merged like any other and never
+        // read here, which is what lets the two halves land separately.
+        run.members[at] = { ...run.members[at]!, ...cmd.patch, updatedAt: now };
+        return this.saveRun(run, now);
+      }
+      case "run.member.remove": {
+        const run = this.requireRun(cmd.runId);
+        const m = run.members.find((x) => x.id === cmd.memberId);
+        if (m && m.threadId) throw new EngineError("dispatched", "a dispatched member is withdrawn, not removed — its thread did the work");
+        run.members = run.members.filter((x) => x.id !== cmd.memberId);
+        return this.saveRun(run, now);
+      }
+      case "run.delete": {
+        this.db.deleteRun(cmd.runId);
+        return this.emitShell({ kind: "run.removed", runId: cmd.runId });
+      }
       // Unreachable for a client of the same version. A newer client talking to
       // this daemon lands here, and has to hear so — falling out of the switch
       // would ack a command that never ran.
       default: throw new EngineError("unknown_command", `this daemon does not know the command ${(cmd as { type: string }).type}`);
+    }
+  }
+
+  private requireRun(runId: string): Run {
+    const run = this.db.getRun(runId);
+    if (!run) throw new EngineError("not_found", `run ${runId} not found`);
+    return run;
+  }
+
+  /** Store the run and send it whole, the way a timeline item is sent whole. */
+  private saveRun(run: Run, now: string): number {
+    run.updatedAt = now;
+    this.db.putRun(run);
+    return this.emitShell({ kind: "run.upserted", run });
+  }
+
+  /**
+   * The issues a run's task list names, read with `gh` in the project's
+   * checkout — here, where `gh` has the remote and the login.
+   */
+  async runIssues(projectId: string, numbers: number[]): Promise<{ issues: RunIssue[]; error: string | null }> {
+    const p = this.db.getProject(projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    return readIssues(p.workspaceRoot, numbers.slice(0, 100));
+  }
+
+  /**
+   * The pull request for a member's branch. The branch is on this machine, so
+   * this daemon is the one that can see it.
+   */
+  async runPullRequest(threadId: string): Promise<RunPullRequest | null> {
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", `thread ${threadId} not found`);
+    if (!t.branch) return null;
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    try {
+      return await pullRequestFor(t.worktreePath ?? p.workspaceRoot, t.branch);
+    } catch (e: any) {
+      throw new EngineError("gh", e?.message ?? String(e));
     }
   }
 

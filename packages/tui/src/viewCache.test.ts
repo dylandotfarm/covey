@@ -108,7 +108,7 @@ function attach(store: Store, client: FakeClient) {
   (store as any).clients.set(MACHINE, client);
   const ms: MachineState = {
     key: MACHINE, saved: { name: "fake", url: MACHINE }, conn: "connected", error: null,
-    info: null, projects: new Map(), threads: new Map(), update: null, restarting: false,
+    info: null, projects: new Map(), threads: new Map(), runs: new Map(), update: null, restarting: false,
   };
   store.state.machines.set(MACHINE, ms);
   store.state.order.push(MACHINE);
