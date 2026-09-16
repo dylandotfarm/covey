@@ -17,6 +17,11 @@
  *
  * `covey info` is the cheapest command that loads the whole graph: it prints
  * this machine's daemon settings and exits, and it touches no socket.
+ *
+ * The setting is for React and for this process. The tests at the end are the
+ * other side of that: `nodeEnv.ts` hands `NODE_ENV` back once React has read
+ * it, so the daemon — and through it every Claude session and every command
+ * those sessions run — is left with the environment the user has.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -50,6 +55,7 @@ process.on("exit", () => {
   };
   process.stderr.write("PROBE " + JSON.stringify({
     env: process.env.NODE_ENV ?? null,
+    flag: process.env.COVEY_SET_NODE_ENV ?? null,
     react: copy("react/index.js", "cjs/react.development.js", "cjs/react.production.js"),
     reconciler: copy(
       "react-reconciler/index.js",
@@ -60,7 +66,7 @@ process.on("exit", () => {
 });
 `;
 
-interface Probed { env: string | null; react: string; reconciler: string }
+interface Probed { env: string | null; flag: string | null; react: string; reconciler: string }
 
 /** Run `covey info` on its own data directory and read the probe's line. */
 function runClient(env: Record<string, string> = {}): Probed {
@@ -87,15 +93,26 @@ function runClient(env: Record<string, string> = {}): Probed {
 
 test("the client runs React's production build", () => {
   const got = runClient();
-  assert.equal(got.env, "production", "the entry no longer sets NODE_ENV before it loads anything");
   assert.equal(
     got.reconciler, "production",
     "the client loaded React's development reconciler, which calls performance.measure() on every " +
     "commit. Node keeps every user-timing entry, so the client then grows once per event it paints " +
     "and never gives it back — 22.8 MB a minute, and SIGABRT at about 4 GB (issue #61). The line that " +
-    "sets NODE_ENV has to stay above the import of main.js in packages/cli/src/index.ts",
+    "sets NODE_ENV has to stay in packages/cli/src/index.ts, above every import",
   );
   assert.equal(got.react, "production", "and the same for React itself");
+});
+
+test("a command that paints no TUI is left with the environment the user has", () => {
+  const got = runClient();
+  assert.equal(
+    got.env, null,
+    "covey invented NODE_ENV for React and kept it. The daemon runs no React, and this value " +
+    "reaches the Claude sessions it spawns and every command those sessions run — npm install " +
+    "under NODE_ENV=production installs without the devDependencies, and says nothing. " +
+    "nodeEnv.ts has to give it back once React has read it",
+  );
+  assert.equal(got.flag, null, "and the flag that carried the decision is gone too");
 });
 
 test("an environment that already names NODE_ENV is left alone", () => {
