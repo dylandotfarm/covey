@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { appendFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode } from "@covey/protocol";
 import { Store, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
-import { diffToLines, selectedText, activityLine, truncate } from "../lines.js";
+import { diffToLines, selectedText, activityLine, linkAt, truncate } from "../lines.js";
+import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { buildLine, buildSkew } from "../build.js";
@@ -130,7 +132,13 @@ export function App({ store }: { store: Store }) {
     + (menu ? menuHeight(menu) : 0);
   const transcriptH = Math.max(3, size.rows - composerRows - 2 - 1);
   const questionUi = useMemo(() => ({ cursor: questionCursor, answered: answersGiven }), [questionCursor, answersGiven]);
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded]);
+  // A path in the transcript belongs to the daemon's host, and the file
+  // manager belongs to this one. So paths are only openable when the thread's
+  // machine is the loopback one; a URL is openable from any machine.
+  const viewMachine = state.view?.machine ?? null;
+  const viewHome = viewMachine ? (state.machines.get(viewMachine)?.info?.homeDir ?? undefined) : undefined;
+  const linkCtx = useMemo<LinkContext>(() => ({ localFiles: !!viewMachine && isLoopbackUrl(viewMachine), homeDir: viewHome }), [viewMachine, viewHome]);
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded, linkCtx), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded, linkCtx]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
@@ -566,6 +574,29 @@ export function App({ store }: { store: Store }) {
     return { pane, line, col: Math.max(0, ev.col - 1 - mainX0), exact: rowInBox >= pad && start + (rowInBox - pad) < end };
   }
 
+  /**
+   * Open what the pointer is on: reveal a file in the file manager, or send a
+   * URL to the browser.
+   *
+   * alt+click and ctrl+click, because an SGR mouse report has a bit for each
+   * of those and none for cmd, and shift is the escape hatch that gives the
+   * terminal its own selection back. The OSC 8 links do the same job through
+   * the terminal, so this is the route for a terminal without them.
+   */
+  function openLink(uri: string) {
+    const cmd = openCommand(uri, process.platform);
+    try {
+      // No shell: the URI comes out of the transcript, so it must never be
+      // read as a command line.
+      const child = spawn(cmd.cmd, cmd.args, { detached: true, stdio: "ignore" });
+      child.on("error", () => store.notify(`could not run ${cmd.cmd}`, "error"));
+      child.unref();
+      store.notify(uri.startsWith("file://") ? `revealed ${truncate(decodeURIComponent(uri.slice(7)), 60)}` : `opened ${truncate(uri, 60)}`, "success");
+    } catch {
+      store.notify(`could not run ${cmd.cmd}`, "error");
+    }
+  }
+
   function copySelection() {
     const sel = state.selection;
     if (!sel) return;
@@ -656,6 +687,14 @@ export function App({ store }: { store: Store }) {
       if (inTranscript) {
         store.setFocus("composer");
         const hit = hitTest(ev);
+        if (hit?.exact && (ev.alt || ev.ctrl) && !state.diffView) {
+          const uri = linkAt(layout.lines[hit.line] ?? [], hit.col);
+          // A modified click that lands on no link starts no selection
+          // either: it asked to open something, and nothing was there.
+          if (uri) openLink(uri);
+          else store.notify("no link here — alt+click a path or a URL");
+          return;
+        }
         pressedLine.current = hit?.exact ? hit.line : null;
         if (hit) store.beginSelection(hit.pane, hit.line, hit.col);
         return;
