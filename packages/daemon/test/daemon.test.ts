@@ -42,7 +42,7 @@ class Client {
 
 async function startDaemon(port: number, name: string): Promise<{ proc: ChildProcess; home: string }> {
   const home = tempDir("covey-test-");
-  const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", name], { env: { ...process.env, COVEY_HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", name], { env: { ...process.env, COVEY_HOME: home, COVEY_STREAM: "" }, stdio: ["ignore", "pipe", "pipe"] });
   let log = "";
   proc.stderr!.on("data", (d) => { log += d.toString(); });
   for (let i = 0; i < 100; i++) {
@@ -286,17 +286,17 @@ test("a project remembers where new threads should run", async () => {
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {
   const settings = async () => (await a.rpc("hello", { protocolVersion: 1, client: "test" })).settings;
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null }, "no opinion until one is set");
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "no opinion until one is set");
 
   await a.rpc("shell.subscribe", {});
   a.pushes.length = 0;
-  await a.command({ type: "machine.settings", defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions" });
+  await a.command({ type: "machine.settings", defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true });
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(
     a.pushes.some((p) => p.push === "shell" && p.event.kind === "machine.updated" && p.event.machine.settings.defaultModel === "claude-opus-5"),
     "the change is broadcast, so every client's panel follows",
   );
-  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions" });
+  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true });
   const onDisk = JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8"));
   assert.equal(onDisk.defaultModel, "claude-opus-5", "settings survive a daemon restart");
   assert.ok(onDisk.machineId, "writing settings does not clobber the rest of daemon.json");
@@ -308,15 +308,38 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal(t.model, "claude-opus-5");
   assert.equal(t.permissionMode, "bypassPermissions");
   assert.equal(t.permissionModeExplicit, true, "a machine default is a choice, so the SDK is told about it");
+  assert.equal(t.streaming, true);
 
   const explicit = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: explicit, sessionId: randomUUID(), workspaceMode: "checkout", model: "claude-haiku-4-5-20251001", permissionMode: "plan" });
+  await a.command({ type: "thread.create", projectId, threadId: explicit, sessionId: randomUUID(), workspaceMode: "checkout", model: "claude-haiku-4-5-20251001", permissionMode: "plan", streaming: false });
   const e = (await a.rpc("thread.snapshot", { threadId: explicit })).thread;
   assert.equal(e.model, "claude-haiku-4-5-20251001", "an explicit model still wins");
   assert.equal(e.permissionMode, "plan");
+  assert.equal(e.streaming, false, "an explicit choice still wins");
 
-  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null });
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null }, "and can be cleared again");
+  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null });
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "and can be cleared again");
+});
+
+test("streaming is a per-thread switch that needs no restart", async () => {
+  const projectId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === repoA)!.id;
+  const threadId = randomUUID();
+  await a.command({ type: "thread.create", projectId, threadId, sessionId: randomUUID(), workspaceMode: "checkout" });
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).thread.streaming, false, "off until asked for");
+
+  await a.rpc("thread.subscribe", { threadId, sinceSeq: 0 });
+  a.pushes.length = 0;
+  await a.command({ type: "thread.setStreaming", threadId, streaming: true });
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).thread.streaming, true);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.ok(
+    a.pushes.some((p) => p.push === "shell" && p.event.kind === "thread.upserted" && p.event.thread.id === threadId && p.event.thread.streaming),
+    "the switch is broadcast, so a second client's palette agrees",
+  );
+
+  await a.command({ type: "thread.setStreaming", threadId, streaming: false });
+  assert.equal((await a.rpc("thread.snapshot", { threadId })).thread.streaming, false);
+  await a.command({ type: "thread.delete", threadId });
 });
 
 test("machine.source points at the checkout the daemon runs from", async () => {

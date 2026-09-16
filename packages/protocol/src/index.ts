@@ -83,6 +83,11 @@ export interface MachineSettings {
   defaultModel: string | null;
   /** Permission mode for new threads on this machine. */
   defaultPermissionMode: PermissionMode | null;
+  /**
+   * Incremental text for new threads on this machine. `null` means off, the
+   * same as `false`; it is nullable so the field matches the two beside it.
+   */
+  defaultStreaming: boolean | null;
 }
 
 export interface MachineCapabilities {
@@ -234,6 +239,15 @@ export interface Thread {
    * settings apply exactly as they would in the CLI.
    */
   permissionModeExplicit?: boolean;
+  /**
+   * True when the daemon forwards incremental text for this thread: the
+   * assistant and thinking rows grow token by token instead of landing whole.
+   * Absent on threads created before the switch existed, which reads as off.
+   *
+   * The wire contract does not change with it. A growing item is re-sent whole
+   * under the same id, exactly as a finished one is; there is no delta channel.
+   */
+  streaming?: boolean;
   branch: string | null;
   worktreePath: string | null;
   status: SessionStatus;
@@ -546,6 +560,7 @@ export type Command =
       type: "machine.settings";
       defaultModel?: string | null;
       defaultPermissionMode?: PermissionMode | null;
+      defaultStreaming?: boolean | null;
     }
   | {
       type: "thread.create";
@@ -555,6 +570,8 @@ export type Command =
       title?: string;
       model?: string | null;
       permissionMode?: PermissionMode;
+      /** Omitted = the machine's `defaultStreaming`, else off. */
+      streaming?: boolean;
       /** Omitted = the project's `defaultWorkspaceMode`, else `checkout`. */
       workspaceMode?: WorkspaceMode;
     }
@@ -564,6 +581,12 @@ export type Command =
   | { type: "thread.delete"; threadId: ThreadId }
   | { type: "thread.setPermissionMode"; threadId: ThreadId; mode: PermissionMode }
   | { type: "thread.setModel"; threadId: ThreadId; model: string | null }
+  /**
+   * Turn incremental text on or off for one thread. It applies to the live
+   * session at once, mid-turn included, because the daemon always asks the SDK
+   * for partial messages and decides here whether to forward them.
+   */
+  | { type: "thread.setStreaming"; threadId: ThreadId; streaming: boolean }
   | {
       type: "turn.send";
       threadId: ThreadId;

@@ -47,6 +47,8 @@ export interface DaemonConfig {
   defaultModel: string | null;
   /** Machine-wide default permission mode for new threads; null = no opinion. */
   defaultPermissionMode: PermissionMode | null;
+  /** Machine-wide default for incremental text on new threads; null = off. */
+  defaultStreaming: boolean | null;
 }
 
 const configFile = () => join(dataDir(), "daemon.json");
@@ -57,8 +59,14 @@ function readConfigFile(): Record<string, unknown> {
 }
 
 /** Settings written before these fields existed simply read as "no opinion". */
-export function machineSettings(cfg: Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode">): MachineSettings {
-  return { defaultModel: cfg.defaultModel ?? null, defaultPermissionMode: cfg.defaultPermissionMode ?? null };
+export function machineSettings(cfg: Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming">): MachineSettings {
+  return {
+    defaultModel: cfg.defaultModel ?? null,
+    defaultPermissionMode: cfg.defaultPermissionMode ?? null,
+    // The old escape becomes the seed for the new default, so a machine that
+    // starts with COVEY_STREAM=1 still gives every new thread incremental text.
+    defaultStreaming: cfg.defaultStreaming ?? (process.env.COVEY_STREAM === "1" ? true : null),
+  };
 }
 
 /**
@@ -91,6 +99,7 @@ export function loadDaemonConfig(overrides: Partial<DaemonConfig> = {}): DaemonC
       createdAt: new Date().toISOString(),
       defaultModel: null,
       defaultPermissionMode: null,
+      defaultStreaming: null,
     };
     writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n", { mode: 0o600 });
   }
