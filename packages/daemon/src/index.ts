@@ -1,4 +1,5 @@
-export { runDaemon } from "./main.js";
+export { runDaemon, installStopHandlers, type DaemonHandle } from "./main.js";
 export { dataDir, loadDaemonConfig } from "./config.js";
+export { clearPidFile, isAlive, pidFilePath, readPidFile, type PidRecord } from "./pidfile.js";
 export { Engine } from "./engine.js";
 export { Updater, sourceInfo, sourceRoot } from "./update.js";
