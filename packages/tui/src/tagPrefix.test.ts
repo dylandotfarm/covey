@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { commandToken } from "./commands.js";
+import { findTargets } from "./links.js";
 import { mentionAt } from "./mentions.js";
 import { applyDrop } from "./attachments.js";
 
@@ -49,4 +50,14 @@ test("a space in the file name does not split the tag into a prefix", () => {
   assert.equal(drop.value, "[shot 1.png] ");
   assert.equal(mentionAt(drop.value, 8), null);
   assert.equal(commandToken(drop.value), null);
+});
+
+test("a tag is never mistaken for a clickable path", () => {
+  // #29 links an absolute path with two segments or more. A tag holds a
+  // basename, which can never contain a `/`, so the two cannot collide.
+  const drop = applyDrop("compare", 7, [att("shot.png")], []);
+  assert.deepEqual(findTargets(drop.value, { localFiles: true, homeDir: "/Users/me" }), []);
+  // The real path beside it still links, so the tag costs the reader nothing.
+  const targets = findTargets(`${drop.value}/Users/me/shots/shot.png`, { localFiles: true, homeDir: "/Users/me" });
+  assert.deepEqual(targets.map((t) => t.uri), ["file:///Users/me/shots/shot.png"]);
 });
