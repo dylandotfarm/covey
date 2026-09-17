@@ -363,7 +363,10 @@ export function App({ store }: { store: Store }) {
   const machinePanel = (machineKey = contextMachine) => {
     const m = machineKey ? state.machines.get(machineKey) : undefined;
     if (!m) return;
-    if (m.conn !== "connected" || !m.info) { store.notify(`${m.saved.name} is ${m.conn}`, "error"); return; }
+    // The panel needs what only a connected daemon sends. On a machine the
+    // client has given up on there is exactly one thing worth doing, so enter
+    // does it rather than reporting the state back at the reader (issue #68).
+    if (m.conn !== "connected" || !m.info) { store.retryMachine(machineKey!); return; }
     const info = m.info;
     const settings = info.settings ?? { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null };
     const busy = runningTurns(machineKey!);
@@ -498,6 +501,10 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "addproject", label: "Add project", hint: "a" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults", hint: "enter on a machine" });
+    // Only offered when there is something to retry, so the list does not grow
+    // a row that does nothing on a fleet that is all up.
+    const offline = state.order.filter((k) => state.machines.get(k)?.conn === "offline");
+    if (offline.length) opts.push({ id: "retry", label: `Retry ${offline.length === 1 ? state.machines.get(offline[0]!)!.saved.name : `${offline.length} offline machines`}`, hint: "the client stopped dialling" });
     opts.push({ id: "updateclient", label: "Update covey — pull, rebuild, relaunch this client", hint: store.clientSource?.commit ?? "" });
     opts.push({ id: "addmachine", label: "Add machine (ws://host:port)" });
     opts.push({ id: "rmmachine", label: "Remove machine" });
@@ -524,6 +531,7 @@ export function App({ store }: { store: Store }) {
         case "addproject": return addProject();
         case "usage": return void store.loadUsage(0, "thread");
         case "machine": return machinePanel();
+        case "retry": { for (const k of offline) store.retryMachine(k); return; }
         case "updateclient": return updateClient();
         case "addmachine": return openInput("Machine URL", (v) => { store.setOverlay(null); const [url, token] = v.split(/\s+/); if (url) store.addMachine({ name: new URL(url).hostname, url, token }); }, "ws://", "ws://host.tailnet.ts.net:3790 [token]");
         case "rmmachine": return openPick("Remove machine", state.order.map((k) => ({ id: k, label: state.machines.get(k)!.saved.name, hint: k })), (k) => { store.setOverlay(null); store.removeMachine(k); });

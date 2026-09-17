@@ -42,13 +42,19 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
   const m = state.machines.get(row.machine)!;
   switch (row.kind) {
     case "machine": {
-      const dot = m.conn === "connected" ? "●" : m.conn === "connecting" ? "◌" : "○";
-      const dotColor = m.conn === "connected" ? T.success : m.conn === "connecting" ? T.warning : T.danger;
+      // An offline machine gets its own mark. It used to share "○" with every
+      // other kind of silence, so a machine nobody was dialling any more looked
+      // exactly like one about to answer (issue #68).
+      const dot = m.conn === "connected" ? "●" : m.conn === "connecting" ? "◌" : m.conn === "offline" ? "✗" : "○";
+      const dotColor = m.conn === "connected" ? T.success : m.conn === "connecting" ? T.warning : m.conn === "offline" ? T.faint : T.danger;
       const name = m.info?.name ?? m.saved.name;
       // A machine behind the client is worth more than its os here: the os
       // never changes, and old code on the far end is what wastes an hour.
       const behind = m.conn === "connected" && buildSkew(state.clientBuild, m.info?.build) === "behind";
-      const meta = m.conn !== "connected" ? m.conn : behind ? "⚠ old build" : (m.info?.os ?? "");
+      // Room here is a dozen characters, so the reason lives in the summary
+      // pane; what the row owes the reader is that nothing more will happen
+      // unless they ask, which is what "enter to retry" says.
+      const meta = m.conn === "offline" ? "offline · enter" : m.conn !== "connected" ? m.conn : behind ? "⚠ old build" : (m.info?.os ?? "");
       return (
         <Box paddingX={1} height={1} backgroundColor={bg}>
           <Text color={dotColor}>{dot} </Text>

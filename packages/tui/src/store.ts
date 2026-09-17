@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { MachineClient, type ConnState } from "./client.js";
+import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
@@ -177,6 +177,8 @@ export interface StoreOptions {
   canRelaunch?: boolean;
   /** Carried over from the process we were relaunched from. */
   notice?: { text: string; tone: Notice["tone"] };
+  /** Passed to every MachineClient. Only a test moves the retry backoff. */
+  client?: ClientOptions;
 }
 
 /**
@@ -220,11 +222,13 @@ export class Store {
   readonly clientSource: MachineSource | null;
   readonly canRelaunch: boolean;
   private buildTimer: NodeJS.Timeout | null = null;
+  private clientOpts: ClientOptions;
 
   constructor(machines: SavedMachine[], opts: StoreOptions = {}) {
     this.config = loadConfig();
     this.clientSource = opts.source ?? null;
     this.canRelaunch = opts.canRelaunch ?? false;
+    this.clientOpts = opts.client ?? {};
     this.state = {
       machines: new Map(), order: [], selected: null, view: null, focus: "sidebar",
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
@@ -287,6 +291,10 @@ export class Store {
     this.state.order.push(saved.url);
     const client = new MachineClient(saved, {
       state: (s, err) => {
+        // A machine that is off reports the same state over and over. Painting
+        // the whole sidebar for a row that did not change is what made a dead
+        // machine cost the same as a busy one (issue #68).
+        const changed = ms.conn !== s || ms.error !== (err ?? null) || ms.info !== client.info;
         ms.conn = s; ms.error = err ?? null; ms.info = client.info;
         // A cached seq only means something to the daemon it was read from.
         if (s !== "connected") this.viewCache.dropMachine(ms.key);
@@ -298,7 +306,7 @@ export class Store {
           if (ms.update?.state === "restarting") ms.update = { ...ms.update, state: "succeeded", finishedAt: new Date().toISOString() };
           this.notify(`${ms.info?.name ?? ms.saved.name} is back up${at ? ` on ${at}` : ""}`, "success");
         }
-        this.touch();
+        if (changed) this.touch();
       },
       shellSnapshot: (snap) => {
         ms.info = snap.machine;
@@ -314,11 +322,14 @@ export class Store {
       machineUpdate: (update) => {
         const prev = ms.update;
         ms.update = update;
-        if (update.state === "restarting") ms.restarting = true;
+        // The drop that follows is the update working, so the client has to be
+        // told before it happens — otherwise it gives up on the daemon it was
+        // asked to restart, and the reconnect that reports success never comes.
+        if (update.state === "restarting") { ms.restarting = true; client.expectRestart(); }
         this.noticeUpdate(ms, prev, update);
         this.touch();
       },
-    });
+    }, this.clientOpts);
     this.clients.set(saved.url, client);
     client.start();
     if (persist) { this.config.machines.push(saved); this.persist(); }
@@ -338,6 +349,27 @@ export class Store {
   }
 
   client(key: string): MachineClient | undefined { return this.clients.get(key); }
+
+  /**
+   * Dial a machine the client has given up on, and give it a fresh budget.
+   *
+   * This is the whole answer to "a machine that comes back on its own": there
+   * is no heartbeat. A probe slow enough to be cheap is also slow enough that
+   * the reader who wants the machine now presses this instead, and a state that
+   * keeps probing in the background is not the honest "we have stopped trying"
+   * that the offline row promises. One key, and the count starts again.
+   */
+  retryMachine(key: string) {
+    const ms = this.state.machines.get(key);
+    const client = this.clients.get(key);
+    if (!ms || !client) return;
+    const who = ms.info?.name ?? ms.saved.name;
+    if (ms.conn === "connected") { this.notify(`${who} is already connected`); return; }
+    // A dial in flight is left alone by `retry`, so do not promise a new one.
+    if (ms.conn === "connecting") { this.notify(`${who}: already trying…`); return; }
+    client.retry();
+    this.notify(`${who}: trying again…`);
+  }
 
   private applyShell(ms: MachineState, ev: ShellEvent) {
     switch (ev.kind) {
@@ -705,11 +737,12 @@ export class Store {
     try {
       await client.rpc("machine.restart", {});
       if (ms) ms.restarting = true;
+      client.expectRestart();
       this.notify(`${who}: restarting the daemon…`);
     } catch (e: any) {
       // The daemon may drop the socket before the reply lands; that is the
       // restart happening, not a failure.
-      if (e.message === "disconnected") { if (ms) ms.restarting = true; this.notify(`${who}: restarting the daemon…`); }
+      if (e.message === "disconnected") { if (ms) ms.restarting = true; client.expectRestart(); this.notify(`${who}: restarting the daemon…`); }
       else this.notify(this.machineError(machine, e), "error");
     }
   }
