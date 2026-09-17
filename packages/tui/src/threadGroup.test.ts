@@ -201,9 +201,9 @@ test("a group the user furled is still furled after a restart", () => {
  *
  * This reads the *terminal output* — the thing a person clicks — and clicks the
  * line a row was really drawn on. A thread row that grew a second line, which
- * is what a new marker or a new indent invites, would move every row below it
- * and fail here. That is why `CLAUDE.md` says to change the renderer and the
- * hit test together or not at all.
+ * is what a new row type or a count on its own line invites, would move every
+ * row below it and fail here. That is why `CLAUDE.md` says to change the
+ * renderer and the hit test together or not at all.
  */
 async function paint(store: Store) {
   const stdin: any = new PassThrough();
@@ -355,8 +355,14 @@ test("a click below a furled group opens the row that is painted there", async (
 
 test("a marked row is still one line, so the hit test and the renderer agree", async () => {
   // The oldest rake in this repository: `sidebarCells` gives every row exactly
-  // one line, so a row that wrapped would silently move every row below it.
-  // A long title under a narrow sidebar is what makes one wrap.
+  // one line, and hands the same list to the renderer and to the hit test. A
+  // row painted any other height — a group head given a second line for its
+  // count, say — moves every row below it and the click lands on the wrong
+  // thread, with nothing on screen to say so.
+  //
+  // A long title is here because it is the shape most likely to make a row
+  // grow: the mark, the caret and the indent all come out of the width the
+  // title is measured against.
   const long = "a title long enough to fill the sidebar twice over and then some more";
   const store = storeWith([
     thread("manager", "2026-01-09T00:00:00Z", { title: long }),
