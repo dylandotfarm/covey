@@ -76,6 +76,10 @@ function storeWith(threads: Thread[]) {
   } as unknown as MachineState;
   store.state.machines.set(PI, m);
   store.state.order.push(PI);
+  // Every case here starts with the project open. `expanded` is loaded from
+  // the config, which every Store in this file shares, so a case that furled a
+  // project would otherwise furl the next case's tree as well.
+  store.state.expanded[`${PI}:${project.id}`] = true;
   return store;
 }
 
