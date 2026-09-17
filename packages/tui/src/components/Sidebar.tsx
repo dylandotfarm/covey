@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { archiveKey, liveThreads, runKey, type AppState, type SidebarRow } from "../store.js";
+import { archiveKey, liveThreads, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
 import { T, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -33,6 +33,13 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
     </Box>
   );
 }
+
+/**
+ * The mark on a thread a program started (#49). It is in Geometric Shapes,
+ * the same block as the `◼` a run member row already paints, so it survives a
+ * terminal with a narrow font as the rest of the sidebar does.
+ */
+export const AGENT_MARK = "◇";
 
 function isActive(s: AppState, r: SidebarRow) {
   return r.kind === "thread" && s.selected?.machine === r.machine && s.selected.threadId === r.thread!.id;
@@ -132,12 +139,36 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const attention = state.attention.get(`${row.machine}:${t.id}`);
       const showDot = st !== "idle" || !!attention;
       const time = relTime(t.lastMessageAt ?? t.createdAt);
-      const pad = row.archived ? 5 : 3; // in the folder, the title lines up under "Archived"
-      const titleW = width - pad - 3 - time.length;
+      // One row, one line, always. The indent and the two fixed cells below
+      // come out of the same width the title is measured against, so a row can
+      // never grow a second line — that is what silently breaks the mouse hit
+      // test, because `sidebarCells` gives every row exactly one line.
+      //
+      // The indent reproduces what it was before nesting existed: depth 2 (a
+      // thread in its project) leads with 3 columns, and an archived thread —
+      // depth 3, lining up under "Archived" — with 5. A child of a thread is
+      // depth 3 and lands on the same 5.
+      const indent = 1 + 2 * (row.depth - 2);
+      const open = state.expanded[threadGroupKey(row.machine, t.id)] ?? false;
+      // A fixed two-column cell, blank on a thread that heads no group, so
+      // every thread title starts in the same place whether or not the list
+      // holds a group at all.
+      const caret = row.group ? (open ? "▾ " : "▸ ") : "  ";
+      // A glyph, not a colour. covey runs over ssh, in tmux, and on terminals
+      // with a narrow palette, and colour alone also fails a reader who cannot
+      // tell the pair apart — so the mark carries the meaning and the colour
+      // only reinforces it.
+      const mark = row.agent ? `${AGENT_MARK} ` : "";
+      // What a furled group is holding back, so the way in is visible.
+      const held = row.group && !open && row.hidden ? ` ${row.hidden}` : "";
+      const titleW = Math.max(4, width - indent - 2 - 3 - time.length - mark.length - held.length);
       return (
-        <Box paddingLeft={pad} paddingRight={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
+          <Text color={T.subtle}>{caret}</Text>
           <Text color={attention === "done" ? T.success : attention === "error" ? T.danger : statusColor(st, pulse)}>{showDot ? (attention === "done" ? "✓" : attention === "error" ? "✗" : "●") : t.pinnedAt ? "⋆" : " "} </Text>
+          {mark ? <Text color={T.awaiting}>{mark}</Text> : null}
           <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{truncate(t.title, titleW).padEnd(titleW)}</Text>
+          <Text color={T.subtle}>{held}</Text>
           <Text color={T.faint}> {time}</Text>
         </Box>
       );
