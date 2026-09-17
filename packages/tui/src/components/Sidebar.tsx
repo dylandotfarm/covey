@@ -148,7 +148,7 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // thread in its project) leads with 3 columns, and an archived thread —
       // depth 3, lining up under "Archived" — with 5. A child of a thread is
       // depth 3 and lands on the same 5.
-      const indent = 1 + 2 * (row.depth - 2);
+      const indent = Math.max(1, 1 + 2 * (row.depth - 2));
       const open = state.expanded[threadGroupKey(row.machine, t.id)] ?? false;
       // A fixed two-column cell, blank on a thread that heads no group, so
       // every thread title starts in the same place whether or not the list

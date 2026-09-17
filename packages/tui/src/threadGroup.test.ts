@@ -33,6 +33,7 @@ import type { MachineInfo, Project, Thread, ThreadOrigin } from "@covey/protocol
 import { Store, sidebarRows, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
 import { sidebarCells, rowAtScreenRow } from "./sidebar.js";
 import { App } from "./components/App.js";
+import { AGENT_MARK } from "./components/Sidebar.js";
 
 const PI = "ws://pi:3790";
 
@@ -175,6 +176,20 @@ test("the row of a thread a program started is marked, and a user's thread is un
   const rows = sidebarRows(store.state as AppState).filter((r) => r.kind === "thread");
   const mark = new Map(rows.map((r) => [r.thread!.id, r.agent ?? false]));
   assert.deepEqual([...mark], [["manager", false], ["agent-a", true], ["agent-b", true], ["agent-c", true], ["mine", false]]);
+});
+
+test("the mark is painted on the screen, on the agent's line and on no other", async () => {
+  // A glyph the terminal was really sent, not a flag on a row. Colour alone
+  // would satisfy the case above and fail every reader this rule is for.
+  const store = storeWith(tree());
+  store.state.expanded[threadGroupKey(PI, "manager")] = true;
+  const { frame, unmount } = await paint(store);
+  try {
+    const lineOf = (text: string) => frame().find((l) => l.slice(0, 33).includes(text)) ?? "";
+    assert.ok(lineOf("agent-a").includes(AGENT_MARK), `the agent's row carries no mark: "${lineOf("agent-a")}"`);
+    assert.ok(!lineOf("mine").includes(AGENT_MARK), `the user's own row was marked: "${lineOf("mine")}"`);
+    assert.ok(!lineOf("manager").includes(AGENT_MARK), "and so was the thread they opened by hand");
+  } finally { unmount(); }
 });
 
 // ---- furl state survives a restart (#69) --------------------------------------
