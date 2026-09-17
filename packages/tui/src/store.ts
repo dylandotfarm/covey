@@ -537,6 +537,12 @@ export class Store {
   beginSelection(pane: Selection["pane"], line: number, col: number) {
     this.set({ selection: { pane, anchor: { line, col }, head: { line, col }, dragging: true } });
   }
+  /** Put a finished selection down in one go, the way a double or triple click
+   *  makes one. `dragging` is false, so pointer motion after it leaves it
+   *  alone: the user asked for a word, not for the start of a drag. */
+  setSelection(pane: Selection["pane"], anchor: Selection["anchor"], head: Selection["head"]) {
+    this.set({ selection: { pane, anchor, head, dragging: false } });
+  }
   extendSelection(line: number, col: number) {
     const s = this.state.selection;
     if (!s || !s.dragging) return;

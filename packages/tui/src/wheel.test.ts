@@ -168,11 +168,14 @@ test("a left notch mixed into a scroll down does not throw the view back up", as
 // ---- the sidebar branch -----------------------------------------------------
 
 // #26 made the sidebar cursor a row key rather than an index, and the wheel
-// branch calls its `moveCursor`. That update is functional, so it should not
-// have the defect above — but "should" is not evidence, and the cursor is React
-// state that no assertion can reach directly. The preview timer can: it opens
-// the thread the cursor is sitting on, so a stub on `select` reports the row it
-// landed on.
+// branch used to call its `moveCursor`. #71 took that away: the cursor opens
+// the thread it lands on, so a notch over the sidebar opened a conversation
+// nobody asked for. The rule now is that a scroll anywhere scrolls the open
+// conversation, and the sidebar answers the wheel not at all.
+//
+// The claim that the notch reaches the transcript instead, and that nothing is
+// opened or focused by it, is asserted in `mouseScroll.test.ts`. What is left
+// here is the part this file is about: a chunk is still worth one row a notch.
 const thread = (n: number): Thread => ({
   id: `t${n}`, projectId: "p", title: `thread ${n}`, provider: "claude", sessionId: `s${n}`,
   model: null, permissionMode: "default", modeChosen: false, createdAt: "2026-01-01T00:00:00Z",
@@ -191,21 +194,19 @@ function machineWithThreads(n: number): MachineState {
   } as unknown as MachineState;
 }
 
-test("a chunk of wheel notches over the sidebar moves one row a notch", async () => {
+test("a chunk of wheel notches over the sidebar still moves one row a notch", async () => {
   const picked: string[] = [];
   const { store, stdin, unmount } = await mount({
     machines: new Map([["m", machineWithThreads(10)]]), order: ["m"],
   });
-  // The preview opens whatever the cursor settles on; record it instead.
+  // If the sidebar cursor ever moves again, the preview will record it here.
   (store as any).select = async (sel: { threadId: string }) => { picked.push(sel.threadId); };
   try {
-    // Column 10 is inside the 34-column sidebar. Four notches down in one chunk.
-    stdin.write(notch(65, 10).repeat(4));
+    // Column 10 is inside the 34-column sidebar. Four notches up in one chunk.
+    stdin.write(notch(64, 10).repeat(4));
     await tick(300); // past PREVIEW_MS
-    // The cursor starts on row 0. Rows are the machine, the project, then the
-    // threads in recency order, so four rows down lands on the third thread.
-    // One notch a row, and the chunk does not collapse to a single step.
-    assert.equal(picked.at(-1), "t3",
+    assert.equal(store.getState().scrollFromBottom, 4,
       "four notches in one chunk must move four rows, not one");
+    assert.deepEqual(picked, [], "and a scroll must not open a conversation");
   } finally { unmount(); }
 });
