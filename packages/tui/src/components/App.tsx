@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
+import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
+import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
 import { buildLine, buildSkew } from "../build.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
@@ -55,6 +56,19 @@ const MACHINE_MODES: PickOption[] = [
   { id: "acceptEdits", label: "Auto", hint: "file edits go through, other tools ask" },
   { id: "bypassPermissions", label: "Bypass", hint: "never ask" },
 ];
+
+/** The states the operator sets by hand in the run panel, in `t`'s order. */
+const MEMBER_STATES: RunMemberState[] = ["working", "review", "blocked", "merged", "withdrawn", "dispatched", "planned"];
+
+const MEMBER_STATE_HINT: Record<RunMemberState, string> = {
+  planned: "placed, not started",
+  dispatched: "the brief was sent",
+  working: "its thread is at work",
+  review: "there is a change to read",
+  merged: "landed on main",
+  blocked: "waiting on something else — not an error",
+  withdrawn: "the task was cancelled; the work still counted",
+};
 
 /** What `g` cycles through in the usage overlay. */
 const USAGE_GROUPINGS: UsageGroupBy[] = ["thread", "project", "model", "machine"];
@@ -223,7 +237,7 @@ export function App({ store }: { store: Store }) {
   // fetched. `loadDir` reads each one once.
   useEffect(() => { if (mentionDirPath !== null) void store.loadDir(mentionDirPath); }, [mentionDirPath, threadKey, store]);
 
-  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle }); };
+  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string, onCancel?: () => void) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle, onCancel }); };
   const openInput = (title: string, onSubmit: (v: string) => void, initial = "", placeholder?: string, onCancel?: () => void) => { setOvFilter(initial); store.setOverlay({ kind: "input", title, onSubmit, initial, placeholder, onCancel }); };
 
   // ---- actions ----------------------------------------------------------------
@@ -497,6 +511,195 @@ export function App({ store }: { store: Store }) {
     });
   };
 
+  // ---- runs -----------------------------------------------------------------
+
+  /** The run the panel is showing. Read fresh: a member changes under it. */
+  const overlayRun = state.overlay?.kind === "run" ? store.run(state.overlay.machine, state.overlay.runId) : null;
+
+  /**
+   * Start a run: one request from the operator becomes many threads, one task
+   * each, across the machines that can do the work.
+   *
+   * Nothing is dispatched here. The run is placed and shown, and the operator
+   * reads the placement and may move a member before any agent starts.
+   */
+  const startRun = () => {
+    const machine = contextMachine;
+    const projectId = contextProject;
+    const p = project(machine, projectId);
+    if (!machine || !projectId || !p) { store.notify("select a project first — a run works in one repository", "error"); return; }
+    openInput(`Tasks for a run in ${p.title}`, (v) => {
+      const tasks = parseTaskList(v);
+      if (tasks.length === 0) { store.notify("no tasks — give issue numbers, or one task each separated by ;", "error"); return; }
+      openInput("What is this run for?", (goal) => {
+        store.setOverlay(null);
+        void beginRun(machine, projectId, goal.trim() || `${tasks.length} tasks in ${p.title}`, tasks);
+      }, "", `the goal all ${tasks.length} members share`);
+    }, "", "44 45 46 — or: Fix the wheel os=darwin; Write the docs");
+  };
+
+  /** Read the issue titles, then place the tasks and write the record. */
+  const beginRun = async (machine: string, projectId: string, goal: string, tasks: RunTask[]) => {
+    const p = project(machine, projectId);
+    const numbers = tasks.map((t) => t.issue).filter((n): n is number => n !== null);
+    let full = tasks;
+    if (numbers.length > 0) {
+      store.notify(`reading ${numbers.length} issue${numbers.length === 1 ? "" : "s"}…`);
+      const { issues, error } = await store.runIssues(machine, projectId, numbers);
+      full = withIssueTitles(tasks, issues);
+      if (error) store.notify(error, "error");
+    }
+    setOvCursor(0);
+    await store.createRun({ machine, name: truncate(goal, 48), goal, tasks: full, repositoryIdentity: p?.repositoryIdentity ?? null });
+  };
+
+  /** Come back to the run panel after a pick, with the cursor where it was. */
+  const backToRun = (ov: Extract<Overlay, { kind: "run" }>, at: number) => { store.setOverlay(ov); setOvFilter(""); setOvCursor(at); };
+
+  /**
+   * The run panel's keys. The list is the run's members in order, so the row
+   * under the cursor and the row a key acts on are the same array — the same
+   * rule the sidebar and the browser follow.
+   */
+  function handleRunKey(ov: Extract<Overlay, { kind: "run" }>, input: string, key: any) {
+    const run = store.run(ov.machine, ov.runId);
+    if (!run) { store.setOverlay(null); return; }
+    const at = Math.max(0, Math.min(run.members.length - 1, ovCursor));
+    const m = run.members[at];
+    if (key.upArrow || input === "k") return setOvCursor(() => Math.max(0, at - 1));
+    if (key.downArrow || input === "j") return setOvCursor(() => Math.min(run.members.length - 1, at + 1));
+    if (input === " ") {
+      if (!m) return;
+      const marked = new Set(ov.marked);
+      if (marked.has(m.id)) marked.delete(m.id); else marked.add(m.id);
+      return store.setOverlay({ ...ov, marked });
+    }
+    if (key.return) {
+      if (!m?.threadId) { store.notify("that member has no thread yet — press d to dispatch the run", "error"); return; }
+      const mk = store.machineKeyOf(m.machineId);
+      if (!mk) { store.notify(`${store.machineNameOf(m.machineId)} is not connected`, "error"); return; }
+      store.setOverlay(null);
+      void store.select({ machine: mk, threadId: m.threadId });
+      store.setFocus("composer");
+      return;
+    }
+    if (input === "d") return dispatchRun(ov, run);
+    if (input === "s") return sendToRun(ov, run, at);
+    if (input === "p") return void store.refreshPullRequests(ov.machine, ov.runId);
+    if (input === "m" && m) return moveMember(ov, run, m, at);
+    if (input === "t" && m) return setMemberState(ov, run, m, at);
+    if (input === "a") return addTaskToRun(ov, run, at);
+    if (input === "D" && m && !m.threadId) {
+      // A member that never started can simply go. One that did is withdrawn,
+      // because its thread did work that the record should keep.
+      return openPick(`Drop ${m.task.key} from the run?`, [
+        { id: "no", label: "Cancel" },
+        { id: "yes", label: "Drop it — it was never dispatched" },
+      ], (id) => { backToRun(ov, at); if (id === "yes") void store.threadCommand({ type: "run.member.remove", runId: run.id, memberId: m.id }, ov.machine); }, undefined, () => backToRun(ov, at));
+    }
+    if (input === "r") return openInput("Rename run", (v) => { backToRun(ov, at); if (v.trim()) void store.threadCommand({ type: "run.update", runId: run.id, name: v.trim() }, ov.machine); }, run.name, undefined, () => backToRun(ov, at));
+  }
+
+  /**
+   * Dispatch, behind a confirmation. This starts real Claude sessions and real
+   * git worktrees on other people's machines, so it says how many and where
+   * before it does.
+   */
+  const dispatchRun = (ov: Extract<Overlay, { kind: "run" }>, run: Run) => {
+    const todo = run.members.filter((m) => m.state === "planned" && !m.threadId);
+    if (todo.length === 0) { store.notify("every member is already dispatched", "error"); return; }
+    const byMachine = new Map<string, number>();
+    for (const m of todo) { const n = store.machineNameOf(m.machineId); byMachine.set(n, (byMachine.get(n) ?? 0) + 1); }
+    const where = [...byMachine].map(([n, c]) => `${c} on ${n}`).join(" · ");
+    openPick(`Dispatch ${todo.length} member${todo.length === 1 ? "" : "s"}?`, [
+      { id: "no", label: "Cancel", hint: "m moves a member first" },
+      { id: "yes", label: `Start ${todo.length} thread${todo.length === 1 ? "" : "s"}, one worktree each`, hint: where },
+    ], (id) => {
+      backToRun(ov, 0);
+      if (id === "yes") void store.dispatchRun(ov.machine, ov.runId);
+    }, undefined, () => backToRun(ov, 0));
+  };
+
+  /**
+   * Send the same message to every member, to the marked ones, or to one.
+   *
+   * The operator of 2026-09-16 sent the same correction to fifteen threads four
+   * separate times, each one a hand-written loop over thread ids.
+   */
+  const sendToRun = (ov: Extract<Overlay, { kind: "run" }>, run: Run, at: number) => {
+    const live = run.members.filter((m) => m.threadId && m.state !== "withdrawn");
+    const marked = run.members.filter((m) => ov.marked.has(m.id) && m.threadId);
+    const one = run.members[at];
+    const opts: PickOption[] = [];
+    if (live.length > 0) opts.push({ id: "all", label: `Every member (${live.length})`, hint: "the whole run" });
+    if (marked.length > 0) opts.push({ id: "marked", label: `The ${marked.length} marked`, hint: marked.map((m) => m.task.key).join(" ") });
+    if (one?.threadId) opts.push({ id: "one", label: `Only ${one.task.key}`, hint: truncate(one.task.title, 40) });
+    if (opts.length === 0) { store.notify("no member has a thread yet", "error"); return; }
+    openPick("Send a message to…", opts, (id) => {
+      const to = id === "all" ? live : id === "marked" ? marked : one ? [one] : [];
+      openInput(`Message to ${to.length} member${to.length === 1 ? "" : "s"}`, (text) => {
+        backToRun(ov, at);
+        if (text.trim()) void store.sendToRun(ov.machine, ov.runId, to.map((m) => m.id), text);
+      }, "", "they all get this, verbatim", () => backToRun(ov, at));
+    }, undefined, () => backToRun(ov, at));
+  };
+
+  /** Move a member to another machine, before it has a thread. */
+  const moveMember = (ov: Extract<Overlay, { kind: "run" }>, run: Run, m: RunMember, at: number) => {
+    if (m.threadId) { store.notify("this member already has a thread — withdraw it instead of moving it", "error"); return; }
+    const machines = store.placementMachines(runRepository(run));
+    if (machines.length < 2) { store.notify("no other machine has a checkout of this project", "error"); return; }
+    openPick(`Move ${m.task.key} to…`, machines.map((x) => ({
+      id: x.machineId,
+      label: x.name,
+      // The requirement it fails is why the rule did not put the task here, so
+      // it is what the operator needs to see before overriding the rule.
+      hint: [x.machineId === m.machineId ? "here now" : "", `${x.cpuCount} cores`, firstUnmet(x, m.task) ? `misses ${firstUnmet(x, m.task)!.value}` : ""].filter(Boolean).join(" · "),
+    })), (id) => {
+      backToRun(ov, at);
+      void store.moveMember(ov.machine, run.id, m.id, id);
+    }, undefined, () => backToRun(ov, at));
+  };
+
+  /** The states an operator sets by hand. `blocked` is not an error. */
+  const setMemberState = (ov: Extract<Overlay, { kind: "run" }>, run: Run, m: RunMember, at: number) => {
+    const opts: PickOption[] = MEMBER_STATES.map((s) => ({ id: s, label: runMemberStateLabel(s), hint: s === m.state ? "current" : MEMBER_STATE_HINT[s] }));
+    openPick(`${m.task.key} — state`, opts, (id) => {
+      const next = id as RunMemberState;
+      // A blocked member is blocked *on* something, and a withdrawn one was
+      // withdrawn *for* a reason. Both are worth a sentence; neither is an error.
+      if (next === "blocked" || next === "withdrawn") {
+        openInput(next === "blocked" ? `${m.task.key} — blocked on what?` : `${m.task.key} — withdrawn why?`, (note) => {
+          backToRun(ov, at);
+          void store.patchMember(ov.machine, run.id, m.id, { state: next, note: note.trim() || null });
+        }, m.note ?? "", "one sentence", () => backToRun(ov, at));
+        return;
+      }
+      backToRun(ov, at);
+      void store.patchMember(ov.machine, run.id, m.id, { state: next });
+    }, undefined, () => backToRun(ov, at));
+  };
+
+  /** Add a task to a run in flight, without tearing the run down. */
+  const addTaskToRun = (ov: Extract<Overlay, { kind: "run" }>, run: Run, at: number) => {
+    openInput("Add a task", (v) => {
+      const tasks = parseTaskList(v);
+      if (tasks.length === 0) { backToRun(ov, at); return; }
+      backToRun(ov, at);
+      void store.addTasks(ov.machine, run.id, tasks);
+    }, "", "an issue number, or a line of text", () => backToRun(ov, at));
+  };
+
+  /** The repository a run works in, from the project its first member is in. */
+  const runRepository = (run: Run): string | null => {
+    for (const m of run.members) {
+      const mk = store.machineKeyOf(m.machineId);
+      const p = mk && m.projectId ? state.machines.get(mk)?.projects.get(m.projectId) : null;
+      if (p) return p.repositoryIdentity;
+    }
+    return null;
+  };
+
   const palette = () => {
     const t = state.view?.thread;
     const opts: PickOption[] = [];
@@ -517,6 +720,7 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "newwt", label: "New thread in git worktree", hint: "N" });
     if (contextProject) opts.push({ id: "startmode", label: `New threads here: ${workspaceModeLabel(project(contextMachine, contextProject)?.defaultWorkspaceMode)}` });
     opts.push({ id: "addproject", label: "Add project", hint: "a" });
+    opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults", hint: "enter on a machine" });
     opts.push({ id: "updateclient", label: "Update covey — pull, rebuild, relaunch this client", hint: store.clientSource?.commit ?? "" });
@@ -543,6 +747,7 @@ export function App({ store }: { store: Store }) {
         case "newwt": return void newThread(contextMachine, contextProject, "worktree-head");
         case "startmode": return void chooseDefaultWorkspace();
         case "addproject": return addProject();
+        case "run": return startRun();
         case "usage": return void store.loadUsage(0, "thread");
         case "machine": return machinePanel();
         case "updateclient": return updateClient();
@@ -573,6 +778,19 @@ export function App({ store }: { store: Store }) {
         return;
       }
       case "project": return store.toggleExpanded(`${row.machine}:${row.projectId}`);
+      case "run": {
+        setOvCursor(0);
+        return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
+      }
+      case "member": {
+        // A member with a thread opens it, wherever that thread lives; one
+        // without opens the run, which is where dispatch is.
+        const m = row.member!;
+        const mk = m.threadId ? store.machineKeyOf(m.machineId) : null;
+        if (mk && m.threadId) { void store.select({ machine: mk, threadId: m.threadId }); store.setFocus("composer"); return; }
+        setOvCursor(row.run!.members.indexOf(m));
+        return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
+      }
       case "archived": return store.toggleExpanded(archiveKey(row.machine, row.projectId!), false);
       case "machine": return machinePanel(row.machine);
       case "empty": return addProject(row.machine);
@@ -1020,8 +1238,16 @@ export function App({ store }: { store: Store }) {
 
   function handleOverlayKey(input: string, key: any) {
     const ov = state.overlay!;
-    if (key.escape) { store.setOverlay(null); setOvFilter(""); if (ov.kind === "input") ov.onCancel?.(); return; }
+    if (key.escape) {
+      store.setOverlay(null);
+      setOvFilter("");
+      // A pick opened from the run panel goes back to it, rather than closing
+      // the panel the reader was working in.
+      if (ov.kind === "input" || ov.kind === "pick") ov.onCancel?.();
+      return;
+    }
     if (ov.kind === "help" || ov.kind === "update") return;
+    if (ov.kind === "run") return handleRunKey(ov, input, key);
     if (ov.kind === "usage") {
       const last = USAGE_WINDOWS.length - 1;
       if (key.leftArrow || input === "h") return void store.loadUsage(Math.max(0, ov.window - 1), ov.groupBy);
@@ -1078,6 +1304,7 @@ export function App({ store }: { store: Store }) {
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
       if (row.archived) { const k = archiveKey(row.machine, row.projectId!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
+      if (row.run) { const k = runKey(row.machine, row.run.id); if (store.isExpanded(k)) store.toggleExpanded(k); return; }
       if (row.projectId) { const k = `${row.machine}:${row.projectId}`; if (store.isExpanded(k)) store.toggleExpanded(k); }
       return;
     }
@@ -1312,7 +1539,7 @@ export function App({ store }: { store: Store }) {
         <Box height={1}><Text color={T.border}>{"─".repeat(Math.max(0, mainW))}</Text></Box>
         <Box height={transcriptH} flexDirection="column">
           {state.overlay
-            ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} />
+            ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} run={overlayRun} machineNameOf={(id) => store.machineNameOf(id)} />
             : state.diffView
               ? <DiffPanel view={state.diffView} width={mainW} height={transcriptH} lines={diffLines} selection={state.selection} />
               : summaryRow

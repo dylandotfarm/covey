@@ -9,86 +9,89 @@
  * starts two daemons, stops one by port, and requires the other to survive.
  * Before the fix there was no `stop` command at all, so the CLI fell through
  * to the usage text and neither daemon stopped.
+ *
+ * Starting and stopping the daemons is `packages/daemon/test/daemons.ts`'s job
+ * (issue #53): it is the module that guarantees a daemon started for a test
+ * comes down again even when the test between throws.
  */
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
 import { execFile } from "node:child_process";
 import { mkdtempSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { freePort, startDaemon, stopAll, waitForExit } from "../../daemon/test/daemons.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cliEntry = join(here, "..", "src", "index.ts");
 const run = promisify(execFile);
 
-/** Two ports well away from 3790 and away from the throwaway port agents use. */
-const PORT_KEEP = 3840 + Math.floor(Math.random() * 20);
-const PORT_STOP = PORT_KEEP + 20;
+/** Booting the CLI under tsx is the slow part — it pulls in Ink and React —
+ *  and on this project's four-core Pi at load average 25 a whole `covey stop`
+ *  against an empty port measured 30.9s. This is ~5x that: a bound the machine
+ *  cannot trip, only a CLI that has genuinely stopped answering. */
+const CLI_BUDGET_MS = 150_000;
+/** A daemon that has been signalled must be gone this long after, or the stop
+ *  path is broken rather than the machine being slow. */
+const EXIT_BUDGET_MS = 30_000;
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
-async function startDaemon(port: number, home: string): Promise<ChildProcess> {
-  const proc = spawn(process.execPath, ["--import", "tsx", cliEntry, "daemon", "--bind", "loopback", "--port", String(port)],
-    { env: { ...process.env, COVEY_HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
-  let log = "";
-  proc.stderr!.on("data", (d) => { log += d.toString(); });
-  for (let i = 0; i < 120; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return proc; } catch { /* retry */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`daemon on ${port} did not start:\n${log}`);
-}
-
-/** Run the CLI the way a person would. Never throws on a non-zero exit. */
+/** Run the CLI the way a person would. Never throws on a non-zero exit, and
+ *  never waits for ever: `covey stop` polls a pid, and a poll that cannot end
+ *  is the defect in #53. */
 async function covey(home: string, ...args: string[]): Promise<{ code: number; out: string }> {
   try {
-    const r = await run(process.execPath, ["--import", "tsx", cliEntry, ...args], { env: { ...process.env, COVEY_HOME: home } });
+    const r = await run(process.execPath, ["--import", "tsx", cliEntry, ...args], { env: { ...process.env, COVEY_HOME: home }, timeout: CLI_BUDGET_MS });
     return { code: 0, out: r.stdout + r.stderr };
   } catch (e: any) {
+    if (e.killed) return { code: e.code ?? 1, out: `${(e.stdout ?? "") + (e.stderr ?? "")}\ncovey ${args.join(" ")} was still running after ${CLI_BUDGET_MS / 1000}s and was killed` };
     return { code: e.code ?? 1, out: (e.stdout ?? "") + (e.stderr ?? "") };
   }
 }
 
+// Whatever any test did, no daemon this file started is left listening.
+after(stopAll);
+
 test("covey stop --port stops that one daemon and leaves the other running", async () => {
   const homeKeep = mkdtempSync(join(tmpdir(), "covey-keep-"));
   const homeStop = mkdtempSync(join(tmpdir(), "covey-stop-"));
-  let keep: ChildProcess | undefined, victim: ChildProcess | undefined;
-  try {
-    [keep, victim] = await Promise.all([startDaemon(PORT_KEEP, homeKeep), startDaemon(PORT_STOP, homeStop)]);
-    assert.ok(alive(keep.pid!) && alive(victim.pid!), "both daemons are up");
+  // If either start throws, the other daemon is still registered and `after`
+  // takes it down. Two runs at once cannot collide on a port they were handed.
+  const [keep, victim] = await Promise.all([
+    startDaemon({ home: homeKeep }),
+    startDaemon({ home: homeStop }),
+  ]);
+  assert.ok(alive(keep.proc.pid!) && alive(victim.proc.pid!), "both daemons are up");
 
-    const { code, out } = await covey(homeStop, "stop", "--port", String(PORT_STOP));
+  const { code, out } = await covey(homeStop, "stop", "--port", String(victim.port));
 
-    assert.equal(code, 0, `covey stop --port ${PORT_STOP} should succeed. Output:\n${out}`);
-    assert.match(out, new RegExp(`stopping daemon pid ${victim.pid} on port ${PORT_STOP}`),
-      `covey stop must name the one pid it signals. Output:\n${out}`);
+  assert.equal(code, 0, `covey stop --port ${victim.port} should succeed. Output:\n${out}`);
+  assert.match(out, new RegExp(`stopping daemon pid ${victim.proc.pid} on port ${victim.port}`),
+    `covey stop must name the one pid it signals. Output:\n${out}`);
 
-    for (let i = 0; i < 40 && alive(victim.pid!); i++) await new Promise((r) => setTimeout(r, 100));
-    assert.equal(alive(victim.pid!), false, `the daemon on ${PORT_STOP} should have stopped`);
+  assert.ok(await waitForExit(victim.proc, EXIT_BUDGET_MS),
+    `the daemon on ${victim.port} should have stopped within ${EXIT_BUDGET_MS / 1000}s. Output:\n${out}`);
 
-    // The heart of the defect: the other daemon runs the same program, and it
-    // must be untouched. `pkill -f "index.js daemon"` would have taken both.
-    assert.equal(alive(keep.pid!), true,
-      `the daemon on ${PORT_KEEP} must survive: stopping one daemon by port must never reach another`);
-    assert.equal((await fetch(`http://127.0.0.1:${PORT_KEEP}/health`)).ok, true,
-      `the daemon on ${PORT_KEEP} must still answer`);
-    assert.equal(existsSync(join(homeKeep, `daemon-${PORT_KEEP}.pid`)), true,
-      "and must keep its own pid file");
-  } finally {
-    for (const p of [keep, victim]) if (p?.pid && alive(p.pid)) p.kill("SIGKILL");
-    for (const d of [homeKeep, homeStop]) rmSync(d, { recursive: true, force: true });
-  }
+  // The heart of the defect: the other daemon runs the same program, and it
+  // must be untouched. `pkill -f "index.js daemon"` would have taken both.
+  assert.equal(alive(keep.proc.pid!), true,
+    `the daemon on ${keep.port} must survive: stopping one daemon by port must never reach another`);
+  assert.equal((await fetch(`http://127.0.0.1:${keep.port}/health`)).ok, true,
+    `the daemon on ${keep.port} must still answer`);
+  assert.equal(existsSync(join(homeKeep, `daemon-${keep.port}.pid`)), true,
+    "and must keep its own pid file");
 });
 
 test("covey stop reports a port with no daemon instead of hunting for one", async () => {
   const home = mkdtempSync(join(tmpdir(), "covey-none-"));
+  const port = await freePort();
   try {
-    const { code, out } = await covey(home, "stop", "--port", String(PORT_STOP));
+    const { code, out } = await covey(home, "stop", "--port", String(port));
     assert.equal(code, 0, `a port with nothing on it is not an error. Output:\n${out}`);
-    assert.match(out, new RegExp(`no daemon on port ${PORT_STOP}`), out);
+    assert.match(out, new RegExp(`no daemon on port ${port}`), out);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

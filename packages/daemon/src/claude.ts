@@ -112,6 +112,25 @@ export class ClaudeSession {
   get activeTurnId(): string | null {
     return this.currentTurnId;
   }
+  /**
+   * True while the session owes somebody an answer: a turn is in flight, a
+   * tool approval or a question stands in front of the user, or a background
+   * task still runs. Such a session is never released for idleness, however
+   * long the user takes to read it.
+   *
+   * A background task counts because the thread looks idle while it runs. The
+   * turn that started the task ended, so the status says idle and no turn is
+   * in flight, but the work is a child of this subprocess and only this
+   * subprocess receives the `task_notification` that ends it. To release the
+   * session is to kill the work and leave the tool row reading "running" for
+   * ever (measured: a `sleep 100` in the background died with the session and
+   * its output file was never written). A task that never reports therefore
+   * holds its session — which is the right trade: 300 MB costs less than the
+   * build the user waits for.
+   */
+  get busy(): boolean {
+    return this.currentTurnId !== null || this.pending.size > 0 || this.backgrounded.size > 0;
+  }
 
   start() {
     const opts: Options = {
@@ -222,6 +241,10 @@ export class ClaudeSession {
       /* ignore */
     }
     this.failPending("interrupted");
+    // The turn is over even if the CLI has not reported its result yet. Without
+    // this the session would count as busy for ever after an interrupt, and the
+    // idle sweep would never release it.
+    this.currentTurnId = null;
     this.sink.onStatus("interrupted");
   }
 

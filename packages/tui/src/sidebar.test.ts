@@ -20,7 +20,7 @@ function appState(projects: Project[], threads: Thread[], expanded: Record<strin
   const m = {
     key: "pi", saved: { name: "pi", url: "ws://pi:3790" }, conn: "connected", error: null, info: null,
     projects: new Map(projects.map((p) => [p.id, p])), threads: new Map(threads.map((t) => [t.id, t])),
-    update: null, restarting: false,
+    runs: new Map(), update: null, restarting: false,
   } as unknown as MachineState;
   return { machines: new Map([["pi", m]]), order: ["pi"], expanded } as unknown as AppState;
 }

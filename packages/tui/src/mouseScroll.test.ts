@@ -124,7 +124,7 @@ function machineWithThreads(n: number): MachineState {
     key: "m", saved: { name: "m", url: "ws://127.0.0.1:1" }, conn: "connected", error: null,
     info: { name: "m" } as any, projects: new Map([["p", project]]),
     threads: new Map(Array.from({ length: n }, (_, i) => thread(i + 1)).map((t) => [t.id, t])),
-    update: null, restarting: false,
+    runs: new Map(), update: null, restarting: false,
   } as unknown as MachineState;
 }
 

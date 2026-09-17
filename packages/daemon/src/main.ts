@@ -9,6 +9,7 @@ import { buildInfo, buildLabel } from "./build.js";
 import { tailscaleSelf } from "./tailscale.js";
 import { Updater } from "./update.js";
 import { clearPidFile, writePidFile } from "./pidfile.js";
+import { machineResources } from "./resources.js";
 
 export interface RunDaemonOptions {
   port?: number;
@@ -50,7 +51,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     settings: machineSettings(config),
   };
   const db = new Db(join(dataDir()));
-  const engine = new Engine(db, machine);
+  const engine = new Engine(db, machine, { log });
   const updater = new Updater(config.machineId, log);
   const server = await startServer({ config, engine, updater, host, log });
   log(`listening on ws://${host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
@@ -60,6 +61,15 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
       await startServer({ config: { ...config }, engine, updater, host: "127.0.0.1", log });
     } catch (e: any) { log(`loopback listener unavailable: ${e.message}`); }
   }
+  // What this machine is made of, and which tools *this process* can run. It
+  // is read here rather than over ssh because an agent inherits this
+  // environment and not a login shell's — see `resources.ts`. Running a program
+  // per tool takes a moment, so it happens behind the listener and reaches
+  // clients as a `machine.updated` push.
+  void machineResources()
+    .then((r) => { engine.setResources(r); log(`resources: ${r.cpuCount} cores, ${Math.round(r.totalMemoryBytes / 1e9)} GB, up to ${r.concurrency} run members, tools ${r.tools.map((t) => t.name).join(" ") || "none"}`); })
+    .catch((e) => log(`could not read machine resources: ${e.message}`));
+
   // The pid file lets `covey stop --port N` name one daemon. Write it only
   // after the listener binds, so a failed start leaves no false record.
   const pidFile = writePidFile(server.port);
