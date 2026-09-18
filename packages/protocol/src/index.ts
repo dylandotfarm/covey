@@ -45,6 +45,11 @@ export interface MachineInfo {
   tailnetName?: string;
   tailnetIps?: string[];
   capabilities: MachineCapabilities;
+  /**
+   * What the machine is made of and which tools the daemon can run, so a run
+   * can place work on it. Absent on a daemon built before runs existed.
+   */
+  resources?: MachineResources;
   /** Machine-wide defaults, changed from the TUI's machine control panel. */
   settings: MachineSettings;
 }
@@ -88,6 +93,21 @@ export interface MachineSettings {
    * same as `false`; it is nullable so the field matches the two beside it.
    */
   defaultStreaming: boolean | null;
+  /**
+   * How long a thread may sit idle before the daemon stops its Claude session
+   * and gives the memory back. `0` keeps every session for ever. Absent or
+   * `null` means the daemon's own default.
+   *
+   * The next message starts a new process and resumes the transcript, so the
+   * conversation is not lost — it costs about a third of a second.
+   */
+  sessionIdleMinutes?: number | null;
+  /**
+   * How many Claude sessions this machine keeps live at one time. Above the
+   * limit the daemon releases the least recently used session that is not
+   * busy. Absent or `null` means a limit derived from the machine's memory.
+   */
+  maxLiveSessions?: number | null;
 }
 
 export interface MachineCapabilities {
@@ -99,6 +119,72 @@ export interface MachineCapabilities {
 }
 
 export type ProviderName = "claude";
+
+/**
+ * What a machine is made of, and what the daemon can run on it.
+ *
+ * Read in the daemon, never over `ssh`. The daemon starts from a login shell
+ * (often through `nvm`), and a non-interactive `ssh` session does not, so the
+ * two resolve different `PATH`s. An agent inherits the daemon's, so the
+ * daemon's is the only answer a run can place work with.
+ *
+ * Optional on `MachineInfo`: a daemon built before this existed omits it, and
+ * a run says "unknown" rather than guessing.
+ */
+export interface MachineResources {
+  /** Logical cores. */
+  cpuCount: number;
+  totalMemoryBytes: number;
+  /**
+   * How many run members this machine should take at once, from its cores and
+   * its memory. See `concurrencyLimit`.
+   */
+  concurrency: number;
+  /** Where a member's throwaway `COVEY_HOME` goes on this machine. */
+  tmpDir: string;
+  /** The `PATH` the daemon resolved the tools with, for when one is missing. */
+  path: string;
+  /**
+   * The tools the daemon found, in the order it looked. The first entry for a
+   * name is the one the `PATH` resolves to; a later entry with the same name is
+   * another copy somewhere else, which is how the run of 2026-09-16 found the
+   * one machine with an old `/usr/bin/node` to reproduce against.
+   */
+  tools: MachineTool[];
+  /** When the daemon read all this. */
+  readAt: string;
+}
+
+/** One program the daemon can run. */
+export interface MachineTool {
+  /** `gh`, `pnpm`, `tmux`, `node` … */
+  name: string;
+  /** Absolute path, as the daemon resolved it. */
+  path: string;
+  /** First word of `--version`, or null when it would not say. */
+  version: string | null;
+}
+
+/** The tool names a daemon probes. A run places work by these names. */
+export const PROBED_TOOLS = ["git", "gh", "node", "pnpm", "npm", "tmux", "docker", "rg"] as const;
+
+/** Whether a machine can run a tool, by name. */
+export function hasTool(r: MachineResources | undefined, name: string): boolean {
+  return !!r?.tools.some((t) => t.name === name);
+}
+
+/**
+ * How many members a machine should take at once.
+ *
+ * An agent spends most of its time waiting on the API, so cores are a loose
+ * bound; a build is what makes two agents on one machine hurt each other, and
+ * on a small machine memory binds first. The Pi of the run of 2026-09-16 — four
+ * cores, 8 GB — gets four, and it took five by hand.
+ */
+export function concurrencyLimit(cpuCount: number, totalMemoryBytes: number): number {
+  const byMemory = Math.floor(totalMemoryBytes / (1.5 * 1024 * 1024 * 1024));
+  return Math.max(1, Math.min(cpuCount, byMemory));
+}
 
 // ---------------------------------------------------------------------------
 // Updating a machine (the daemon updates its own checkout, then restarts)
@@ -607,6 +693,292 @@ export interface PathEntry {
 export type ThreadCommands = SlashCommandInfo[] | null;
 
 // ---------------------------------------------------------------------------
+// Runs: one request from the operator, many threads, one goal
+// ---------------------------------------------------------------------------
+
+/**
+ * A **run** is a named group of threads with one goal — one task each, across
+ * as many machines as the operator lets it use. Call it a run: it has a
+ * beginning, an end and a result.
+ *
+ * Where it lives: the run record belongs to the daemon the operator started it
+ * from, because a run outlives a client restart. The members' threads belong to
+ * whichever daemon runs them. Only a client holds connections to every machine,
+ * so the client is the party that dispatches and that keeps the record honest;
+ * the daemon is the durable store and the fan-out point for the sidebar.
+ */
+export interface Run {
+  id: string;
+  /** The machine whose daemon stores this run. */
+  machineId: MachineId;
+  /** What the operator called it, e.g. "covey issues". */
+  name: string;
+  /** The one goal, in the operator's words. */
+  goal: string;
+  /**
+   * The brief every member gets, before substitution. See `BRIEF_TOKENS`: a
+   * member's own task, branch, port and directories are written into it, which
+   * is the whole reason a run exists rather than a loop over `turn.send`.
+   */
+  briefTemplate: string;
+  /**
+   * Where a member's thread works. `checkout` is refused: parallel agents in
+   * one working tree is the defect, not the feature.
+   */
+  workspaceMode: WorkspaceMode;
+  members: RunMember[];
+  /** Set when the operator closes the run; the record stays. */
+  closedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One task, one thread, one machine. */
+export interface RunMember {
+  /** Stable for the life of the run. */
+  id: string;
+  task: RunTask;
+  /** Where the work goes. The operator may change it until dispatch. */
+  machineId: MachineId;
+  /** The project on that machine the thread is made in. */
+  projectId: ProjectId | null;
+  /** The thread doing the work, once dispatch made one. */
+  threadId: ThreadId | null;
+  branch: string | null;
+  worktreePath: string | null;
+  pullRequest: RunPullRequest | null;
+  state: RunMemberState;
+  /** Why it is blocked, or what it is waiting for. Free text, operator's words. */
+  note: string | null;
+  /** This member's own port and directories. Nobody else in the run gets them. */
+  resources: MemberResources;
+  /** The brief as it was sent, after substitution. Null until dispatch. */
+  brief: string | null;
+  dispatchedAt: string | null;
+  updatedAt: string;
+  /**
+   * Gates, the conflict queue and the merge order — issue #45. This is the
+   * named place that half attaches to. Dispatch and tracking carry it and
+   * never read it, so the two halves land separately.
+   */
+  review?: RunMemberReview | null;
+}
+
+/**
+ * Per-member review state: what the gate decided, the evidence the member
+ * recorded, where it sits in the merge queue, and what the audit found on its
+ * branch after a merge. #44 carries this through the store and the wire and
+ * never reads it. See "Integration of a run" at the end of this file.
+ */
+export interface RunMemberReview {
+  /** The gate, as it was last read. It goes stale when the base head moves. */
+  gate: GateVerdict | null;
+  /** The record that the member's test fails without its fix. */
+  evidence: RegressionEvidence | null;
+  /** This member's place in the merge queue, and the brief it was sent. */
+  queue: QueuePosition | null;
+  /** Set when the audit finds commits on a merged branch that the base lacks. */
+  audit: AuditFinding | null;
+  /** When the run last read the gate, ISO 8601. */
+  checkedAt: string | null;
+}
+
+/**
+ * `dispatched → working → review → merged`, plus `blocked` and `withdrawn`.
+ *
+ * `blocked` is not an error. Three members of the run of 2026-09-16 were
+ * legitimately blocked on another member's work.
+ *
+ * `withdrawn` is an ordinary outcome beside `merged`: a task cancelled after
+ * the agent built it still produced the reasoning that the replacement issue
+ * was written from.
+ */
+export type RunMemberState =
+  | "planned"
+  | "dispatched"
+  | "working"
+  | "review"
+  | "merged"
+  | "blocked"
+  | "withdrawn";
+
+/** A member's state in the operator's words. */
+export function runMemberStateLabel(s: RunMemberState): string {
+  return s === "review" ? "in review" : s;
+}
+
+/** A member nobody is waiting on any more. */
+export function isFinalMemberState(s: RunMemberState): boolean {
+  return s === "merged" || s === "withdrawn";
+}
+
+/**
+ * One task in a run.
+ *
+ * A GitHub issue is the source worth building for: the issue is a durable place
+ * for the agent to report, and `Closes #N` closes the loop when the change
+ * lands. A plain line of text works too, and is worth less.
+ */
+export interface RunTask {
+  /** Stable key inside the run: `#44`, or `t3` for a plain line. */
+  key: string;
+  title: string;
+  /** The issue number, when the task came from GitHub. */
+  issue: number | null;
+  url: string | null;
+  /** What a machine must have for this task. Placement obeys every one. */
+  requires: TaskRequirement[];
+}
+
+/**
+ * A requirement a machine has to meet: `os=darwin`, `arch=arm64`,
+ * `needs=tmux`, `machine=pi`. Two tasks of the run of 2026-09-16 could only be
+ * done on macOS and one only on the Pi, so this is not decoration.
+ */
+export interface TaskRequirement {
+  kind: "os" | "arch" | "tool" | "machine";
+  value: string;
+}
+
+/**
+ * The port and directories one member owns, and nobody else in the run does.
+ *
+ * This is the defect that made issue #44 necessary. The brief of
+ * 2026-09-16 gave all fifteen agents the same throwaway port; one of them ran
+ * `covey stop --port 3799` and stopped a daemon another agent had started.
+ * Bookkeeping is what a program is for.
+ */
+export interface MemberResources {
+  /** A port for a throwaway daemon. Never the machine's real one. */
+  port: number;
+  coveyHome: string;
+  coveyConfig: string;
+}
+
+/**
+ * The pull request a member's branch has, if any. Identity and state only:
+ * whether it *may merge*, and in what order, is issue #45.
+ */
+export interface RunPullRequest {
+  number: number;
+  title: string;
+  url: string;
+  /** `OPEN`, `MERGED` or `CLOSED`, as `gh` reports it. */
+  state: string;
+  isDraft: boolean;
+  headRefName: string;
+  /** When the daemon read it. */
+  readAt: string;
+}
+
+/**
+ * What a brief template may say. Every token is replaced per member, so the
+ * brief an agent reads names its own port, its own directories and its own
+ * branch — and no other member's.
+ *
+ * A template may also carry `{{#issue}}…{{/issue}}` and `{{^issue}}…{{/issue}}`
+ * around a block that belongs only to a task with an issue number, or only to
+ * one without. A task typed as a line of text has no issue, and a brief that
+ * tells the agent to write `Closes ` is worse than one that says nothing.
+ */
+export const BRIEF_TOKENS: { token: string; means: string }[] = [
+  { token: "{{run}}", means: "the run's name" },
+  { token: "{{goal}}", means: "the run's goal" },
+  { token: "{{task}}", means: "this member's task title" },
+  { token: "{{issue}}", means: "`#44`, or empty for a plain task" },
+  { token: "{{url}}", means: "the issue's URL, or empty" },
+  { token: "{{machine}}", means: "the machine this member runs on" },
+  { token: "{{branch}}", means: "the branch the worktree was made on" },
+  { token: "{{port}}", means: "this member's own port" },
+  { token: "{{home}}", means: "this member's own COVEY_HOME" },
+  { token: "{{config}}", means: "this member's own COVEY_CONFIG" },
+  { token: "{{member}}", means: "`3 of 15`" },
+];
+
+/** What a run adds up to, for the sidebar row and the run panel header. */
+export interface RunTally {
+  total: number;
+  planned: number;
+  dispatched: number;
+  working: number;
+  review: number;
+  merged: number;
+  blocked: number;
+  withdrawn: number;
+  /** Machines the members are spread over. */
+  machines: number;
+}
+
+export function tallyRun(run: Run): RunTally {
+  const t: RunTally = { total: 0, planned: 0, dispatched: 0, working: 0, review: 0, merged: 0, blocked: 0, withdrawn: 0, machines: 0 };
+  const machines = new Set<string>();
+  for (const m of run.members) {
+    t.total++;
+    t[m.state]++;
+    machines.add(m.machineId);
+  }
+  t.machines = machines.size;
+  return t;
+}
+
+/**
+ * Where the run is as a whole. Derived, never stored: a stored copy would go
+ * out of step with the members it describes, and the members are the truth.
+ */
+export function runState(run: Run): "planning" | "running" | "finished" | "closed" {
+  if (run.closedAt) return "closed";
+  if (run.members.every((m) => m.state === "planned")) return "planning";
+  return run.members.every((m) => isFinalMemberState(m.state)) ? "finished" : "running";
+}
+
+/** What `run.create` carries. The daemon adds the timestamps and nothing else. */
+export interface RunInit {
+  runId: string;
+  name: string;
+  goal: string;
+  briefTemplate: string;
+  workspaceMode: WorkspaceMode;
+  members: RunMemberInit[];
+}
+
+/** A member as the client places it, before any thread exists. */
+export interface RunMemberInit {
+  id: string;
+  task: RunTask;
+  machineId: MachineId;
+  projectId: ProjectId | null;
+  resources: MemberResources;
+  /**
+   * Set when placement could not meet the task's requirements and put the
+   * member somewhere anyway. The operator has to see that before dispatch,
+   * because the machine cannot do the work.
+   */
+  note?: string | null;
+}
+
+/**
+ * What one member's row may be changed to. The client owns dispatch and
+ * tracking and patches the first group; issue #45 owns `review`.
+ */
+export type RunMemberPatch = Partial<
+  Pick<
+    RunMember,
+    | "machineId" | "projectId" | "threadId" | "branch" | "worktreePath"
+    | "pullRequest" | "state" | "note" | "resources" | "brief" | "dispatchedAt"
+    | "review"
+  >
+>;
+
+/** One GitHub issue, as `gh` reports it for a run's task list. */
+export interface RunIssue {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+  labels: string[];
+}
+
+// ---------------------------------------------------------------------------
 // Snapshots
 // ---------------------------------------------------------------------------
 
@@ -615,6 +987,12 @@ export interface ShellSnapshot {
   machine: MachineInfo;
   projects: Project[];
   threads: Thread[];
+  /**
+   * The runs this daemon stores. A run's members may live on other machines;
+   * this machine is only where the record is kept. Absent from a daemon built
+   * before runs existed, so read it as an empty list.
+   */
+  runs?: Run[];
 }
 
 export interface ThreadSnapshot {
@@ -653,6 +1031,10 @@ export type Command =
       defaultModel?: string | null;
       defaultPermissionMode?: PermissionMode | null;
       defaultStreaming?: boolean | null;
+      /** Minutes a thread may sit idle before its session is released; `0` = never. */
+      sessionIdleMinutes?: number | null;
+      /** How many sessions stay live at one time on this machine. */
+      maxLiveSessions?: number | null;
     }
   | {
       type: "thread.create";
@@ -715,7 +1097,28 @@ export type Command =
       /** One answer for each question on the item, in order. */
       answers?: string[];
     }
-  | { type: "session.stop"; threadId: ThreadId };
+  | { type: "session.stop"; threadId: ThreadId }
+  /**
+   * Start a run. The client has already placed the members and allocated their
+   * resources; this writes the record, which is what makes the run survive the
+   * client. Creating a run that is already here is a no-op, so a retry is safe.
+   */
+  | { type: "run.create"; run: RunInit }
+  /** Omitted fields are left alone. `closedAt: null` reopens a closed run. */
+  | {
+      type: "run.update";
+      runId: string;
+      name?: string;
+      goal?: string;
+      briefTemplate?: string;
+      closedAt?: string | null;
+    }
+  /** Add a task to a run in flight, without tearing the run down. */
+  | { type: "run.member.add"; runId: string; member: RunMemberInit }
+  | { type: "run.member.patch"; runId: string; memberId: string; patch: RunMemberPatch }
+  /** Drop a member that was never dispatched. A dispatched one is `withdrawn`. */
+  | { type: "run.member.remove"; runId: string; memberId: string }
+  | { type: "run.delete"; runId: string };
 
 export type CommandEnvelope = Command & { commandId: string };
 
@@ -742,7 +1145,11 @@ export type ShellEvent =
   | { seq: number; kind: "project.upserted"; project: Project }
   | { seq: number; kind: "project.removed"; projectId: ProjectId }
   | { seq: number; kind: "thread.upserted"; thread: Thread }
-  | { seq: number; kind: "thread.removed"; threadId: ThreadId };
+  | { seq: number; kind: "thread.removed"; threadId: ThreadId }
+  /** The whole run, every time — the same rule timeline items follow, so a
+   *  client that reconnects mid-run sees what one that watched throughout does. */
+  | { seq: number; kind: "run.upserted"; run: Run }
+  | { seq: number; kind: "run.removed"; runId: string };
 
 export type ThreadEvent =
   | { seq: number; kind: "item.upserted"; item: TimelineItem }
@@ -850,6 +1257,75 @@ export interface RpcMethods {
   "machine.update": { params: { restart?: boolean }; result: MachineUpdate };
   /** Restart the daemon without updating. `pid` is the process that will exit. */
   "machine.restart": { params: Record<string, never>; result: { pid: number } };
+  /**
+   * Read issues for a run's task list, with `gh` in the project's checkout.
+   * `error` says why the list is short — no `gh`, no login, no such issue —
+   * rather than failing the whole call, because one bad number must not cost
+   * the operator the other nineteen.
+   */
+  "run.issues": {
+    params: { projectId: ProjectId; numbers: number[] };
+    result: { issues: RunIssue[]; error: string | null };
+  };
+  /**
+   * The pull request for a member's branch, read with `gh` on the machine that
+   * holds the branch. Identity and state only — whether it *may merge*, and in
+   * what order, is issue #45.
+   */
+  "run.pullRequest": { params: { threadId: ThreadId }; result: RunPullRequest | null };
+  /**
+   * The gate for one member, read on the machine that holds its branch.
+   *
+   * The daemon reads `turnRunning` from the thread itself, so a client cannot
+   * say the member is idle and merge under a running turn. The caller passes
+   * the evidence, which lives in the run record on the operator's daemon.
+   */
+  "run.gate": {
+    params: { threadId: ThreadId; label: string; state: RunMemberState; evidence: RegressionEvidence | null };
+    result: GateVerdict;
+  };
+  /** The size and the files of a member's branch, which the merge queue orders on. */
+  "run.memberDiff": { params: { threadId: ThreadId }; result: MemberDiff | null };
+  /**
+   * The merge order for a whole run: serial, largest diff first, with the brief
+   * for each member. Pure, and answered by the daemon that stores the run, so
+   * there is one implementation of the order and not one per client.
+   */
+  "run.queue": { params: { entries: QueueEntryWire[] }; result: QueuePosition[] };
+  /**
+   * Merge one member. The gate is read fresh here, not taken from an older
+   * verdict, and the audit runs straight after. `merged: false` comes back with
+   * the refusals, which the operator forwards to the member unchanged.
+   *
+   * One party merges: a caller without `integrator` is refused whatever the
+   * gate says.
+   */
+  "run.merge": {
+    params: {
+      threadId: ThreadId;
+      label: string;
+      state: RunMemberState;
+      evidence: RegressionEvidence | null;
+      actor: MergeParty;
+      method?: "merge" | "squash" | "rebase";
+      /** The queue, so a merge out of order is refused rather than taken. */
+      queue?: QueuePosition[];
+    };
+    result: { merged: boolean; verdict: GateVerdict; audit: AuditFinding[] };
+  };
+  /**
+   * `git rev-list origin/<base>..origin/<branch>` for one merged member.
+   *
+   * One line of shell that would have caught a real loss: a member pushed 211
+   * lines to a branch whose pull request had already merged, and nothing saw it.
+   */
+  "run.audit": { params: { threadId: ThreadId; label: string }; result: AuditFinding | null };
+}
+
+/** One member's entry in the merge queue, as it crosses the wire. */
+export interface QueueEntryWire {
+  member: RunMemberRef;
+  diff: MemberDiff;
 }
 
 export type RpcMethodName = keyof RpcMethods;
@@ -900,3 +1376,181 @@ export const KNOWN_MODELS: { id: string; label: string }[] = [
   { id: "claude-sonnet-5", label: "Sonnet 5" },
   { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
 ];
+
+// ---------------------------------------------------------------------------
+// Integration of a run: gates, the conflict queue, and the audit
+// ---------------------------------------------------------------------------
+//
+// A run dispatches work (#44); these types describe what happens when the work
+// comes back. The rules come from a real run of fifteen agents on 2026-09-16:
+//
+//  - A green check is not the gate. A check is green against the base it ran
+//    on, and that base moves. A pending check and a stale check are both a
+//    refusal.
+//  - A test that exists is not the gate. The gate is the evidence that the
+//    member reverted the fix and watched the test fail.
+//  - File overlap is a hint about a conflict. It is never the answer.
+//  - One party merges. A member never gets push rights to the base branch.
+
+/**
+ * The little of a run member that the gate, the queue and the audit read.
+ *
+ * It is a view of `RunMember`, not a second model: `memberRef` in the daemon
+ * builds one. The only field that is not on `RunMember` is `turnRunning`,
+ * which belongs to the member's thread rather than to the member.
+ */
+export interface RunMemberRef {
+  /** `RunMember.id`. */
+  memberId: string;
+  /** Short human label, e.g. `#20 wheel scroll`. It goes in the queue brief. */
+  label: string;
+  threadId: ThreadId | null;
+  machineId: MachineId | null;
+  /** The branch the member pushes to. The gate and the audit both key on it. */
+  branch: string;
+  /** The pull request number, or null before the member opens one. */
+  pullRequest: number | null;
+  /**
+   * True while the member's thread runs a turn. A run owns the map from thread
+   * to branch, so it can answer this; the integration half only reads it.
+   */
+  turnRunning: boolean;
+  state: RunMemberState;
+}
+
+/** One check on a pull request, flattened from `gh pr view --json statusCheckRollup`. */
+export interface CheckSummary {
+  name: string;
+  /** The workflow that owns the check, e.g. `ci`. Null for a status context. */
+  workflow: string | null;
+  state: CheckState;
+  /**
+   * When the check started, ISO 8601. The staleness test reads this field: a
+   * check that started before the current base head landed did not include it.
+   */
+  startedAt: string | null;
+  url: string | null;
+}
+
+/** `neutral` covers a skipped or cancelled check: it neither passes nor fails. */
+export type CheckState = "success" | "failure" | "pending" | "neutral";
+
+/**
+ * The state of the checks as a gate reads them.
+ *  - `passing`  — every check succeeded, and each one ran against the current base head.
+ *  - `pending`  — a check has not finished. This is a refusal, not a pass.
+ *  - `failing`  — a check failed.
+ *  - `stale`    — every check succeeded, but against a base that has since moved.
+ *  - `absent`   — no check proved anything.
+ */
+export type CiState = "passing" | "pending" | "failing" | "stale" | "absent";
+
+/** The commit at the tip of the base branch, and when it landed there. */
+export interface BaseHead {
+  oid: string;
+  /** ISO 8601. A check that started before this time did not test this commit. */
+  committedAt: string;
+}
+
+/**
+ * The evidence that a member's test bites. A machine cannot judge a test, so
+ * the member records what it did: it reverted the fix, ran the test, and kept
+ * the failure verbatim. The failure text is the whole value of this record.
+ */
+export interface RegressionEvidence {
+  /** What the member reverted, e.g. `the guard in sidebar.ts:112`. */
+  reverted: string;
+  /** The test that failed once the fix was gone. */
+  test: string;
+  /** The failure, copied from the test run. Empty text proves nothing. */
+  failure: string;
+  recordedAt: string;
+  /** The thread that recorded it, so a reader can trace it back. */
+  recordedBy?: string;
+}
+
+export type GateRefusalCode =
+  | "ci-failing"
+  | "ci-pending"
+  | "ci-stale"
+  | "ci-absent"
+  | "merge-conflict"
+  | "pr-draft"
+  | "pr-missing"
+  | "turn-running"
+  | "no-evidence"
+  | "evidence-proves-nothing"
+  | "withdrawn"
+  | "not-the-merge-party";
+
+export interface GateRefusal {
+  code: GateRefusalCode;
+  /** One sentence for the operator, with the fact that caused the refusal. */
+  message: string;
+}
+
+/** What the gate decides about one member. `ok` is true only with no refusals. */
+export interface GateVerdict {
+  memberId: string;
+  branch: string;
+  ok: boolean;
+  ci: CiState;
+  checks: CheckSummary[];
+  /** Every reason to refuse, not the first one. The operator fixes them together. */
+  refusals: GateRefusal[];
+  evidence: RegressionEvidence | null;
+}
+
+/** The size and reach of one member's change, for the conflict queue. */
+export interface MemberDiff {
+  branch: string;
+  additions: number;
+  deletions: number;
+  /** Every path the branch touches, as `gh pr view --json files` reports it. */
+  files: string[];
+  mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+  /** `CLEAN`, `BEHIND`, `DIRTY`, `UNSTABLE`, `BLOCKED`, `DRAFT`, `UNKNOWN`. */
+  mergeStateStatus: string;
+}
+
+/** A member that lands earlier and touches a file this member also touches. */
+export interface QueueCollision {
+  branch: string;
+  label: string;
+  files: string[];
+}
+
+/** One member's place in the merge queue, and the brief the run sends it. */
+export interface QueuePosition {
+  memberId: string;
+  branch: string;
+  label: string;
+  /** 1 is the first merge. Largest diff first. */
+  position: number;
+  total: number;
+  /** additions + deletions, the cost of a re-merge. */
+  size: number;
+  /** Members ahead of this one that share a file with it. A hint, not the answer. */
+  meets: QueueCollision[];
+  /** The message to send to the member. It names the files and the caution. */
+  brief: string;
+}
+
+/** A merged member whose branch still holds commits that the base branch lacks. */
+export interface AuditFinding {
+  memberId: string;
+  branch: string;
+  /** The commits that `origin/<base>..origin/<branch>` reports. */
+  commits: { sha: string; subject: string }[];
+  message: string;
+}
+
+/**
+ * Who may merge. One party merges and the members never do, so a merge takes a
+ * party with `integrator` set. Fifteen agents with push rights to one branch is
+ * a worse problem than the one a run solves.
+ */
+export interface MergeParty {
+  id: string;
+  integrator: boolean;
+}

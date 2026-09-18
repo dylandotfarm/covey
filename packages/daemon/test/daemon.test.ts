@@ -5,55 +5,68 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import WebSocket from "ws";
 import type { RpcMethodName, RpcMethods } from "@covey/protocol";
+import { startDaemon, stopAll, tempDir, waitForExit, type TestDaemon } from "./daemons.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const daemonEntry = join(here, "..", "src", "main.ts");
 
-/** A throwaway directory, with every symlink already resolved. macOS makes
- *  /var a link to /private/var, and git reports the resolved path, so a raw
- *  mkdtemp path never compares equal to the one the daemon sends back. */
-function tempDir(prefix: string): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
-}
+/** How long any one wait on the daemon may take before it is a failure rather
+ *  than a hang. Every call here answers in well under a second when measured,
+ *  and `pnpm test` runs every file at once on four cores, so this is set for
+ *  contention and is the bound rather than the expectation. See #53: an
+ *  unbounded wait on a daemon that has died looks exactly like slow hardware. */
+const REPLY_BUDGET_MS = 60_000;
 
 class Client {
-  private ws!: WebSocket; private id = 0; private waits = new Map<number, { res: (v: any) => void; rej: (e: Error) => void }>();
+  private ws?: WebSocket; private id = 0; private waits = new Map<number, { res: (v: any) => void; rej: (e: Error) => void }>();
   pushes: any[] = [];
   async connect(port: number) {
-    this.ws = new WebSocket(`ws://127.0.0.1:${port}`);
-    this.ws.on("message", (d) => { const m = JSON.parse(d.toString()); if ("push" in m) { this.pushes.push(m); return; } const w = this.waits.get(m.id); this.waits.delete(m.id); m.ok ? w?.res(m.result) : w?.rej(Object.assign(new Error(m.error.message), { code: m.error.code })); });
-    await new Promise<void>((res, rej) => { this.ws.once("open", () => res()); this.ws.once("error", rej); });
+    const ws = this.ws = new WebSocket(`ws://127.0.0.1:${port}`);
+    ws.on("message", (d) => { const m = JSON.parse(d.toString()); if ("push" in m) { this.pushes.push(m); return; } const w = this.waits.get(m.id); this.waits.delete(m.id); m.ok ? w?.res(m.result) : w?.rej(Object.assign(new Error(m.error.message), { code: m.error.code })); });
+    // A socket that closes owes every call on it an answer. Without this a
+    // daemon that dies mid-test leaves each pending rpc waiting for ever.
+    const fail = (why: string) => { for (const [, w] of this.waits) w.rej(new Error(why)); this.waits.clear(); };
+    ws.on("close", () => fail(`the daemon on port ${port} closed the connection`));
+    ws.on("error", (e) => fail(`the connection to port ${port} failed: ${e.message}`));
+    await new Promise<void>((res, rej) => {
+      // Waiting on `open` or `error` alone is not enough: a handshake the
+      // daemon refuses arrives as `close`, and a machine under load can be slow
+      // enough to lose any of the three. Every outcome settles this, and the
+      // timer is the floor under all of them.
+      const settle = (fn: () => void) => () => {
+        clearTimeout(timer);
+        for (const [event, handler] of handlers) ws.off(event, handler);
+        fn();
+      };
+      const timer = setTimeout(settle(() => rej(new Error(`no websocket to port ${port} within ${REPLY_BUDGET_MS / 1000}s`))), REPLY_BUDGET_MS);
+      const handlers: [string, () => void][] = [
+        ["open", settle(res)],
+        ["error", settle(() => rej(new Error(`the websocket to port ${port} failed`)))],
+        ["close", settle(() => rej(new Error(`the websocket to port ${port} closed before it opened`)))],
+      ];
+      for (const [event, handler] of handlers) ws.once(event, handler);
+    });
   }
   rpc<M extends RpcMethodName>(method: M, params: RpcMethods[M]["params"]): Promise<RpcMethods[M]["result"]> {
-    return new Promise((res, rej) => { const i = ++this.id; this.waits.set(i, { res, rej }); this.ws.send(JSON.stringify({ id: i, method, params })); });
+    return new Promise((res, rej) => {
+      const i = ++this.id;
+      const timer = setTimeout(() => { this.waits.delete(i); rej(new Error(`rpc ${method} got no answer in ${REPLY_BUDGET_MS / 1000}s`)); }, REPLY_BUDGET_MS);
+      this.waits.set(i, { res: (v) => { clearTimeout(timer); res(v); }, rej: (e) => { clearTimeout(timer); rej(e); } });
+      this.ws!.send(JSON.stringify({ id: i, method, params }));
+    });
   }
   command(cmd: any) { return this.rpc("command", { ...cmd, commandId: randomUUID() }); }
-  close() { this.ws.close(); }
+  /** Tolerates never having connected: `before` can throw before `connect`. */
+  close() { this.ws?.close(); }
 }
 
-async function startDaemon(port: number, name: string): Promise<{ proc: ChildProcess; home: string }> {
-  const home = tempDir("covey-test-");
-  const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", name], { env: { ...process.env, COVEY_HOME: home, COVEY_STREAM: "" }, stdio: ["ignore", "pipe", "pipe"] });
-  let log = "";
-  proc.stderr!.on("data", (d) => { log += d.toString(); });
-  for (let i = 0; i < 100; i++) {
-    try { const r = await fetch(`http://127.0.0.1:${port}/health`); if (r.ok) return { proc, home }; } catch { /* retry */ }
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new Error(`daemon ${name} did not start:\n${log}`);
-}
-
-const PORT_A = 3900 + Math.floor(Math.random() * 50), PORT_B = PORT_A + 50;
-let A: { proc: ChildProcess; home: string }, B: { proc: ChildProcess; home: string };
+let A: TestDaemon, B: TestDaemon;
 let repoA: string, repoB: string;
 const a = new Client(), b = new Client();
 
@@ -68,76 +81,67 @@ before(async () => {
     execFileSync("git", ["add", "README.md"], { cwd: r });
     execFileSync("git", ["-c", "user.email=test@covey", "-c", "user.name=covey test", "commit", "-qm", "init"], { cwd: r });
   }
-  [A, B] = await Promise.all([startDaemon(PORT_A, "alpha"), startDaemon(PORT_B, "beta")]);
-  await Promise.all([a.connect(PORT_A), b.connect(PORT_B)]);
+  // If one of these throws the other is still reachable — `startDaemon`
+  // registers a daemon before it waits on it, so `stopAll` below finds it.
+  [A, B] = await Promise.all([
+    startDaemon({ name: "alpha", env: { COVEY_STREAM: "" } }),
+    startDaemon({ name: "beta", env: { COVEY_STREAM: "" } }),
+  ]);
+  await Promise.all([a.connect(A.port), b.connect(B.port)]);
 });
 
-after(() => {
-  a.close(); b.close();
-  A?.proc.kill(); B?.proc.kill();
-  for (const d of [A?.home, B?.home, repoA, repoB]) if (d) rmSync(d, { recursive: true, force: true });
-});
-
-/**
- * A daemon on `port`, started the way the CLI starts one. Returns the process
- * and the log it writes, so a test can read both.
- */
-async function stoppableDaemon(port: number): Promise<{ proc: ChildProcess; home: string; log: () => string }> {
-  const home = tempDir("covey-test-stop-");
-  const proc = spawn(process.execPath, ["--import", "tsx", daemonEntry, "--bind", "loopback", "--port", String(port), "--name", "stoppable"], { env: { ...process.env, COVEY_HOME: home }, stdio: ["ignore", "pipe", "pipe"] });
-  let log = "";
-  proc.stderr!.on("data", (d) => { log += d.toString(); });
-  for (let i = 0; i < 100; i++) {
-    try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) break; } catch { /* retry */ }
-    await new Promise((r) => setTimeout(r, 100));
+after(async () => {
+  // Every step runs whatever the step before it did. One throw at the top of
+  // this hook skipping the rest is what left five daemons listening in #53.
+  for (const step of [() => a.close(), () => b.close()]) {
+    try { step(); } catch (e) { console.error(`covey test teardown: ${e}`); }
   }
-  return { proc, home, log: () => log };
-}
-
-function reap(proc: ChildProcess, home: string) {
-  if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
-  rmSync(home, { recursive: true, force: true });
-}
+  await stopAll();
+  for (const d of [repoA, repoB]) if (d) rmSync(d, { recursive: true, force: true });
+});
 
 // Issue #8: every daemon runs `node <dir>/index.js daemon`, so a pattern such
 // as `pkill -f "index.js daemon"` matches all of them. A session killed the
 // daemon that hosted it that way, and the stop left no line in the log.
 
+/** A daemon must be gone this long after SIGTERM, or something is wrong with
+ *  the stop path rather than with the machine. */
+const EXIT_BUDGET_MS = 30_000;
+
 test("a daemon writes a pid file for its port, and takes it away when it stops", async () => {
   // The pid file is the name that `covey stop --port N` uses, in place of a
   // pattern over the command line.
-  const port = PORT_A + 25;
-  const { proc, home, log } = await stoppableDaemon(port);
+  const d = await startDaemon({ name: "stoppable" });
+  const { proc, home, port } = d;
   try {
     const pidFile = join(home, `daemon-${port}.pid`);
-    assert.ok(existsSync(pidFile), `expected a pid file at ${pidFile}\n${log()}`);
+    assert.ok(existsSync(pidFile), `expected a pid file at ${pidFile}\n${d.log()}`);
     const rec = JSON.parse(readFileSync(pidFile, "utf8"));
     assert.equal(rec.pid, proc.pid, "the pid file names the daemon process");
     assert.equal(rec.port, port, "and the port it listens on");
     // A daemon on another port keeps its own file, under its own data dir.
-    assert.equal(existsSync(join(A.home, `daemon-${PORT_A}.pid`)), true);
-    assert.notEqual(join(A.home, `daemon-${PORT_A}.pid`), pidFile);
+    assert.equal(existsSync(join(A.home, `daemon-${A.port}.pid`)), true);
+    assert.notEqual(join(A.home, `daemon-${A.port}.pid`), pidFile);
 
     proc.kill("SIGTERM");
-    await new Promise<void>((res) => proc.once("exit", () => res()));
+    assert.ok(await waitForExit(proc, EXIT_BUDGET_MS), `the daemon on ${port} did not exit within ${EXIT_BUDGET_MS / 1000}s\n${d.log()}`);
     assert.equal(existsSync(pidFile), false, "the pid file goes when the daemon goes");
   } finally {
-    reap(proc, home);
+    await d.stop();
   }
 });
 
 test("a daemon says why it stopped, so the log does not just end", async () => {
   // The stop used to be silent. The log ended in the middle of the work with
   // no error and no shutdown line, and the daemon looked like it vanished.
-  const port = PORT_A + 26;
-  const { proc, home, log } = await stoppableDaemon(port);
+  const d = await startDaemon({ name: "stoppable" });
   try {
-    proc.kill("SIGTERM");
-    await new Promise<void>((res) => proc.once("exit", () => res()));
-    assert.match(log(), new RegExp(`stopping: signal=SIGTERM pid=${proc.pid} port=${port} at \\d{4}-`),
-      `a silent stop costs hours to explain; the log must name the signal, the pid and the time. Got:\n${log()}`);
+    d.proc.kill("SIGTERM");
+    assert.ok(await waitForExit(d.proc, EXIT_BUDGET_MS), `the daemon on ${d.port} did not exit within ${EXIT_BUDGET_MS / 1000}s\n${d.log()}`);
+    assert.match(d.log(), new RegExp(`stopping: signal=SIGTERM pid=${d.proc.pid} port=${d.port} at \\d{4}-`),
+      `a silent stop costs hours to explain; the log must name the signal, the pid and the time. Got:\n${d.log()}`);
   } finally {
-    reap(proc, home);
+    await d.stop();
   }
 });
 
@@ -286,7 +290,7 @@ test("a project remembers where new threads should run", async () => {
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {
   const settings = async () => (await a.rpc("hello", { protocolVersion: 1, client: "test" })).settings;
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "no opinion until one is set");
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null }, "no opinion until one is set");
 
   await a.rpc("shell.subscribe", {});
   a.pushes.length = 0;
@@ -296,7 +300,7 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
     a.pushes.some((p) => p.push === "shell" && p.event.kind === "machine.updated" && p.event.machine.settings.defaultModel === "claude-opus-5"),
     "the change is broadcast, so every client's panel follows",
   );
-  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true });
+  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true, sessionIdleMinutes: null, maxLiveSessions: null });
   const onDisk = JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8"));
   assert.equal(onDisk.defaultModel, "claude-opus-5", "settings survive a daemon restart");
   assert.ok(onDisk.machineId, "writing settings does not clobber the rest of daemon.json");
@@ -317,8 +321,15 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal(e.permissionMode, "plan");
   assert.equal(e.streaming, false, "an explicit choice still wins");
 
-  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null });
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null }, "and can be cleared again");
+  // The session limits live beside the rest, and a nonsense value reads as "no
+  // opinion" rather than as a limit that would release every session at once.
+  await a.command({ type: "machine.settings", sessionIdleMinutes: 30, maxLiveSessions: 0 });
+  assert.equal((await settings()).sessionIdleMinutes, 30);
+  assert.equal((await settings()).maxLiveSessions, 1, "one live session is the smallest budget there is");
+  assert.equal(JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8")).sessionIdleMinutes, 30, "and survives a restart");
+
+  await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null });
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null }, "and can be cleared again");
 });
 
 test("streaming is a per-thread switch that needs no restart", async () => {
@@ -397,7 +408,10 @@ test("a machine reports the build it runs, not a package version that never move
   assert.equal(other.build!.commit, info.build!.commit);
 });
 
-test("live: a real turn streams items, folds a second message in, and captures a diff", { skip: !process.env.COVEY_LIVE_TESTS }, async () => {
+// It waits on a real model twice, up to 180s and then 120s, so it needs far
+// more than the suite-wide `--test-timeout`. It says so here rather than
+// forcing that bound up for every other test in the repo.
+test("live: a real turn streams items, folds a second message in, and captures a diff", { skip: !process.env.COVEY_LIVE_TESTS, timeout: 600_000 }, async () => {
   const snapB = await b.rpc("shell.snapshot", {});
   const projectId = snapB.projects[0]!.id;
   const threadId = randomUUID();
