@@ -44,4 +44,34 @@ if [ ! -f "$entry" ]; then
   (cd "$root" && pnpm install --frozen-lockfile && pnpm run build --force) >&2
 fi
 
-exec node "$entry" "$@"
+# Node runs as a child of this shell, not in place of it. V8's out-of-memory
+# path calls abort(), and a SIGKILL or a segfault is the same: no JavaScript
+# runs, so the client's own handlers never fire and the terminal keeps mouse
+# reporting on and the alternate screen up. This shell is the only part that
+# survives every death, so it puts the terminal back. See issue #58.
+#
+# Each trap has an action, and that action is what keeps this shell here for
+# the client. A ctrl+c at the terminal goes to every process in the foreground
+# group, so this shell gets one too, and a shell does not run a trap while a
+# foreground command runs — so the client always exits first. An action also
+# keeps the signal for the client: a shell resets a trapped signal to the
+# default action in the child, but keeps an ignored signal ignored, so
+# `trap '' INT` would take ctrl+c away from the client.
+trap ':' INT TERM HUP QUIT
+status=0
+node "$entry" "$@" || status=$?
+
+# Turn off the modes the client turns on: mouse reporting (1002 and 1006, from
+# `disableMouse` in packages/tui/src/mouse.ts) and the alternate screen (1049,
+# from packages/tui/src/index.tsx). `packages/cli/test/restore.test.ts` reads
+# the modes out of those two files and out of this line, and fails when the
+# two lists differ. Only to a terminal: in a pipe the bytes are noise.
+if [ -t 1 ]; then printf '\033[?1002l\033[?1006l\033[?1049l' 2>/dev/null || :; fi
+
+# Pass the death on: an exit status as it is, a signal by dying of the same
+# signal, so `covey` in a script or in an `&&` chain sees what node saw.
+if [ "$status" -gt 128 ]; then
+  trap - INT TERM HUP QUIT
+  kill -$((status - 128)) $$ 2>/dev/null || :
+fi
+exit "$status"
