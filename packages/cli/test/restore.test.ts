@@ -29,8 +29,13 @@ const tuiSrc = join(repo, "packages", "tui", "src");
 
 /** The modes the client turns on: mouse reporting, then the alternate screen. */
 const ENABLE = "\x1b[?1002h\x1b[?1006h\x1b[?1049h";
-/** What the launcher owes the terminal afterwards, whatever killed the client. */
+/** Ink hides the cursor while it paints, and shows it again only on unmount. */
+const HIDE_CURSOR = "\x1b[?25l";
+const SHOW_CURSOR = "\x1b[?25h";
+/** The modes covey itself turns on, turned off again. */
 const RESTORE = "\x1b[?1002l\x1b[?1006l\x1b[?1049l";
+/** The whole line the launcher writes: covey's modes, then Ink's cursor. */
+const TAIL = RESTORE + SHOW_CURSOR;
 
 const dirs: string[] = [];
 process.on("exit", () => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
@@ -136,26 +141,28 @@ const noExecve = "execve" in process ? false : "this Node has no process.execve"
 test("an abort leaves mouse reporting off", { skip: noPty }, () => {
   const r = inPty(child("process.abort()"));
   assert.ok(r.out.includes(ENABLE), `the stand-in never turned the modes on, so this test proves nothing.\n${show(r)}`);
-  assert.ok(r.out.endsWith(RESTORE),
+  assert.ok(r.out.includes(RESTORE),
     `the launcher left the terminal in mouse reporting after an abort: every wheel notch now types itself into the shell.\n${show(r)}`);
+  assert.ok(r.out.endsWith(TAIL),
+    `the launcher's restore is not the last thing the terminal saw, or it is incomplete.\n${show(r)}`);
   assert.equal(r.code, -6, `the abort did not reach the parent shell as SIGABRT.\n${show(r)}`);
 });
 
 test("a SIGKILL leaves mouse reporting off", { skip: noPty }, () => {
   const r = inPty(child('process.kill(process.pid,"SIGKILL")'));
-  assert.ok(r.out.endsWith(RESTORE), `the launcher left the terminal in mouse reporting after a SIGKILL.\n${show(r)}`);
+  assert.ok(r.out.includes(RESTORE), `the launcher left the terminal in mouse reporting after a SIGKILL.\n${show(r)}`);
   assert.equal(r.code, -9, `the SIGKILL did not reach the parent shell.\n${show(r)}`);
 });
 
 test("a failed exit leaves mouse reporting off", { skip: noPty }, () => {
   const r = inPty(child("process.exit(3)"));
-  assert.ok(r.out.endsWith(RESTORE), `the launcher left the terminal in mouse reporting after a failed exit.\n${show(r)}`);
+  assert.ok(r.out.includes(RESTORE), `the launcher left the terminal in mouse reporting after a failed exit.\n${show(r)}`);
   assert.equal(r.code, 3, `the exit status did not come through the launcher.\n${show(r)}`);
 });
 
 test("a clean exit leaves mouse reporting off", { skip: noPty }, () => {
   const r = inPty(child(""));
-  assert.ok(r.out.endsWith(RESTORE), `the launcher left the terminal in mouse reporting after a clean exit.\n${show(r)}`);
+  assert.ok(r.out.includes(RESTORE), `the launcher left the terminal in mouse reporting after a clean exit.\n${show(r)}`);
   assert.equal(r.code, 0, show(r));
 });
 
@@ -210,8 +217,21 @@ test("an in-place relaunch keeps one launcher and one restore", { skip: noPty ||
   assert.ok(r.out.includes("RELAUNCHED"), `the relaunch never came back.\n${show(r)}`);
   assert.ok(r.out.indexOf("RELAUNCHED") > r.out.indexOf("CHILD-UP"), `the relaunch came back out of order.\n${show(r)}`);
   assert.equal(r.out.split(RESTORE).length - 1, 1, `the terminal was restored ${r.out.split(RESTORE).length - 1} times, not once.\n${show(r)}`);
-  assert.ok(r.out.endsWith(RESTORE), `the launcher did not restore the terminal after the relaunch.\n${show(r)}`);
+  assert.ok(r.out.endsWith(TAIL), `the launcher did not restore the terminal after the relaunch.\n${show(r)}`);
   assert.equal(r.code, 0, show(r));
+});
+
+/**
+ * The modes covey writes itself are not the whole terminal. Ink hides the
+ * cursor while it paints and shows it again in `finishUnmount`, which an abort
+ * never reaches, so a crash used to hand the user a prompt with no cursor.
+ * The drift test below cannot see this one: 25 is Ink's, not covey's.
+ */
+test("a crash leaves the cursor visible", { skip: noPty }, () => {
+  const r = inPty(`const fs=require("fs");fs.writeSync(1,${JSON.stringify(ENABLE + HIDE_CURSOR)}+"CHILD-UP\\n");process.abort()`);
+  assert.ok(r.out.includes(HIDE_CURSOR), `the stand-in never hid the cursor, so this test proves nothing.\n${show(r)}`);
+  assert.ok(r.out.lastIndexOf(SHOW_CURSOR) > r.out.lastIndexOf(HIDE_CURSOR),
+    `the launcher left the cursor hidden after an abort: the user types at a prompt they cannot see.\n${show(r)}`);
 });
 
 test("the launcher writes no escape sequence into a pipe", () => {

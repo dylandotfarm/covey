@@ -66,7 +66,13 @@ node "$entry" "$@" || status=$?
 # from packages/tui/src/index.tsx). `packages/cli/test/restore.test.ts` reads
 # the modes out of those two files and out of this line, and fails when the
 # two lists differ. Only to a terminal: in a pipe the bytes are noise.
-if [ -t 1 ]; then printf '\033[?1002l\033[?1006l\033[?1049l' 2>/dev/null || :; fi
+#
+# 25 comes last and is the one mode covey does not write itself: Ink hides the
+# cursor while it paints and shows it again only when it unmounts, which an
+# abort or a SIGKILL never reaches. A prompt with no cursor is still a broken
+# terminal, so the launcher shows it. That is why the test above finds 25 in
+# no TUI source: it reads only the `l` sequences on this line.
+if [ -t 1 ]; then printf '\033[?1002l\033[?1006l\033[?1049l\033[?25h' 2>/dev/null || :; fi
 
 # Pass the death on: an exit status as it is, a signal by dying of the same
 # signal, so `covey` in a script or in an `&&` chain sees what node saw.
