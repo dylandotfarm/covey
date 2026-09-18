@@ -534,7 +534,9 @@ thread in a project asks where it should run, and offers to remember the answer:
 
   `--no-track` keeps `origin/main` from becoming the new branch's upstream, which would make
   `git push` under `push.default=simple` refuse it.
-- **Worktree from HEAD** — same, branched from the current checkout.
+- **Worktree from HEAD** — the same worktree, branched from the current checkout, so work in
+  progress carries over. It means "branch from HEAD" on purpose: it neither fetches nor reads
+  `origin`, and `N` takes it without asking.
 - **This checkout** — the project directory itself, shared with every other thread. The
   behaviour covey had before, and the only option in a non-git project.
 
