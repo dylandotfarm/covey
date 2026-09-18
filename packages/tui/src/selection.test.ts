@@ -100,6 +100,17 @@ test("a blank line between paragraphs survives", () => {
   assert.match(got, / {2}one\n\n {2}two/);
 });
 
+test("a line that ends on the wrap boundary keeps the newline after it", () => {
+  // The wrap flushes on the trailing whitespace, and the row it flushed is the
+  // last one the call makes — so the marker it left behind would claim the
+  // *next* source line as a continuation of this one. `wrapSpans` deletes the
+  // marker on its last row for exactly this case, and nothing else here
+  // reaches it: two trailing spaces is markdown's own hard break, so the line
+  // it eats is one the writer asked for twice over.
+  const got = copyAll(paint("assistant", "a hard break here  \nand the line after", 20));
+  assert.equal(got, "  a hard break here\n  and the line after");
+});
+
 test("a token broken mid-word rejoins with nothing, not with a space", () => {
   const long = "supercalifragilisticexpialidocious";
   const got = copyAll(paint("assistant", long, 20));

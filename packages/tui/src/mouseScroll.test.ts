@@ -59,6 +59,9 @@ async function mount(patch: Partial<Store["state"]> = {}) {
 
   const stdin = fakeStdin();
   const stdout = fakeStdout();
+  const written: string[] = [];
+  const realWrite = stdout.write.bind(stdout);
+  (stdout as any).write = (chunk: any, ...rest: any[]) => { written.push(String(chunk)); return realWrite(chunk, ...rest); };
   const app = render(React.createElement(App, { store }), {
     stdin, stdout, patchConsole: false, exitOnCtrlC: false,
     // Ink writes only the final frame when it decides it is not interactive,
@@ -67,7 +70,7 @@ async function mount(patch: Partial<Store["state"]> = {}) {
     interactive: true,
   });
   await tick(120);
-  return { store, stdin, unmount: () => app.unmount() };
+  return { store, stdin, written, unmount: () => app.unmount() };
 }
 
 /**
@@ -186,6 +189,31 @@ test("a wheel notch over a folder browser moves that list and leaves the convers
   } finally { unmount(); }
 });
 
+// `handleMouse` used to begin with `if (state.overlay) return;`. It now lets
+// the wheel through, and a door held open for one kind of event is a door: a
+// press that reached the transcript underneath would select text nobody can
+// see, and its release would copy it.
+test("an overlay lets no click or drag through to the transcript", async () => {
+  const { store, stdin, written, unmount } = await mount({
+    scrollFromBottom: 5,
+    overlay: { kind: "browse", machine: "m", path: "/w", entries: entries(30), onPick: () => {} },
+  } as Partial<Store["state"]>);
+  try {
+    stdin.write(press(50, 6));
+    await tick(60);
+    assert.equal(store.getState().selection, null, "a press behind an overlay starts no selection");
+    stdin.write(drag(70, 9));
+    await tick(60);
+    assert.equal(store.getState().selection, null, "and a drag extends none");
+    stdin.write(release(70, 9));
+    await tick(80);
+    assert.equal(store.getState().selection, null, "and the release leaves none behind");
+    assert.equal(written.join("").includes(`${ESC}]52;c;`), false, "nothing reached the clipboard");
+    assert.equal(store.getState().scrollFromBottom, 5, "and the conversation did not move");
+    assert.equal(store.getState().overlay?.kind, "browse", "the overlay is still up");
+  } finally { unmount(); }
+});
+
 // ---------------------------------------------------------------------------
 // A drag past the edge scrolls
 // ---------------------------------------------------------------------------
@@ -226,6 +254,19 @@ test("a drag above the top edge scrolls the other way", async () => {
 test("a drag released outside the pane clears the repeating scroll", async () => {
   const timers = trackIntervals(DRAG_SCROLL_MS);
   const { store, stdin, unmount } = await mount({ scrollFromBottom: 50 });
+  // `dragScrollStep` has a second stop in it: it gives up when the selection
+  // is no longer dragging, and a release ends the drag. That stop answers a
+  // release within one 60 ms tick whether or not the release cleared the
+  // timer itself, so it stands in for the teardown this test is about — and
+  // it does: measured, `stopDragScroll()` can be deleted from the release
+  // branch and every assertion below still passes.
+  //
+  // So hold the selection dragging across the release. `endSelection` says
+  // the drag was a real one, which is what makes the app copy it, but leaves
+  // `dragging` alone. Now the only thing that can clear the timer is the
+  // teardown on the release, and waiting longer only gives a missing one more
+  // chances to show itself.
+  (store as any).endSelection = () => store.getState().selection != null;
   try {
     stdin.write(press(80, 10));
     await tick(60);
@@ -235,7 +276,7 @@ test("a drag released outside the pane clears the repeating scroll", async () =>
     assert.ok(store.getState().scrollFromBottom < 50, "and it really was scrolling");
 
     stdin.write(release(80, 30)); // released outside the pane
-    await tick(100);
+    await tick(200);
     assert.equal(timers.count(), 0, "the release cleared the timer, not just the scrolling");
     const atRelease = store.getState().scrollFromBottom;
     await tick(400);
