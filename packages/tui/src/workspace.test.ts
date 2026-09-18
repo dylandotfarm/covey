@@ -17,8 +17,10 @@ test("workspaceOptions offers worktree-from-default, worktree-from-HEAD, and the
   assert.match(opts[2]!.label, /\(feature\)/);
 });
 
-test("a repo with no remote still names its own default branch", () => {
-  assert.equal(workspaceOptions(git({ defaultBranch: "main" }))[0]!.label, "Worktree from main");
+test("a repo with no remote still names its own default branch, and claims no fetch", () => {
+  const row = workspaceOptions(git({ defaultBranch: "main" }))[0]!;
+  assert.equal(row.label, "Worktree from main");
+  assert.equal(row.hint, "clean start", "there is no remote here, so nothing was fetched first");
 });
 
 test("workspaceOptions drops the default-branch row when there is nothing to branch from", () => {

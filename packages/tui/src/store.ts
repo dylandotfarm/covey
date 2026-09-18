@@ -1484,8 +1484,11 @@ export function workspaceOptions(git: ProjectGit): PickOption[] {
   const head = git.currentBranch ? ` (${git.currentBranch})` : "";
   const opts: PickOption[] = [];
   // The label names the ref the worktree really gets — `origin/main`, not the
-  // local copy of it — because that difference is the whole of #76.
-  if (git.defaultBranch) opts.push({ id: "worktree-default", label: `Worktree from ${git.defaultBranch}`, hint: "clean start, fetched first" });
+  // local copy of it — because that difference is the whole of #76. A ref that
+  // does not start with `origin/` is a repo with no remote, where there is
+  // nothing to fetch and the hint must not claim one.
+  const remote = git.defaultBranch?.startsWith("origin/") ?? false;
+  if (git.defaultBranch) opts.push({ id: "worktree-default", label: `Worktree from ${git.defaultBranch}`, hint: remote ? "clean start, fetched first" : "clean start" });
   opts.push({ id: "worktree-head", label: `Worktree from HEAD${head}`, hint: "branch off what is checked out" });
   opts.push({ id: "checkout", label: `This checkout${head}`, hint: "shared with other threads" });
   return opts;

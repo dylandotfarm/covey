@@ -15,6 +15,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile as execFileCb } from "node:child_process";
+import { createServer, type AddressInfo } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +132,44 @@ test("one fetch serves a whole dispatch, and a second thread a second later reus
   const second = await cleanStartBase(c.repo);
   assert.equal(second?.commit, first?.commit, "a second fetch a moment later is a round trip nobody asked for");
   assert.notEqual(second?.commit, ahead);
+});
+
+test("a fetch that failed is not remembered, so the next thread tries again", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const ahead = await c.moveRemote("two");
+  const url = await git(c.repo, "remote", "get-url", "origin");
+  await c.breakRemote();
+
+  const blip = await cleanStartBase(c.repo);
+  assert.equal(blip?.fetch.state, "failed", "the case under test is a fetch that did not work");
+
+  // The remote comes back in the same second, the way a blip does. The six
+  // threads behind this one in a dispatch must not all start where the blip
+  // left them: that is #76 again, one minute wide instead of two days.
+  await git(c.repo, "remote", "set-url", "origin", url);
+  const next = await cleanStartBase(c.repo);
+  assert.equal(next?.fetch.state, "fetched", "a failed fetch must not count as fresh");
+  assert.equal(next?.commit, ahead, "the second thread starts where the remote really is");
+});
+
+test("a remote that says nothing is named as a timeout, not as 'git failed'", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  // A socket that accepts the connection and then answers nothing — the one
+  // case FETCH_TIMEOUT_MS exists for, and the one git never complains about.
+  const sink = createServer((sock) => { sock.resume(); });
+  t.after(() => sink.close());
+  await new Promise<void>((r) => sink.listen(0, "127.0.0.1", r));
+  const { port } = sink.address() as AddressInfo;
+  await git(c.repo, "remote", "set-url", "origin", `git://127.0.0.1:${port}/hang.git`);
+
+  const start = await cleanStartBase(c.repo);
+  assert.equal(start?.fetch.state, "failed");
+  assert.match((start!.fetch as { error: string }).error, /no answer from origin within 20s/);
+  const [tone, text] = cleanStartNote(start!);
+  assert.equal(tone, "warning");
+  assert.match(text, /no answer from origin within 20s/, "the thread is told what actually happened");
 });
 
 test("a repository with no remote still gets its local default branch", async (t) => {

@@ -525,6 +525,8 @@ thread in a project asks where it should run, and offers to remember the answer:
   The fetch takes one branch, not the whole remote, and is bounded at 20s (a healthy no-op
   fetch of this project measures 1.2s to 1.4s). One repository's fetch counts as fresh for a
   minute, so a dispatch of eight threads in one project pays for one round trip, not eight.
+  A fetch that *failed* is not remembered: the next thread tries again, because a blip of one
+  second must not decide where the next seven agents start.
   **A fetch that fails never stops the worktree.** Offline, no credentials, a remote that is
   down: the worktree is branched from the refs that are here and the thread gets a warning
   naming the ref and the commit it really got. An agent that starts stale and knows it can

@@ -65,6 +65,9 @@ const FETCH_TIMEOUT_MS = 20_000;
  * path the operator waits on is a delay they feel. One fetch a minute leaves a
  * worktree at most a minute behind the remote, against the two days this
  * replaces.
+ *
+ * This is the window for a fetch that *worked*. A fetch that failed is not
+ * remembered at all — see `fetchOrigin`.
  */
 const FETCH_FRESH_MS = 60_000;
 
@@ -77,7 +80,11 @@ export type FetchOutcome =
   | { state: "failed"; error: string };
 
 /** In-flight and recent fetches, by repo root. Also deduplicates a dispatch:
- *  eight threads in one project share the one fetch. */
+ *  eight threads in one project share the one fetch.
+ *
+ *  One entry per repository a daemon has ever dispatched into, which is a
+ *  handful, so nothing evicts a good one before `FETCH_FRESH_MS` retires it in
+ *  place. A failed one is deleted, so a blip is never remembered. */
 const fetches = new Map<string, { at: number; done: Promise<FetchOutcome> }>();
 
 /**
@@ -106,10 +113,24 @@ async function fetchOrigin(root: string): Promise<FetchOutcome> {
     const ref = await remoteDefaultRef(root);
     const name = ref?.replace(/^origin\//, "");
     const args = ["fetch", "--no-tags", "--quiet", "origin", ...(name ? [name] : [])];
+    const started = Date.now();
     const r = await gitTry(root, args, FETCH_TIMEOUT_MS);
-    return r.ok ? { state: "fetched" } : { state: "failed", error: r.err };
+    if (r.ok) return { state: "fetched" };
+    // A remote that says nothing leaves git nothing to complain about, so the
+    // budget has to name itself. Without this the thread reads "the fetch from
+    // origin failed (git failed)", which tells it nothing it can act on.
+    const quiet = Date.now() - started >= FETCH_TIMEOUT_MS;
+    return { state: "failed", error: quiet ? `no answer from origin within ${FETCH_TIMEOUT_MS / 1000}s` : r.err };
   })();
   fetches.set(root, { at: Date.now(), done });
+  // A fetch that worked is remembered for a minute. A fetch that failed is
+  // forgotten the moment it settles, so the next thread tries again: a blip
+  // that lasted a second must not decide where the next seven agents start,
+  // and that is #76 in miniature. The entry is removed only once it settles,
+  // so threads created together still share the one attempt. A remote that is
+  // really down is therefore retried once per thread — each bounded by
+  // `FETCH_TIMEOUT_MS`, and each of those threads is told in its first line.
+  void done.then((r) => { if (r.state === "failed" && fetches.get(root)?.done === done) fetches.delete(root); });
   return done;
 }
 
