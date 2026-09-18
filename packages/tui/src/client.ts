@@ -138,15 +138,23 @@ export class MachineClient {
     const ws = new WebSocket(url.toString(), { handshakeTimeout: 8000 });
     this.ws = ws;
     ws.on("open", async () => {
-      this.attempt = 0;
-      this.everConnected = true;
-      this.expectingRestart = false;
-      this.lastError = null;
       try {
         this.info = await this.rpc("hello", { protocolVersion: PROTOCOL_VERSION, client: USER_CLIENT });
+        // The budget resets here, not when the socket opens: a socket that
+        // opens is not a machine that answered. A daemon a protocol version
+        // behind opens every socket and refuses every hello, and a budget that
+        // reset on `open` would never run out on it.
+        this.attempt = 0;
+        this.everConnected = true;
+        this.expectingRestart = false;
+        this.lastError = null;
         this.setState("connected");
         await this.resubscribe();
       } catch (e: any) {
+        // When the socket went first, `onClose` has already said what happens
+        // next. Do not paint "error" over the "offline" it settled on, because
+        // then the row would claim a dial that nobody is making.
+        if (this.state === "offline") return;
         this.setState("error", e.message);
         ws.close();
       }
@@ -173,7 +181,11 @@ export class MachineClient {
     // one thing to say, and saying both would paint the row twice.
     if (this.attempt >= budget) { this.giveUp(budget); return; }
     if (this.state !== "error") this.setState("disconnected");
-    const delay = this.backoff[Math.min(this.attempt - 1, this.backoff.length - 1)]!;
+    // `attempt - 1` because the dial has already been counted. It is 0 only
+    // just after a connection that worked, and there the wait is the first
+    // delay rather than none: `backoff[-1]` is `undefined`, which `setTimeout`
+    // reads as "now".
+    const delay = this.backoff[Math.min(Math.max(this.attempt - 1, 0), this.backoff.length - 1)]!;
     this.timer = setTimeout(() => this.connect(), delay);
   }
 
@@ -315,5 +327,8 @@ export class MachineClient {
  * no, and the reader needs the words.
  */
 function isSilence(message: string): boolean {
+  // A bare "disconnected" is the socket going away before `hello` was answered,
+  // which is silence with extra steps and says less than the count does.
+  if (message === "disconnected") return true;
   return /ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|handshake has timed out|socket hang up/i.test(message);
 }
