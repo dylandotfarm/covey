@@ -85,6 +85,36 @@ export function contrastRatio(a: string, b: string): number {
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
 }
 
+/**
+ * Every background a sidebar row is painted on: the terminal's own paint, and
+ * the tint under the cursor. A row's marks have to be legible on both, and the
+ * cursor row is the harder of the two — `T.selection` lifts the floor without
+ * lifting the dim tiers with it.
+ */
+export const SIDEBAR_ROW_SURFACES = ["#000000", T.selection] as const;
+
+/**
+ * The colour of a machine's mark in the sidebar, by connection state.
+ *
+ * `offline` is deliberately not dim. The first version of it used `T.faint`,
+ * which `theme.test.ts` measures at 1.49:1 on the cursor row — the same
+ * unreadable number the selection defect was reported for (#70). A machine the
+ * client has given up on is the one a reader most needs to find, so it takes a
+ * neutral grey that clears the bar on both surfaces: grey because giving up is
+ * not an error, legible because it is the state that asks for an answer.
+ *
+ * Takes a `string` rather than `ConnState` for the same reason `statusColor`
+ * does: the palette stays free of the rest of the program.
+ */
+export function connColor(conn: string): string {
+  switch (conn) {
+    case "connected": return T.success;
+    case "connecting": return T.warning;
+    case "offline": return T.muted;
+    default: return T.danger;
+  }
+}
+
 export function statusColor(status: string, pulse: boolean): string {
   switch (status) {
     case "running": case "starting": return pulse ? T.info : T.working;
