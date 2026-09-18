@@ -263,8 +263,12 @@ export interface Project {
 
 /**
  * Where a new thread does its work.
- *  - `worktree-default`: a fresh `git worktree` branched from the repo's
- *    default branch (`origin/HEAD`, else main/master) — a clean start.
+ *  - `worktree-default`: a fresh `git worktree` branched from `origin/<default
+ *    branch>`, after a fetch — a clean start. Work is pushed to `origin` and
+ *    reviewed there, so `origin` is the truth about what the default branch
+ *    is, and the local branch of that name is one machine's stale opinion of
+ *    it. A repo with no remote falls back to a local main/master; a fetch that
+ *    fails branches from what is here and says so in the thread.
  *  - `worktree-head`: a fresh worktree branched from whatever is checked out
  *    now, so work in progress carries over (committed work, not the dirty tree).
  *  - `checkout`: the project directory itself, shared with every other thread.
@@ -278,7 +282,8 @@ export interface ProjectGit {
   root: string | null;
   /** Branch checked out in the project directory; null when HEAD is detached. */
   currentBranch: string | null;
-  /** Ref to branch from for `worktree-default` ("main", "origin/main", …). */
+  /** Ref to branch from for `worktree-default`: `origin/main` whenever a remote
+   *  has a default branch, else the local "main"/"master". */
   defaultBranch: string | null;
   /** False in a repo with no commits yet, where worktrees cannot be created. */
   hasCommits: boolean;

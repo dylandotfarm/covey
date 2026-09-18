@@ -76,6 +76,14 @@ before(async () => {
   for (const r of [repoA, repoB]) {
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: r });
     execFileSync("git", ["remote", "add", "origin", "git@github.com:example/shared.git"], { cwd: r });
+    // That URL is here for `repositoryIdentity`, which only reads it. Since #76
+    // a `worktree-default` thread *fetches* `origin`, and this file creates one
+    // below, so without this line `pnpm test` opens an ssh connection to
+    // github.com — measured, 0.7s and a real authentication. A test reaches no
+    // network. `false` as the ssh command fails the fetch here on the machine,
+    // which is the case the clean-start path already handles: branch from what
+    // is here and tell the thread.
+    execFileSync("git", ["config", "core.sshCommand", "false"], { cwd: r });
     writeFileSync(join(r, "README.md"), "hello\n");
     // a real commit: worktrees (and checkpoints) need a HEAD to branch from
     execFileSync("git", ["add", "README.md"], { cwd: r });

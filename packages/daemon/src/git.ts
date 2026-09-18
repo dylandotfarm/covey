@@ -7,9 +7,9 @@ import type { ProjectGit } from "@covey/protocol";
 const run = promisify(execFile);
 
 /** Like `git()`, but keeps git's own complaint so it can be shown to the user. */
-async function gitTry(cwd: string, args: string[]): Promise<{ ok: true; out: string } | { ok: false; err: string }> {
+async function gitTry(cwd: string, args: string[], timeout = 10_000): Promise<{ ok: true; out: string } | { ok: false; err: string }> {
   try {
-    const { stdout } = await run("git", args, { cwd, timeout: 10_000 });
+    const { stdout } = await run("git", args, { cwd, timeout });
     return { ok: true, out: stdout.trim() };
   } catch (e: any) {
     const text = String(e?.stderr ?? e?.message ?? e).trim();
@@ -51,22 +51,152 @@ export async function repoRoot(cwd: string): Promise<string | null> {
 }
 
 /**
- * The ref a "clean start" worktree branches from: whatever `origin/HEAD` points
- * at if the remote's default is known locally, else a local main/master.
- * Returned as the ref to pass to git, so the UI can show `origin/main` honestly
- * when that is what we would use.
+ * How long a fetch on the clean-start path gets before we give up and branch
+ * from the refs that are already here. A no-op fetch of this project over the
+ * network measures 1.2s to 1.4s, so the budget is more than ten times a
+ * healthy fetch. It bounds the one case that has no bound of its own: a remote
+ * that accepts the connection and then says nothing.
+ */
+const FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * How long one repository's fetch counts as fresh. A dispatch makes six or
+ * eight threads in the same project within a few seconds, and 1.3s each on the
+ * path the operator waits on is a delay they feel. One fetch a minute leaves a
+ * worktree at most a minute behind the remote, against the two days this
+ * replaces.
+ *
+ * This is the window for a fetch that *worked*. A fetch that failed is not
+ * remembered at all — see `fetchOrigin`.
+ */
+const FETCH_FRESH_MS = 60_000;
+
+/** What the fetch before a clean start did. */
+export type FetchOutcome =
+  | { state: "fetched" }
+  /** No `origin`, so there is nothing to be behind. */
+  | { state: "no-remote" }
+  /** Offline, no credentials, a remote that is down. git's own complaint. */
+  | { state: "failed"; error: string };
+
+/** In-flight and recent fetches, by repo root. Also deduplicates a dispatch:
+ *  eight threads in one project share the one fetch.
+ *
+ *  One entry per repository a daemon has ever dispatched into, which is a
+ *  handful, so nothing evicts a good one before `FETCH_FRESH_MS` retires it in
+ *  place. A failed one is deleted, so a blip is never remembered. */
+const fetches = new Map<string, { at: number; done: Promise<FetchOutcome> }>();
+
+/**
+ * The remote's default branch, as a ref this machine can resolve: `origin/HEAD`
+ * first, then the usual names. An `origin/HEAD` can outlive the branch it
+ * names, so each candidate is verified rather than believed.
+ */
+async function remoteDefaultRef(root: string): Promise<string | null> {
+  const head = await git(root, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  const named = head?.startsWith("origin/") ? [head.replace(/^origin\//, "")] : [];
+  for (const b of [...named, "main", "master"]) {
+    if (await git(root, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${b}`])) return `origin/${b}`;
+  }
+  return null;
+}
+
+/** Bring `origin` up to date, or say why we could not. Never throws. */
+async function fetchOrigin(root: string): Promise<FetchOutcome> {
+  if (!(await git(root, ["remote", "get-url", "origin"]))) return { state: "no-remote" };
+  const hit = fetches.get(root);
+  if (hit && Date.now() - hit.at < FETCH_FRESH_MS) return hit.done;
+  const done = (async (): Promise<FetchOutcome> => {
+    // One branch when we can name it, which is every repo that has ever
+    // fetched; the whole remote only for one that has a remote and no refs
+    // from it yet.
+    const ref = await remoteDefaultRef(root);
+    const name = ref?.replace(/^origin\//, "");
+    const args = ["fetch", "--no-tags", "--quiet", "origin", ...(name ? [name] : [])];
+    const started = Date.now();
+    const r = await gitTry(root, args, FETCH_TIMEOUT_MS);
+    if (r.ok) return { state: "fetched" };
+    // A remote that says nothing leaves git nothing to complain about, so the
+    // budget has to name itself. Without this the thread reads "the fetch from
+    // origin failed (git failed)", which tells it nothing it can act on.
+    const quiet = Date.now() - started >= FETCH_TIMEOUT_MS;
+    return { state: "failed", error: quiet ? `no answer from origin within ${FETCH_TIMEOUT_MS / 1000}s` : r.err };
+  })();
+  fetches.set(root, { at: Date.now(), done });
+  // A fetch that worked is remembered for a minute. A fetch that failed is
+  // forgotten the moment it settles, so the next thread tries again: a blip
+  // that lasted a second must not decide where the next seven agents start,
+  // and that is #76 in miniature. The entry is removed only once it settles,
+  // so threads created together still share the one attempt. A remote that is
+  // really down is therefore retried once per thread — each bounded by
+  // `FETCH_TIMEOUT_MS`, and each of those threads is told in its first line.
+  void done.then((r) => { if (r.state === "failed" && fetches.get(root)?.done === done) fetches.delete(root); });
+  return done;
+}
+
+/**
+ * The ref a "clean start" worktree branches from. Work is pushed to `origin`
+ * and reviewed there, so `origin` is the truth about what the default branch
+ * is; the local branch of the same name is one machine's opinion of it, and on
+ * a machine that dispatches agents it is a stale one, because nobody pulls a
+ * checkout they only ever branch from. So: `origin/<default>` whenever a
+ * remote has one, and a local main/master only for a repo with no remote.
+ *
+ * Reads refs and nothing else. `gitInfo` calls it on every project read, which
+ * is why the fetch lives in `cleanStartBase` and not here.
  */
 export async function defaultBranchRef(cwd: string): Promise<string | null> {
   const root = (await repoRoot(cwd)) ?? cwd;
-  const origin = await git(root, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
-  if (origin) {
-    const local = origin.replace(/^origin\//, "");
-    return (await git(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${local}`])) ? local : origin;
-  }
+  const remote = await remoteDefaultRef(root);
+  if (remote) return remote;
   for (const b of ["main", "master"]) {
     if (await git(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${b}`])) return b;
   }
   return null;
+}
+
+/** Where a clean-start worktree begins, and how fresh that is. */
+export interface CleanStart {
+  /** The ref to branch from: `origin/main`, or `main` in a repo with no remote. */
+  ref: string;
+  /** The commit the ref pointed at, abbreviated, so a thread can say where it started. */
+  commit: string;
+  fetch: FetchOutcome;
+}
+
+/**
+ * The base for a `worktree-default` worktree: fetch `origin`, then resolve its
+ * default branch. Without the fetch the ref is only as fresh as the last time
+ * somebody typed `git pull`, which is the same defect wearing a different hat.
+ *
+ * A fetch that fails does not stop the worktree. The caller branches from what
+ * is here and reports `fetch`, because an agent that starts stale and knows it
+ * can merge the default branch first, and an agent that cannot start does
+ * nothing at all.
+ */
+export async function cleanStartBase(cwd: string): Promise<CleanStart | null> {
+  const root = (await repoRoot(cwd)) ?? cwd;
+  const fetch = await fetchOrigin(root);
+  const ref = await defaultBranchRef(root);
+  if (!ref) return null;
+  const commit = await git(root, ["rev-parse", "--short", ref]);
+  if (!commit) return null;
+  return { ref, commit, fetch };
+}
+
+/**
+ * The one line a clean-start thread gets in its transcript. It names the ref
+ * and the commit, so the thread can say where it started; a fetch that failed
+ * makes it a warning, because that is the case where the thread has to act.
+ */
+export function cleanStartNote(start: CleanStart): ["info" | "warning", string] {
+  const at = `Branched from ${start.ref} at ${start.commit}`;
+  if (start.fetch.state === "failed") {
+    const merge = start.ref.replace(/^origin\//, "");
+    return ["warning", `${at}, but the fetch from origin failed (${start.fetch.error}), so ${start.ref} is only as fresh as the last fetch that worked. Merge ${merge} before you start if the work has to land on it.`];
+  }
+  if (start.fetch.state === "no-remote") return ["info", `${at}. The repository has no remote, so ${start.ref} is all there is.`];
+  return ["info", `${at}, fetched from origin just now.`];
 }
 
 /** Branch state of a project directory, read fresh — branches move under us. */
@@ -101,7 +231,10 @@ export async function createWorktree(
     const ignore = join(root, ".covey", ".gitignore");
     if (!existsSync(ignore)) writeFile(ignore, "*\n");
   } catch { /* best effort; worktree creation is what matters */ }
-  const r = await gitTry(root, ["worktree", "add", "-b", branch, path, base]);
+  // `--no-track`: branching from `origin/main` would otherwise make it the new
+  // branch's upstream, and `git push` under push.default=simple refuses a
+  // branch whose upstream has another name.
+  const r = await gitTry(root, ["worktree", "add", "--no-track", "-b", branch, path, base]);
   if (!r.ok) return { error: r.err };
   return { path, branch };
 }
