@@ -127,7 +127,8 @@ packages/protocol   wire types shared by daemon and TUI
 packages/daemon     per-machine daemon: SQLite, Claude SDK sessions, WebSocket server, tailscale auth
 packages/tui        Ink (React) terminal client
 packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart | stop
-bin/covey           launcher that setup links onto your PATH; runs its own checkout
+bin/covey           launcher that setup links onto your PATH; runs its own checkout,
+                    waits for it, and puts the terminal back however it died
 scripts/setup.mjs   one command from a clone: install, build, link the launcher
 docs/DESIGN.md      architecture and the reasoning behind it
 ```
