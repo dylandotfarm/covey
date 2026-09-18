@@ -180,10 +180,16 @@ test("a client killed by a signal kills the launcher the same way", () => {
  * the terminal under a client that is still running.
  */
 test("ctrl+c reaches the client, and the launcher waits for it", { skip: noPty }, () => {
-  const scenario = 'const fs=require("fs");fs.writeSync(1,"CHILD-UP\\n");'
+  // The marker comes last, after the handler: it is the client saying it is
+  // ready for the signal. Written first, a loaded machine can deliver the
+  // SIGINT into the gap before the handler exists, and node's default action
+  // kills the client — a race in the test, which read as a fault in the
+  // launcher.
+  const scenario = 'const fs=require("fs");'
     + 'process.on("SIGINT",()=>{fs.writeSync(1,"CHILD-GOT-SIGINT\\n");'
     + 'setTimeout(()=>{fs.writeSync(1,"CHILD-EXITING\\n");process.exit(0);},300);});'
-    + "setTimeout(()=>{fs.writeSync(1,\"CHILD-RAN-ON\\n\");process.exit(7);},8000);";
+    + 'setTimeout(()=>{fs.writeSync(1,"CHILD-RAN-ON\\n");process.exit(7);},8000);'
+    + 'fs.writeSync(1,"CHILD-UP\\n");';
   const r = inPty(scenario, { signal: "INT", after: "CHILD-UP" });
   assert.ok(r.out.includes("CHILD-GOT-SIGINT"),
     `the client never got the SIGINT: the launcher took ctrl+c away from it.\n${show(r)}`);
