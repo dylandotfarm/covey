@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import { KNOWN_MODELS, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
 import type { AppState, MachineState, SidebarRow, ThreadTally } from "../store.js";
 import { liveThreads, byRecency, tallyThreads, permissionModeLabel, workspaceModeLabel } from "../store.js";
-import { T, statusColor } from "../theme.js";
+import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { buildLine, buildSkew } from "../build.js";
 
@@ -76,7 +76,10 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
     <>
       <Text wrap="truncate">
         <Text color={T.text} bold>{(info?.name ?? m.saved.name).toUpperCase()}</Text>
-        <Text color={m.conn === "connected" ? T.success : m.conn === "connecting" ? T.warning : T.danger}>  {m.conn}</Text>
+        {/* The same colour the row uses, from the same place: the pane that
+            explains `offline` must not paint it as the error the row says it
+            is not. Every other state keeps the colour it had. */}
+        <Text color={connColor(m.conn)}>  {m.conn}</Text>
         {/* The reason belongs beside the word, not a pane away: "offline"
             alone reads like a verdict, and a bad token is a different job
             from a machine that is off. */}
