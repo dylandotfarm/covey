@@ -304,6 +304,9 @@ const HELP: [string, string][] = [
   ["sidebar", ""],
   ["  ↑/↓ j/k", "move — what you land on is shown on the right"],
   ["  enter", "open thread / fold project or archive / machine panel"],
+  ["  →/←", "unfurl / furl — ← on a nested thread goes to the one above it"],
+  ["", "  ◇ marks a thread a program started, not you"],
+  ["", "  a furled group still shows a child that failed or is waiting"],
   ["  n", "new thread (asks worktree vs. checkout in a git repo)"],
   ["  N", "new thread in a worktree branched from HEAD"],
   ["  a", "add project — browse dirs, ctrl+n makes a new folder"],
@@ -353,5 +356,5 @@ const HELP: [string, string][] = [
   ["  click", "sidebar: open that row, as enter would"],
   ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
   ["  alt+click", "reveal the file, or open the URL (ctrl+click does it too)"],
-  ["  wheel", "scroll a line · +alt a page · sidebar: move the cursor"],
+  ["  wheel", "scroll the conversation · +alt a page · over a list, move in it"],
 ];

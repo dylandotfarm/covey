@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import {
-  PROTOCOL_VERSION, isPush, type RpcMethods, type RpcMethodName, type WireFromDaemon, type PushMessage,
+  PROTOCOL_VERSION, USER_CLIENT, isPush, type RpcMethods, type RpcMethodName, type WireFromDaemon, type PushMessage,
   type MachineInfo, type ShellSnapshot, type ShellEvent, type ThreadEvent, type SavedMachine, type CommandEnvelope, type Command,
   type MachineUpdate,
 } from "@covey/protocol";
@@ -143,7 +143,7 @@ export class MachineClient {
       this.expectingRestart = false;
       this.lastError = null;
       try {
-        this.info = await this.rpc("hello", { protocolVersion: PROTOCOL_VERSION, client: "covey-tui" });
+        this.info = await this.rpc("hello", { protocolVersion: PROTOCOL_VERSION, client: USER_CLIENT });
         this.setState("connected");
         await this.resubscribe();
       } catch (e: any) {

@@ -298,6 +298,37 @@ export type SessionStatus =
   | "interrupted"
   | "error";
 
+/**
+ * The `client` name the TUI gives at `hello`. It is the one client a person
+ * types into, so a thread that any other connection creates is machinery
+ * unless the command itself says otherwise. Self-declared — see `ThreadOrigin`.
+ */
+export const USER_CLIENT = "covey-tui";
+
+/**
+ * Who asked for a thread.
+ *
+ * `client` is self-declared: a connection states its name at `hello` and the
+ * daemon has no way to check it. This is a hint for the person reading the
+ * sidebar, and never a security boundary. Do not put a permission on top of it.
+ */
+export interface ThreadOrigin {
+  /** `agent` means a program asked for this thread, and not a person. */
+  by: "user" | "agent";
+  /** The name the connection that created the thread gave at `hello`. */
+  client?: string;
+  /**
+   * The thread that started this one, on the same machine. The sidebar paints
+   * a child under its parent. A parent the sidebar cannot find is ignored, and
+   * the child stays a top-level row: a thread is never hidden by a link that
+   * leads nowhere.
+   *
+   * A caller sets this. The daemon cannot work out which thread a program
+   * speaks for, so a program that starts a thread must say so itself.
+   */
+  parentThreadId?: ThreadId;
+}
+
 export interface Thread {
   id: ThreadId;
   projectId: ProjectId;
@@ -309,6 +340,12 @@ export interface Thread {
    * Absent on threads created before auto-titling existed.
    */
   titleAuto?: boolean;
+  /**
+   * Who asked for this thread. Absent on every thread created before this
+   * existed, and on a thread whose creator named no client — the same rule
+   * `titleAuto` follows, so an old thread keeps working and paints as it did.
+   */
+  origin?: ThreadOrigin;
   provider: ProviderName;
   /** SDK session id — minted client-side before the first turn. */
   sessionId: string;
@@ -1048,6 +1085,13 @@ export type Command =
       streaming?: boolean;
       /** Omitted = the project's `defaultWorkspaceMode`, else `checkout`. */
       workspaceMode?: WorkspaceMode;
+      /**
+       * Who to record as the creator. A caller that knows better than its own
+       * client name says so here — the TUI dispatches a run member, and that
+       * thread is machinery even though a person's client asked for it.
+       * Omitted = the daemon reads the name the connection gave at `hello`.
+       */
+      origin?: ThreadOrigin;
     }
   | { type: "thread.rename"; threadId: ThreadId; title: string }
   | { type: "thread.archive"; threadId: ThreadId; archived: boolean }

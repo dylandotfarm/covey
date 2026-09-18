@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseMouse, wheelDelta, isMouseInput, copyToClipboard } from "./mouse.js";
+import { parseMouse, wheelDelta, isMouseInput, copyToClipboard, countClick, MULTI_CLICK_MS, MULTI_CLICK_SLOP } from "./mouse.js";
 
 // Ink strips exactly one leading ESC before handing the sequence to useInput,
 // so the common case has no ESC on the first event but does on the rest.
@@ -120,4 +120,55 @@ test("OSC 52 emits bare base64, including inside tmux", () => {
   assert.equal(writes[1], expected);
 
   if (prev === undefined) delete process.env.TMUX; else process.env.TMUX = prev;
+});
+
+// ---- click counting ---------------------------------------------------------
+//
+// The clock is an argument, so every case here states its own timing. Nothing
+// in this block depends on how fast the machine runs it.
+
+test("a press on its own is one click", () => {
+  const [ev] = parseMouse("[<0;10;5M");
+  assert.equal(countClick(null, ev!, 1_000).count, 1);
+});
+
+test("a second press soon and near counts two, a third counts three", () => {
+  const [ev] = parseMouse("[<0;10;5M");
+  const one = countClick(null, ev!, 1_000);
+  const two = countClick(one, ev!, 1_100);
+  const three = countClick(two, ev!, 1_200);
+  assert.deepEqual([one.count, two.count, three.count], [1, 2, 3]);
+});
+
+test("a fourth press starts the run again, since nothing is larger than a line", () => {
+  const [ev] = parseMouse("[<0;10;5M");
+  let run = countClick(null, ev!, 1_000);
+  for (const at of [1_100, 1_200, 1_300]) run = countClick(run, ev!, at);
+  assert.equal(run.count, 1);
+});
+
+test("a press past the window is a new click, whatever it lands on", () => {
+  const [ev] = parseMouse("[<0;10;5M");
+  const first = countClick(null, ev!, 1_000);
+  assert.equal(countClick(first, ev!, 1_000 + MULTI_CLICK_MS).count, 2, "the window is inclusive");
+  assert.equal(countClick(first, ev!, 1_000 + MULTI_CLICK_MS + 1).count, 1);
+});
+
+test("a press the slop allows still counts, one further away does not", () => {
+  const first = countClick(null, parseMouse("[<0;10;5M")[0]!, 1_000);
+  const near = parseMouse(`[<0;${10 + MULTI_CLICK_SLOP};5M`)[0]!;
+  const far = parseMouse(`[<0;${10 + MULTI_CLICK_SLOP + 1};5M`)[0]!;
+  assert.equal(countClick(first, near, 1_050).count, 2);
+  assert.equal(countClick(first, far, 1_050).count, 1);
+  // A row apart is a different line, and a different word.
+  const below = parseMouse("[<0;10;7M")[0]!;
+  assert.equal(countClick(first, below, 1_050).count, 1);
+});
+
+test("the run remembers where it was, so the next press measures from there", () => {
+  const first = countClick(null, parseMouse("[<0;10;5M")[0]!, 1_000);
+  const second = countClick(first, parseMouse("[<0;11;5M")[0]!, 1_050);
+  assert.deepEqual([second.col, second.row, second.at], [11, 5, 1_050]);
+  // Column 12 is two from the first press but one from the second.
+  assert.equal(countClick(second, parseMouse("[<0;12;5M")[0]!, 1_100).count, 3);
 });

@@ -86,6 +86,14 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
   const send = (m: WireFromDaemon) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
   const subs = new Map<string, () => void>();
   let subCounter = 0;
+  /**
+   * The name this connection gave at `hello`. It says whether a person or a
+   * program creates the threads that follow, so it is kept for the life of the
+   * connection instead of being read once and thrown away. Self-declared: the
+   * daemon cannot check it, so nothing that must not be spoofable may rest on
+   * it (`ThreadOrigin`).
+   */
+  let clientName = "";
 
   const rpc = async (req: RpcRequest): Promise<RpcResponse> => {
     try {
@@ -102,6 +110,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
     switch (req.method) {
       case "hello":
         if (p.protocolVersion !== PROTOCOL_VERSION) throw new EngineError("protocol", `daemon speaks v${PROTOCOL_VERSION}, client v${p.protocolVersion}`);
+        clientName = typeof p.client === "string" ? p.client : "";
         return engine.machine;
       case "shell.snapshot":
         return engine.shellSnapshot();
@@ -144,7 +153,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
         subs.delete(p.subscriptionId);
         return null;
       case "command": {
-        const seq = await engine.dispatch(p);
+        const seq = await engine.dispatch(p, clientName);
         return { commandId: p.commandId, ok: true, seq };
       }
       case "thread.export":

@@ -4,7 +4,9 @@ import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
+  ThreadOrigin,
 } from "@covey/protocol";
+import { USER_CLIENT } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
@@ -191,15 +193,21 @@ export class Engine {
 
   // ---- commands -------------------------------------------------------------
 
-  async dispatch(cmd: CommandEnvelope): Promise<number> {
+  /**
+   * `client` is the name the calling connection gave at `hello`. The server
+   * keeps it for the life of the connection and hands it back here, because it
+   * is what says whether a person or a program asked for a thread. It is
+   * self-declared and unverifiable — a hint for a reader, never a permission.
+   */
+  async dispatch(cmd: CommandEnvelope, client = ""): Promise<number> {
     const prior = this.db.receipt(cmd.commandId);
     if (prior !== null) return prior;
-    const seq = await this.apply(cmd);
+    const seq = await this.apply(cmd, client);
     this.db.putReceipt(cmd.commandId, seq);
     return seq;
   }
 
-  private async apply(cmd: Command): Promise<number> {
+  private async apply(cmd: Command, client = ""): Promise<number> {
     const now = new Date().toISOString();
     // Any command about a thread is use of that thread, so the idle clock for
     // its session starts again here — before the command runs, because some of
@@ -271,8 +279,10 @@ export class Engine {
           worktreePath = wt.path; branch = wt.branch;
         }
         const machineMode = this.machine.settings.defaultPermissionMode;
+        const origin = threadOrigin(cmd.origin, client);
         const t: Thread = {
           id: cmd.threadId, projectId: p.id, title: cmd.title ?? "New thread", titleAuto: cmd.title === undefined, provider: "claude",
+          ...(origin ? { origin } : {}),
           sessionId: cmd.sessionId, model: cmd.model ?? p.defaultModel ?? this.machine.settings.defaultModel,
           // The command wins, then the machine's default; only when neither has
           // an opinion do we honour the user's own settings default.
@@ -1214,6 +1224,28 @@ export class Engine {
 function clampSetting(v: number | null, min: number): number | null {
   if (v === null || !Number.isFinite(v)) return null;
   return Math.max(min, Math.floor(v));
+}
+
+/**
+ * What to record about who asked for a thread.
+ *
+ * The command wins. A caller that knows better than its own client name says
+ * so — the TUI dispatches a run member over the same connection a person
+ * types into, and that thread is machinery all the same.
+ *
+ * Otherwise the name the connection gave at `hello` decides: the TUI is the
+ * client a person types into, so every other name is a program. That name is
+ * self-declared and the daemon cannot check it, which makes this a hint for a
+ * reader and never a permission. A connection that named nothing gets no
+ * origin at all, so it behaves exactly as it did before this field existed.
+ */
+export function threadOrigin(explicit: ThreadOrigin | undefined, client: string): ThreadOrigin | undefined {
+  if (explicit) {
+    const name = explicit.client ?? client;
+    return name ? { ...explicit, client: name } : { ...explicit };
+  }
+  if (!client) return undefined;
+  return { by: client === USER_CLIENT ? "user" : "agent", client };
 }
 
 /** Whether covey still owns this thread's title. Threads from before

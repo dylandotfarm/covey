@@ -87,6 +87,57 @@ export function parseMouse(input: string): MouseEvent[] {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Click counting
+// ---------------------------------------------------------------------------
+
+/**
+ * How long after a press a second press still belongs to the same click.
+ *
+ * 400 ms is the middle of what desktop toolkits use — GTK ships 400, Windows
+ * defaults to 500, macOS to about 500 — and it is the number a user's hand is
+ * already trained on. Shorter drops a deliberate double-click from a slow
+ * hand; longer turns two separate clicks on the same word into a word select
+ * the user did not ask for.
+ */
+export const MULTI_CLICK_MS = 400;
+
+/**
+ * How far the pointer may move between the two presses, in cells.
+ *
+ * One cell. A terminal cell is small, and a hand that stays on a word still
+ * reports a column either side of where it started. Any more and a click at
+ * the end of one word joins the click at the start of the next.
+ */
+export const MULTI_CLICK_SLOP = 1;
+
+/** Where and when the last press landed, and how many it has made so far. */
+export interface ClickRun {
+  count: number;
+  col: number;
+  row: number;
+  at: number;
+}
+
+/**
+ * Count a press against the one before it: 1 for a plain click, 2 for a
+ * double, 3 for a triple.
+ *
+ * The clock is an argument rather than a call to `Date.now` inside, so a test
+ * can state the timing it means instead of depending on how fast the machine
+ * runs.
+ */
+export function countClick(prev: ClickRun | null, ev: MouseEvent, now: number): ClickRun {
+  const near = prev != null
+    && Math.abs(ev.col - prev.col) <= MULTI_CLICK_SLOP
+    && Math.abs(ev.row - prev.row) <= MULTI_CLICK_SLOP;
+  const soon = prev != null && now - prev.at >= 0 && now - prev.at <= MULTI_CLICK_MS;
+  // Past three there is nothing larger to select, so a fourth press starts a
+  // new run rather than counting on into nothing.
+  const count = near && soon && prev!.count < 3 ? prev!.count + 1 : 1;
+  return { count, col: ev.col, row: ev.row, at: now };
+}
+
 /**
  * Rows to move for one wheel notch: positive towards the older lines, negative
  * towards the newest. One row a notch, so the scroll follows the hand; a
