@@ -20,7 +20,13 @@
  */
 
 /** 1002 = report drag motion while a button is held; 1006 = SGR coordinates
- *  (required past column 223). */
+ *  (required past column 223).
+ *
+ *  `bin/covey` turns these same modes off after the client dies, because a
+ *  crash that runs no JavaScript (an out-of-memory abort, SIGKILL, a segfault)
+ *  never reaches `disableMouse`. Add a mode here, and add it there too:
+ *  `packages/cli/test/restore.test.ts` compares the two lists and fails when
+ *  they differ. */
 const ENABLE = "\x1b[?1002h\x1b[?1006h";
 const DISABLE = "\x1b[?1002l\x1b[?1006l";
 

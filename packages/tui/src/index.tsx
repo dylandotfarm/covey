@@ -47,7 +47,9 @@ export async function runTui(opts: RunTuiOptions): Promise<RunTuiResult> {
     kittyKeyboard: { mode: "auto", flags: ["disambiguateEscapeCodes", "reportEventTypes"] },
   });
   // Mouse reporting must be switched off even on an abnormal exit, or the
-  // user's shell is left emitting escape codes on every click.
+  // user's shell is left emitting escape codes on every click. This covers
+  // every death the client can see; `bin/covey` covers the rest, because an
+  // abort or a SIGKILL runs none of this.
   const restore = () => { disableMouse(); process.stdout.write("\x1b[?1049l"); };
   process.on("exit", restore);
   for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
