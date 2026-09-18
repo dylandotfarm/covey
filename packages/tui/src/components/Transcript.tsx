@@ -15,7 +15,7 @@ export function applySelection(slice: Line[], first: number, selection: Selectio
     if (idx < from.line || idx > to.line) return l;
     const a = idx === from.line ? colToIndex(l, from.col) : 0;
     const b = idx === to.line ? colToIndex(l, to.col) : lineText(l).length;
-    return highlightLine(l, a, b, T.selection);
+    return highlightLine(l, a, b, T.selectionBg, T.selectionText);
   });
 }
 

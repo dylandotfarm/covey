@@ -1,5 +1,5 @@
 import { questionAnswers, questionAsks, type TimelineItem, type ToolCallItem } from "@covey/protocol";
-import { linkSpans, targetUri, toolLink, type LinkContext } from "./links.js";
+import { linkSpans, targetUri, toolLink, wordAt, type LinkContext } from "./links.js";
 import { T } from "./theme.js";
 
 /**
@@ -22,7 +22,34 @@ export interface Span {
    */
   link?: string;
 }
-export type Line = Span[];
+/**
+ * One painted row.
+ *
+ * A row is not a line of content. `wrapSpans` cuts a paragraph into as many
+ * rows as the pane is narrow, and `wrap` records that it did so — and why —
+ * on the row the break ends. `selectedText` reads it to put the paragraph back
+ * together, so a copy does not carry the pane width onto the clipboard.
+ *
+ * - `"space"`: the wrap broke at a word boundary and ate the space there. Put
+ *   one back to rejoin.
+ * - `"char"`: the wrap broke inside a token too long for one row. Rejoin with
+ *   nothing.
+ * - absent: the break after this row is a real newline in the content.
+ *
+ * A renderer that builds a new array from a wrapped one — the padding of a
+ * user message, the two-space indent of an assistant one — has to carry the
+ * marker across with `withWrap`, or the row it makes claims a break the
+ * content never had.
+ */
+export interface Line extends Array<Span> {
+  wrap?: "space" | "char";
+}
+
+/** Carry `src`'s wrap marker onto a row rebuilt from it. */
+export function withWrap(line: Line, src: Line): Line {
+  if (src.wrap) line.wrap = src.wrap;
+  return line;
+}
 
 export function width(s: string): number {
   // cheap approximation: count code points, wide CJK/emoji as 2
@@ -47,8 +74,11 @@ export function wrapSpans(spans: Span[], w: number, links?: LinkContext): Line[]
   let cur: Line = [];
   let curW = 0;
   const push = (sp: Span) => { cur.push(sp); curW += width(sp.text); };
-  const flush = () => {
+  /** `how` says why this row ends, so a copy can put back what the wrap took
+   *  out: a space at a word break, nothing inside a token. */
+  const flush = (how: Line["wrap"]) => {
     while (cur.length && /^\s+$/.test(cur[cur.length - 1]!.text)) cur.pop();
+    cur.wrap = how;
     lines.push(cur); cur = []; curW = 0;
   };
   for (const sp of spans) {
@@ -56,32 +86,38 @@ export function wrapSpans(spans: Span[], w: number, links?: LinkContext): Line[]
     for (const tok of tokens) {
       const tw = width(tok);
       if (curW + tw <= w) { push({ ...sp, text: tok }); continue; }
-      if (/^\s+$/.test(tok)) { flush(); continue; }
+      if (/^\s+$/.test(tok)) { flush("space"); continue; }
       if (tw > w) {
         // hard-break a very long token
         let rest = tok;
         while (width(rest) > 0) {
           const room = w - curW;
-          if (room <= 0) flush();
+          if (room <= 0) flush("char");
           let take = "";
           for (const ch of rest) { if (width(take + ch) > (w - curW)) break; take += ch; }
           push({ ...sp, text: take });
           rest = rest.slice(take.length);
-          if (width(rest) > 0) flush();
+          if (width(rest) > 0) flush("char");
         }
         continue;
       }
-      flush();
+      flush("space");
       push({ ...sp, text: tok });
     }
   }
   if (cur.length || lines.length === 0) lines.push(cur);
   // trim leading whitespace spans on wrapped lines
-  return lines.map((l, i) => (i === 0 ? l : trimLeading(l)));
+  const out = lines.map((l, i) => (i === 0 ? l : trimLeading(l)));
+  // The last row has nothing left to join to. Text that ends on a column
+  // boundary flushes and leaves `cur` empty, and a marker left there would
+  // claim the *next* paragraph as a continuation of this one.
+  delete out[out.length - 1]!.wrap;
+  return out;
 }
 
 function trimLeading(l: Line): Line {
-  const out = [...l];
+  const out: Line = [...l];
+  withWrap(out, l);
   while (out.length && /^\s+$/.test(out[0]!.text)) out.shift();
   return out;
 }
@@ -113,6 +149,10 @@ export function markdownToLines(text: string, w: number, base: Partial<Span> = {
       const marker = bullet[2] === "-" || bullet[2] === "*" ? "•" : bullet[2]!;
       const lead = " ".repeat(indent) + marker + " ";
       const body = wrapSpans(inline(bullet[3]!, base, links), Math.max(10, w - width(lead)), links);
+      // The wrap marker is deliberately dropped here. Every row of a list item
+      // carries a lead — the marker, then an indent that lines up under it —
+      // so a rejoined item would put that indent in the middle of the
+      // sentence. A list reads as one line per row, and copies that way too.
       body.forEach((l, i) => out.push([{ text: i === 0 ? lead : " ".repeat(width(lead)), color: T.subtle }, ...l]));
       continue;
     }
@@ -170,7 +210,9 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       const body = markdownToLines(item.text, inner, { color: T.text }, o.links);
       const lines: Line[] = body.map((l) => {
         const lw = l.reduce((a, s) => a + width(s.text), 0);
-        return [{ text: "  ", bg: T.userBg }, ...l.map((s) => ({ ...s, bg: T.userBg })), { text: " ".repeat(Math.max(0, inner - lw)) + "  ", bg: T.userBg }];
+        // `withWrap`, because this row replaces the wrapped one: without it the
+        // block padding would hide every soft break in the message.
+        return withWrap([{ text: "  ", bg: T.userBg }, ...l.map((s) => ({ ...s, bg: T.userBg })), { text: " ".repeat(Math.max(0, inner - lw)) + "  ", bg: T.userBg }], l);
       });
       // An attachment reads as a tag — `[shot.png]` — inside the text itself,
       // so it needs no line of its own. The footer stays for a file the text
@@ -186,7 +228,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       return lines;
     }
     case "assistant": {
-      const lines = markdownToLines(item.text, w - 2, { color: T.text }, o.links).map((l) => [{ text: "  " }, ...l]);
+      const lines = markdownToLines(item.text, w - 2, { color: T.text }, o.links).map((l) => withWrap([{ text: "  " }, ...l], l));
       if (item.streaming) { const last = lines[lines.length - 1] ?? []; lines[lines.length - 1] = [...last, { text: "▍", color: T.accent }]; }
       lines.push([]);
       return lines;
@@ -195,7 +237,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       const open = o.expanded.has(item.id);
       const head: Line = [{ text: "  ", }, { text: open ? "▾" : "▸", color: T.subtle }, { text: item.streaming ? " thinking…" : " thought", color: T.subtle, italic: true }];
       if (!open) return [head];
-      return [head, ...markdownToLines(item.text, w - 6, { color: T.subtle, italic: true }, o.links).map((l) => [{ text: "    " }, ...l])];
+      return [head, ...markdownToLines(item.text, w - 6, { color: T.subtle, italic: true }, o.links).map((l) => withWrap([{ text: "    " }, ...l], l))];
     }
     case "tool": {
       const bg = item.background;
@@ -435,13 +477,20 @@ export function indexToCol(line: Line, index: number): number {
   return w;
 }
 
-/** Extract the text covered by a selection, for the clipboard. */
+/**
+ * Extract the text covered by a selection, for the clipboard.
+ *
+ * A row the wrapper broke is joined back to the row after it. The pane width
+ * is a property of the screen, not of the message, so the same selection at
+ * two different widths has to give the same clipboard text — that is the
+ * assertion the whole `Line.wrap` marker exists for.
+ */
 export function selectedText(
   lines: Line[],
   from: { line: number; col: number },
   to: { line: number; col: number },
 ): string {
-  const out: string[] = [];
+  let out = "";
   for (let i = Math.max(0, from.line); i <= to.line && i < lines.length; i++) {
     const l = lines[i]!;
     const text = lineText(l);
@@ -449,14 +498,67 @@ export function selectedText(
     const b = i === to.line ? colToIndex(l, to.col) : text.length;
     // Lines are padded with background spans to draw blocks; that padding is
     // not content, so it never belongs on the clipboard.
-    out.push(text.slice(a, b).replace(/\s+$/, ""));
+    let piece = text.slice(a, b).replace(/\s+$/, "");
+    const wrap = i > from.line ? lines[i - 1]!.wrap : undefined;
+    if (i === from.line) {
+      // nothing to join to
+    } else if (wrap) {
+      // A soft break. Whatever indent the renderer put in front of this row is
+      // decoration — the wrap already dropped the content's own leading space.
+      out += wrap === "space" ? " " : "";
+      piece = piece.replace(/^\s+/, "");
+    } else out += "\n";
+    out += piece;
   }
-  return out.join("\n");
+  // A soft break with nothing after it leaves a space that was never content.
+  return out.replace(/ +$/, "");
 }
 
-/** Paint a background over characters [from, to) of a line, splitting spans. */
-export function highlightLine(line: Line, from: number, to: number, bg: string): Line {
+/**
+ * The word, path or URL under a display column, as a column range.
+ *
+ * This is what a double-click takes. The boundary lives in `links.ts`, beside
+ * the code that already knows what a path looks like.
+ */
+export function wordRangeAt(line: Line, col: number): { from: number; to: number } {
+  const text = lineText(line);
+  const { start, end } = wordAt(text, colToIndex(line, col));
+  return { from: indexToCol(line, start), to: indexToCol(line, end) };
+}
+
+/**
+ * The rows that make up one line of content: the row given, plus every row the
+ * wrap carried it onto, in both directions.
+ *
+ * This is what a triple-click takes. The row under the pointer would be the
+ * wrong answer for the same reason the copy was wrong — a row is a property of
+ * the pane width, and the reader is pointing at a sentence.
+ */
+export function wrappedRun(lines: Line[], index: number): { from: number; to: number } {
+  let from = Math.max(0, Math.min(index, lines.length - 1));
+  let to = from;
+  while (from > 0 && lines[from - 1]!.wrap) from--;
+  while (to < lines.length - 1 && lines[to]!.wrap) to++;
+  return { from, to };
+}
+
+/** The display width of a whole line, which is also its last column. */
+export function lineWidth(line: Line): number {
+  let w = 0;
+  for (const sp of line) w += width(sp.text);
+  return w;
+}
+
+/**
+ * Paint a selection over characters [from, to) of a line, splitting spans.
+ *
+ * `fg` replaces the colour of what it covers rather than painting behind it.
+ * The palette runs from `#f5f5f5` to `#4a4a4a` and holds a yellow for code, so
+ * no single background keeps every tier readable; one foreground does.
+ */
+export function highlightLine(line: Line, from: number, to: number, bg: string, fg?: string): Line {
   if (to <= from) return line;
+  const mark = (sp: Span, text: string): Span => (fg ? { ...sp, text, bg, color: fg, dim: false } : { ...sp, text, bg });
   const out: Line = [];
   let i = 0;
   for (const sp of line) {
@@ -467,7 +569,7 @@ export function highlightLine(line: Line, from: number, to: number, bg: string):
     const a = Math.max(from, start) - start;
     const b = Math.min(to, end) - start;
     if (a > 0) out.push({ ...sp, text: sp.text.slice(0, a) });
-    out.push({ ...sp, text: sp.text.slice(a, b), bg });
+    out.push(mark(sp, sp.text.slice(a, b)));
     if (b < sp.text.length) out.push({ ...sp, text: sp.text.slice(b) });
   }
   return out;
@@ -488,9 +590,9 @@ export function diffToLines(patch: string, w: number): Line[] {
     } else if (raw.startsWith("@@")) {
       out.push([{ text: line, color: T.info }]);
     } else if (raw.startsWith("+")) {
-      out.push([{ text: line.padEnd(w), color: "#b5e8b0", bg: "#173124" }]);
+      out.push([{ text: line.padEnd(w), color: T.diffAdd, bg: T.diffAddBg }]);
     } else if (raw.startsWith("-")) {
-      out.push([{ text: line.padEnd(w), color: "#f2b8b5", bg: "#3a1f1f" }]);
+      out.push([{ text: line.padEnd(w), color: T.diffDel, bg: T.diffDelBg }]);
     } else {
       out.push([{ text: line, color: T.muted }]);
     }
