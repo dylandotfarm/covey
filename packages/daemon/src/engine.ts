@@ -10,7 +10,7 @@ import { USER_CLIENT } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
-import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree } from "./git.js";
+import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
@@ -268,12 +268,20 @@ export class Engine {
         let branch = isGitRepo(p.workspaceRoot) ? await currentBranch(p.workspaceRoot) : null;
         // An explicit choice wins; otherwise the project's remembered default.
         const mode: WorkspaceMode = cmd.workspaceMode ?? p.defaultWorkspaceMode ?? "checkout";
+        // Set for `worktree-default` only, and written into the thread below:
+        // an agent that knows where it started can merge before it works
+        // rather than after it finishes.
+        let cleanStart: CleanStart | null = null;
         if (mode !== "checkout") {
           // A failed worktree is reported, never silently downgraded to the
           // shared checkout: the whole point of asking was isolation.
           if (!isGitRepo(p.workspaceRoot)) throw new EngineError("not_git", "project is not a git repository");
-          const base = mode === "worktree-default" ? await defaultBranchRef(p.workspaceRoot) : "HEAD";
-          if (!base) throw new EngineError("git", "no default branch (origin/HEAD, main or master) to branch from");
+          let base = "HEAD";
+          if (mode === "worktree-default") {
+            cleanStart = await cleanStartBase(p.workspaceRoot);
+            if (!cleanStart) throw new EngineError("git", "no default branch (origin/HEAD, main or master) to branch from");
+            base = cleanStart.ref;
+          }
           const wt = await createWorktree(p.workspaceRoot, cmd.threadId.slice(0, 8), base);
           if ("error" in wt) throw new EngineError("git", `could not create worktree from ${base}: ${wt.error}`);
           worktreePath = wt.path; branch = wt.branch;
@@ -293,6 +301,7 @@ export class Engine {
           lastMessageAt: null, archivedAt: null, pinnedAt: null, movedTo: null, createdAt: now, updatedAt: now,
         };
         this.db.putThread(t);
+        if (cleanStart) this.note(t.id, ...cleanStartNote(cleanStart));
         return this.emitShell({ kind: "thread.upserted", thread: t });
       }
       case "thread.rename": return this.mutateThread(cmd.threadId, (t) => { t.title = cmd.title; t.titleAuto = false; });

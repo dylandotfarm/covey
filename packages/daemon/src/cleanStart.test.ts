@@ -1,0 +1,273 @@
+/**
+ * Where a `worktree-default` worktree starts. Issue #76.
+ *
+ * Measured on the macOS host on 2026-09-18: local `main` at 506def4,
+ * `origin/main` at 774c764, 46 commits apart, and `defaultBranchRef` returned
+ * the local one. Work is pushed to `origin` and reviewed there, so `origin` is
+ * the truth about what the default branch is; every agent dispatched that day
+ * started two days behind and spent a round merging before its work could land.
+ *
+ * Every repository here is a throwaway under `tmpdir`, and every "remote" is a
+ * bare repository beside it. **No test in this file reaches the network**, and
+ * none of them may ever be pointed at a real checkout: they create worktrees
+ * and they fetch, which are real operations on a real repository.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { execFile as execFileCb } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
+import type { MachineInfo, SystemNoteItem } from "@covey/protocol";
+import { cleanStartBase, cleanStartNote, createWorktree, defaultBranchRef } from "./git.js";
+import { Db } from "./db.js";
+import { Engine } from "./engine.js";
+
+const execFile = promisify(execFileCb);
+const git = async (cwd: string, ...args: string[]) => (await execFile("git", args, { cwd })).stdout.trim();
+const head = (cwd: string) => git(cwd, "rev-parse", "--short", "HEAD");
+
+interface Clone {
+  /** The working checkout, standing in for the operator's own. */
+  repo: string;
+  /** Add a commit to the remote's `main`, behind the checkout's back. */
+  moveRemote: (msg: string) => Promise<string>;
+  /** Point `origin` at somewhere that is not there, the way being offline looks. */
+  breakRemote: () => Promise<void>;
+  drop: () => void;
+}
+
+/** A checkout cloned from a bare repository beside it: a remote with no network. */
+async function scratchClone(): Promise<Clone> {
+  const dir = mkdtempSync(join(tmpdir(), "covey-clean-"));
+  const remote = join(dir, "remote.git");
+  await execFile("git", ["init", "-q", "--bare", "-b", "main", remote]);
+
+  const seed = join(dir, "seed");
+  await execFile("git", ["clone", "-q", remote, seed]);
+  await git(seed, "config", "user.email", "test@covey");
+  await git(seed, "config", "user.name", "covey test");
+  const moveRemote = async (msg: string) => {
+    writeFileSync(join(seed, "a.txt"), `${msg}\n`);
+    await git(seed, "add", "-A");
+    await git(seed, "commit", "-qm", msg);
+    await git(seed, "push", "-q", "origin", "main");
+    return head(seed);
+  };
+  await moveRemote("one");
+
+  const repo = join(dir, "repo");
+  await execFile("git", ["clone", "-q", remote, repo]);
+  await git(repo, "config", "user.email", "test@covey");
+  await git(repo, "config", "user.name", "covey test");
+  return {
+    repo,
+    moveRemote,
+    breakRemote: async () => { await git(repo, "remote", "set-url", "origin", join(dir, "gone.git")); },
+    drop: () => rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+/** A repository with one commit and no remote at all. */
+async function scratchRepo(): Promise<{ repo: string; drop: () => void }> {
+  const repo = mkdtempSync(join(tmpdir(), "covey-solo-"));
+  await execFile("git", ["init", "-q", "-b", "main", repo]);
+  await git(repo, "config", "user.email", "test@covey");
+  await git(repo, "config", "user.name", "covey test");
+  writeFileSync(join(repo, "a.txt"), "hello\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "init");
+  return { repo, drop: () => rmSync(repo, { recursive: true, force: true }) };
+}
+
+test("a clean start branches from origin/main, not from the local main behind it", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const ahead = await c.moveRemote("two");
+  await git(c.repo, "fetch", "-q", "origin", "main"); // origin/main is fresh; local main is not
+  const local = await git(c.repo, "rev-parse", "--short", "main");
+  assert.notEqual(local, ahead, "the checkout is behind its remote, which is the case under test");
+
+  assert.equal(await defaultBranchRef(c.repo), "origin/main", "a local main must not win over the remote's");
+
+  const start = await cleanStartBase(c.repo);
+  assert.ok(start, "a clean start has a base");
+  assert.equal(start!.ref, "origin/main");
+  assert.equal(start!.commit, ahead, "branched from what the remote has, not from the local copy");
+
+  const wt = await createWorktree(c.repo, "aaa111", start!.ref);
+  assert.ok(!("error" in wt), JSON.stringify(wt));
+  if ("error" in wt) return;
+  assert.equal(await head(wt.path), ahead, "the worktree itself starts at origin/main");
+});
+
+test("a clean start fetches first, so origin/main is what the remote has now", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const stale = await git(c.repo, "rev-parse", "--short", "origin/main");
+  const ahead = await c.moveRemote("two"); // nobody in the checkout has fetched this
+  assert.notEqual(stale, ahead);
+
+  const start = await cleanStartBase(c.repo);
+  assert.equal(start?.fetch.state, "fetched");
+  assert.equal(start?.commit, ahead, "origin/main was only as fresh as the last fetch");
+
+  const wt = await createWorktree(c.repo, "bbb222", start!.ref);
+  if ("error" in wt) return assert.fail(wt.error);
+  assert.equal(await head(wt.path), ahead);
+});
+
+test("one fetch serves a whole dispatch, and a second thread a second later reuses it", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const first = await cleanStartBase(c.repo);
+  assert.equal(first?.fetch.state, "fetched");
+
+  // The remote moves between two threads of the same dispatch. Within the
+  // freshness window covey does not pay for a second round trip.
+  const ahead = await c.moveRemote("two");
+  const second = await cleanStartBase(c.repo);
+  assert.equal(second?.commit, first?.commit, "a second fetch a moment later is a round trip nobody asked for");
+  assert.notEqual(second?.commit, ahead);
+});
+
+test("a repository with no remote still gets its local default branch", async (t) => {
+  const { repo, drop } = await scratchRepo();
+  t.after(drop);
+  assert.equal(await defaultBranchRef(repo), "main");
+
+  const start = await cleanStartBase(repo);
+  assert.equal(start?.ref, "main");
+  assert.equal(start?.fetch.state, "no-remote");
+  assert.equal(start?.commit, await head(repo));
+
+  const wt = await createWorktree(repo, "ccc333", start!.ref);
+  if ("error" in wt) return assert.fail(wt.error);
+  assert.equal(await head(wt.path), start!.commit);
+});
+
+test("a remote that cannot be reached still gets a worktree, and says it may be behind", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const here = await git(c.repo, "rev-parse", "--short", "origin/main");
+  await c.breakRemote();
+
+  const start = await cleanStartBase(c.repo);
+  assert.ok(start, "an agent that cannot start is worse than one that starts stale and knows it");
+  assert.equal(start!.fetch.state, "failed", "the fetch did not work and must not claim it did");
+  assert.equal(start!.ref, "origin/main");
+  assert.equal(start!.commit, here, "branched from what is here");
+
+  const [tone, text] = cleanStartNote(start!);
+  assert.equal(tone, "warning");
+  assert.match(text, /origin\/main/);
+  assert.match(text, new RegExp(here));
+  assert.match(text, /fetch from origin failed/);
+
+  const wt = await createWorktree(c.repo, "ddd444", start!.ref);
+  assert.ok(!("error" in wt), "the worktree is created anyway");
+});
+
+test("the note names the ref and the commit in every outcome", () => {
+  assert.deepEqual(cleanStartNote({ ref: "origin/main", commit: "774c764", fetch: { state: "fetched" } }), [
+    "info",
+    "Branched from origin/main at 774c764, fetched from origin just now.",
+  ]);
+  const [tone, text] = cleanStartNote({ ref: "main", commit: "506def4", fetch: { state: "no-remote" } });
+  assert.equal(tone, "info");
+  assert.match(text, /Branched from main at 506def4/);
+});
+
+test("worktree-head is untouched: it branches from the checkout, however far behind it is", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const ahead = await c.moveRemote("two");
+  await git(c.repo, "fetch", "-q", "origin", "main");
+  const local = await head(c.repo);
+
+  const wt = await createWorktree(c.repo, "eee555", "HEAD");
+  if ("error" in wt) return assert.fail(wt.error);
+  assert.equal(await head(wt.path), local, "HEAD means HEAD; carrying work over is the point of this mode");
+  assert.notEqual(await head(wt.path), ahead);
+});
+
+test("a branch from origin/main does not take origin/main as its upstream", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const wt = await createWorktree(c.repo, "fff666", "origin/main");
+  if ("error" in wt) return assert.fail(wt.error);
+  // With origin/main as upstream, `git push` under push.default=simple refuses
+  // the branch outright, because the upstream has another name.
+  const upstream = await execFile("git", ["config", "--get", `branch.${wt.branch}.merge`], { cwd: c.repo }).catch(() => null);
+  assert.equal(upstream, null, "the thread's branch tracks nothing");
+});
+
+// ---- the thread is told where it started ------------------------------------
+
+const MACHINE: MachineInfo = {
+  machineId: "m1", name: "mac", os: "darwin", arch: "arm64", homeDir: "/tmp",
+  daemonVersion: "0.0.1", protocolVersion: 1,
+  capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
+  settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
+};
+
+/** An engine over a throwaway database, with one project on `repo`. */
+function engineOn(repo: string) {
+  const dir = mkdtempSync(join(tmpdir(), "covey-clean-db-"));
+  const db = new Db(dir);
+  const engine = new Engine(db, { ...MACHINE });
+  const send = (cmd: any) => engine.dispatch({ ...cmd, commandId: randomUUID() });
+  return { engine, db, send, repo, drop: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
+async function threadNotes(repo: string, mode: string): Promise<{ notes: string[]; tones: string[]; branchedAt: string | null }> {
+  const e = engineOn(repo);
+  try {
+    await e.send({ type: "project.create", workspaceRoot: repo });
+    const projectId = e.engine.shellSnapshot().projects[0]!.id;
+    const threadId = randomUUID();
+    await e.send({ type: "thread.create", projectId, threadId, sessionId: randomUUID(), workspaceMode: mode });
+    const t = e.db.getThread(threadId)!;
+    const items = e.db.listItems(threadId).items.filter((i): i is SystemNoteItem => i.kind === "note");
+    const wt = t.worktreePath;
+    return {
+      notes: items.map((i) => i.text),
+      tones: items.map((i) => i.tone),
+      branchedAt: wt ? await head(wt) : null,
+    };
+  } finally { e.drop(); }
+}
+
+test("a clean-start thread is told the ref and the commit it got", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const ahead = await c.moveRemote("two");
+
+  const { notes, tones, branchedAt } = await threadNotes(c.repo, "worktree-default");
+  assert.equal(branchedAt, ahead, "the thread's own worktree starts at origin/main");
+  assert.equal(notes.length, 1, `expected one note, got ${JSON.stringify(notes)}`);
+  assert.equal(tones[0], "info");
+  assert.equal(notes[0], `Branched from origin/main at ${ahead}, fetched from origin just now.`);
+});
+
+test("a thread whose fetch failed is warned, in its own transcript, that it may be behind", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const here = await git(c.repo, "rev-parse", "--short", "origin/main");
+  await c.breakRemote();
+
+  const { notes, tones, branchedAt } = await threadNotes(c.repo, "worktree-default");
+  assert.equal(branchedAt, here, "the thread started, which is the whole point");
+  assert.equal(tones[0], "warning");
+  assert.match(notes[0]!, new RegExp(`Branched from origin/main at ${here}`));
+  assert.match(notes[0]!, /Merge main before you start/);
+});
+
+test("a worktree-head thread gets no clean-start note, because it made no such claim", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const { notes } = await threadNotes(c.repo, "worktree-head");
+  assert.deepEqual(notes, []);
+});
