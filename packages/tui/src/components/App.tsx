@@ -4,9 +4,9 @@ import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
 import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
-import { diffToLines, selectedText, activityLine, linkAt, truncate } from "../lines.js";
+import { diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
-import { parseMouse, wheelDelta, copyToClipboard, type MouseEvent } from "../mouse.js";
+import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
 import { buildLine, buildSkew } from "../build.js";
@@ -29,6 +29,16 @@ import { T } from "../theme.js";
 const SIDEBAR_W = 34;
 /** Screen row (1-based) of the sidebar list's first line: below the title. */
 const SIDEBAR_TOP = 2;
+/**
+ * How often a selection drag held past the edge of a pane scrolls one row.
+ *
+ * A terminal reports the mouse only while it moves. Hold the pointer still
+ * below the bottom edge and no further event arrives, so the scroll has to
+ * come from a timer rather than from the drag. 60 ms is about sixteen rows a
+ * second: quick enough to cross a screen while the hand waits, slow enough to
+ * stop where the reader means it to.
+ */
+export const DRAG_SCROLL_MS = 60;
 /**
  * How long the sidebar cursor has to sit still before the thread under it is
  * opened. Long enough that holding ↓ through a list costs one subscription
@@ -111,6 +121,17 @@ export function App({ store }: { store: Store }) {
   const [walk, setWalk] = useState<HistoryWalk | null>(null);
   /** Transcript line the mouse went down on, so a click can fold what it hit. */
   const pressedLine = useRef<number | null>(null);
+  /** The last press, so the next one can tell a double click from a click. */
+  const clickRun = useRef<ClickRun | null>(null);
+  /**
+   * The repeating scroll of a selection drag held past a pane's edge, with the
+   * direction it runs in: -1 towards the older lines, +1 towards the newest.
+   * Clearing it on release is not tidying — a timer left running scrolls the
+   * transcript for ever.
+   */
+  const dragScroll = useRef<{ dir: number; timer: ReturnType<typeof setInterval> } | null>(null);
+  /** The latest step, so the timer never calls a stale render's closure. */
+  const dragStep = useRef<(dir: number) => void>(() => {});
 
   const rows = useMemo(() => sidebarRows(state), [state]);
   const cursor = cursorIndex(rows, cursorKey, lastCursor.current);
@@ -808,6 +829,61 @@ export function App({ store }: { store: Store }) {
     return { pane, line, col: Math.max(0, ev.col - 1 - mainX0), exact: rowInBox >= pad && start + (rowInBox - pad) < end };
   }
 
+  // ---- a drag held past the edge --------------------------------------------
+
+  function stopDragScroll() {
+    if (!dragScroll.current) return;
+    clearInterval(dragScroll.current.timer);
+    dragScroll.current = null;
+  }
+
+  /**
+   * One row of drag scrolling, with the selection following the edge that the
+   * scroll uncovers.
+   *
+   * Reads the store rather than `state`: the timer outlives the render that
+   * started it, and `state` is that render's snapshot. `Selection` is anchored
+   * to line indices rather than screen rows, so the part already selected does
+   * not move while the rows under it do.
+   */
+  function dragScrollStep(dir: number) {
+    const live = store.getState();
+    const sel = live.selection;
+    if (!sel?.dragging) { stopDragScroll(); return; }
+    if (sel.pane === "diff") {
+      const bodyH = Math.max(1, transcriptH - 2);
+      const max = Math.max(0, diffLines.length - bodyH);
+      const next = Math.max(0, Math.min(max, (live.diffView?.scroll ?? 0) + dir));
+      store.setDiffScroll(next);
+      const line = dir < 0 ? next : Math.min(Math.max(0, diffLines.length - 1), next + bodyH - 1);
+      store.extendSelection(line, dir < 0 ? 0 : lineWidth(diffLines[line] ?? []));
+      return;
+    }
+    // The transcript stores its scroll from the *bottom*, so the sign flips.
+    const max = Math.max(0, layout.lines.length - transcriptH);
+    const next = Math.max(0, Math.min(max, live.scrollFromBottom - dir));
+    store.setScroll(next);
+    const end = Math.max(0, layout.lines.length - next);
+    const start = Math.max(0, end - transcriptH);
+    const line = dir < 0 ? start : Math.max(start, end - 1);
+    store.extendSelection(line, dir < 0 ? 0 : lineWidth(layout.lines[line] ?? []));
+    if (dir < 0 && next >= max && live.view?.hasMore) void store.loadOlder();
+  }
+  dragStep.current = dragScrollStep;
+
+  function startDragScroll(dir: number) {
+    if (dragScroll.current?.dir === dir) return;
+    stopDragScroll();
+    // Move at once. The event that carried the pointer past the edge should
+    // not wait a whole tick for its first row.
+    dragScrollStep(dir);
+    dragScroll.current = { dir, timer: setInterval(() => dragStep.current(dir), DRAG_SCROLL_MS) };
+  }
+
+  // The button can come up outside the pane, outside the terminal, or never at
+  // all if the app is torn down mid-drag. Stop the timer in every case.
+  useEffect(() => () => stopDragScroll(), []);
+
   /**
    * Open what the pointer is on: reveal a file in the file manager, or send a
    * URL to the browser.
@@ -831,16 +907,53 @@ export function App({ store }: { store: Store }) {
     }
   }
 
-  function copySelection() {
-    const sel = state.selection;
+  /** Copy a selection. The caller passes the one it just made, because
+   *  `state` is the last render's snapshot and does not hold it yet. */
+  function copySelection(selection: Selection | null = state.selection) {
+    const sel = selection;
     if (!sel) return;
     const lines = sel.pane === "diff" ? diffLines : layout.lines;
     const { from, to } = selectionBounds(sel);
     const text = selectedText(lines, from, to);
     if (!text.trim()) return;
-    copyToClipboard(text);
-    const n = to.line - from.line + 1;
+    // The app's own stream, not `process.stdout`: it is the one ink owns, and
+    // in a test it is the one the harness can read.
+    copyToClipboard(text, stdout);
+    const n = text.split("\n").length;
     store.notify(`copied ${n} line${n === 1 ? "" : "s"}`, "success");
+  }
+
+  /**
+   * What a double or a triple click takes.
+   *
+   * Double takes the word under the pointer, where a "word" includes a path:
+   * `packages/tui/src/lines.ts:439` is the thing a reader wants, and a
+   * boundary that stopped at `/` or `.` would make the gesture useless for the
+   * case it is most wanted.
+   *
+   * Triple takes the whole wrapped run rather than the row under the pointer.
+   * A row is a property of the pane width — the same sentence is three rows in
+   * a narrow pane and one in a wide one — so the row would be the wrong unit
+   * for the same reason the copy used to be wrong.
+   */
+  function selectByClickCount(hit: { pane: Selection["pane"]; line: number; col: number }, count: number) {
+    const lines = hit.pane === "diff" ? diffLines : layout.lines;
+    const line = lines[hit.line];
+    if (!line) return;
+    let anchor: Selection["anchor"];
+    let head: Selection["head"];
+    if (count === 2) {
+      const word = wordRangeAt(line, hit.col);
+      if (word.to <= word.from) return;
+      anchor = { line: hit.line, col: word.from };
+      head = { line: hit.line, col: word.to };
+    } else {
+      const run = wrappedRun(lines, hit.line);
+      anchor = { line: run.from, col: 0 };
+      head = { line: run.to, col: lineWidth(lines[run.to]!) };
+    }
+    store.setSelection(hit.pane, anchor, head);
+    copySelection({ pane: hit.pane, anchor, head, dragging: false });
   }
 
   /**
@@ -872,25 +985,55 @@ export function App({ store }: { store: Store }) {
     if (items[0]) store.toggleItem(items[0].id);
   }
 
+  /**
+   * A wheel notch over an overlay moves that list, and only that list.
+   *
+   * The list is windowed on its own cursor, so moving the cursor is what
+   * scrolling means here. Nothing is opened by it: an overlay row is picked
+   * with enter, never by arriving on it.
+   */
+  function scrollOverlay(ev: MouseEvent) {
+    const ov = state.overlay;
+    if (!ov) return;
+    const rows = ov.kind === "pick" ? filterOptions(ov.options, ovFilter).length
+      : ov.kind === "browse" ? browseRows(ov.entries, ovFilter).length
+      : 0;
+    if (rows === 0) return;
+    const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
+    if (delta === 0) return;
+    // A notch up goes towards the first row, which is the lower index.
+    setOvCursor((c) => Math.max(0, Math.min(rows - 1, c - delta)));
+  }
+
   function handleMouse(ev: MouseEvent) {
-    if (state.overlay) return;
+    // An overlay covers the screen, so the conversation behind it is not what
+    // the pointer is on. The wheel still means something there; nothing else
+    // does.
+    if (state.overlay) { if (ev.kind === "wheel") scrollOverlay(ev); return; }
     const inSidebar = sidebarVisible && ev.col <= SIDEBAR_W;
     const inTranscript = ev.row >= TRANSCRIPT_TOP && ev.row < TRANSCRIPT_TOP + transcriptH && !inSidebar;
 
     if (ev.kind === "wheel") {
       // One row a notch, alt for half a page. 0 is a sideways notch, which
-      // nothing here scrolls; it must not take the focus or load older lines
-      // either, so leave before any of that.
+      // nothing here scrolls; it must not load older lines either, so leave
+      // before any of that.
       const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
       if (delta === 0) return;
-      // Over the sidebar the wheel moves the cursor rather than scrolling a
-      // viewport of its own: the cursor is what the window is centred on, and
-      // one source of truth means the preview follows the wheel too.
-      if (inSidebar) {
-        store.setFocus("sidebar");
-        moveCursor(-delta);
-        return;
-      }
+      // Where the pointer is does not choose the target: a scroll anywhere in
+      // the terminal scrolls the conversation that is open. Scrolling is how
+      // you move inside what you are reading, and it must never move you
+      // between things to read.
+      //
+      // The sidebar used to take the notch and move its cursor, and the
+      // cursor opens the thread it lands on — so a notch over the sidebar
+      // opened a conversation nobody asked for. The sidebar has no viewport
+      // of its own to scroll instead; the cursor *is* the window. Giving it
+      // one is a larger change than this defect needs, so for now the sidebar
+      // does not answer the wheel at all, and the notch goes to the
+      // transcript like every other notch.
+      //
+      // A notch also does not call `setFocus`. Scrolling is not a click.
+      //
       // Same rule as `scrollPane`: a chunk holds several notches and is
       // replayed one at a time, so every notch measures from the store rather
       // than from `state`, which is the last render's snapshot and does not
@@ -905,8 +1048,11 @@ export function App({ store }: { store: Store }) {
     }
 
     if (ev.kind === "press") {
+      stopDragScroll();
       store.clearSelection();
       pressedLine.current = null;
+      const run = countClick(clickRun.current, ev, Date.now());
+      clickRun.current = run;
       if (inSidebar) {
         // Sidebar rows are chrome, not content: a click does what the keyboard
         // would — move the cursor there and activate the row — instead of
@@ -929,6 +1075,9 @@ export function App({ store }: { store: Store }) {
           else store.notify("no link here — alt+click a path or a URL");
           return;
         }
+        // A second or a third press selects instead of starting a drag, and
+        // must not fold what the first press already toggled underneath it.
+        if (hit?.exact && run.count >= 2) return selectByClickCount(hit, run.count);
         pressedLine.current = hit?.exact ? hit.line : null;
         if (hit) store.beginSelection(hit.pane, hit.line, hit.col);
         return;
@@ -938,17 +1087,33 @@ export function App({ store }: { store: Store }) {
     }
 
     if (ev.kind === "drag") {
-      const sel = state.selection;
-      if (!sel) return;
+      // The store, not `state`: a press and the drag after it can arrive in
+      // one chunk, and `state` is the snapshot from before either of them.
+      const sel = store.getState().selection;
+      if (!sel) { stopDragScroll(); return; }
+      // Past the top or the bottom edge the drag scrolls instead of pointing.
+      // A selection that could not leave the screen was most of the reason
+      // selecting anything longer than a paragraph was not worth trying.
+      const above = ev.row < TRANSCRIPT_TOP;
+      const below = ev.row >= TRANSCRIPT_TOP + transcriptH;
+      if (above || below) return startDragScroll(above ? -1 : 1);
+      stopDragScroll();
       const hit = hitTest(ev, sel.pane);
       if (hit) store.extendSelection(hit.line, hit.col);
       return;
     }
 
     if (ev.kind === "release") {
+      // The button is up, so nothing is dragging any more. This is the leak:
+      // a release outside the pane used to leave the timer running.
+      stopDragScroll();
       const line = pressedLine.current;
       pressedLine.current = null;
-      if (state.selection?.dragging && store.endSelection()) { copySelection(); return; }
+      // Same rule again. A quick click arrives as one chunk, so at this point
+      // `state.selection` is still null and the selection the press just made
+      // would never be ended — leaving an empty one behind for ever.
+      const sel = store.getState().selection;
+      if (sel?.dragging && store.endSelection()) { copySelection(sel); return; }
       // Press and release on the same spot is a click, not a drag: on a row
       // that folds something — a `>_` group, a tool call, a thought — it does
       // what the keyboard would.
@@ -973,8 +1138,9 @@ export function App({ store }: { store: Store }) {
       for (const m of mouseEvents) handleMouse(m);
       return;
     }
-    // Any real keystroke dismisses a selection.
-    if (state.selection) store.clearSelection();
+    // Any real keystroke dismisses a selection, and with it any drag still
+    // scrolling past an edge.
+    if (state.selection) { stopDragScroll(); store.clearSelection(); }
     // Ink batches rapid keystrokes (and pastes) into one string. In the
     // composer a multi-char chunk is a paste; elsewhere replay it key by key.
     const special = rawKey.upArrow || rawKey.downArrow || rawKey.leftArrow || rawKey.rightArrow || rawKey.return || rawKey.escape || rawKey.tab || rawKey.backspace || rawKey.delete || rawKey.pageUp || rawKey.pageDown || rawKey.ctrl || rawKey.meta || rawKey.super;
