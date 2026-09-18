@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { archiveKey, liveThreads, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
-import { T, statusColor } from "../theme.js";
+import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { runMemberStateLabel, runState, tallyRun } from "@covey/protocol";
 import { buildSkew } from "../build.js";
@@ -54,7 +54,7 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // other kind of silence, so a machine nobody was dialling any more looked
       // exactly like one about to answer (issue #68).
       const dot = m.conn === "connected" ? "●" : m.conn === "connecting" ? "◌" : m.conn === "offline" ? "✗" : "○";
-      const dotColor = m.conn === "connected" ? T.success : m.conn === "connecting" ? T.warning : m.conn === "offline" ? T.faint : T.danger;
+      const dotColor = connColor(m.conn);
       const name = m.info?.name ?? m.saved.name;
       // A machine behind the client is worth more than its os here: the os
       // never changes, and old code on the far end is what wastes an hour.
@@ -67,7 +67,10 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
         <Box paddingX={1} height={1} backgroundColor={bg}>
           <Text color={dotColor}>{dot} </Text>
           <Text color={T.text} bold>{truncate(name.toUpperCase(), width - 6 - meta.length)}</Text>
-          <Text color={behind ? T.warning : T.subtle}>  {meta}</Text>
+          {/* The words that say what to press are held to the same bar as the
+              mark. Every other row's meta keeps `T.subtle`, which the sidebar
+              has always used and which this change does not widen. */}
+          <Text color={m.conn === "offline" ? connColor(m.conn) : behind ? T.warning : T.subtle}>  {meta}</Text>
         </Box>
       );
     }

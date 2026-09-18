@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { T, SELECTION_SURFACES, contrastRatio, relativeLuminance } from "./theme.js";
+import { T, SELECTION_SURFACES, SIDEBAR_ROW_SURFACES, connColor, contrastRatio, relativeLuminance } from "./theme.js";
 
 /**
  * The selection has to be visible.
@@ -54,4 +54,35 @@ test("the reported symptom: a tint over a near-black surface is not a boundary",
     assert.ok(contrastRatio(tint, surface) < 1.5, `${surface} was never a boundary`);
   }
   assert.ok(contrastRatio(T.faint, tint) < VISIBLE, "and the dimmest tier on it was unreadable");
+});
+
+/**
+ * A machine's mark has to be legible, and the offline one most of all (#68).
+ *
+ * The states the sidebar can paint, so the loop is complete rather than a list
+ * of the ones somebody remembered. `default` stands for `disconnected` and
+ * `error`, which share a colour.
+ */
+const CONN_STATES = ["connected", "connecting", "disconnected", "error", "offline"] as const;
+
+test("every machine mark clears 3:1 on both backgrounds a sidebar row has", () => {
+  for (const conn of CONN_STATES) {
+    for (const surface of SIDEBAR_ROW_SURFACES) {
+      const ratio = contrastRatio(connColor(conn), surface);
+      assert.ok(ratio >= VISIBLE, `a ${conn} machine is ${ratio.toFixed(2)}:1 on ${surface}, under ${VISIBLE}:1`);
+    }
+  }
+});
+
+/**
+ * The cursor row is the harder surface, and the one the first version of the
+ * offline mark failed on: it used `T.faint`, which the test above this one
+ * measures at 1.49:1 on that tint. The reader moving the cursor onto an offline
+ * machine to retry it is exactly the moment its mark disappeared.
+ */
+test("the offline mark is not the dim tier the selection defect was reported for", () => {
+  const cursorRow = T.selection;
+  assert.ok(contrastRatio(T.faint, cursorRow) < VISIBLE, "the dim tier on the cursor row is still unreadable");
+  assert.ok(contrastRatio(connColor("offline"), cursorRow) >= VISIBLE,
+    "so the machine the reader has to find and press enter on must not be painted in it");
 });
