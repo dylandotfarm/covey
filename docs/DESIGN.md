@@ -383,6 +383,77 @@ transcript uses for drag-selection. The wheel over the sidebar moves the cursor
 instead of scrolling a viewport of its own, so one thing decides both what is
 visible and what is shown.
 
+## Who started a thread, and where it sits
+
+A thread a program started used to look exactly like a thread the user opened by
+hand. On 2026-09-16 an operator ran fifteen agents over two machines, and all
+fifteen threads appeared beside the user's own, with nothing to tell them apart
+but their titles.
+
+`Thread.origin` records the difference: whether a person or a program asked for
+the thread, the `client` name the creating connection gave at `hello`, and the
+thread that started it. It is optional, the rule `titleAuto` follows, so every
+thread that predates it keeps working and paints as it did.
+
+The name comes from the connection, not from one call. `hello` has always
+carried it and the daemon used to discard it; the server now holds it for the
+life of the connection and `Engine.dispatch` takes it. `USER_CLIENT`
+(`covey-tui`) is the one client a person types into, so every other name is a
+program, and a connection that names nothing gets no origin at all.
+
+**It is a hint, not a boundary.** `client` is self-declared and the daemon cannot
+check it. Nothing that must not be spoofable may rest on it.
+
+`thread.create` can carry an explicit `origin`, because the client name cannot
+answer every case: the TUI dispatches a run's members over the same connection a
+person types into, so it says `{ by: "agent" }` outright and the command wins.
+
+### In the sidebar
+
+A child sits under its parent, indented, **furled by default** — fifteen
+dispatched threads become one row, with a count on the parent saying what it is
+holding. `◇` marks a thread a program started: a glyph, not colour alone,
+because covey runs over ssh and in tmux, and colour alone also fails a reader
+who cannot tell the pair apart.
+
+**The arrow keys furl; the click never does.** `→` unfurls a furled group as it
+unfurls a project, `←` furls it, and `enter` and a click both open the thread —
+the mouse keeps no vocabulary of its own. Were a click to furl, the row that
+most wants clicking, the thread that dispatched everything below it, could not
+be opened without collapsing everything under it. `←` on a *child* moves to its
+parent, so `←←` is the way out of a group from any row inside it.
+
+A furled group hides the children that are **working**. It never hides one that
+failed, is `waiting`, or has a pending approval: nobody else is watching a
+thread that failed, and a run in a strict permission mode would deadlock in
+silence behind a hidden approval. Quiet while it works, painted the moment it
+needs a person.
+
+`threadGroupKey(machine, threadId)` sits beside `archiveKey` and `runKey` in
+`AppState.expanded` and persists through `TuiConfig.prefs.expanded`, so a furled
+group is still furled after a restart.
+
+A `parentThreadId` naming a thread the sidebar cannot see — archived, deleted,
+on another machine — leaves the child a top-level row: a thread is never lost
+behind a link that leads nowhere. Two threads naming each other have no parent
+outside the pair, so the reachable set is settled from the roots *before*
+anything paints; resolving it during the paint would treat "furled" as
+"unowned" and resurrect every hidden child.
+
+### A run is not a manager thread
+
+A run is a named group the operator created and finds its members through
+`run.members`. A manager thread's children find *it*, through a back-pointer on
+the child. Same edge, opposite directions, and unifying them would mean
+inventing a run nobody named or a parent thread that does not exist. What they
+share is the furl mechanism, and that is reused rather than rebuilt: a third
+grouping *key*, not a third grouping *model*. A run member's thread is marked
+`agent` with no parent, so it is grouped under its run row and nowhere else.
+
+Nothing yet tells an agent its own thread id, so a program running *inside* a
+covey thread cannot fill `parentThreadId` by itself — the caller has to know it
+and pass it.
+
 ## The machine control panel
 
 Enter on a machine row in the sidebar opens the per-machine panel, so keeping a remote

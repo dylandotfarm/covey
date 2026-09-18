@@ -1205,6 +1205,11 @@ export class Store {
         sessionId: randomUUID(),
         title: m.task.title,
         workspaceMode: run.workspaceMode,
+        // Said outright, because the client name cannot say it: this connection
+        // is the TUI, the one client a person types into, but nobody typed this
+        // thread. No parent — a member is grouped under its run row already,
+        // and a thread must not be painted in two groups at once.
+        origin: { by: "agent" },
       });
       // Write the thread onto the member the moment it exists, before the brief
       // is even composed. A failure after this point leaves a thread and a
@@ -1537,6 +1542,12 @@ export interface SidebarRow {
   /** Set on a run row and on every member row inside it. */
   run?: Run;
   member?: RunMember;
+  /** Set on a thread a program started, not a person (`Thread.origin.by`). */
+  agent?: boolean;
+  /** Set on a thread row that has threads of its own under it. */
+  group?: boolean;
+  /** How many of a furled group's children are not painted. */
+  hidden?: number;
   depth: number;
 }
 
@@ -1545,6 +1556,28 @@ export function archiveKey(machine: string, projectId: string): string { return 
 
 /** `expanded` key for a run's members. Open unless furled. */
 export function runKey(machine: string, runId: string): string { return `${machine}:run:${runId}`; }
+
+/**
+ * `expanded` key for the threads one thread started. Furled unless opened,
+ * which is the point of #69: fifteen dispatched threads become one row.
+ *
+ * It is the same mechanism a project and an archive folder use, so a group the
+ * user furled is still furled after a restart (`TuiConfig.prefs.expanded`).
+ */
+export function threadGroupKey(machine: string, threadId: string): string { return `${machine}:thread:${threadId}`; }
+
+/**
+ * True when a thread has stopped needing to work and started needing a person:
+ * it failed, or it is blocked on an approval or an answer.
+ *
+ * This is the attention rule of #49. An agent's thread is quiet while it works,
+ * so a furled group hides it — but never these. Nobody else is watching a
+ * thread that failed, and a run in a strict permission mode deadlocks in
+ * silence if the thread asking for the approval is the one that is hidden.
+ */
+export function needsPerson(t: Thread): boolean {
+  return t.status === "error" || t.status === "waiting" || t.pendingApprovals > 0;
+}
 
 export function sidebarRows(s: AppState): SidebarRow[] {
   const rows: SidebarRow[] = [];
@@ -1568,7 +1601,59 @@ export function sidebarRows(s: AppState): SidebarRow[] {
       rows.push({ key: `p:${pk}`, kind: "project", machine: key, projectId: p.id, project: p, depth: 1 });
       if (!(s.expanded[pk] ?? true)) continue;
       const threads = liveThreads(m, p.id).sort(byRecency);
-      for (const t of threads) rows.push({ key: `t:${key}:${t.id}`, kind: "thread", machine: key, projectId: p.id, thread: t, depth: 2 });
+      // A thread a program started sits under the thread that started it.
+      // `origin.parentThreadId` is the only record of that (#49); a parent that
+      // is not in this list — archived, deleted, or on another machine — leaves
+      // the child a top-level row, because a thread must never be lost behind a
+      // link that leads nowhere.
+      const here = new Map(threads.map((t) => [t.id, t]));
+      const parentOf = (t: Thread) => {
+        const id = t.origin?.parentThreadId;
+        return id && id !== t.id && here.has(id) ? id : null;
+      };
+      const kids = new Map<string, Thread[]>();
+      for (const t of threads) {
+        const parent = parentOf(t);
+        if (parent) kids.set(parent, [...(kids.get(parent) ?? []), t]);
+      }
+      // Which threads are top-level rows. A thread whose parent is here belongs
+      // under it — but two threads naming each other have no parent outside the
+      // pair, so neither would ever be a root and both would vanish. Claiming
+      // from the roots first says which threads a root can reach; whatever is
+      // left is a cycle, and its first thread becomes a root of its own.
+      //
+      // This is settled before anything paints, because a furled group paints
+      // none of its children, and "not painted" must not be mistaken for
+      // "nobody owns it".
+      const claimed = new Set<string>();
+      const claim = (t: Thread) => {
+        if (claimed.has(t.id)) return;
+        claimed.add(t.id);
+        for (const c of kids.get(t.id) ?? []) claim(c);
+      };
+      const roots: Thread[] = [];
+      for (const t of threads) if (!parentOf(t)) { roots.push(t); claim(t); }
+      for (const t of threads) if (!claimed.has(t.id)) { roots.push(t); claim(t); }
+
+      const painted = new Set<string>();
+      const pushThread = (t: Thread, depth: number) => {
+        // A cycle reached through an unfurled group would otherwise paint for
+        // ever. Whichever thread the walk reaches first keeps the row.
+        if (painted.has(t.id)) return;
+        painted.add(t.id);
+        const children = kids.get(t.id) ?? [];
+        const open = children.length > 0 && (s.expanded[threadGroupKey(key, t.id)] ?? false);
+        // Furled hides the children that are working. It never hides one that
+        // has failed or is blocked on a person — see `needsPerson`.
+        const shown = open ? children : children.filter(needsPerson);
+        rows.push({
+          key: `t:${key}:${t.id}`, kind: "thread", machine: key, projectId: p.id, thread: t, depth,
+          ...(t.origin?.by === "agent" ? { agent: true } : {}),
+          ...(children.length > 0 ? { group: true, hidden: children.length - shown.length } : {}),
+        });
+        for (const c of shown) pushThread(c, depth + 1);
+      };
+      for (const t of roots) pushThread(t, 2);
       // The project's own archived folder, below its live threads and inside
       // its fold: the old threads of this project, most recently archived
       // first. Moved threads are tombstones, not archive — they stay hidden.

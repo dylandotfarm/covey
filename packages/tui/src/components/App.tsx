@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, threadGroupKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
@@ -1299,12 +1299,33 @@ export function App({ store }: { store: Store }) {
     if (key.pageDown) return moveCursor(10);
     if (input === "?") return store.setOverlay({ kind: "help" });
     if (!row) return;
-    if (key.return || input === "l" || key.rightArrow) return activateRow(row);
+    // The group a thread row heads, when it heads one (#69).
+    const groupOf = (r: SidebarRow) => r.kind === "thread" && r.group ? threadGroupKey(r.machine, r.thread!.id) : null;
+    if (key.return || input === "l" || key.rightArrow) {
+      // → unfurls a furled group of threads, the way it unfurls a project.
+      // enter always opens the thread, and so does a click: a click on a thread
+      // row has always meant "open this conversation", and the row that most
+      // wants clicking is the one that dispatched everything below it (#69).
+      const g = !key.return ? groupOf(row) : null;
+      if (g && !store.isExpanded(g, false)) return store.toggleExpanded(g, false);
+      return activateRow(row);
+    }
     if (input === "h" || key.leftArrow) {
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
       if (row.archived) { const k = archiveKey(row.machine, row.projectId!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
       if (row.run) { const k = runKey(row.machine, row.run.id); if (store.isExpanded(k)) store.toggleExpanded(k); return; }
+      if (row.kind === "thread") {
+        // An unfurled group furls. A child has no group of its own, so left
+        // moves to its parent — which is where the group's furl lives, so a
+        // second left furls the group you were just inside. That is the tree
+        // idiom, and it makes ←← the way out of a group from any row in it.
+        const g = groupOf(row);
+        if (g && store.isExpanded(g, false)) { store.toggleExpanded(g, false); return; }
+        const parent = row.thread!.origin?.parentThreadId;
+        const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine && r.thread!.id === parent) : -1;
+        if (at >= 0) { setCursorKey(rows[at]!.key); return; }
+      }
       if (row.projectId) { const k = `${row.machine}:${row.projectId}`; if (store.isExpanded(k)) store.toggleExpanded(k); }
       return;
     }
