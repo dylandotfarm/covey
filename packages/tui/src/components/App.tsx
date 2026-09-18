@@ -2,12 +2,13 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, type Attachment, type PermissionMode, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
-import { diffToLines, selectedText, activityLine, linkAt, truncate } from "../lines.js";
+import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
+import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, threadGroupKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
-import { parseMouse, wheelDelta, copyToClipboard, type MouseEvent } from "../mouse.js";
+import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
+import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
 import { buildLine, buildSkew } from "../build.js";
 import { Sidebar } from "./Sidebar.js";
 import { Summary } from "./Summary.js";
@@ -29,6 +30,16 @@ const SIDEBAR_W = 34;
 /** Screen row (1-based) of the sidebar list's first line: below the title. */
 const SIDEBAR_TOP = 2;
 /**
+ * How often a selection drag held past the edge of a pane scrolls one row.
+ *
+ * A terminal reports the mouse only while it moves. Hold the pointer still
+ * below the bottom edge and no further event arrives, so the scroll has to
+ * come from a timer rather than from the drag. 60 ms is about sixteen rows a
+ * second: quick enough to cross a screen while the hand waits, slow enough to
+ * stop where the reader means it to.
+ */
+export const DRAG_SCROLL_MS = 60;
+/**
  * How long the sidebar cursor has to sit still before the thread under it is
  * opened. Long enough that holding ↓ through a list costs one subscription
  * rather than one per row, short enough that a deliberate move feels immediate.
@@ -45,6 +56,19 @@ const MACHINE_MODES: PickOption[] = [
   { id: "acceptEdits", label: "Auto", hint: "file edits go through, other tools ask" },
   { id: "bypassPermissions", label: "Bypass", hint: "never ask" },
 ];
+
+/** The states the operator sets by hand in the run panel, in `t`'s order. */
+const MEMBER_STATES: RunMemberState[] = ["working", "review", "blocked", "merged", "withdrawn", "dispatched", "planned"];
+
+const MEMBER_STATE_HINT: Record<RunMemberState, string> = {
+  planned: "placed, not started",
+  dispatched: "the brief was sent",
+  working: "its thread is at work",
+  review: "there is a change to read",
+  merged: "landed on main",
+  blocked: "waiting on something else — not an error",
+  withdrawn: "the task was cancelled; the work still counted",
+};
 
 /** What `g` cycles through in the usage overlay. */
 const USAGE_GROUPINGS: UsageGroupBy[] = ["thread", "project", "model", "machine"];
@@ -97,6 +121,17 @@ export function App({ store }: { store: Store }) {
   const [walk, setWalk] = useState<HistoryWalk | null>(null);
   /** Transcript line the mouse went down on, so a click can fold what it hit. */
   const pressedLine = useRef<number | null>(null);
+  /** The last press, so the next one can tell a double click from a click. */
+  const clickRun = useRef<ClickRun | null>(null);
+  /**
+   * The repeating scroll of a selection drag held past a pane's edge, with the
+   * direction it runs in: -1 towards the older lines, +1 towards the newest.
+   * Clearing it on release is not tidying — a timer left running scrolls the
+   * transcript for ever.
+   */
+  const dragScroll = useRef<{ dir: number; timer: ReturnType<typeof setInterval> } | null>(null);
+  /** The latest step, so the timer never calls a stale render's closure. */
+  const dragStep = useRef<(dir: number) => void>(() => {});
 
   const rows = useMemo(() => sidebarRows(state), [state]);
   const cursor = cursorIndex(rows, cursorKey, lastCursor.current);
@@ -202,7 +237,7 @@ export function App({ store }: { store: Store }) {
   // fetched. `loadDir` reads each one once.
   useEffect(() => { if (mentionDirPath !== null) void store.loadDir(mentionDirPath); }, [mentionDirPath, threadKey, store]);
 
-  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle }); };
+  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string, onCancel?: () => void) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle, onCancel }); };
   const openInput = (title: string, onSubmit: (v: string) => void, initial = "", placeholder?: string, onCancel?: () => void) => { setOvFilter(initial); store.setOverlay({ kind: "input", title, onSubmit, initial, placeholder, onCancel }); };
 
   // ---- actions ----------------------------------------------------------------
@@ -363,7 +398,10 @@ export function App({ store }: { store: Store }) {
   const machinePanel = (machineKey = contextMachine) => {
     const m = machineKey ? state.machines.get(machineKey) : undefined;
     if (!m) return;
-    if (m.conn !== "connected" || !m.info) { store.notify(`${m.saved.name} is ${m.conn}`, "error"); return; }
+    // The panel needs what only a connected daemon sends. On a machine the
+    // client has given up on there is exactly one thing worth doing, so enter
+    // does it rather than reporting the state back at the reader (issue #68).
+    if (m.conn !== "connected" || !m.info) { store.retryMachine(machineKey!); return; }
     const info = m.info;
     const settings = info.settings ?? { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null };
     const busy = runningTurns(machineKey!);
@@ -476,6 +514,195 @@ export function App({ store }: { store: Store }) {
     });
   };
 
+  // ---- runs -----------------------------------------------------------------
+
+  /** The run the panel is showing. Read fresh: a member changes under it. */
+  const overlayRun = state.overlay?.kind === "run" ? store.run(state.overlay.machine, state.overlay.runId) : null;
+
+  /**
+   * Start a run: one request from the operator becomes many threads, one task
+   * each, across the machines that can do the work.
+   *
+   * Nothing is dispatched here. The run is placed and shown, and the operator
+   * reads the placement and may move a member before any agent starts.
+   */
+  const startRun = () => {
+    const machine = contextMachine;
+    const projectId = contextProject;
+    const p = project(machine, projectId);
+    if (!machine || !projectId || !p) { store.notify("select a project first — a run works in one repository", "error"); return; }
+    openInput(`Tasks for a run in ${p.title}`, (v) => {
+      const tasks = parseTaskList(v);
+      if (tasks.length === 0) { store.notify("no tasks — give issue numbers, or one task each separated by ;", "error"); return; }
+      openInput("What is this run for?", (goal) => {
+        store.setOverlay(null);
+        void beginRun(machine, projectId, goal.trim() || `${tasks.length} tasks in ${p.title}`, tasks);
+      }, "", `the goal all ${tasks.length} members share`);
+    }, "", "44 45 46 — or: Fix the wheel os=darwin; Write the docs");
+  };
+
+  /** Read the issue titles, then place the tasks and write the record. */
+  const beginRun = async (machine: string, projectId: string, goal: string, tasks: RunTask[]) => {
+    const p = project(machine, projectId);
+    const numbers = tasks.map((t) => t.issue).filter((n): n is number => n !== null);
+    let full = tasks;
+    if (numbers.length > 0) {
+      store.notify(`reading ${numbers.length} issue${numbers.length === 1 ? "" : "s"}…`);
+      const { issues, error } = await store.runIssues(machine, projectId, numbers);
+      full = withIssueTitles(tasks, issues);
+      if (error) store.notify(error, "error");
+    }
+    setOvCursor(0);
+    await store.createRun({ machine, name: truncate(goal, 48), goal, tasks: full, repositoryIdentity: p?.repositoryIdentity ?? null });
+  };
+
+  /** Come back to the run panel after a pick, with the cursor where it was. */
+  const backToRun = (ov: Extract<Overlay, { kind: "run" }>, at: number) => { store.setOverlay(ov); setOvFilter(""); setOvCursor(at); };
+
+  /**
+   * The run panel's keys. The list is the run's members in order, so the row
+   * under the cursor and the row a key acts on are the same array — the same
+   * rule the sidebar and the browser follow.
+   */
+  function handleRunKey(ov: Extract<Overlay, { kind: "run" }>, input: string, key: any) {
+    const run = store.run(ov.machine, ov.runId);
+    if (!run) { store.setOverlay(null); return; }
+    const at = Math.max(0, Math.min(run.members.length - 1, ovCursor));
+    const m = run.members[at];
+    if (key.upArrow || input === "k") return setOvCursor(() => Math.max(0, at - 1));
+    if (key.downArrow || input === "j") return setOvCursor(() => Math.min(run.members.length - 1, at + 1));
+    if (input === " ") {
+      if (!m) return;
+      const marked = new Set(ov.marked);
+      if (marked.has(m.id)) marked.delete(m.id); else marked.add(m.id);
+      return store.setOverlay({ ...ov, marked });
+    }
+    if (key.return) {
+      if (!m?.threadId) { store.notify("that member has no thread yet — press d to dispatch the run", "error"); return; }
+      const mk = store.machineKeyOf(m.machineId);
+      if (!mk) { store.notify(`${store.machineNameOf(m.machineId)} is not connected`, "error"); return; }
+      store.setOverlay(null);
+      void store.select({ machine: mk, threadId: m.threadId });
+      store.setFocus("composer");
+      return;
+    }
+    if (input === "d") return dispatchRun(ov, run);
+    if (input === "s") return sendToRun(ov, run, at);
+    if (input === "p") return void store.refreshPullRequests(ov.machine, ov.runId);
+    if (input === "m" && m) return moveMember(ov, run, m, at);
+    if (input === "t" && m) return setMemberState(ov, run, m, at);
+    if (input === "a") return addTaskToRun(ov, run, at);
+    if (input === "D" && m && !m.threadId) {
+      // A member that never started can simply go. One that did is withdrawn,
+      // because its thread did work that the record should keep.
+      return openPick(`Drop ${m.task.key} from the run?`, [
+        { id: "no", label: "Cancel" },
+        { id: "yes", label: "Drop it — it was never dispatched" },
+      ], (id) => { backToRun(ov, at); if (id === "yes") void store.threadCommand({ type: "run.member.remove", runId: run.id, memberId: m.id }, ov.machine); }, undefined, () => backToRun(ov, at));
+    }
+    if (input === "r") return openInput("Rename run", (v) => { backToRun(ov, at); if (v.trim()) void store.threadCommand({ type: "run.update", runId: run.id, name: v.trim() }, ov.machine); }, run.name, undefined, () => backToRun(ov, at));
+  }
+
+  /**
+   * Dispatch, behind a confirmation. This starts real Claude sessions and real
+   * git worktrees on other people's machines, so it says how many and where
+   * before it does.
+   */
+  const dispatchRun = (ov: Extract<Overlay, { kind: "run" }>, run: Run) => {
+    const todo = run.members.filter((m) => m.state === "planned" && !m.threadId);
+    if (todo.length === 0) { store.notify("every member is already dispatched", "error"); return; }
+    const byMachine = new Map<string, number>();
+    for (const m of todo) { const n = store.machineNameOf(m.machineId); byMachine.set(n, (byMachine.get(n) ?? 0) + 1); }
+    const where = [...byMachine].map(([n, c]) => `${c} on ${n}`).join(" · ");
+    openPick(`Dispatch ${todo.length} member${todo.length === 1 ? "" : "s"}?`, [
+      { id: "no", label: "Cancel", hint: "m moves a member first" },
+      { id: "yes", label: `Start ${todo.length} thread${todo.length === 1 ? "" : "s"}, one worktree each`, hint: where },
+    ], (id) => {
+      backToRun(ov, 0);
+      if (id === "yes") void store.dispatchRun(ov.machine, ov.runId);
+    }, undefined, () => backToRun(ov, 0));
+  };
+
+  /**
+   * Send the same message to every member, to the marked ones, or to one.
+   *
+   * The operator of 2026-09-16 sent the same correction to fifteen threads four
+   * separate times, each one a hand-written loop over thread ids.
+   */
+  const sendToRun = (ov: Extract<Overlay, { kind: "run" }>, run: Run, at: number) => {
+    const live = run.members.filter((m) => m.threadId && m.state !== "withdrawn");
+    const marked = run.members.filter((m) => ov.marked.has(m.id) && m.threadId);
+    const one = run.members[at];
+    const opts: PickOption[] = [];
+    if (live.length > 0) opts.push({ id: "all", label: `Every member (${live.length})`, hint: "the whole run" });
+    if (marked.length > 0) opts.push({ id: "marked", label: `The ${marked.length} marked`, hint: marked.map((m) => m.task.key).join(" ") });
+    if (one?.threadId) opts.push({ id: "one", label: `Only ${one.task.key}`, hint: truncate(one.task.title, 40) });
+    if (opts.length === 0) { store.notify("no member has a thread yet", "error"); return; }
+    openPick("Send a message to…", opts, (id) => {
+      const to = id === "all" ? live : id === "marked" ? marked : one ? [one] : [];
+      openInput(`Message to ${to.length} member${to.length === 1 ? "" : "s"}`, (text) => {
+        backToRun(ov, at);
+        if (text.trim()) void store.sendToRun(ov.machine, ov.runId, to.map((m) => m.id), text);
+      }, "", "they all get this, verbatim", () => backToRun(ov, at));
+    }, undefined, () => backToRun(ov, at));
+  };
+
+  /** Move a member to another machine, before it has a thread. */
+  const moveMember = (ov: Extract<Overlay, { kind: "run" }>, run: Run, m: RunMember, at: number) => {
+    if (m.threadId) { store.notify("this member already has a thread — withdraw it instead of moving it", "error"); return; }
+    const machines = store.placementMachines(runRepository(run));
+    if (machines.length < 2) { store.notify("no other machine has a checkout of this project", "error"); return; }
+    openPick(`Move ${m.task.key} to…`, machines.map((x) => ({
+      id: x.machineId,
+      label: x.name,
+      // The requirement it fails is why the rule did not put the task here, so
+      // it is what the operator needs to see before overriding the rule.
+      hint: [x.machineId === m.machineId ? "here now" : "", `${x.cpuCount} cores`, firstUnmet(x, m.task) ? `misses ${firstUnmet(x, m.task)!.value}` : ""].filter(Boolean).join(" · "),
+    })), (id) => {
+      backToRun(ov, at);
+      void store.moveMember(ov.machine, run.id, m.id, id);
+    }, undefined, () => backToRun(ov, at));
+  };
+
+  /** The states an operator sets by hand. `blocked` is not an error. */
+  const setMemberState = (ov: Extract<Overlay, { kind: "run" }>, run: Run, m: RunMember, at: number) => {
+    const opts: PickOption[] = MEMBER_STATES.map((s) => ({ id: s, label: runMemberStateLabel(s), hint: s === m.state ? "current" : MEMBER_STATE_HINT[s] }));
+    openPick(`${m.task.key} — state`, opts, (id) => {
+      const next = id as RunMemberState;
+      // A blocked member is blocked *on* something, and a withdrawn one was
+      // withdrawn *for* a reason. Both are worth a sentence; neither is an error.
+      if (next === "blocked" || next === "withdrawn") {
+        openInput(next === "blocked" ? `${m.task.key} — blocked on what?` : `${m.task.key} — withdrawn why?`, (note) => {
+          backToRun(ov, at);
+          void store.patchMember(ov.machine, run.id, m.id, { state: next, note: note.trim() || null });
+        }, m.note ?? "", "one sentence", () => backToRun(ov, at));
+        return;
+      }
+      backToRun(ov, at);
+      void store.patchMember(ov.machine, run.id, m.id, { state: next });
+    }, undefined, () => backToRun(ov, at));
+  };
+
+  /** Add a task to a run in flight, without tearing the run down. */
+  const addTaskToRun = (ov: Extract<Overlay, { kind: "run" }>, run: Run, at: number) => {
+    openInput("Add a task", (v) => {
+      const tasks = parseTaskList(v);
+      if (tasks.length === 0) { backToRun(ov, at); return; }
+      backToRun(ov, at);
+      void store.addTasks(ov.machine, run.id, tasks);
+    }, "", "an issue number, or a line of text", () => backToRun(ov, at));
+  };
+
+  /** The repository a run works in, from the project its first member is in. */
+  const runRepository = (run: Run): string | null => {
+    for (const m of run.members) {
+      const mk = store.machineKeyOf(m.machineId);
+      const p = mk && m.projectId ? state.machines.get(mk)?.projects.get(m.projectId) : null;
+      if (p) return p.repositoryIdentity;
+    }
+    return null;
+  };
+
   const palette = () => {
     const t = state.view?.thread;
     const opts: PickOption[] = [];
@@ -496,8 +723,13 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "newwt", label: "New thread in git worktree", hint: "N" });
     if (contextProject) opts.push({ id: "startmode", label: `New threads here: ${workspaceModeLabel(project(contextMachine, contextProject)?.defaultWorkspaceMode)}` });
     opts.push({ id: "addproject", label: "Add project", hint: "a" });
+    opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults", hint: "enter on a machine" });
+    // Only offered when there is something to retry, so the list does not grow
+    // a row that does nothing on a fleet that is all up.
+    const offline = state.order.filter((k) => state.machines.get(k)?.conn === "offline");
+    if (offline.length) opts.push({ id: "retry", label: `Retry ${offline.length === 1 ? state.machines.get(offline[0]!)!.saved.name : `${offline.length} offline machines`}`, hint: "the client stopped dialling" });
     opts.push({ id: "updateclient", label: "Update covey — pull, rebuild, relaunch this client", hint: store.clientSource?.commit ?? "" });
     opts.push({ id: "addmachine", label: "Add machine (ws://host:port)" });
     opts.push({ id: "rmmachine", label: "Remove machine" });
@@ -522,8 +754,10 @@ export function App({ store }: { store: Store }) {
         case "newwt": return void newThread(contextMachine, contextProject, "worktree-head");
         case "startmode": return void chooseDefaultWorkspace();
         case "addproject": return addProject();
+        case "run": return startRun();
         case "usage": return void store.loadUsage(0, "thread");
         case "machine": return machinePanel();
+        case "retry": { for (const k of offline) store.retryMachine(k); return; }
         case "updateclient": return updateClient();
         case "addmachine": return openInput("Machine URL", (v) => { store.setOverlay(null); const [url, token] = v.split(/\s+/); if (url) store.addMachine({ name: new URL(url).hostname, url, token }); }, "ws://", "ws://host.tailnet.ts.net:3790 [token]");
         case "rmmachine": return openPick("Remove machine", state.order.map((k) => ({ id: k, label: state.machines.get(k)!.saved.name, hint: k })), (k) => { store.setOverlay(null); store.removeMachine(k); });
@@ -552,6 +786,19 @@ export function App({ store }: { store: Store }) {
         return;
       }
       case "project": return store.toggleExpanded(`${row.machine}:${row.projectId}`);
+      case "run": {
+        setOvCursor(0);
+        return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
+      }
+      case "member": {
+        // A member with a thread opens it, wherever that thread lives; one
+        // without opens the run, which is where dispatch is.
+        const m = row.member!;
+        const mk = m.threadId ? store.machineKeyOf(m.machineId) : null;
+        if (mk && m.threadId) { void store.select({ machine: mk, threadId: m.threadId }); store.setFocus("composer"); return; }
+        setOvCursor(row.run!.members.indexOf(m));
+        return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
+      }
       case "archived": return store.toggleExpanded(archiveKey(row.machine, row.projectId!), false);
       case "machine": return machinePanel(row.machine);
       case "empty": return addProject(row.machine);
@@ -590,6 +837,61 @@ export function App({ store }: { store: Store }) {
     return { pane, line, col: Math.max(0, ev.col - 1 - mainX0), exact: rowInBox >= pad && start + (rowInBox - pad) < end };
   }
 
+  // ---- a drag held past the edge --------------------------------------------
+
+  function stopDragScroll() {
+    if (!dragScroll.current) return;
+    clearInterval(dragScroll.current.timer);
+    dragScroll.current = null;
+  }
+
+  /**
+   * One row of drag scrolling, with the selection following the edge that the
+   * scroll uncovers.
+   *
+   * Reads the store rather than `state`: the timer outlives the render that
+   * started it, and `state` is that render's snapshot. `Selection` is anchored
+   * to line indices rather than screen rows, so the part already selected does
+   * not move while the rows under it do.
+   */
+  function dragScrollStep(dir: number) {
+    const live = store.getState();
+    const sel = live.selection;
+    if (!sel?.dragging) { stopDragScroll(); return; }
+    if (sel.pane === "diff") {
+      const bodyH = Math.max(1, transcriptH - 2);
+      const max = Math.max(0, diffLines.length - bodyH);
+      const next = Math.max(0, Math.min(max, (live.diffView?.scroll ?? 0) + dir));
+      store.setDiffScroll(next);
+      const line = dir < 0 ? next : Math.min(Math.max(0, diffLines.length - 1), next + bodyH - 1);
+      store.extendSelection(line, dir < 0 ? 0 : lineWidth(diffLines[line] ?? []));
+      return;
+    }
+    // The transcript stores its scroll from the *bottom*, so the sign flips.
+    const max = Math.max(0, layout.lines.length - transcriptH);
+    const next = Math.max(0, Math.min(max, live.scrollFromBottom - dir));
+    store.setScroll(next);
+    const end = Math.max(0, layout.lines.length - next);
+    const start = Math.max(0, end - transcriptH);
+    const line = dir < 0 ? start : Math.max(start, end - 1);
+    store.extendSelection(line, dir < 0 ? 0 : lineWidth(layout.lines[line] ?? []));
+    if (dir < 0 && next >= max && live.view?.hasMore) void store.loadOlder();
+  }
+  dragStep.current = dragScrollStep;
+
+  function startDragScroll(dir: number) {
+    if (dragScroll.current?.dir === dir) return;
+    stopDragScroll();
+    // Move at once. The event that carried the pointer past the edge should
+    // not wait a whole tick for its first row.
+    dragScrollStep(dir);
+    dragScroll.current = { dir, timer: setInterval(() => dragStep.current(dir), DRAG_SCROLL_MS) };
+  }
+
+  // The button can come up outside the pane, outside the terminal, or never at
+  // all if the app is torn down mid-drag. Stop the timer in every case.
+  useEffect(() => () => stopDragScroll(), []);
+
   /**
    * Open what the pointer is on: reveal a file in the file manager, or send a
    * URL to the browser.
@@ -613,16 +915,53 @@ export function App({ store }: { store: Store }) {
     }
   }
 
-  function copySelection() {
-    const sel = state.selection;
+  /** Copy a selection. The caller passes the one it just made, because
+   *  `state` is the last render's snapshot and does not hold it yet. */
+  function copySelection(selection: Selection | null = state.selection) {
+    const sel = selection;
     if (!sel) return;
     const lines = sel.pane === "diff" ? diffLines : layout.lines;
     const { from, to } = selectionBounds(sel);
     const text = selectedText(lines, from, to);
     if (!text.trim()) return;
-    copyToClipboard(text);
-    const n = to.line - from.line + 1;
+    // The app's own stream, not `process.stdout`: it is the one ink owns, and
+    // in a test it is the one the harness can read.
+    copyToClipboard(text, stdout);
+    const n = text.split("\n").length;
     store.notify(`copied ${n} line${n === 1 ? "" : "s"}`, "success");
+  }
+
+  /**
+   * What a double or a triple click takes.
+   *
+   * Double takes the word under the pointer, where a "word" includes a path:
+   * `packages/tui/src/lines.ts:439` is the thing a reader wants, and a
+   * boundary that stopped at `/` or `.` would make the gesture useless for the
+   * case it is most wanted.
+   *
+   * Triple takes the whole wrapped run rather than the row under the pointer.
+   * A row is a property of the pane width — the same sentence is three rows in
+   * a narrow pane and one in a wide one — so the row would be the wrong unit
+   * for the same reason the copy used to be wrong.
+   */
+  function selectByClickCount(hit: { pane: Selection["pane"]; line: number; col: number }, count: number) {
+    const lines = hit.pane === "diff" ? diffLines : layout.lines;
+    const line = lines[hit.line];
+    if (!line) return;
+    let anchor: Selection["anchor"];
+    let head: Selection["head"];
+    if (count === 2) {
+      const word = wordRangeAt(line, hit.col);
+      if (word.to <= word.from) return;
+      anchor = { line: hit.line, col: word.from };
+      head = { line: hit.line, col: word.to };
+    } else {
+      const run = wrappedRun(lines, hit.line);
+      anchor = { line: run.from, col: 0 };
+      head = { line: run.to, col: lineWidth(lines[run.to]!) };
+    }
+    store.setSelection(hit.pane, anchor, head);
+    copySelection({ pane: hit.pane, anchor, head, dragging: false });
   }
 
   /**
@@ -654,25 +993,55 @@ export function App({ store }: { store: Store }) {
     if (items[0]) store.toggleItem(items[0].id);
   }
 
+  /**
+   * A wheel notch over an overlay moves that list, and only that list.
+   *
+   * The list is windowed on its own cursor, so moving the cursor is what
+   * scrolling means here. Nothing is opened by it: an overlay row is picked
+   * with enter, never by arriving on it.
+   */
+  function scrollOverlay(ev: MouseEvent) {
+    const ov = state.overlay;
+    if (!ov) return;
+    const rows = ov.kind === "pick" ? filterOptions(ov.options, ovFilter).length
+      : ov.kind === "browse" ? browseRows(ov.entries, ovFilter).length
+      : 0;
+    if (rows === 0) return;
+    const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
+    if (delta === 0) return;
+    // A notch up goes towards the first row, which is the lower index.
+    setOvCursor((c) => Math.max(0, Math.min(rows - 1, c - delta)));
+  }
+
   function handleMouse(ev: MouseEvent) {
-    if (state.overlay) return;
+    // An overlay covers the screen, so the conversation behind it is not what
+    // the pointer is on. The wheel still means something there; nothing else
+    // does.
+    if (state.overlay) { if (ev.kind === "wheel") scrollOverlay(ev); return; }
     const inSidebar = sidebarVisible && ev.col <= SIDEBAR_W;
     const inTranscript = ev.row >= TRANSCRIPT_TOP && ev.row < TRANSCRIPT_TOP + transcriptH && !inSidebar;
 
     if (ev.kind === "wheel") {
       // One row a notch, alt for half a page. 0 is a sideways notch, which
-      // nothing here scrolls; it must not take the focus or load older lines
-      // either, so leave before any of that.
+      // nothing here scrolls; it must not load older lines either, so leave
+      // before any of that.
       const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
       if (delta === 0) return;
-      // Over the sidebar the wheel moves the cursor rather than scrolling a
-      // viewport of its own: the cursor is what the window is centred on, and
-      // one source of truth means the preview follows the wheel too.
-      if (inSidebar) {
-        store.setFocus("sidebar");
-        moveCursor(-delta);
-        return;
-      }
+      // Where the pointer is does not choose the target: a scroll anywhere in
+      // the terminal scrolls the conversation that is open. Scrolling is how
+      // you move inside what you are reading, and it must never move you
+      // between things to read.
+      //
+      // The sidebar used to take the notch and move its cursor, and the
+      // cursor opens the thread it lands on — so a notch over the sidebar
+      // opened a conversation nobody asked for. The sidebar has no viewport
+      // of its own to scroll instead; the cursor *is* the window. Giving it
+      // one is a larger change than this defect needs, so for now the sidebar
+      // does not answer the wheel at all, and the notch goes to the
+      // transcript like every other notch.
+      //
+      // A notch also does not call `setFocus`. Scrolling is not a click.
+      //
       // Same rule as `scrollPane`: a chunk holds several notches and is
       // replayed one at a time, so every notch measures from the store rather
       // than from `state`, which is the last render's snapshot and does not
@@ -687,8 +1056,11 @@ export function App({ store }: { store: Store }) {
     }
 
     if (ev.kind === "press") {
+      stopDragScroll();
       store.clearSelection();
       pressedLine.current = null;
+      const run = countClick(clickRun.current, ev, Date.now());
+      clickRun.current = run;
       if (inSidebar) {
         // Sidebar rows are chrome, not content: a click does what the keyboard
         // would — move the cursor there and activate the row — instead of
@@ -711,6 +1083,9 @@ export function App({ store }: { store: Store }) {
           else store.notify("no link here — alt+click a path or a URL");
           return;
         }
+        // A second or a third press selects instead of starting a drag, and
+        // must not fold what the first press already toggled underneath it.
+        if (hit?.exact && run.count >= 2) return selectByClickCount(hit, run.count);
         pressedLine.current = hit?.exact ? hit.line : null;
         if (hit) store.beginSelection(hit.pane, hit.line, hit.col);
         return;
@@ -720,17 +1095,33 @@ export function App({ store }: { store: Store }) {
     }
 
     if (ev.kind === "drag") {
-      const sel = state.selection;
-      if (!sel) return;
+      // The store, not `state`: a press and the drag after it can arrive in
+      // one chunk, and `state` is the snapshot from before either of them.
+      const sel = store.getState().selection;
+      if (!sel) { stopDragScroll(); return; }
+      // Past the top or the bottom edge the drag scrolls instead of pointing.
+      // A selection that could not leave the screen was most of the reason
+      // selecting anything longer than a paragraph was not worth trying.
+      const above = ev.row < TRANSCRIPT_TOP;
+      const below = ev.row >= TRANSCRIPT_TOP + transcriptH;
+      if (above || below) return startDragScroll(above ? -1 : 1);
+      stopDragScroll();
       const hit = hitTest(ev, sel.pane);
       if (hit) store.extendSelection(hit.line, hit.col);
       return;
     }
 
     if (ev.kind === "release") {
+      // The button is up, so nothing is dragging any more. This is the leak:
+      // a release outside the pane used to leave the timer running.
+      stopDragScroll();
       const line = pressedLine.current;
       pressedLine.current = null;
-      if (state.selection?.dragging && store.endSelection()) { copySelection(); return; }
+      // Same rule again. A quick click arrives as one chunk, so at this point
+      // `state.selection` is still null and the selection the press just made
+      // would never be ended — leaving an empty one behind for ever.
+      const sel = store.getState().selection;
+      if (sel?.dragging && store.endSelection()) { copySelection(sel); return; }
       // Press and release on the same spot is a click, not a drag: on a row
       // that folds something — a `>_` group, a tool call, a thought — it does
       // what the keyboard would.
@@ -755,8 +1146,9 @@ export function App({ store }: { store: Store }) {
       for (const m of mouseEvents) handleMouse(m);
       return;
     }
-    // Any real keystroke dismisses a selection.
-    if (state.selection) store.clearSelection();
+    // Any real keystroke dismisses a selection, and with it any drag still
+    // scrolling past an edge.
+    if (state.selection) { stopDragScroll(); store.clearSelection(); }
     // Ink batches rapid keystrokes (and pastes) into one string. In the
     // composer a multi-char chunk is a paste; elsewhere replay it key by key.
     const special = rawKey.upArrow || rawKey.downArrow || rawKey.leftArrow || rawKey.rightArrow || rawKey.return || rawKey.escape || rawKey.tab || rawKey.backspace || rawKey.delete || rawKey.pageUp || rawKey.pageDown || rawKey.ctrl || rawKey.meta || rawKey.super;
@@ -854,8 +1246,16 @@ export function App({ store }: { store: Store }) {
 
   function handleOverlayKey(input: string, key: any) {
     const ov = state.overlay!;
-    if (key.escape) { store.setOverlay(null); setOvFilter(""); if (ov.kind === "input") ov.onCancel?.(); return; }
+    if (key.escape) {
+      store.setOverlay(null);
+      setOvFilter("");
+      // A pick opened from the run panel goes back to it, rather than closing
+      // the panel the reader was working in.
+      if (ov.kind === "input" || ov.kind === "pick") ov.onCancel?.();
+      return;
+    }
     if (ov.kind === "help" || ov.kind === "update") return;
+    if (ov.kind === "run") return handleRunKey(ov, input, key);
     if (ov.kind === "usage") {
       const last = USAGE_WINDOWS.length - 1;
       if (key.leftArrow || input === "h") return void store.loadUsage(Math.max(0, ov.window - 1), ov.groupBy);
@@ -907,11 +1307,33 @@ export function App({ store }: { store: Store }) {
     if (key.pageDown) return moveCursor(10);
     if (input === "?") return store.setOverlay({ kind: "help" });
     if (!row) return;
-    if (key.return || input === "l" || key.rightArrow) return activateRow(row);
+    // The group a thread row heads, when it heads one (#69).
+    const groupOf = (r: SidebarRow) => r.kind === "thread" && r.group ? threadGroupKey(r.machine, r.thread!.id) : null;
+    if (key.return || input === "l" || key.rightArrow) {
+      // → unfurls a furled group of threads, the way it unfurls a project.
+      // enter always opens the thread, and so does a click: a click on a thread
+      // row has always meant "open this conversation", and the row that most
+      // wants clicking is the one that dispatched everything below it (#69).
+      const g = !key.return ? groupOf(row) : null;
+      if (g && !store.isExpanded(g, false)) return store.toggleExpanded(g, false);
+      return activateRow(row);
+    }
     if (input === "h" || key.leftArrow) {
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
       if (row.archived) { const k = archiveKey(row.machine, row.projectId!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
+      if (row.run) { const k = runKey(row.machine, row.run.id); if (store.isExpanded(k)) store.toggleExpanded(k); return; }
+      if (row.kind === "thread") {
+        // An unfurled group furls. A child has no group of its own, so left
+        // moves to its parent — which is where the group's furl lives, so a
+        // second left furls the group you were just inside. That is the tree
+        // idiom, and it makes ←← the way out of a group from any row in it.
+        const g = groupOf(row);
+        if (g && store.isExpanded(g, false)) { store.toggleExpanded(g, false); return; }
+        const parent = row.thread!.origin?.parentThreadId;
+        const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine && r.thread!.id === parent) : -1;
+        if (at >= 0) { setCursorKey(rows[at]!.key); return; }
+      }
       if (row.projectId) { const k = `${row.machine}:${row.projectId}`; if (store.isExpanded(k)) store.toggleExpanded(k); }
       return;
     }
@@ -1146,7 +1568,7 @@ export function App({ store }: { store: Store }) {
         <Box height={1}><Text color={T.border}>{"─".repeat(Math.max(0, mainW))}</Text></Box>
         <Box height={transcriptH} flexDirection="column">
           {state.overlay
-            ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} />
+            ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} run={overlayRun} machineNameOf={(id) => store.machineNameOf(id)} />
             : state.diffView
               ? <DiffPanel view={state.diffView} width={mainW} height={transcriptH} lines={diffLines} selection={state.selection} />
               : summaryRow

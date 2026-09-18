@@ -9,6 +9,15 @@
 - `pnpm run setup` (`scripts/setup.mjs`) is the one-machine install: it installs, builds, and
   links `bin/covey` into a directory on the PATH. The launcher follows its own symlink back
   to the checkout, so a linked `covey` always runs that checkout — keep it that way.
+- `packages/cli/src/index.ts` sets `NODE_ENV=production`, for React and for nothing else.
+  React reads it when its module body runs, and the development reconciler calls
+  `performance.measure()` per commit — entries node never drops, which grew the client to
+  4.2 GB (#61). Keep the entry free of static imports: node evaluates every static import
+  before the first statement in the file, so one import there undoes the line.
+  `packages/cli/src/nodeEnv.ts` hands the setting back once React has read it. Nothing covey
+  starts may inherit it: the daemon spawns the Claude sessions, and a command such as
+  `npm install` under `NODE_ENV=production` installs without the devDependencies and says
+  nothing. `clientEnv.test.ts` and `nodeEnv.test.ts` hold both halves.
 - Ink 7 batches fast keystrokes and pastes into one `useInput` call; `App.tsx` splits them.
   Test the TUI in tmux with small delays between `send-keys`, and capture with
   `tmux capture-pane -p -e` to see colours.
@@ -23,6 +32,11 @@
   channel. Keep it that way; it makes replay and reconnect trivial.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
+- A thread's session is a subprocess of about 300 MB. The engine releases one after
+  `sessionIdleMinutes` (default 15) and holds at most `maxLiveSessions`; the next message
+  resumes it from the transcript. Never release a session that runs a turn, waits on an
+  approval, or still owns a background task — `Engine.sessionBusy` decides, and a background
+  task dies with its session. `/health` reports `sessions.live`.
 - The daemon listens on port 3790 by default. `COVEY_PORT` moves it.
 - A machine's control panel (enter on a sidebar machine row) makes the daemon pull, rebuild
   and restart itself (`packages/daemon/src/update.ts`). Restarting ends every turn that
@@ -38,6 +52,18 @@
   `<COVEY_HOME>/daemon-<port>.pid`. To check first: `cat /tmp/h/daemon-3799.pid`.
 - The client updates itself by quitting with a request the CLI performs (pull, build, restart
   the daemon) before `process.execve`ing back into the new build — see `packages/cli/src/main.ts`.
+- A run's capability data is read *in the daemon* (`packages/daemon/src/resources.ts`), never
+  over ssh: the daemon starts from a login shell, an ssh session does not, and an agent
+  inherits the daemon's `PATH`. Keep it that way.
+- A test that starts a daemon must start it with `packages/daemon/test/daemons.ts`,
+  and the file must `after(stopAll)`. It unrefs the child so a daemon nobody stopped
+  can never hold the runner open — that, not a slow test, is what hung a gate run
+  for eleven minutes (#53). `--test-timeout` does not cover it: node bounds a test,
+  not a process that lingers once the tests are over.
 - Dependencies: `pnpm add <pkg>`; pnpm refuses versions younger than 7 days
   (`minimumReleaseAge` in pnpm-workspace.yaml). Keep `pnpm run check:age` green. Install
   scripts are blocked (`onlyBuiltDependencies: []`); never use npm in this repo.
+- `packages/daemon/src/integrate/` reaches `gh` and `git` through one `GhHost`
+  (`integrate/gh.ts`); everything else there is pure. Tests use `fakeHost`, so nothing
+  merges during `pnpm test`. The read path calls `assertReadOnly` first, which throws on a
+  `gh` command that can change a repository.

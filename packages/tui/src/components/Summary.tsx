@@ -3,7 +3,7 @@ import { Box, Text } from "ink";
 import { KNOWN_MODELS, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
 import type { AppState, MachineState, SidebarRow, ThreadTally } from "../store.js";
 import { liveThreads, byRecency, tallyThreads, permissionModeLabel, workspaceModeLabel } from "../store.js";
-import { T, statusColor } from "../theme.js";
+import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { buildLine, buildSkew } from "../build.js";
 
@@ -76,8 +76,14 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
     <>
       <Text wrap="truncate">
         <Text color={T.text} bold>{(info?.name ?? m.saved.name).toUpperCase()}</Text>
-        <Text color={m.conn === "connected" ? T.success : m.conn === "connecting" ? T.warning : T.danger}>  {m.conn}</Text>
-      </Text>
+        {/* The same colour the row uses, from the same place: the pane that
+            explains `offline` must not paint it as the error the row says it
+            is not. Every other state keeps the colour it had. */}
+        <Text color={connColor(m.conn)}>  {m.conn}</Text>
+        {/* The reason belongs beside the word, not a pane away: "offline"
+            alone reads like a verdict, and a bad token is a different job
+            from a machine that is off. */}
+        {m.conn === "offline" && m.error && <Text color={T.subtle}> — {m.error}</Text>}</Text>
       <Text color={T.subtle} wrap="truncate">{meta}</Text>
       {/* Build skew across machines is the normal state here — a client on a
           laptop against a daemon on a Pi — so name it rather than leave the
@@ -90,7 +96,7 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
           <Text color={T.faint}>  {buildLine(info?.build)} vs {buildLine(state.clientBuild)}</Text>
         </Text>
       )}
-      {m.error && <Text color={T.danger} wrap="truncate">{m.error}</Text>}
+      {m.error && m.conn !== "offline" && <Text color={T.danger} wrap="truncate">{m.error}</Text>}
       <Box height={1} />
       <Text wrap="truncate"><Counts t={tally} where={` in ${projects.length} project${projects.length === 1 ? "" : "s"}`} /></Text>
       <Text color={T.subtle} wrap="truncate">
@@ -108,7 +114,9 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
       {projects.length === 0 && <Text color={T.subtle} italic>{m.conn === "connected" ? "no projects yet — press a to add one" : "nothing to show until it connects"}</Text>}
       {projects.length > shown.length && <Text color={T.faint}>  … {projects.length - shown.length} more</Text>}
       <Box flexGrow={1} />
-      <Text color={T.faint} wrap="truncate">enter control panel — update, restart, default model and mode · a add project</Text>
+      <Text color={T.faint} wrap="truncate">{m.conn === "offline"
+        ? "nobody is dialling this machine any more · enter tries again"
+        : "enter control panel — update, restart, default model and mode · a add project"}</Text>
     </>
   );
 }

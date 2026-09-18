@@ -200,3 +200,87 @@ export function osc8(uri: string, text: string): string {
 export function hyperlinksEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return !env.COVEY_NO_HYPERLINKS;
 }
+
+// ---------------------------------------------------------------------------
+// The word under a double-click
+// ---------------------------------------------------------------------------
+
+/**
+ * What a double-click takes, as an offset pair into the text it scanned.
+ *
+ * A "word" here includes a path, because a path is what a reader most often
+ * wants off a transcript: `packages/tui/src/lines.ts:439` has to come off
+ * whole, and a boundary that stops at `/` or `.` gives the one piece nobody
+ * asked for.
+ *
+ * `findTargets` above cannot do this job on its own. It wants a leading `/`,
+ * and the path a reader points at is usually relative; `targetUri` also
+ * refuses every path when `localFiles` is false, which is every thread on a
+ * remote machine. So the boundary is its own rule, and a link is only the
+ * first of the three cases it covers.
+ */
+export interface WordRange {
+  start: number;
+  end: number;
+}
+
+/** A URL, found first so that its `//`, `?` and `&` never cut it up. */
+const URL_RUN = /https?:\/\/[^\s<>"'`]+/g;
+
+/**
+ * The characters a path or an identifier is made of. `:` is absent on purpose:
+ * it ends a word in `note:` and in `https:` alike, so a `file:line` reference
+ * is put back by hand below rather than folded in here.
+ */
+const WORD_CHAR = /[A-Za-z0-9_~./@%+\-#]/;
+
+/** A `:line` or `:line:column` reference, which belongs to the path before it. */
+const LOCATION = /^:\d+(?::\d+)?/;
+
+/** How many `name:` hops to walk back over, enough for `file:line:column`. */
+const LOCATION_HOPS = 2;
+
+/** Find the word, path or URL that covers one character index. */
+export function wordAt(text: string, index: number): WordRange {
+  if (index < 0 || index >= text.length) return { start: text.length, end: text.length };
+
+  URL_RUN.lastIndex = 0;
+  for (const m of text.matchAll(URL_RUN)) {
+    const hit = m[0].replace(TRAILING, "");
+    if (hit && index >= m.index && index < m.index + hit.length) return { start: m.index, end: m.index + hit.length };
+  }
+
+  const ch = text[index]!;
+  // Whitespace and punctuation take the run of their own kind. Neither is
+  // worth copying, but selecting nothing looks like a click that missed.
+  if (/\s/.test(ch)) return run(text, index, (c) => /\s/.test(c));
+  if (!WORD_CHAR.test(ch)) return run(text, index, (c) => !/\s/.test(c) && !WORD_CHAR.test(c));
+
+  let { start, end } = run(text, index, (c) => WORD_CHAR.test(c));
+
+  // `lines.ts:439` is one thing to a reader. Take the suffix when the click
+  // was on the path, and the path when the click was on the number.
+  const loc = LOCATION.exec(text.slice(end));
+  if (loc) end += loc[0].length;
+  for (let hop = 0; hop < LOCATION_HOPS; hop++) {
+    if (start < 2 || text[start - 1] !== ":" || !WORD_CHAR.test(text[start - 2]!)) break;
+    let s = start - 1;
+    while (s > 0 && WORD_CHAR.test(text[s - 1]!)) s--;
+    start = s;
+  }
+
+  // Trailing punctuation belongs to the sentence. Never trim back past the
+  // character that was clicked: a click on the `.` of `…ts.` asked for it.
+  const tail = TRAILING.exec(text.slice(start, end));
+  if (tail) end = Math.max(index + 1, end - tail[0].length);
+  return { start, end };
+}
+
+/** Grow an index into the longest run of characters `ok` accepts. */
+function run(text: string, index: number, ok: (c: string) => boolean): WordRange {
+  let start = index;
+  let end = index + 1;
+  while (start > 0 && ok(text[start - 1]!)) start--;
+  while (end < text.length && ok(text[end]!)) end++;
+  return { start, end };
+}

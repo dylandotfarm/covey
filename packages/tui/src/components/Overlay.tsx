@@ -1,11 +1,12 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { MachineUpdate, UpdateStep } from "@covey/protocol";
+import { runMemberStateLabel, runState, tallyRun, type MachineUpdate, type Run, type RunMemberState, type UpdateStep } from "@covey/protocol";
 import { browseRows, sumUsage, usageRows, fmtTokens, fmtCost, USAGE_WINDOWS, type Overlay } from "../store.js";
+import { PLACEMENT_RULE } from "../run.js";
 import { T } from "../theme.js";
 import { truncate, SPINNER } from "../lines.js";
 
-export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number }) {
+export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick, run, machineNameOf }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number; run?: Run | null; machineNameOf?: (id: string) => string }) {
   const w = Math.min(width - 4, 80);
   const maxRows = Math.max(4, Math.min(height - 10, 20));
   // Rendered in place of the transcript (not floated): Ink cannot paint an
@@ -100,6 +101,13 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
     case "usage":
       return frame("Usage — estimated", <UsageBody overlay={overlay} width={w} maxRows={maxRows} />,
         "←→ period · g group by thread/project/model/machine · esc close");
+    case "run": {
+      if (!run) return frame("Run", <Box marginY={1}><Text color={T.subtle}>this run is gone</Text></Box>, "esc close");
+      return frame(`Run "${run.name}"`, (
+        <RunBody run={run} machineName={machineNameOf ?? ((id) => id.slice(0, 8))} marked={overlay.marked}
+          cursor={cursor} busy={overlay.busy} width={w} maxRows={maxRows} />
+      ), "enter open · space mark · s send · d dispatch · m move · t state · p read PRs · a add · esc close");
+    }
   }
 }
 
@@ -197,6 +205,93 @@ export function filterOptions<O extends { label: string; hint?: string }>(option
   return options.filter((o) => (o.label + " " + (o.hint ?? "")).toLowerCase().includes(f));
 }
 
+
+/** Columns of the run panel: state, machine, branch, pull request. */
+const RUN_COLS = { state: 10, machine: 8, branch: 18, pr: 7 } as const;
+
+/**
+ * A run and its members: task, thread, machine, branch, pull request, state.
+ *
+ * Every field here streams over the shell subscription the sidebar already
+ * holds, except the pull request, which is fetched — see `refreshPullRequests`.
+ */
+function RunBody({ run, machineName, marked, cursor, busy, width, maxRows }: {
+  run: Run;
+  /** The machine each member works on, by machine id. */
+  machineName: (id: string) => string;
+  marked: Set<string>;
+  cursor: number;
+  busy: string | null;
+  width: number;
+  maxRows: number;
+}) {
+  const t = tallyRun(run);
+  const inner = width - 4;
+  const taskW = Math.max(10, inner - 2 - RUN_COLS.state - RUN_COLS.machine - RUN_COLS.branch - RUN_COLS.pr);
+  const start = Math.max(0, Math.min(cursor - Math.floor(maxRows / 2), run.members.length - maxRows));
+  const cell = (s: string, n: number) => truncate(s, n).padEnd(n);
+  return (
+    <Box flexDirection="column">
+      <Text color={T.subtle}>{truncate(run.goal, inner)}</Text>
+      <Box marginTop={1}>
+        <Text color={T.muted}>
+          {`${t.total} member${t.total === 1 ? "" : "s"} · ${t.machines} machine${t.machines === 1 ? "" : "s"} · `}
+          <Text color={T.subtle}>{`planned ${t.planned}  working ${t.working}  in review ${t.review}  merged ${t.merged}`}</Text>
+          {t.blocked > 0 ? <Text color={T.awaiting}>{`  blocked ${t.blocked}`}</Text> : null}
+          {t.withdrawn > 0 ? <Text color={T.faint}>{`  withdrawn ${t.withdrawn}`}</Text> : null}
+        </Text>
+      </Box>
+      <Text color={T.faint}>
+        {"  "}{cell("task", taskW)}{cell("state", RUN_COLS.state)}{cell("machine", RUN_COLS.machine)}{cell("branch", RUN_COLS.branch)}{cell("pr", RUN_COLS.pr)}
+      </Text>
+      {run.members.slice(start, start + maxRows).map((m, i) => {
+        const sel = start + i === cursor;
+        const on = marked.has(m.id);
+        return (
+          <Text key={m.id} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>
+            <Text color={on ? T.accent : T.faint}>{on ? "▸ " : "  "}</Text>
+            {cell(`${m.task.key} ${m.task.title}`, taskW)}
+            <Text color={memberTint(m.state)}>{cell(runMemberStateLabel(m.state), RUN_COLS.state)}</Text>
+            {cell(machineName(m.machineId), RUN_COLS.machine)}
+            {cell(m.branch ?? "", RUN_COLS.branch)}
+            {cell(m.pullRequest ? `#${m.pullRequest.number}` : "", RUN_COLS.pr)}
+          </Text>
+        );
+      })}
+      {run.members.length === 0 && <Text color={T.subtle} italic> no members — press a to add a task</Text>}
+      {run.members.length > maxRows && <Text color={T.faint}>{` …${run.members.length - maxRows} more`}</Text>}
+      {/* A note is the operator's own sentence about one member; the row it
+          belongs to has no space for it, so it sits under the list. */}
+      {noteFor(run, cursor) && <Box marginTop={1}><Text color={T.awaiting}>{truncate(noteFor(run, cursor)!, inner)}</Text></Box>}
+      {/* The rule, before it runs. Placement that cannot be read is placement
+          nobody overrides, and the operator is the one who knows that this
+          task needs a Mac. Once the run is dispatched it has nothing to say. */}
+      {runState(run) === "planning" && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={T.faint}>{truncate(`Placed: ${PLACEMENT_RULE}`, inner)}</Text>
+          <Text color={T.faint}>{truncate("m moves a member before dispatch.", inner)}</Text>
+        </Box>
+      )}
+      {busy && <Box marginTop={1}><Text color={T.working}>{truncate(busy, inner)}</Text></Box>}
+    </Box>
+  );
+}
+
+function noteFor(run: Run, cursor: number): string | null {
+  const m = run.members[cursor];
+  return m?.note ? `${m.task.key}: ${m.note}` : null;
+}
+
+function memberTint(s: RunMemberState): string {
+  switch (s) {
+    case "blocked": return T.awaiting;
+    case "working": return T.working;
+    case "merged": return T.success;
+    case "withdrawn": return T.faint;
+    default: return T.subtle;
+  }
+}
+
 const HELP: [string, string][] = [
   ["tab", "switch focus: sidebar ↔ composer"],
   ["ctrl+k", "command palette (move, rename, model, mode, streaming, machines…)"],
@@ -209,6 +304,9 @@ const HELP: [string, string][] = [
   ["sidebar", ""],
   ["  ↑/↓ j/k", "move — what you land on is shown on the right"],
   ["  enter", "open thread / fold project or archive / machine panel"],
+  ["  →/←", "unfurl / furl — ← on a nested thread goes to the one above it"],
+  ["", "  ◇ marks a thread a program started, not you"],
+  ["", "  a furled group still shows a child that failed or is waiting"],
   ["  n", "new thread (asks worktree vs. checkout in a git repo)"],
   ["  N", "new thread in a worktree branched from HEAD"],
   ["  a", "add project — browse dirs, ctrl+n makes a new folder"],
@@ -219,6 +317,16 @@ const HELP: [string, string][] = [
   ["  D", "delete thread"],
   ["ctrl+k", "…also: revert to before a turn (esc esc too), model, mode"],
   ["ctrl+k", "…and: usage — tokens and estimated cost, per period"],
+  ["ctrl+k", "…and: start a run — one task each, across machines"],
+  ["run panel", "(enter on a run row in the sidebar)"],
+  ["  ↑/↓ j/k", "move · enter open that member's thread"],
+  ["  space", "mark a member, for \"send to these\""],
+  ["  s", "send one message to every member, the marked, or one"],
+  ["  d", "dispatch — one thread per task, one worktree each"],
+  ["  m", "move a member to another machine (before dispatch)"],
+  ["  t", "set a member's state (blocked is not an error)"],
+  ["  p", "read each member's pull request"],
+  ["  a / D / r", "add a task · drop an undispatched member · rename"],
   ["machine panel", ""],
   ["  enter", "on a machine row: update (pull, rebuild, restart),"],
   ["", "  restart, default model, default mode"],
@@ -248,5 +356,5 @@ const HELP: [string, string][] = [
   ["  click", "sidebar: open that row, as enter would"],
   ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
   ["  alt+click", "reveal the file, or open the URL (ctrl+click does it too)"],
-  ["  wheel", "scroll a line · +alt a page · sidebar: move the cursor"],
+  ["  wheel", "scroll the conversation · +alt a page · over a list, move in it"],
 ];

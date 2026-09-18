@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { BuildInfo, MachineInfo, Project, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { MachineClient, type ConnState } from "./client.js";
+import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import { isFinalMemberState } from "@covey/protocol";
+import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
+import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
@@ -30,6 +32,12 @@ export interface MachineState {
   info: MachineInfo | null;
   projects: Map<string, Project>;
   threads: Map<string, Thread>;
+  /**
+   * The runs this daemon stores. A run's members may be threads on other
+   * machines; this is only where the record lives, because a run outlives the
+   * client that started it.
+   */
+  runs: Map<string, Run>;
   /** The update in flight on that machine, or the last one it reported. */
   update: MachineUpdate | null;
   /** We asked the daemon to restart, so the drop that follows is expected. */
@@ -88,6 +96,11 @@ export type Overlay =
       filter?: boolean;
       /** Label for a checkbox row under the list, flipped with tab. */
       toggle?: string;
+      /**
+       * Where esc goes. Without it esc closes everything, which throws the
+       * reader out of the run panel they opened the pick from.
+       */
+      onCancel?: () => void;
     }
   /** `onCancel` lets esc go back where the input came from instead of closing
    *  everything — the folder prompt returns to the directory it was opened on. */
@@ -105,6 +118,19 @@ export type Overlay =
       reports: UsageReport[];
       /** Machines that could not answer, with the reason. */
       errors: { machine: string; message: string }[];
+    }
+  /**
+   * A run and its members: task, thread, machine, branch, pull request, state.
+   * `machine` is the machine that *stores* the run, not where its members work.
+   */
+  | {
+      kind: "run";
+      machine: string;
+      runId: string;
+      /** Members the operator has marked, for "send to these". */
+      marked: Set<string>;
+      /** What the run is doing right now — dispatching, reading pull requests. */
+      busy: string | null;
     };
 
 export interface DirEntry { name: string; isDir: boolean; isRepo: boolean }
@@ -177,6 +203,8 @@ export interface StoreOptions {
   canRelaunch?: boolean;
   /** Carried over from the process we were relaunched from. */
   notice?: { text: string; tone: Notice["tone"] };
+  /** Passed to every MachineClient. Only a test moves the retry backoff. */
+  client?: ClientOptions;
 }
 
 /**
@@ -220,11 +248,15 @@ export class Store {
   readonly clientSource: MachineSource | null;
   readonly canRelaunch: boolean;
   private buildTimer: NodeJS.Timeout | null = null;
+  private clientOpts: ClientOptions;
+  /** Drives `state.tick`, which animates the spinner. */
+  private tickTimer: NodeJS.Timeout | null = null;
 
   constructor(machines: SavedMachine[], opts: StoreOptions = {}) {
     this.config = loadConfig();
     this.clientSource = opts.source ?? null;
     this.canRelaunch = opts.canRelaunch ?? false;
+    this.clientOpts = opts.client ?? {};
     this.state = {
       machines: new Map(), order: [], selected: null, view: null, focus: "sidebar",
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
@@ -235,7 +267,8 @@ export class Store {
       clientBuild: opts.build ?? null, clientStale: false,
     };
     for (const m of machines) this.addMachine(m, false);
-    setInterval(() => this.set({ tick: this.state.tick + 1 }), 700).unref();
+    this.tickTimer = setInterval(() => this.set({ tick: this.state.tick + 1 }), 700);
+    this.tickTimer.unref();
     if (opts.watchBuild) this.watchOwnBuild(opts.watchBuild, opts.buildPollMs ?? BUILD_POLL_MS);
     if (opts.notice) this.notify(opts.notice.text, opts.notice.tone);
   }
@@ -282,11 +315,15 @@ export class Store {
 
   addMachine(saved: SavedMachine, persist = true) {
     if (this.clients.has(saved.url)) return;
-    const ms: MachineState = { key: saved.url, saved, conn: "connecting", error: null, info: null, projects: new Map(), threads: new Map(), update: null, restarting: false };
+    const ms: MachineState = { key: saved.url, saved, conn: "connecting", error: null, info: null, projects: new Map(), threads: new Map(), runs: new Map(), update: null, restarting: false };
     this.state.machines.set(saved.url, ms);
     this.state.order.push(saved.url);
     const client = new MachineClient(saved, {
       state: (s, err) => {
+        // A machine that is off reports the same state over and over. Painting
+        // the whole sidebar for a row that did not change is what made a dead
+        // machine cost the same as a busy one (issue #68).
+        const changed = ms.conn !== s || ms.error !== (err ?? null) || ms.info !== client.info;
         ms.conn = s; ms.error = err ?? null; ms.info = client.info;
         // A cached seq only means something to the daemon it was read from.
         if (s !== "connected") this.viewCache.dropMachine(ms.key);
@@ -298,12 +335,13 @@ export class Store {
           if (ms.update?.state === "restarting") ms.update = { ...ms.update, state: "succeeded", finishedAt: new Date().toISOString() };
           this.notify(`${ms.info?.name ?? ms.saved.name} is back up${at ? ` on ${at}` : ""}`, "success");
         }
-        this.touch();
+        if (changed) this.touch();
       },
       shellSnapshot: (snap) => {
         ms.info = snap.machine;
         ms.projects = new Map(snap.projects.map((p) => [p.id, p]));
         ms.threads = new Map(snap.threads.map((t) => [t.id, t]));
+        ms.runs = new Map((snap.runs ?? []).map((r) => [r.id, r]));
         if (saved.machineId !== snap.machine.machineId) { saved.machineId = snap.machine.machineId; this.persist(); }
         this.touch();
       },
@@ -314,11 +352,14 @@ export class Store {
       machineUpdate: (update) => {
         const prev = ms.update;
         ms.update = update;
-        if (update.state === "restarting") ms.restarting = true;
+        // The drop that follows is the update working, so the client has to be
+        // told before it happens — otherwise it gives up on the daemon it was
+        // asked to restart, and the reconnect that reports success never comes.
+        if (update.state === "restarting") { ms.restarting = true; client.expectRestart(); }
         this.noticeUpdate(ms, prev, update);
         this.touch();
       },
-    });
+    }, this.clientOpts);
     this.clients.set(saved.url, client);
     client.start();
     if (persist) { this.config.machines.push(saved); this.persist(); }
@@ -339,6 +380,27 @@ export class Store {
 
   client(key: string): MachineClient | undefined { return this.clients.get(key); }
 
+  /**
+   * Dial a machine the client has given up on, and give it a fresh budget.
+   *
+   * This is the whole answer to "a machine that comes back on its own": there
+   * is no heartbeat. A probe slow enough to be cheap is also slow enough that
+   * the reader who wants the machine now presses this instead, and a state that
+   * keeps probing in the background is not the honest "we have stopped trying"
+   * that the offline row promises. One key, and the count starts again.
+   */
+  retryMachine(key: string) {
+    const ms = this.state.machines.get(key);
+    const client = this.clients.get(key);
+    if (!ms || !client) return;
+    const who = ms.info?.name ?? ms.saved.name;
+    if (ms.conn === "connected") { this.notify(`${who} is already connected`); return; }
+    // A dial in flight is left alone by `retry`, so do not promise a new one.
+    if (ms.conn === "connecting") { this.notify(`${who}: already trying…`); return; }
+    client.retry();
+    this.notify(`${who}: trying again…`);
+  }
+
   private applyShell(ms: MachineState, ev: ShellEvent) {
     switch (ev.kind) {
       case "machine.updated": ms.info = ev.machine; break;
@@ -350,9 +412,14 @@ export class Store {
         const v = this.state.view;
         if (v && v.machine === ms.key && v.threadId === ev.thread.id) v.thread = ev.thread;
         else if (prev) this.noticeTransition(ms, prev, ev.thread);
+        this.noticeRunProgress(ms, ev.thread);
         break;
       }
       case "thread.removed": ms.threads.delete(ev.threadId); break;
+      // A run arrives whole, the way a timeline item does, so there is no
+      // partial state to reconcile after a reconnect.
+      case "run.upserted": ms.runs.set(ev.run.id, ev.run); break;
+      case "run.removed": ms.runs.delete(ev.runId); break;
     }
     this.touch();
   }
@@ -537,6 +604,12 @@ export class Store {
   beginSelection(pane: Selection["pane"], line: number, col: number) {
     this.set({ selection: { pane, anchor: { line, col }, head: { line, col }, dragging: true } });
   }
+  /** Put a finished selection down in one go, the way a double or triple click
+   *  makes one. `dragging` is false, so pointer motion after it leaves it
+   *  alone: the user asked for a word, not for the start of a drag. */
+  setSelection(pane: Selection["pane"], anchor: Selection["anchor"], head: Selection["head"]) {
+    this.set({ selection: { pane, anchor, head, dragging: false } });
+  }
   extendSelection(line: number, col: number) {
     const s = this.state.selection;
     if (!s || !s.dragging) return;
@@ -705,11 +778,12 @@ export class Store {
     try {
       await client.rpc("machine.restart", {});
       if (ms) ms.restarting = true;
+      client.expectRestart();
       this.notify(`${who}: restarting the daemon…`);
     } catch (e: any) {
       // The daemon may drop the socket before the reply lands; that is the
       // restart happening, not a failure.
-      if (e.message === "disconnected") { if (ms) ms.restarting = true; this.notify(`${who}: restarting the daemon…`); }
+      if (e.message === "disconnected") { if (ms) ms.restarting = true; client.expectRestart(); this.notify(`${who}: restarting the daemon…`); }
       else this.notify(this.machineError(machine, e), "error");
     }
   }
@@ -924,14 +998,445 @@ export class Store {
     } catch (e: any) { this.notify(e.message, "error"); }
   }
 
+  // ---- runs ----------------------------------------------------------------
+
+  /** The run record, from the machine whose daemon stores it. */
+  run(machine: string, runId: string): Run | null {
+    return this.state.machines.get(machine)?.runs.get(runId) ?? null;
+  }
+
+  /** The member under an id, and the machine key its thread lives on. */
+  member(machine: string, runId: string, memberId: string): RunMember | null {
+    return this.run(machine, runId)?.members.find((m) => m.id === memberId) ?? null;
+  }
+
+  /** The client key for a machine id, across every machine this client holds. */
+  machineKeyOf(machineId: string): string | null {
+    for (const k of this.state.order) if (this.state.machines.get(k)?.info?.machineId === machineId) return k;
+    return null;
+  }
+
+  /** A machine's name, for a run row that names a machine it may not be on. */
+  machineNameOf(machineId: string): string {
+    const k = this.machineKeyOf(machineId);
+    return (k && this.state.machines.get(k)?.info?.name) || machineId.slice(0, 8);
+  }
+
+  /**
+   * The machines a run may put work on: connected, with a checkout of the same
+   * repository, and reporting what they are made of.
+   *
+   * A machine whose daemon predates `resources` is still offered — it just
+   * counts as one core and one member at a time, because guessing bigger is
+   * how a Pi ends up with ten agents on it.
+   */
+  placementMachines(repositoryIdentity: string | null): PlacementMachine[] {
+    const out: PlacementMachine[] = [];
+    for (const key of this.state.order) {
+      const m = this.state.machines.get(key);
+      if (!m || m.conn !== "connected" || !m.info) continue;
+      const project = [...m.projects.values()].find((p) =>
+        repositoryIdentity ? p.repositoryIdentity === repositoryIdentity : false);
+      if (!project) continue;
+      const r = m.info.resources;
+      out.push({
+        key,
+        machineId: m.info.machineId,
+        name: m.info.name,
+        os: m.info.os,
+        arch: m.info.arch,
+        tools: [...new Set((r?.tools ?? []).map((t) => t.name))],
+        cpuCount: r?.cpuCount ?? 1,
+        concurrency: r?.concurrency ?? 1,
+        tmpDir: r?.tmpDir ?? "/tmp",
+        projectId: project.id,
+      });
+    }
+    return out;
+  }
+
+  /** Read the issues a task list names, with `gh` in that machine's checkout. */
+  async runIssues(machine: string, projectId: string, numbers: number[]): Promise<{ issues: RunIssue[]; error: string | null }> {
+    const client = this.clients.get(machine);
+    if (!client) return { issues: [], error: "not connected" };
+    try { return await client.rpc("run.issues", { projectId, numbers }); }
+    catch (e: any) { return { issues: [], error: this.machineError(machine, e) }; }
+  }
+
+  /**
+   * Start a run: place every task, give every member its own port and
+   * directories, and write the record on this machine's daemon.
+   *
+   * Nothing is dispatched here. The operator reads the placement and may move a
+   * member before any agent starts, because placement that cannot be overridden
+   * will be wrong on the first run that matters.
+   */
+  async createRun(o: {
+    machine: string;
+    name: string;
+    goal: string;
+    tasks: RunTask[];
+    repositoryIdentity: string | null;
+    briefTemplate?: string;
+    workspaceMode?: WorkspaceMode;
+    /** The run's id. Supplied only by a test that needs a known one. */
+    runId?: string;
+  }): Promise<string | null> {
+    const client = this.clients.get(o.machine);
+    if (!client) { this.notify("start a run from a connected machine", "error"); return null; }
+    const machines = this.placementMachines(o.repositoryIdentity);
+    if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return null; }
+    const runId = o.runId ?? randomUUID();
+    // Placed against what every other run's live members already hold, the same
+    // way `addTasks` is. A machine's concurrency limit is the machine's, not
+    // each run's: two runs started in a row would otherwise both fill the Mac
+    // to its limit and put twice the limit on it.
+    const placed = placeTasks(o.tasks, machines, this.membersPerMachine());
+    const byId = new Map(machines.map((m) => [m.machineId, m]));
+    const ports = allocatePorts(runId, placed.length, this.portsInUse());
+    const members = placed.map((p, i) => {
+      // A task no machine can take still gets a member, on the fastest machine,
+      // so the operator sees it and decides. Dropping it silently is how a task
+      // goes missing from a run of twenty.
+      const target = (p.machineId && byId.get(p.machineId)) || machines[0]!;
+      return {
+        id: randomUUID(),
+        task: p.task,
+        machineId: target.machineId,
+        projectId: target.projectId,
+        resources: allocateResources(runId, ports[i]!, target.tmpDir, memberSlug(p.task, i)),
+        // A member the rule could not place says so on its own row. Moving it
+        // is the operator's call, and they cannot make it without the reason.
+        note: p.machineId === null ? `not placed by the rule: ${p.reason} — move it or change the task` : null,
+      };
+    });
+    try {
+      await client.command({
+        type: "run.create",
+        run: {
+          runId,
+          name: o.name,
+          goal: o.goal,
+          briefTemplate: o.briefTemplate ?? DEFAULT_BRIEF,
+          workspaceMode: o.workspaceMode ?? "worktree-default",
+          members,
+        },
+      });
+      this.setOverlay({ kind: "run", machine: o.machine, runId, marked: new Set(), busy: null });
+      return runId;
+    } catch (e: any) { this.notify(e.message, "error"); return null; }
+  }
+
+  /**
+   * The ports the members of every run this client can see are still using.
+   *
+   * Two runs whose ids hash close together would otherwise hand the same port
+   * to two agents — which is issue #8 happening again, one level up. A member
+   * that is merged or withdrawn has given its port back.
+   */
+  private portsInUse(): Set<number> {
+    const ports = new Set<number>();
+    for (const key of this.state.order) {
+      for (const run of this.state.machines.get(key)?.runs.values() ?? []) {
+        for (const m of run.members) if (!isFinalMemberState(m.state)) ports.add(m.resources.port);
+      }
+    }
+    return ports;
+  }
+
+  /**
+   * How many live members every machine already carries, across every run this
+   * client can see. Placement starts from this rather than from zero.
+   */
+  private membersPerMachine(): Map<string, number> {
+    const load = new Map<string, number>();
+    for (const key of this.state.order) {
+      for (const run of this.state.machines.get(key)?.runs.values() ?? []) {
+        for (const m of run.members) if (!isFinalMemberState(m.state)) load.set(m.machineId, (load.get(m.machineId) ?? 0) + 1);
+      }
+    }
+    return load;
+  }
+
+  /** Change one member's row. Everything about a run is one of these. */
+  async patchMember(machine: string, runId: string, memberId: string, patch: RunMemberPatch): Promise<string | null> {
+    return this.threadCommand({ type: "run.member.patch", runId, memberId, patch }, machine);
+  }
+
+  /** Move a member to another machine. Refused once its thread exists. */
+  async moveMember(machine: string, runId: string, memberId: string, toMachineId: string) {
+    const m = this.member(machine, runId, memberId);
+    if (!m) return;
+    if (m.threadId) { this.notify("this member already has a thread — withdraw it instead of moving it", "error"); return; }
+    const run = this.run(machine, runId);
+    const to = this.placementMachines(this.runRepository(machine, runId)).find((x) => x.machineId === toMachineId);
+    if (!to || !run) { this.notify("that machine has no checkout of this project", "error"); return; }
+    const index = run.members.findIndex((x) => x.id === memberId);
+    await this.patchMember(machine, runId, memberId, {
+      machineId: to.machineId,
+      projectId: to.projectId,
+      // The port is the member's and goes with it. The directories are rebuilt,
+      // because they are named for the machine they will be used on and `/tmp`
+      // is not `/tmp` everywhere.
+      resources: allocateResources(runId, m.resources.port, to.tmpDir, memberSlug(m.task, index)),
+    });
+    this.notify(`${m.task.key} → ${to.name}`, "success");
+  }
+
+  /** The repository a run's members work in, from the project of its first member. */
+  private runRepository(machine: string, runId: string): string | null {
+    const run = this.run(machine, runId);
+    for (const m of run?.members ?? []) {
+      const key = this.machineKeyOf(m.machineId);
+      const p = key && m.projectId ? this.state.machines.get(key)?.projects.get(m.projectId) : null;
+      if (p) return p.repositoryIdentity;
+    }
+    return null;
+  }
+
+  /**
+   * Start every member that has not started. One thread each, in its own
+   * worktree, with a brief that names its own resources.
+   *
+   * Serialised on purpose: fifteen `git worktree add` calls at once on one
+   * machine is a lot of disk, and a failure part way through should leave a run
+   * the operator can read rather than fifteen half-made threads.
+   */
+  async dispatchRun(machine: string, runId: string) {
+    const run = this.run(machine, runId);
+    if (!run) return;
+    const todo = run.members.filter((m) => m.state === "planned" && !m.threadId);
+    if (todo.length === 0) { this.notify("every member is already dispatched", "error"); return; }
+    let done = 0;
+    for (const m of todo) {
+      this.setRunBusy(machine, runId, `dispatching ${m.task.key} (${done + 1}/${todo.length})…`);
+      const err = await this.dispatchMember(machine, runId, m.id);
+      if (err) {
+        await this.patchMember(machine, runId, m.id, { state: "blocked", note: `dispatch failed: ${err}` });
+        this.notify(`${m.task.key}: ${err}`, "error");
+      } else done++;
+    }
+    this.setRunBusy(machine, runId, null);
+    this.notify(`dispatched ${done} of ${todo.length}`, done === todo.length ? "success" : "error");
+  }
+
+  /** Start one member. Returns the reason it could not, or null. */
+  async dispatchMember(machine: string, runId: string, memberId: string): Promise<string | null> {
+    const run = this.run(machine, runId);
+    const m = run?.members.find((x) => x.id === memberId);
+    if (!run || !m) return "no such member";
+    if (m.threadId) return null;
+    const key = this.machineKeyOf(m.machineId);
+    const client = key ? this.clients.get(key) : null;
+    if (!client || !m.projectId) return `${this.machineNameOf(m.machineId)} is not connected`;
+    const threadId = randomUUID();
+    try {
+      await client.command({
+        type: "thread.create",
+        projectId: m.projectId,
+        threadId,
+        sessionId: randomUUID(),
+        title: m.task.title,
+        workspaceMode: run.workspaceMode,
+        // Said outright, because the client name cannot say it: this connection
+        // is the TUI, the one client a person types into, but nobody typed this
+        // thread. No parent — a member is grouped under its run row already,
+        // and a thread must not be painted in two groups at once.
+        origin: { by: "agent" },
+      });
+      // Write the thread onto the member the moment it exists, before the brief
+      // is even composed. A failure after this point leaves a thread and a
+      // worktree on that machine, and a run that did not record them is the
+      // defect of 2026-09-16 from the other end: work nobody knew was there,
+      // found later by `git rev-list`. It also stops a second dispatch making a
+      // second worktree for the same task.
+      await this.patchMember(machine, runId, memberId, { threadId });
+      // Read the thread back rather than waiting for the shell push: the branch
+      // the daemon minted goes into the brief, and the brief is the next thing
+      // sent. One round trip, and the agent's first message names its branch.
+      const snap = await client.rpc("thread.snapshot", { threadId, limit: 1 });
+      const brief = renderBrief(run.briefTemplate, {
+        runName: run.name,
+        goal: run.goal,
+        task: m.task,
+        machineName: this.machineNameOf(m.machineId),
+        branch: snap.thread.branch ?? "",
+        resources: m.resources,
+        position: run.members.indexOf(m) + 1,
+        total: run.members.length,
+      });
+      await client.command({ type: "turn.send", threadId, turnId: randomUUID(), text: brief });
+      await this.patchMember(machine, runId, memberId, {
+        threadId,
+        branch: snap.thread.branch,
+        worktreePath: snap.thread.worktreePath,
+        brief,
+        state: "dispatched",
+        dispatchedAt: new Date().toISOString(),
+        note: null,
+      });
+      return null;
+    } catch (e: any) {
+      return e?.message ?? String(e);
+    }
+  }
+
+  /**
+   * Add tasks to a run in flight.
+   *
+   * Scope changes in the middle: on the day this came from, one task was
+   * cancelled outright and another was added, and the run had to absorb both
+   * without being torn down. A new task is placed by the same rule as the
+   * others and gets resources nobody else in the run has.
+   */
+  async addTasks(machine: string, runId: string, tasks: RunTask[]) {
+    const run = this.run(machine, runId);
+    if (!run) return;
+    const machines = this.placementMachines(this.runRepository(machine, runId));
+    if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return; }
+    // Placed against what the machines already carry, so a task added to a run
+    // in flight lands where there is room and not on top of the full machine.
+    const placed = placeTasks(tasks, machines, this.membersPerMachine());
+    // The new members clear every port this run already holds, as well as every
+    // other run's — an added task must not take the port of a member at work.
+    const taken = this.portsInUse();
+    for (const m of run.members) taken.add(m.resources.port);
+    const ports = allocatePorts(runId, tasks.length, taken);
+    for (let i = 0; i < tasks.length; i++) {
+      const index = run.members.length + i;
+      const target = machines.find((x) => x.machineId === placed[i]!.machineId) ?? machines[0]!;
+      const err = await this.threadCommand({
+        type: "run.member.add",
+        runId,
+        member: {
+          id: randomUUID(),
+          task: tasks[i]!,
+          machineId: target.machineId,
+          projectId: target.projectId,
+          resources: allocateResources(runId, ports[i]!, target.tmpDir, memberSlug(tasks[i]!, index)),
+        },
+      }, machine);
+      if (err) return;
+    }
+    this.notify(`added ${tasks.length} task${tasks.length === 1 ? "" : "s"} — press d to dispatch`, "success");
+  }
+
+  /**
+   * Send the same message to several members at once.
+   *
+   * The operator of 2026-09-16 sent the same correction to fifteen threads four
+   * separate times, each one a hand-written loop over thread ids. This is the
+   * single largest manual cost in a run and the cheapest thing to build.
+   */
+  async sendToRun(machine: string, runId: string, memberIds: string[], text: string) {
+    const run = this.run(machine, runId);
+    if (!run) return;
+    const targets = run.members.filter((m) => memberIds.includes(m.id) && m.threadId);
+    if (targets.length === 0) { this.notify("none of those members has a thread yet", "error"); return; }
+    let sent = 0;
+    const failed: string[] = [];
+    for (const m of targets) {
+      const key = this.machineKeyOf(m.machineId);
+      const client = key ? this.clients.get(key) : null;
+      if (!client) { failed.push(m.task.key); continue; }
+      try {
+        await client.command({ type: "turn.send", threadId: m.threadId!, turnId: randomUUID(), text });
+        sent++;
+      } catch { failed.push(m.task.key); }
+    }
+    this.notify(
+      failed.length === 0 ? `sent to ${sent} member${sent === 1 ? "" : "s"}` : `sent to ${sent}; ${failed.join(" ")} did not take it`,
+      failed.length === 0 ? "success" : "error",
+    );
+  }
+
+  /**
+   * Read each member's pull request, from the machine that holds its branch.
+   *
+   * This is the one field of a run that does not stream over an existing
+   * subscription. Identity and state only: whether a change *may merge*, and in
+   * what order, is issue #45 and attaches to `member.review`.
+   */
+  async refreshPullRequests(machine: string, runId: string) {
+    const run = this.run(machine, runId);
+    if (!run) return;
+    this.setRunBusy(machine, runId, "reading pull requests…");
+    const errors: string[] = [];
+    for (const m of run.members) {
+      if (!m.threadId || !m.branch) continue;
+      const key = this.machineKeyOf(m.machineId);
+      const client = key ? this.clients.get(key) : null;
+      if (!client) continue;
+      try {
+        const pr = await client.rpc("run.pullRequest", { threadId: m.threadId });
+        const state = nextStateForPr(m.state, pr);
+        if (pr?.url !== m.pullRequest?.url || pr?.state !== m.pullRequest?.state || state !== m.state)
+          await this.patchMember(machine, runId, m.id, { pullRequest: pr, state });
+      } catch (e: any) { errors.push(`${m.task.key}: ${e.message}`); }
+    }
+    this.setRunBusy(machine, runId, null);
+    if (errors.length) this.notify(errors[0]!, "error");
+  }
+
+  /** Put a line on the run panel while it works. */
+  private setRunBusy(machine: string, runId: string, busy: string | null) {
+    const ov = this.state.overlay;
+    if (ov?.kind === "run" && ov.machine === machine && ov.runId === runId) this.setOverlay({ ...ov, busy });
+  }
+
+  /**
+   * A member whose thread has started work is working.
+   *
+   * Only a client sees both the run record and the threads on every machine, so
+   * this is where the two meet. It moves a member forward once and never back:
+   * a thread that goes idle between turns has not stopped being the member's.
+   */
+  private noticeRunProgress(ms: MachineState, thread: Thread) {
+    const machineId = ms.info?.machineId;
+    if (!machineId) return;
+    const busy = thread.status === "running" || thread.status === "starting" || thread.latestTurn?.state === "running";
+    if (!busy) return;
+    for (const key of this.state.order) {
+      const holder = this.state.machines.get(key);
+      if (!holder || holder.conn !== "connected") continue;
+      for (const run of holder.runs.values()) {
+        const m = run.members.find((x) => x.threadId === thread.id && x.machineId === machineId);
+        if (!m || m.state !== "dispatched") continue;
+        const mark = `${run.id}:${m.id}`;
+        if (this.advancing.has(mark)) continue;
+        this.advancing.add(mark);
+        void this.patchMember(key, run.id, m.id, { state: "working" }).finally(() => this.advancing.delete(mark));
+      }
+    }
+  }
+
+  /** Members being moved to `working`, so one thread event is not sent twice. */
+  private advancing = new Set<string>();
+
   shutdown() {
     this.stopWatchingBuild();
     if (this.noticeTimer) { clearTimeout(this.noticeTimer); this.noticeTimer = null; }
+    if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
     for (const c of this.clients.values()) c.stop();
   }
 }
 
 // ---- derived helpers --------------------------------------------------------
+
+/**
+ * Where a member stands once its pull request has been read. Tracking only:
+ * a member that reached review is in review, and one whose change landed is
+ * merged. Whether it *may* merge is issue #45.
+ *
+ * `blocked` and `withdrawn` are the operator's, so a pull request never
+ * overrules them.
+ */
+export function nextStateForPr(state: RunMemberState, pr: { state: string } | null): RunMemberState {
+  if (state === "blocked" || state === "withdrawn" || isFinalMemberState(state)) return state;
+  if (!pr) return state;
+  if (pr.state === "MERGED") return "merged";
+  return state === "dispatched" || state === "working" ? "review" : state;
+}
 
 /**
  * A row in the directory browser. `..` and "new folder" are rows like any
@@ -1058,7 +1563,7 @@ export function tallyThreads(threads: Iterable<Thread>): ThreadTally {
 
 export interface SidebarRow {
   key: string;
-  kind: "machine" | "project" | "thread" | "empty" | "archived";
+  kind: "machine" | "project" | "thread" | "empty" | "archived" | "run" | "member";
   machine: string;
   projectId?: string;
   thread?: Thread;
@@ -1067,17 +1572,61 @@ export interface SidebarRow {
   archived?: boolean;
   /** How many threads the archived folder holds. */
   count?: number;
+  /** Set on a run row and on every member row inside it. */
+  run?: Run;
+  member?: RunMember;
+  /** Set on a thread a program started, not a person (`Thread.origin.by`). */
+  agent?: boolean;
+  /** Set on a thread row that has threads of its own under it. */
+  group?: boolean;
+  /** How many of a furled group's children are not painted. */
+  hidden?: number;
   depth: number;
 }
 
 /** `expanded` key for a project's archived folder. Furled unless toggled. */
 export function archiveKey(machine: string, projectId: string): string { return `${machine}:${projectId}:archived`; }
 
+/** `expanded` key for a run's members. Open unless furled. */
+export function runKey(machine: string, runId: string): string { return `${machine}:run:${runId}`; }
+
+/**
+ * `expanded` key for the threads one thread started. Furled unless opened,
+ * which is the point of #69: fifteen dispatched threads become one row.
+ *
+ * It is the same mechanism a project and an archive folder use, so a group the
+ * user furled is still furled after a restart (`TuiConfig.prefs.expanded`).
+ */
+export function threadGroupKey(machine: string, threadId: string): string { return `${machine}:thread:${threadId}`; }
+
+/**
+ * True when a thread has stopped needing to work and started needing a person:
+ * it failed, or it is blocked on an approval or an answer.
+ *
+ * This is the attention rule of #49. An agent's thread is quiet while it works,
+ * so a furled group hides it — but never these. Nobody else is watching a
+ * thread that failed, and a run in a strict permission mode deadlocks in
+ * silence if the thread asking for the approval is the one that is hidden.
+ */
+export function needsPerson(t: Thread): boolean {
+  return t.status === "error" || t.status === "waiting" || t.pendingApprovals > 0;
+}
+
 export function sidebarRows(s: AppState): SidebarRow[] {
   const rows: SidebarRow[] = [];
   for (const key of s.order) {
     const m = s.machines.get(key)!;
     rows.push({ key: `m:${key}`, kind: "machine", machine: key, depth: 0 });
+    // Runs sit above the projects: a run is the reason the threads under it
+    // exist, and it is what the operator is watching. Closed runs stay, so the
+    // record of what a run did does not vanish the moment it finishes.
+    for (const run of [...m.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      rows.push({ key: `r:${key}:${run.id}`, kind: "run", machine: key, run, depth: 1 });
+      if (!(s.expanded[runKey(key, run.id)] ?? true)) continue;
+      for (const member of run.members) {
+        rows.push({ key: `rm:${key}:${run.id}:${member.id}`, kind: "member", machine: key, run, member, depth: 2 });
+      }
+    }
     const projects = [...m.projects.values()].sort((a, b) => a.title.localeCompare(b.title));
     if (projects.length === 0 && m.conn === "connected") rows.push({ key: `e:${key}`, kind: "empty", machine: key, depth: 1 });
     for (const p of projects) {
@@ -1085,7 +1634,59 @@ export function sidebarRows(s: AppState): SidebarRow[] {
       rows.push({ key: `p:${pk}`, kind: "project", machine: key, projectId: p.id, project: p, depth: 1 });
       if (!(s.expanded[pk] ?? true)) continue;
       const threads = liveThreads(m, p.id).sort(byRecency);
-      for (const t of threads) rows.push({ key: `t:${key}:${t.id}`, kind: "thread", machine: key, projectId: p.id, thread: t, depth: 2 });
+      // A thread a program started sits under the thread that started it.
+      // `origin.parentThreadId` is the only record of that (#49); a parent that
+      // is not in this list — archived, deleted, or on another machine — leaves
+      // the child a top-level row, because a thread must never be lost behind a
+      // link that leads nowhere.
+      const here = new Map(threads.map((t) => [t.id, t]));
+      const parentOf = (t: Thread) => {
+        const id = t.origin?.parentThreadId;
+        return id && id !== t.id && here.has(id) ? id : null;
+      };
+      const kids = new Map<string, Thread[]>();
+      for (const t of threads) {
+        const parent = parentOf(t);
+        if (parent) kids.set(parent, [...(kids.get(parent) ?? []), t]);
+      }
+      // Which threads are top-level rows. A thread whose parent is here belongs
+      // under it — but two threads naming each other have no parent outside the
+      // pair, so neither would ever be a root and both would vanish. Claiming
+      // from the roots first says which threads a root can reach; whatever is
+      // left is a cycle, and its first thread becomes a root of its own.
+      //
+      // This is settled before anything paints, because a furled group paints
+      // none of its children, and "not painted" must not be mistaken for
+      // "nobody owns it".
+      const claimed = new Set<string>();
+      const claim = (t: Thread) => {
+        if (claimed.has(t.id)) return;
+        claimed.add(t.id);
+        for (const c of kids.get(t.id) ?? []) claim(c);
+      };
+      const roots: Thread[] = [];
+      for (const t of threads) if (!parentOf(t)) { roots.push(t); claim(t); }
+      for (const t of threads) if (!claimed.has(t.id)) { roots.push(t); claim(t); }
+
+      const painted = new Set<string>();
+      const pushThread = (t: Thread, depth: number) => {
+        // A cycle reached through an unfurled group would otherwise paint for
+        // ever. Whichever thread the walk reaches first keeps the row.
+        if (painted.has(t.id)) return;
+        painted.add(t.id);
+        const children = kids.get(t.id) ?? [];
+        const open = children.length > 0 && (s.expanded[threadGroupKey(key, t.id)] ?? false);
+        // Furled hides the children that are working. It never hides one that
+        // has failed or is blocked on a person — see `needsPerson`.
+        const shown = open ? children : children.filter(needsPerson);
+        rows.push({
+          key: `t:${key}:${t.id}`, kind: "thread", machine: key, projectId: p.id, thread: t, depth,
+          ...(t.origin?.by === "agent" ? { agent: true } : {}),
+          ...(children.length > 0 ? { group: true, hidden: children.length - shown.length } : {}),
+        });
+        for (const c of shown) pushThread(c, depth + 1);
+      };
+      for (const t of roots) pushThread(t, 2);
       // The project's own archived folder, below its live threads and inside
       // its fold: the old threads of this project, most recently archived
       // first. Moved threads are tombstones, not archive — they stay hidden.

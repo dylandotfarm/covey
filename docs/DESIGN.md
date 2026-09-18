@@ -128,6 +128,54 @@ so successive turns reuse the subprocess. Options that matter:
 - Tool results arrive as `user` messages with `tool_result` blocks and are joined to the tool
   item by `tool_use_id`.
 
+## Session lifetime
+
+A live session is a CLI subprocess that costs 270-390 MB of resident memory (measured on
+macOS with SDK 0.3.265). Before this rule existed a session lived from the first turn of a
+thread until the user stopped it by hand, so a machine that had run a dozen threads held
+gigabytes for conversations nobody was reading, and the machine went into swap.
+
+The engine therefore releases a session that nobody needs. Two rules, in this order:
+
+1. **The timer.** A thread idle longer than `MachineSettings.sessionIdleMinutes`
+   (default 15) loses its session. Idle means no command about that thread and no line from
+   the agent.
+2. **The budget.** While more sessions are live than `MachineSettings.maxLiveSessions`
+   allows, the least recently used ones go. The default comes from the machine's own memory:
+   15% of it at 300 MB a session, and never fewer than two nor more than eight. The budget is
+   a target, not a promise — a machine with more turns in flight than memory keeps every
+   running turn.
+
+A session is never released while it owes somebody an answer: a turn in flight, a tool
+approval on screen, a question in front of the user, or a background task that still runs. A
+thread that waits on an approval is idle by status, and the answer needs the same process, so
+status alone cannot decide this. `ClaudeSession.busy` reports what the process itself is doing
+and the thread row is read beside it.
+
+A background task is the case the thread row cannot show at all. `run_in_background` and
+ctrl+b end the turn and leave the work running, so the status says idle while a build runs.
+The work is a child of the session subprocess and only that subprocess reads the
+`task_notification` that ends it. Measured against a live daemon: a `sleep 100` handed to the
+background died with the released session, its output file was never written, and the tool row
+still read "running in the background" five minutes later. So a live background task holds its
+session, and a task that never reports holds it for ever — 300 MB costs less than the build.
+
+Nothing is lost. The transcript lives in the session store, keyed by thread id, so the next
+message starts a new process with `resume` and the model reads the whole conversation back.
+Measured: a resume costs about 0.3 s of start time on a 458 KB transcript, against 5 ms for a
+process that is already up. A session quiet for longer than the prompt cache lives (about five
+minutes) has no advantage left to hold, which is why the default limit can be a quarter of an
+hour.
+
+Both events are visible. The thread gets a note when its session goes, and another when a
+turn starts one again, so a slow first reply reads as a resume rather than as a thread that
+hangs. The daemon logs both lines, and `/health` reports `sessions: { live, limit,
+idleMinutes }` — the number to compare a `ps` list against when a machine holds more `claude`
+processes than this daemon started.
+
+`COVEY_SESSION_IDLE_MINUTES` and `COVEY_MAX_LIVE_SESSIONS` seed the two settings for a machine
+whose `daemon.json` says nothing. `sessionIdleMinutes: 0` keeps every session for ever.
+
 ## Remote access and auth
 
 The daemon binds to the tailnet IPv4 by default (plus loopback), never `0.0.0.0` unless
@@ -163,7 +211,124 @@ The client brokers the transfer, so daemons never need to authenticate to each o
 responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Methods: `hello`,
 `shell.snapshot/subscribe`, `thread.snapshot/subscribe`, `unsubscribe`, `command`,
 `thread.export/import/markMoved`, `fs.listDir/mkdir`, `models.list`, `project.git`, `turn.diff`,
-`machine.source/update/restart`.
+`machine.source/update/restart`, `run.issues/pullRequest`,
+`run.gate/memberDiff/queue/merge/audit`.
+
+## Runs
+
+A **run** is a named group of threads with one goal: one request from the operator becomes
+many threads across many machines, each with one task, tracked to a finish. Call it a run —
+it has a beginning, an end and a result.
+
+### Where a run lives
+
+The record is **daemon state**, on the daemon the operator started the run from: a run
+outlives a client restart, so it cannot live in the TUI's config. It is one JSON row in the
+`runs` table, sent whole in `ShellSnapshot.runs` and re-sent whole on every change as
+`run.upserted` — the same rule timeline items follow, so a client that reconnects mid-run
+sees what one that watched throughout does.
+
+A run is **dispatched by the client**, because a daemon holds no connection to another
+daemon. Only the TUI has one to every machine. So the daemon stores and fans out, and the
+client places, creates the threads, sends the briefs and patches each member's row.
+
+A member carries `review`, which issue #45 owns: gates, the conflict queue and the merge
+order attach there. Dispatch and tracking carry that field and never read it.
+
+### What placement uses
+
+`MachineCapabilities` says nothing a run can place work with. `MachineInfo.resources`
+(`MachineResources`) says the rest: cores, memory, a concurrency limit from the two, the
+machine's tmpdir, and the tools the daemon can run.
+
+**The daemon reads it, never `ssh`.** The daemon is started from a login shell — often
+through `nvm` — and a non-interactive `ssh` session is not, so the two resolve different
+`PATH`s. An agent inherits the daemon's. On 2026-09-16 an `ssh` probe reported that a machine
+had no `pnpm`; it had `pnpm`, and the operator nearly installed a second one.
+`packages/daemon/src/resources.ts` therefore probes `process.env.PATH`, after the listener
+binds, and pushes the answer as `machine.updated`. It reports a second copy of a name when
+there is one — which is how the machine with the old `/usr/bin/node` answers for itself.
+
+### The rule
+
+> Each task goes to the fastest machine that meets its requirements and still has room; when
+> every machine is full, to the one carrying least for its size.
+
+A task may carry requirements — `os=darwin`, `arch=arm64`, `needs=tmux`, `machine=pi` — and
+placement obeys every one. The rule is shown in the run panel while the run is still being
+planned, and `m` moves a member to another machine until it has a thread. Placement that
+cannot be overridden will be wrong on the first run that matters.
+
+### One set of resources per member
+
+Each member gets a port, a `COVEY_HOME` and a `COVEY_CONFIG` that nobody else in the run has,
+and the brief template substitutes them. This is the defect that made the issue: the brief of
+2026-09-16 gave all fifteen agents the same throwaway port, and one of them ran
+`covey stop --port 3799` and stopped a daemon another agent had started.
+
+Ports come from a contiguous block in 3800–3999, chosen from the run's id, so a member can
+never be handed 3790. The block depends on the run's id alone and not on how many members it
+has, or adding a task would re-number a member already at work on its own port.
+
+### Tracking, and talking to it
+
+A run is a sidebar row that opens to its members: task, thread, machine, branch, pull
+request, state. `planned → dispatched → working → review → merged`, plus `blocked` and
+`withdrawn`. `blocked` is not an error, and `withdrawn` is an outcome beside `merged`, with
+the reasoning kept in `note`.
+
+Everything but the pull request streams over the shell subscription the sidebar already
+holds. `run.pullRequest` fetches the rest, with `gh` on the machine that holds the branch —
+identity and state only; mergeability is #45's.
+
+`s` in the run panel sends one message to every member, to the marked ones, or to one. The
+operator of 2026-09-16 sent the same correction to fifteen threads four separate times, each
+one a hand-written loop over thread ids.
+
+## Integrating a run
+
+A run dispatches work and tracks it (#44). This is what happens when the work comes back:
+the gate, the conflict queue, the audit, and the one party that merges. The rules come from
+a real run of fifteen agents on 2026-09-16, and every one of them cost something.
+
+`packages/daemon/src/integrate/` holds it. Everything in there is pure but `gh.ts`, which is
+the only file that starts a process, so a test passes a `fakeHost` and nothing reaches GitHub.
+
+**Green is not the gate.** A check is green against the base it ran on, and the base moves.
+Two pull requests of that run were each green and each `MERGEABLE`, shared no line, and broke
+`main` when both landed: the second one's checks were computed before the first existed. So
+`summariseChecks` treats four states as a refusal — `failing`, `pending`, `stale` and
+`absent` — and a green check whose `startedAt` is earlier than the base head's commit date is
+stale. GitHub's own `mergeStateStatus` of `BEHIND` says the same thing and counts too.
+A merge queue cures this at the source, because it runs the checks on the queued merge
+result; the rule stays, because the queue is a repository setting a run cannot assume.
+
+**A test that exists is not the gate either.** When the operator asked every agent to revert
+its fix and run its test again, three of five already-merged agents found their tests proved
+nothing. So a member carries a `RegressionEvidence` record: what it reverted, which test, and
+the failure verbatim. No machine can judge a test, and `evidence.ts` does not pretend to. It
+refuses the three cheap fakes — no record, no failure text, and the output of a run that
+passed — and shows the rest to a person.
+
+**The conflict queue is serial, largest diff first**, so the cheapest change pays the
+re-merge tax. `buildQueue` also writes each member a brief that names what lands before it
+and in which file. The brief says in its own words that file overlap is a hint: in the real
+run the predicted collision never happened, the real one was in a file nobody listed, and the
+hard part was a behaviour question rather than a merge.
+
+**Never merge under a running turn.** A run owns the map from thread to branch, so the gate
+refuses while the member's thread runs. The daemon reads that from the thread itself and
+never from the caller. After any merge the audit asks
+`git rev-list origin/<base>..origin/<branch>` of every merged branch; one line of shell that
+would have caught a real loss of 211 lines at once.
+
+**One party merges.** `mergeMember` is the only path to a merge, it takes a `MergeParty` and
+refuses anybody without `integrator`, and it reads the gate fresh rather than trusting a
+verdict from a minute ago. Members never get push rights to the base branch.
+
+The RPCs are `run.gate`, `run.memberDiff`, `run.queue`, `run.merge` and `run.audit`. Each is
+answered by the daemon that holds the member's branch, because that daemon has the checkout,
+the `PATH` and the `gh` login.
 
 ## Browsing the sidebar
 
@@ -217,6 +382,77 @@ hands that one array to both `Sidebar` and the hit test — the same trick the
 transcript uses for drag-selection. The wheel over the sidebar moves the cursor
 instead of scrolling a viewport of its own, so one thing decides both what is
 visible and what is shown.
+
+## Who started a thread, and where it sits
+
+A thread a program started used to look exactly like a thread the user opened by
+hand. On 2026-09-16 an operator ran fifteen agents over two machines, and all
+fifteen threads appeared beside the user's own, with nothing to tell them apart
+but their titles.
+
+`Thread.origin` records the difference: whether a person or a program asked for
+the thread, the `client` name the creating connection gave at `hello`, and the
+thread that started it. It is optional, the rule `titleAuto` follows, so every
+thread that predates it keeps working and paints as it did.
+
+The name comes from the connection, not from one call. `hello` has always
+carried it and the daemon used to discard it; the server now holds it for the
+life of the connection and `Engine.dispatch` takes it. `USER_CLIENT`
+(`covey-tui`) is the one client a person types into, so every other name is a
+program, and a connection that names nothing gets no origin at all.
+
+**It is a hint, not a boundary.** `client` is self-declared and the daemon cannot
+check it. Nothing that must not be spoofable may rest on it.
+
+`thread.create` can carry an explicit `origin`, because the client name cannot
+answer every case: the TUI dispatches a run's members over the same connection a
+person types into, so it says `{ by: "agent" }` outright and the command wins.
+
+### In the sidebar
+
+A child sits under its parent, indented, **furled by default** — fifteen
+dispatched threads become one row, with a count on the parent saying what it is
+holding. `◇` marks a thread a program started: a glyph, not colour alone,
+because covey runs over ssh and in tmux, and colour alone also fails a reader
+who cannot tell the pair apart.
+
+**The arrow keys furl; the click never does.** `→` unfurls a furled group as it
+unfurls a project, `←` furls it, and `enter` and a click both open the thread —
+the mouse keeps no vocabulary of its own. Were a click to furl, the row that
+most wants clicking, the thread that dispatched everything below it, could not
+be opened without collapsing everything under it. `←` on a *child* moves to its
+parent, so `←←` is the way out of a group from any row inside it.
+
+A furled group hides the children that are **working**. It never hides one that
+failed, is `waiting`, or has a pending approval: nobody else is watching a
+thread that failed, and a run in a strict permission mode would deadlock in
+silence behind a hidden approval. Quiet while it works, painted the moment it
+needs a person.
+
+`threadGroupKey(machine, threadId)` sits beside `archiveKey` and `runKey` in
+`AppState.expanded` and persists through `TuiConfig.prefs.expanded`, so a furled
+group is still furled after a restart.
+
+A `parentThreadId` naming a thread the sidebar cannot see — archived, deleted,
+on another machine — leaves the child a top-level row: a thread is never lost
+behind a link that leads nowhere. Two threads naming each other have no parent
+outside the pair, so the reachable set is settled from the roots *before*
+anything paints; resolving it during the paint would treat "furled" as
+"unowned" and resurrect every hidden child.
+
+### A run is not a manager thread
+
+A run is a named group the operator created and finds its members through
+`run.members`. A manager thread's children find *it*, through a back-pointer on
+the child. Same edge, opposite directions, and unifying them would mean
+inventing a run nobody named or a parent thread that does not exist. What they
+share is the furl mechanism, and that is reused rather than rebuilt: a third
+grouping *key*, not a third grouping *model*. A run member's thread is marked
+`agent` with no parent, so it is grouped under its run row and nowhere else.
+
+Nothing yet tells an agent its own thread id, so a program running *inside* a
+covey thread cannot fill `parentThreadId` by itself — the caller has to know it
+and pass it.
 
 ## The machine control panel
 
@@ -445,3 +681,6 @@ streaming, queueing, and diff capture.
   There is no reader for Windows, and no paste for a non-image on the clipboard.
 - **Rust client**: the protocol is the contract; a ratatui client can replace `packages/tui`
   without daemon changes. Worth doing once the protocol stops moving.
+- **A control for the session limits**: `sessionIdleMinutes` and `maxLiveSessions` are in
+  `MachineSettings`, and the machine control panel does not offer them yet. Until it does,
+  `daemon.json` or the two environment variables set them.

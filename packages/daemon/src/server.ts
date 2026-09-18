@@ -50,7 +50,10 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
       // pid and startedAt let the CLI replace a daemon that is running older
       // code than the build on disk — otherwise a long-lived daemon silently
       // serves stale behaviour forever, since the CLI reuses any healthy one.
-      res.end(JSON.stringify({ ok: true, machineId: o.config.machineId, name: o.config.name, pid: process.pid, startedAt: STARTED_AT }));
+      // `sessions` says how many Claude subprocesses this daemon owns, and the
+      // two limits that govern that number. A process list with more `claude`
+      // processes than `sessions.live` holds something this daemon did not start.
+      res.end(JSON.stringify({ ok: true, machineId: o.config.machineId, name: o.config.name, pid: process.pid, startedAt: STARTED_AT, sessions: o.engine.sessionCensus() }));
       return;
     }
     res.writeHead(404); res.end();
@@ -83,6 +86,14 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
   const send = (m: WireFromDaemon) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
   const subs = new Map<string, () => void>();
   let subCounter = 0;
+  /**
+   * The name this connection gave at `hello`. It says whether a person or a
+   * program creates the threads that follow, so it is kept for the life of the
+   * connection instead of being read once and thrown away. Self-declared: the
+   * daemon cannot check it, so nothing that must not be spoofable may rest on
+   * it (`ThreadOrigin`).
+   */
+  let clientName = "";
 
   const rpc = async (req: RpcRequest): Promise<RpcResponse> => {
     try {
@@ -99,6 +110,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
     switch (req.method) {
       case "hello":
         if (p.protocolVersion !== PROTOCOL_VERSION) throw new EngineError("protocol", `daemon speaks v${PROTOCOL_VERSION}, client v${p.protocolVersion}`);
+        clientName = typeof p.client === "string" ? p.client : "";
         return engine.machine;
       case "shell.snapshot":
         return engine.shellSnapshot();
@@ -141,7 +153,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
         subs.delete(p.subscriptionId);
         return null;
       case "command": {
-        const seq = await engine.dispatch(p);
+        const seq = await engine.dispatch(p, clientName);
         return { commandId: p.commandId, ok: true, seq };
       }
       case "thread.export":
@@ -194,6 +206,28 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
         return sourceInfo();
       case "machine.update":
         return o.updater.start({ restart: p.restart });
+      case "run.issues":
+        return engine.runIssues(String(p.projectId), Array.isArray(p.numbers) ? p.numbers.map(Number) : []);
+      case "run.pullRequest":
+        return engine.runPullRequest(String(p.threadId));
+      case "run.gate":
+        return engine.runGate(String(p.threadId), String(p.label ?? ""), p.state, p.evidence ?? null);
+      case "run.memberDiff":
+        return engine.runMemberDiff(String(p.threadId));
+      case "run.queue":
+        return engine.runQueue(Array.isArray(p.entries) ? p.entries : []);
+      case "run.merge":
+        return engine.runMerge({
+          threadId: String(p.threadId),
+          label: String(p.label ?? ""),
+          state: p.state,
+          evidence: p.evidence ?? null,
+          actor: p.actor,
+          method: p.method,
+          queue: p.queue,
+        });
+      case "run.audit":
+        return engine.runAudit(String(p.threadId), String(p.label ?? ""));
       case "machine.restart": {
         const pid = process.pid;
         scheduleRestart(o.log);
