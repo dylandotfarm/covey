@@ -510,9 +510,30 @@ set, so the panel is not silently overridden by the client.
 Parallel threads in one checkout fight over the same files, so in a git repo the first new
 thread in a project asks where it should run, and offers to remember the answer:
 
-- **Worktree from `<default branch>`** — `git worktree add -b covey/<id> … <base>`, where the
-  base is `origin/HEAD` if that branch exists locally, else the local `main`/`master`. A clean
-  start, unaffected by whatever is checked out.
+- **Worktree from `origin/<default branch>`** — `git worktree add --no-track -b covey/<id> …
+  <base>`, where the base is `origin/HEAD` (else `origin/main`, `origin/master`), and only a
+  local `main`/`master` in a repo with no remote. A clean start, unaffected by whatever is
+  checked out *and* by whatever this machine last pulled.
+
+  covey **fetches `origin` first**. Work is pushed to `origin` and reviewed there, so `origin`
+  is the truth about what the default branch is; the local branch of that name is one
+  machine's opinion, and on a machine that dispatches agents it is a stale one, because nobody
+  pulls a checkout they only ever branch from. Before this (#76) a worktree branched from the
+  local `main`, which on the macOS host was 46 commits behind `origin/main`, so every agent
+  started two days back and spent a round merging before its work could land.
+
+  The fetch takes one branch, not the whole remote, and is bounded at 20s (a healthy no-op
+  fetch of this project measures 1.2s to 1.4s). One repository's fetch counts as fresh for a
+  minute, so a dispatch of eight threads in one project pays for one round trip, not eight.
+  **A fetch that fails never stops the worktree.** Offline, no credentials, a remote that is
+  down: the worktree is branched from the refs that are here and the thread gets a warning
+  naming the ref and the commit it really got. An agent that starts stale and knows it can
+  merge first; an agent that cannot start does nothing at all. Every clean-start thread gets
+  that line, warning or not — "Branched from `origin/main` at `774c764`, fetched from origin
+  just now."
+
+  `--no-track` keeps `origin/main` from becoming the new branch's upstream, which would make
+  `git push` under `push.default=simple` refuse it.
 - **Worktree from HEAD** — same, branched from the current checkout.
 - **This checkout** — the project directory itself, shared with every other thread. The
   behaviour covey had before, and the only option in a non-git project.

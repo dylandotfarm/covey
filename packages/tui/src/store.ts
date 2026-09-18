@@ -1483,7 +1483,9 @@ export function parentPath(path: string): string {
 export function workspaceOptions(git: ProjectGit): PickOption[] {
   const head = git.currentBranch ? ` (${git.currentBranch})` : "";
   const opts: PickOption[] = [];
-  if (git.defaultBranch) opts.push({ id: "worktree-default", label: `Worktree from ${git.defaultBranch}`, hint: "clean start" });
+  // The label names the ref the worktree really gets — `origin/main`, not the
+  // local copy of it — because that difference is the whole of #76.
+  if (git.defaultBranch) opts.push({ id: "worktree-default", label: `Worktree from ${git.defaultBranch}`, hint: "clean start, fetched first" });
   opts.push({ id: "worktree-head", label: `Worktree from HEAD${head}`, hint: "branch off what is checked out" });
   opts.push({ id: "checkout", label: `This checkout${head}`, hint: "shared with other threads" });
   return opts;
@@ -1492,7 +1494,7 @@ export function workspaceOptions(git: ProjectGit): PickOption[] {
 /** Short label for a remembered workspace mode, for menus. */
 export function workspaceModeLabel(mode: WorkspaceMode | null | undefined): string {
   switch (mode) {
-    case "worktree-default": return "worktree from the default branch";
+    case "worktree-default": return "worktree from the remote's default branch";
     case "worktree-head": return "worktree from HEAD";
     case "checkout": return "the project checkout";
     default: return "ask every time";
