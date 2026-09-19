@@ -1,8 +1,8 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import type { ToolCallItem } from "@covey/protocol";
+import type { TimelineItem, ToolCallItem } from "@covey/protocol";
 import { selectionBounds, type Selection, type ThreadView } from "../store.js";
-import { renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
+import { ItemLines, renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
 import { hyperlinksEnabled, osc8, type LinkContext } from "../links.js";
 import { T } from "../theme.js";
 
@@ -43,14 +43,21 @@ export const toolGroupKey = (turnId: string) => `tools:${turnId}`;
  *
  * `links` marks the paths and the URLs. It is the caller's job because whether
  * a path is openable depends on which machine the thread runs on.
+ *
+ * `cache` holds the lines of the items that did not change, which is all but
+ * one of them whenever a reply is streaming. Leave it out and every item is
+ * laid out afresh — which is what a test wants, and what the first layout of a
+ * thread does anyway.
  */
-export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, toolsExpanded = false, links?: LinkContext): TranscriptLayout {
+export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, toolsExpanded = false, links?: LinkContext, cache?: ItemLines): TranscriptLayout {
   const lines: Line[] = [];
   const itemStarts: TranscriptLayout["itemStarts"] = [];
   const toggles = new Map<number, string>();
   if (!view) return { lines, itemStarts, toggles };
   const items = [...view.items.values()].sort((a, b) => a.seq - b.seq);
   const opts = { width, expanded, question, links };
+  const draw = cache ? (it: TimelineItem) => cache.render(it, opts) : (it: TimelineItem) => renderItem(it, opts);
+  cache?.prune(view.items);
 
   const liveTurn = view.thread?.latestTurn?.turnId ?? null;
   const groups = new Map<string, ToolCallItem[]>();
@@ -74,7 +81,7 @@ export function layoutTranscript(view: ThreadView | null, width: number, expande
       if (group[0] !== it) {
         if (!open) continue;
         const start = lines.length;
-        lines.push(...renderItem(it, opts));
+        lines.push(...draw(it));
         itemStarts.push({ id: it.id, start, end: lines.length });
         toggles.set(start, it.id);
         continue;
@@ -85,14 +92,14 @@ export function layoutTranscript(view: ThreadView | null, width: number, expande
       itemStarts.push({ id: key, start, end: lines.length });
       if (open) {
         const from = lines.length;
-        lines.push(...renderItem(it, opts));
+        lines.push(...draw(it));
         itemStarts.push({ id: it.id, start: from, end: lines.length });
         toggles.set(from, it.id);
       }
       continue;
     }
     const start = lines.length;
-    lines.push(...renderItem(it, opts));
+    lines.push(...draw(it));
     itemStarts.push({ id: it.id, start, end: lines.length });
     if (it.kind === "tool" || it.kind === "thinking") toggles.set(start, it.id);
   }
