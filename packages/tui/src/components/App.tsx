@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
 import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, threadGroupKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
-import { diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
+import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
@@ -186,7 +186,15 @@ export function App({ store }: { store: Store }) {
   const viewMachine = state.view?.machine ?? null;
   const viewHome = viewMachine ? (state.machines.get(viewMachine)?.info?.homeDir ?? undefined) : undefined;
   const linkCtx = useMemo<LinkContext>(() => ({ localFiles: !!viewMachine && isLoopbackUrl(viewMachine), homeDir: viewHome }), [viewMachine, viewHome]);
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded, linkCtx), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded, linkCtx]);
+  // The lines of every item that did not change. A streamed reply replaces one
+  // item and leaves the rest alone, so without this the client lays out the
+  // whole transcript sixteen times a second to follow a single paragraph.
+  // Lazily: `useRef`'s argument is evaluated on every render and all but the
+  // first are thrown away, which in a file about per-render cost would be a Map
+  // and a wrapper allocated thousands of times a session for no effect.
+  const itemLines = useRef<ItemLines>(undefined);
+  itemLines.current ??= new ItemLines();
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded, linkCtx, itemLines.current), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded, linkCtx]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
