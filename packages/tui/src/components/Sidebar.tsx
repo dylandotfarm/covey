@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { archiveKey, liveThreads, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { archiveKey, liveThreads, runKey, runNeedsPerson, runProject, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -98,7 +98,12 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const open = state.expanded[`${row.machine}:${row.projectId}`] ?? true;
       const threads = liveThreads(m, row.projectId);
       const busy = threads.some((t) => t.status === "running" || t.status === "starting");
-      const waiting = threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0);
+      // The project's runs count too, now that they fold away with it. A
+      // member the operator or the tracker called `blocked` has no thread
+      // status to read, so the fold would otherwise hide the one thing a fold
+      // may never hide: that something in there is waiting on a person.
+      const waiting = threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0)
+        || [...m.runs.values()].some((r) => runProject(m, r) === row.projectId && runNeedsPerson(state, r));
       const agg = !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
       return (
         <Box paddingLeft={2} paddingRight={1} height={1} backgroundColor={bg}>
@@ -132,7 +137,8 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       return (
         <Box paddingLeft={runIndent(row.depth)} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={tint}>{open ? "▾" : "▸"}</Text>
-          <Text color={T.text}> {truncate(run.name, width - runIndent(row.depth) - 7 - meta.length)}</Text>
+          {/* The caret, its space, the two before the meta, and the padding. */}
+          <Text color={T.text}> {truncate(run.name, width - runIndent(row.depth) - 5 - meta.length)}</Text>
           <Text color={T.subtle}>  {meta}</Text>
         </Box>
       );
@@ -157,12 +163,20 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // the extra back by shrinking a cell, and the cell it took was the state
       // mark, so a member row painted its state twice in words and never once
       // as the mark this pane reads by.
+      //
+      // The floor under the title is the other half of that sum: `right` holds
+      // the state *and* the name of the machine the task went to, which is as
+      // long as somebody's machine name, so the two together outran the width
+      // whatever the sum said. The title keeps its floor; the state takes the
+      // room that is left and no more.
       const titleW = Math.max(6, width - indent - 4 - right.length);
+      const room = width - indent - 4 - titleW;
+      const shownRight = room > 0 ? truncate(right, room) : "";
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={tint}>{mem.state === "working" ? "●" : mem.state === "blocked" ? "◼" : mem.state === "merged" ? "✓" : mem.state === "withdrawn" ? "–" : "·"}</Text>
           <Text color={mem.state === "withdrawn" ? T.faint : T.muted}> {truncate(`${mem.task.key} ${mem.task.title}`, titleW).padEnd(titleW)}</Text>
-          <Text color={tint}> {right}</Text>
+          <Text color={tint}>{shownRight ? ` ${shownRight}` : ""}</Text>
         </Box>
       );
     }

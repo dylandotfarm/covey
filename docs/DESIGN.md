@@ -509,9 +509,23 @@ member dispatched to another machine — a project id means nothing off its own
 machine, and one level too high is a run the operator can still find, while a run
 filed under a project it does not work in is a lie.
 
-A member row keeps the rule one level down: a furled thread group hides the runs
-it holds, and never one whose member needs a person (`runNeedsPerson`). Two folds
-between the operator and an approval is the same deadlock as one.
+A fold may never hide the fact that something inside it is waiting on a person,
+and a run inside the tree gives that rule two more places to fail:
+
+- A furled thread group hides the runs it holds, and never one whose member
+  needs a person (`runNeedsPerson`).
+- A thread that is quietly working, holding a blocked run, would sit inside its
+  *own* parent's fold and take the run with it — not furled, absent, with no
+  count on any row to say it is there. `wantsPerson` walks what a thread is
+  holding, runs and threads and their runs, so such a thread comes through its
+  parent's fold and the path down to the blocked member comes with it. Each
+  level filters by the same rule, so letting the thread through lets through
+  what raised the need.
+- A furled *project* hides its runs the way it hides its threads, which is new:
+  a run used to sit outside every project fold. So the project row's attention
+  dot reads its runs as well as its threads. A member the operator or the
+  tracker called `blocked` has no thread status to read, and without this the
+  fold would swallow it in silence.
 
 Three indents say all of this on screen, and they are worked out against each
 other rather than written down as constants: `threadIndent`, `runIndent` and
@@ -538,8 +552,12 @@ and every run that connection creates is recorded as a child of it:
 ```
 
 The daemon checks the id against its own database (`Engine.knownThread`) and
-drops one that names no thread of its own, or the thread being created. Like
-`client`, it is self-declared: a hint for a reader, never a permission.
+drops one that names no thread of its own, or the thread being created. The
+same check covers a parent named in the command itself — `thread.create` and
+`run.create` both take the id the caller asked for, resolve it, and record only
+what resolved — so the stored data can never hold a link to a thread nobody can
+paint. Like `client`, the id is self-declared: a hint for a reader, never a
+permission. Nothing but the sidebar's shape and its `←` key reads it.
 
 ## The machine control panel
 

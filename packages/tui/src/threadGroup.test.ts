@@ -30,7 +30,7 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-group-"));
 import React from "react";
 import { render } from "ink";
 import type { MachineInfo, Project, Run, RunMember, RunMemberState, Thread, ThreadOrigin } from "@covey/protocol";
-import { Store, sidebarRows, runKey, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
+import { Store, archiveKey, sidebarRows, runKey, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
 import { sidebarCells, rowAtScreenRow } from "./sidebar.js";
 import { App } from "./components/App.js";
 import { AGENT_MARK } from "./components/Sidebar.js";
@@ -245,6 +245,56 @@ test("a run this client cannot place in one project keeps its old row under the 
   away.members[0]!.machineId = "m-elsewhere";
   const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [away]);
   assert.deepEqual(shape(store.state as AppState), ["machine@0", "run@1", "member@2", "project@1", "thread@2"]);
+
+  // The contrast, in the same case, because the shape above is also the shape
+  // this file had before runs moved at all: bring the member home and the run
+  // has to move into the project.
+  away.members[0]!.machineId = info.machineId;
+  store.state.machines.get(PI)!.runs.set(away.id, { ...away });
+  assert.deepEqual(shape(store.state as AppState), ["machine@0", "project@1", "run@2", "member@3", "thread@2"]);
+});
+
+/**
+ * The deadlock rule, as far out as the tree goes.
+ *
+ * A group hides its children whole, so a thread that is quietly working takes
+ * everything under it into the fold — including a run with a member blocked on
+ * an approval. Two folds deep, the run is not furled, it is *absent*: no row,
+ * and no count on any row to say it is there. `wantsPerson` is what walks the
+ * subtree, so a thread holding something that needs a person comes through its
+ * own parent's fold and the path below it comes with it.
+ */
+test("a blocked run three levels down still reaches the screen", () => {
+  const store = storeWith([
+    thread("root", "2026-01-09T00:00:00Z"),
+    started("mid", "2026-01-08T00:00:00Z", "root"),
+  ], [run("build", ["working", "blocked"], "mid")]);
+
+  // Both groups furled, which is how they start.
+  const rows = sidebarRows(store.state as AppState);
+  assert.deepEqual(rows.map((r) => `${r.kind}@${r.depth}`), [
+    "machine@0", "project@1", "thread@2", "thread@3", "run@4", "member@5", "member@5",
+  ], "the quiet thread is painted because of what it is holding, and the run with it");
+  assert.equal(rows.find((r) => r.thread?.id === "root")!.hidden, 0, "nothing is held back");
+
+  // Nothing needs a person, and the same tree is one row again.
+  const quiet = storeWith([
+    thread("root", "2026-01-09T00:00:00Z"),
+    started("mid", "2026-01-08T00:00:00Z", "root"),
+  ], [run("build", ["working", "working"], "mid")]);
+  assert.deepEqual(shape(quiet.state as AppState), ["machine@0", "project@1", "thread@2"]);
+  assert.equal(sidebarRows(quiet.state as AppState)[2]!.hidden, 1);
+});
+
+test("a run in planning sits with the thread that asked for it, not under the machine", () => {
+  // Most of a run's life is before dispatch: named, planned, looked at. It has
+  // no member to read a project off until then, and a run that spends that
+  // time under the machine and then jumps into a furled group is a run that
+  // leaves the screen at the moment work starts.
+  const planned = run("build", [], "manager");
+  const store = storeWith([thread("manager", "2026-01-09T00:00:00Z")], [planned]);
+  store.state.expanded[threadGroupKey(PI, "manager")] = true;
+  assert.deepEqual(shape(store.state as AppState), ["machine@0", "project@1", "thread@2", "run@3"]);
 });
 
 /**
@@ -575,6 +625,114 @@ test("a run member row paints its state mark, not only the word", async () => {
     const line = frame().find((l) => l.slice(0, 33).includes("#0 task 0")) ?? "";
     assert.ok(line.includes("◼"), `the blocked member lost its mark: "${line.slice(0, 33)}"`);
     assert.ok(line.includes("blocked"), "and it still says so in words");
+  } finally { unmount(); }
+});
+
+/**
+ * The same row, with the cell that is nobody's to bound.
+ *
+ * A member dispatched elsewhere says so — `blocked · <machine>` — and a machine
+ * is named by whoever set it up. The title has a floor under it, so a long
+ * enough name puts the two past the width however the sum is written, and Ink
+ * pays for an overfull row by shrinking a cell: the state mark went first, and
+ * what was left bled into the row below. The title keeps its floor; the state
+ * takes the room left and no more.
+ */
+test("a member on a machine with a very long name keeps its mark, and stays inside the pane", async () => {
+  const far: MachineInfo = { ...info, machineId: "m-far", name: "a-machine-with-a-really-long-name" };
+  const blocked = run("build", ["blocked"]);
+  blocked.members[0]!.machineId = "m-far";
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("home", ["blocked"]), blocked]);
+  // A second machine, so the row has a name to print beside the state.
+  store.state.machines.set("ws://far:3790", {
+    key: "ws://far:3790", saved: { name: far.name, url: "ws://far:3790" }, conn: "connected", error: null,
+    info: far, projects: new Map(), threads: new Map(), runs: new Map(), update: null, restarting: false,
+  } as unknown as MachineState);
+
+  const { frame, unmount } = await paint(store);
+  try {
+    const lines = frame();
+    const line = lines.find((l) => l.slice(0, 33).includes("a-machin")) ?? "";
+    assert.ok(line.includes("◼"), `the mark went to pay for the machine name: "${line.slice(0, 40)}"`);
+    // Nothing may cross into the pane beside it: the sidebar's own border is
+    // the column every line ends at.
+    for (const l of lines) {
+      const bar = l.indexOf("│");
+      if (bar >= 0) assert.ok(bar === 33 || bar === 0, `a row overflowed its pane: "${l.slice(0, 40)}"`);
+    }
+  } finally { unmount(); }
+});
+
+/**
+ * A run folds away with its project now that it lives inside one, and a fold
+ * may never hide the fact that something in it is waiting on a person. A
+ * member the operator or the tracker called `blocked` has no thread status for
+ * the project row to read, so the row reads its runs as well.
+ */
+test("a furled project says that a run inside it is waiting on somebody", async () => {
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["blocked"])]);
+  store.state.expanded[`${PI}:${project.id}`] = false;
+  const { frame, unmount } = await paint(store);
+  try {
+    // The project's own row, not the pane's header, which is also "covey".
+    const line = frame().find((l) => l.slice(0, 33).indexOf("covey") === 4) ?? "";
+    assert.ok(line.length > 0, "the project row was painted");
+    assert.ok(line.includes("●"), `the fold swallowed the blocked member without a word: "${line.slice(0, 33)}"`);
+  } finally { unmount(); }
+});
+
+/**
+ * `←` walks one step out, and a run row is a step of its own.
+ *
+ * `sidebarRows` sets `run` on a member row as well as on the run's own row, so
+ * a branch that asks "does this row have a run?" answers yes for both — and a
+ * member of a furled run was walked straight past the run row painted directly
+ * above it, out to the thread. One ← is one level.
+ *
+ * The cursor is App's own state, so each case is read from what the next key
+ * does: the second ← lands on the manager without furling it, and only the
+ * third — the one pressed *on* the manager — folds its group away.
+ */
+test("← from a member reaches its run first, and the thread only after it", async () => {
+  const store = storeWith(tree(), [run("build", ["blocked"], "manager")]);
+  const gk = threadGroupKey(PI, "manager");
+  store.state.expanded[gk] = true;
+  store.state.expanded[runKey(PI, "build")] = false;   // the member shows because it is blocked
+  const { key, unmount } = await paint(store);
+  try {
+    // pi, covey, manager, build, the blocked member — four downs.
+    for (let i = 0; i < 4; i++) await key(DOWN);
+
+    await key(LEFT);   // onto the run, which is already furled
+    await key(LEFT);   // onto the manager
+    assert.equal(store.isExpanded(gk, false), true,
+      "two ← furled the manager's group, so the first one skipped the run row and left one key too many");
+
+    await key(LEFT);   // and now on the manager, which furls
+    assert.equal(store.isExpanded(gk, false), false, "the walk did reach the manager");
+  } finally { unmount(); }
+});
+
+test("← on a run never jumps the cursor into another part of the tree", async () => {
+  // The run names a parent that is archived, so it sits under its project. The
+  // thread it names still has a row — inside the open Archived folder — and a
+  // search over every row on the machine would move the cursor into it, where
+  // the next ← folds the archive away.
+  const store = storeWith([
+    thread("gone", "2026-01-09T00:00:00Z", { archivedAt: "2026-02-01T00:00:00Z" }),
+    thread("mine", "2026-01-08T00:00:00Z"),
+  ], [run("build", ["working"], "gone")]);
+  const ak = archiveKey(PI, project.id);
+  store.state.expanded[ak] = true;
+  const { key, unmount } = await paint(store);
+  try {
+    await key(DOWN); await key(DOWN);   // pi, covey, then the run
+    await key(LEFT);                    // furls the run
+    await key(LEFT);                    // nowhere to go from here
+    await key(LEFT);
+    assert.equal(store.isExpanded(ak, false), true,
+      "the cursor walked into the Archived folder and the next ← folded it away");
+    assert.equal(store.isExpanded(runKey(PI, "build")), false, "and the run is where it was left");
   } finally { unmount(); }
 });
 

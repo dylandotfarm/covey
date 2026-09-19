@@ -40,8 +40,9 @@ export interface SessionParams {
   streaming: boolean;
   sessionStore: SessionStore;
   additionalDirectories?: string[];
-  /** The project the thread works in. The session reads it from its own
-   *  environment, so a thread it creates lands in the same project. */
+  /** The project the thread works in. It goes into the session's environment
+   *  as `COVEY_PROJECT_ID`, for an agent that creates a thread to put it in
+   *  the project it is working in. Nothing in covey reads it back. */
   projectId: string;
 }
 

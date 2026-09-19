@@ -292,7 +292,10 @@ export class Engine {
           worktreePath = wt.path; branch = wt.branch;
         }
         const machineMode = this.machine.settings.defaultPermissionMode;
-        const origin = threadOrigin(cmd.origin, client, this.knownThread(caller, cmd.threadId));
+        // The command's parent wins over the connection's, and both are checked
+        // against this database: a link to a thread nobody can paint loses the
+        // child, and `run.create` has never taken one on trust either.
+        const origin = threadOrigin(cmd.origin, client, this.knownThread(cmd.origin?.parentThreadId ?? caller, cmd.threadId));
         const t: Thread = {
           id: cmd.threadId, projectId: p.id, title: cmd.title ?? "New thread", titleAuto: cmd.title === undefined, provider: "claude",
           ...(origin ? { origin } : {}),
@@ -1268,19 +1271,22 @@ function clampSetting(v: number | null, min: number): number | null {
  * reader and never a permission. A connection that named nothing gets no
  * origin at all, so it behaves exactly as it did before this field existed.
  *
- * `parent` is the thread the connection said it runs inside at `hello`, after
- * the caller checked that this daemon holds it. It fills `parentThreadId` for
- * every thread that connection creates, which is the only way an agent can
- * put its own children under itself: nothing else on the wire knows which
- * thread a program speaks for.
+ * `parent` is the thread this one belongs under, already checked against the
+ * database by the caller — the id the command named, or else the thread the
+ * connection said it runs inside at `hello`. The `hello` half is the only way
+ * an agent can put its own children under itself: nothing else on the wire
+ * knows which thread a program speaks for. Whatever `explicit` says about a
+ * parent is ignored here, because it is what the caller resolved.
  */
 export function threadOrigin(explicit: ThreadOrigin | undefined, client: string, parent = ""): ThreadOrigin | undefined {
   const from = parent ? { parentThreadId: parent } : {};
   if (explicit) {
-    const name = explicit.client ?? client;
-    // The command wins here too: a caller that named a parent in the command
-    // means that parent, whatever thread its connection speaks for.
-    return { ...from, ...explicit, ...(name ? { client: name } : {}) };
+    const { parentThreadId: _asked, ...rest } = explicit;
+    const name = rest.client ?? client;
+    // `parent` is the answer to what the command asked for, not a second
+    // opinion beside it: the caller resolved the id the command named against
+    // the threads this daemon holds, and an id that named nothing is gone.
+    return { ...rest, ...(name ? { client: name } : {}), ...from };
   }
   if (!client && !parent) return undefined;
   // A connection that named a parent thread is a program by that fact alone:

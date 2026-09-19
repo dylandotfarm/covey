@@ -71,10 +71,17 @@ test("the thread a connection speaks for becomes the parent of what it creates",
     { by: "agent", parentThreadId: "t-parent" },
     "a connection that names a thread is a program by that fact alone",
   );
+  // Which of the two parents wins is `Engine.apply`'s question, because only
+  // it can check an id against the database. What arrives here is the answer.
   assert.deepEqual(
-    threadOrigin({ by: "agent", parentThreadId: "named-in-the-command" }, "claude-code", "t-parent"),
-    { by: "agent", client: "claude-code", parentThreadId: "named-in-the-command" },
-    "the command still wins, parent and all",
+    threadOrigin({ by: "agent", parentThreadId: "asked-for-this-one" }, "claude-code", "checked-this-one"),
+    { by: "agent", client: "claude-code", parentThreadId: "checked-this-one" },
+    "the id the caller checked is the one recorded",
+  );
+  assert.deepEqual(
+    threadOrigin({ by: "agent", parentThreadId: "a-thread-nobody-holds" }, "claude-code"),
+    { by: "agent", client: "claude-code" },
+    "and an id that survived no check is not recorded at all",
   );
 });
 
@@ -86,9 +93,9 @@ test("the command wins over the client name, and keeps the name beside it", () =
     "a caller that says it is a program is a program, whatever its client is called",
   );
   assert.deepEqual(
-    threadOrigin({ by: "agent", parentThreadId: "t-parent" }, "covey-ctl"),
+    threadOrigin({ by: "agent" }, "covey-ctl", "t-parent"),
     { by: "agent", client: "covey-ctl", parentThreadId: "t-parent" },
-    "the parent link the caller gave survives",
+    "the parent link the caller checked survives",
   );
 });
 
@@ -249,6 +256,24 @@ test("a parent this daemon does not hold is dropped rather than recorded", async
   const loop = await connect(port, "claude-code", itself);
   await loop.command({ type: "thread.create", projectId, threadId: itself, sessionId: randomUUID() });
   assert.equal(threadOf(engine, itself).origin?.parentThreadId, undefined, "a thread is never its own parent");
+
+  // The same check on the other road in. A command may name a parent outright,
+  // and for a while only the `hello` id was checked — so the daemon would
+  // store a link to a thread it does not hold, which nothing can ever paint.
+  const named = randomUUID();
+  await stranger.command({
+    type: "thread.create", projectId, threadId: named, sessionId: randomUUID(),
+    origin: { by: "agent", parentThreadId: "invented-by-the-client" },
+  });
+  assert.equal(threadOf(engine, named).origin?.parentThreadId, undefined,
+    "a parent named in the command is checked exactly as one named at hello");
+
+  const own = randomUUID();
+  await stranger.command({
+    type: "thread.create", projectId, threadId: own, sessionId: randomUUID(),
+    origin: { by: "agent", parentThreadId: own },
+  });
+  assert.equal(threadOf(engine, own).origin?.parentThreadId, undefined);
 });
 
 test("a thread created before this existed has none, and the daemon still serves it", async () => {

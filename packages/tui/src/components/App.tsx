@@ -1339,14 +1339,34 @@ export function App({ store }: { store: Store }) {
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
       if (row.archived) { const k = archiveKey(row.machine, row.projectId!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
-      if (row.run) {
-        const k = runKey(row.machine, row.run.id);
+      // A member row carries its run too, so the kinds are told apart here: a
+      // member's parent is the run it is in, and a run's is the thread that
+      // asked for it. One ← that walked a member all the way out to the thread
+      // would skip the run row painted directly above it.
+      if (row.kind === "member") {
+        const k = runKey(row.machine, row.run!.id);
+        if (store.isExpanded(k)) { store.toggleExpanded(k); return; }
+        // Furled, and this member is painted because it needs a person: the
+        // cursor moves to the run, which is where the fold lives.
+        const at = rows.findIndex((r) => r.kind === "run" && r.machine === row.machine && r.run!.id === row.run!.id);
+        if (at >= 0) setCursorKey(rows[at]!.key);
+        return;
+      }
+      if (row.kind === "run") {
+        const k = runKey(row.machine, row.run!.id);
         if (store.isExpanded(k)) { store.toggleExpanded(k); return; }
         // A furled run under the thread that asked for it: left moves to that
         // thread, the way it moves from a child thread to its parent, so ←←
         // is the way out of a run from any row inside it.
-        const parent = row.run.parentThreadId;
-        const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine && r.thread!.id === parent) : -1;
+        //
+        // Only to the thread it is really painted under. A run whose parent is
+        // archived, or in another project, sits under its project instead, and
+        // the thread it names may still have a row somewhere else on the
+        // machine — inside the Archived folder, or in another project's
+        // subtree. ← must not jump the cursor out of the subtree it is in.
+        const parent = row.run!.parentThreadId;
+        const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine
+          && r.projectId === row.projectId && !r.archived && r.depth < row.depth && r.thread!.id === parent) : -1;
         if (at >= 0) setCursorKey(rows[at]!.key);
         return;
       }
