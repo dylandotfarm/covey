@@ -44,6 +44,11 @@
 - The daemon can be exercised without the TUI: run `node packages/daemon/dist/main.js
   --bind loopback --port 3799` with `COVEY_HOME=/tmp/x`, then speak JSON over ws (see
   `docs/DESIGN.md` → Protocol).
+- A covey session knows which thread it is: the daemon puts `COVEY_THREAD_ID` and
+  `COVEY_PROJECT_ID` in the environment of every Claude session it starts. Pass the thread
+  id back as `threadId` at `hello` and every thread and every run that connection creates
+  is filed under it in the sidebar. Leave it out and the work lands beside the thread that
+  asked for it, which is what made some agent threads nest and some stand alone.
 - Timeline streaming re-sends whole items (same id, accumulated text); there is no delta
   channel. Keep it that way; it makes replay and reconnect trivial.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent

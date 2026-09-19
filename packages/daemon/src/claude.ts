@@ -40,6 +40,10 @@ export interface SessionParams {
   streaming: boolean;
   sessionStore: SessionStore;
   additionalDirectories?: string[];
+  /** The project the thread works in. It goes into the session's environment
+   *  as `COVEY_PROJECT_ID`, for an agent that creates a thread to put it in
+   *  the project it is working in. Nothing in covey reads it back. */
+  projectId: string;
 }
 
 interface Pending {
@@ -156,6 +160,18 @@ export class ClaudeSession {
       canUseTool: (name, input, o) => this.canUseTool(name, input, o),
       settingSources: ["user", "project", "local"],
       systemPrompt: { type: "preset", preset: "claude_code" },
+      // What the agent inside this session is allowed to know about itself.
+      // Nothing else on the wire can tell it: the daemon sees a websocket, not
+      // the process behind it, so an agent that creates a thread can only say
+      // "I am a child of this thread" if it was told which thread it is.
+      // The SDK *replaces* the environment with this object rather than
+      // merging it, so `process.env` is spread first — dropping it would take
+      // PATH, HOME and the credentials with it.
+      env: {
+        ...process.env,
+        COVEY_THREAD_ID: this.params.threadId,
+        COVEY_PROJECT_ID: this.params.projectId,
+      },
       ...(this.params.model ? { model: this.params.model } : {}),
       ...(this.params.additionalDirectories ? { additionalDirectories: this.params.additionalDirectories } : {}),
       ...(this.params.resume ? { resume: this.params.sessionId } : { sessionId: this.params.sessionId }),

@@ -444,6 +444,10 @@ thread that failed, and a run in a strict permission mode would deadlock in
 silence behind a hidden approval. Quiet while it works, painted the moment it
 needs a person.
 
+A thread's group holds the runs it asked for as well as the threads it started,
+and paints them first: a run is the larger piece of work and it names itself.
+The count on a furled row covers both.
+
 `threadGroupKey(machine, threadId)` sits beside `archiveKey` and `runKey` in
 `AppState.expanded` and persists through `TuiConfig.prefs.expanded`, so a furled
 group is still furled after a restart.
@@ -457,8 +461,8 @@ anything paints; resolving it during the paint would treat "furled" as
 
 ### A run is not a manager thread
 
-A run is a named group the operator created and finds its members through
-`run.members`. A manager thread's children find *it*, through a back-pointer on
+A run is a named group somebody created — the operator in the TUI, or an agent
+over the wire — and it finds its members through `run.members`. A manager thread's children find *it*, through a back-pointer on
 the child. Same edge, opposite directions, and unifying them would mean
 inventing a run nobody named or a parent thread that does not exist. What they
 share is the furl mechanism, and that is reused rather than rebuilt: a third
@@ -486,9 +490,74 @@ otherwise deadlock in silence behind an approval the operator furled away. It
 carries no hidden-count: a run row's meta already says how many members it has,
 which is the thing that count exists to tell a thread row.
 
-Nothing yet tells an agent its own thread id, so a program running *inside* a
-covey thread cannot fill `parentThreadId` by itself — the caller has to know it
-and pass it.
+### Where a run sits
+
+A run used to be painted under the machine, above every project, wherever its
+members worked. So a run of five threads in one project stood beside the project
+those five threads were in, and the thread that asked for the run had nothing
+under it at all: the reader had to know that the two rows were one piece of work.
+
+A run goes where its work goes. `runProject` names the one project every placed
+member works in, on the machine that holds the run, and the run becomes a row of
+that project. When the run also carries a `parentThreadId` the sidebar can
+paint, it goes inside that thread's group instead, above the threads that thread
+started — the same place, and the same fold, a child thread gets.
+
+A run this client cannot place stays where every run used to be: under the
+machine, above the projects. No members placed yet, members in two projects, a
+member dispatched to another machine — a project id means nothing off its own
+machine, and one level too high is a run the operator can still find, while a run
+filed under a project it does not work in is a lie.
+
+A fold may never hide the fact that something inside it is waiting on a person,
+and a run inside the tree gives that rule two more places to fail:
+
+- A furled thread group hides the runs it holds, and never one whose member
+  needs a person (`runNeedsPerson`).
+- A thread that is quietly working, holding a blocked run, would sit inside its
+  *own* parent's fold and take the run with it — not furled, absent, with no
+  count on any row to say it is there. `wantsPerson` walks what a thread is
+  holding, runs and threads and their runs, so such a thread comes through its
+  parent's fold and the path down to the blocked member comes with it. Each
+  level filters by the same rule, so letting the thread through lets through
+  what raised the need.
+- A furled *project* hides its runs the way it hides its threads, which is new:
+  a run used to sit outside every project fold. So the project row's attention
+  dot reads its runs as well as its threads. A member the operator or the
+  tracker called `blocked` has no thread status to read, and without this the
+  fold would swallow it in silence.
+
+Three indents say all of this on screen, and they are worked out against each
+other rather than written down as constants: `threadIndent`, `runIndent` and
+`memberIndent` in `Sidebar.tsx`. A thread row spends two columns on its gutter
+and two on its status dot; a run and a project spend two on a caret and a space.
+The titles line up because the numbers are derived, not because three literals
+happen to agree.
+
+### Telling an agent which thread it is
+
+An agent had no way to know. The daemon sees a websocket, not the process behind
+it, so a program that created a thread could not name its parent even when it
+wanted to — and that is why some agent threads nested under the thread that
+asked for them and some stood alone beside it.
+
+The session now carries `COVEY_THREAD_ID` and `COVEY_PROJECT_ID` in its
+environment (`ClaudeSession.start`, through the SDK's `env`, which *replaces*
+the environment rather than merging it — hence the spread of `process.env`). A
+program that reads them can pass the thread id back at `hello`, and every thread
+and every run that connection creates is recorded as a child of it:
+
+```
+{"id":"1","method":"hello","params":{"protocolVersion":1,"client":"my-script","threadId":"<COVEY_THREAD_ID>"}}
+```
+
+The daemon checks the id against its own database (`Engine.knownThread`) and
+drops one that names no thread of its own, or the thread being created. The
+same check covers a parent named in the command itself — `thread.create` and
+`run.create` both take the id the caller asked for, resolve it, and record only
+what resolved — so the stored data can never hold a link to a thread nobody can
+paint. Like `client`, the id is self-declared: a hint for a reader, never a
+permission. Nothing but the sidebar's shape and its `←` key reads it.
 
 ## The machine control panel
 

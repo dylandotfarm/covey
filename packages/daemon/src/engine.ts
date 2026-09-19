@@ -198,16 +198,21 @@ export class Engine {
    * keeps it for the life of the connection and hands it back here, because it
    * is what says whether a person or a program asked for a thread. It is
    * self-declared and unverifiable — a hint for a reader, never a permission.
+   *
+   * `caller` is the thread that connection said it runs inside, and the same
+   * rules apply to it. A thread or a run it creates becomes a child of that
+   * thread, which is how the sidebar puts an agent's work under the thread
+   * that asked for it.
    */
-  async dispatch(cmd: CommandEnvelope, client = ""): Promise<number> {
+  async dispatch(cmd: CommandEnvelope, client = "", caller = ""): Promise<number> {
     const prior = this.db.receipt(cmd.commandId);
     if (prior !== null) return prior;
-    const seq = await this.apply(cmd, client);
+    const seq = await this.apply(cmd, client, caller);
     this.db.putReceipt(cmd.commandId, seq);
     return seq;
   }
 
-  private async apply(cmd: Command, client = ""): Promise<number> {
+  private async apply(cmd: Command, client = "", caller = ""): Promise<number> {
     const now = new Date().toISOString();
     // Any command about a thread is use of that thread, so the idle clock for
     // its session starts again here — before the command runs, because some of
@@ -287,7 +292,10 @@ export class Engine {
           worktreePath = wt.path; branch = wt.branch;
         }
         const machineMode = this.machine.settings.defaultPermissionMode;
-        const origin = threadOrigin(cmd.origin, client);
+        // The command's parent wins over the connection's, and both are checked
+        // against this database: a link to a thread nobody can paint loses the
+        // child, and `run.create` has never taken one on trust either.
+        const origin = threadOrigin(cmd.origin, client, this.knownThread(cmd.origin?.parentThreadId ?? caller, cmd.threadId));
         const t: Thread = {
           id: cmd.threadId, projectId: p.id, title: cmd.title ?? "New thread", titleAuto: cmd.title === undefined, provider: "claude",
           ...(origin ? { origin } : {}),
@@ -493,10 +501,14 @@ export class Engine {
         if (existing) return this.emitShell({ kind: "run.upserted", run: existing });
         if (cmd.run.workspaceMode === "checkout")
           throw new EngineError("bad_workspace", "a run works in worktrees; parallel agents in one checkout is the defect");
+        // The run's parent, by the same rule a thread's parent follows: the
+        // command wins, then the thread the connection speaks for.
+        const parent = this.knownThread(cmd.run.parentThreadId ?? caller);
         const run: Run = {
           id: cmd.run.runId,
           machineId: this.machine.machineId,
           name: cmd.run.name,
+          ...(parent ? { parentThreadId: parent } : {}),
           goal: cmd.run.goal,
           briefTemplate: cmd.run.briefTemplate,
           workspaceMode: cmd.run.workspaceMode,
@@ -550,6 +562,17 @@ export class Engine {
       // would ack a command that never ran.
       default: throw new EngineError("unknown_command", `this daemon does not know the command ${(cmd as { type: string }).type}`);
     }
+  }
+
+  /**
+   * A parent id this daemon can stand behind: a thread it holds, and never the
+   * thread that is being created. Everything else — an empty string, a thread
+   * on another machine, an id a client invented — becomes `undefined`, so a
+   * child is never linked to a parent nobody can paint.
+   */
+  private knownThread(id: string | undefined, self?: string): string | undefined {
+    if (!id || id === self) return undefined;
+    return this.db.getThread(id) ? id : undefined;
   }
 
   private requireRun(runId: string): Run {
@@ -932,7 +955,7 @@ export class Engine {
     };
     const session = new ClaudeSession(
       {
-        threadId: t.id, sessionId: t.sessionId, cwd: t.worktreePath ?? p.workspaceRoot,
+        threadId: t.id, sessionId: t.sessionId, projectId: p.id, cwd: t.worktreePath ?? p.workspaceRoot,
         model: t.model, permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
         streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
@@ -1247,14 +1270,28 @@ function clampSetting(v: number | null, min: number): number | null {
  * self-declared and the daemon cannot check it, which makes this a hint for a
  * reader and never a permission. A connection that named nothing gets no
  * origin at all, so it behaves exactly as it did before this field existed.
+ *
+ * `parent` is the thread this one belongs under, already checked against the
+ * database by the caller — the id the command named, or else the thread the
+ * connection said it runs inside at `hello`. The `hello` half is the only way
+ * an agent can put its own children under itself: nothing else on the wire
+ * knows which thread a program speaks for. Whatever `explicit` says about a
+ * parent is ignored here, because it is what the caller resolved.
  */
-export function threadOrigin(explicit: ThreadOrigin | undefined, client: string): ThreadOrigin | undefined {
+export function threadOrigin(explicit: ThreadOrigin | undefined, client: string, parent = ""): ThreadOrigin | undefined {
+  const from = parent ? { parentThreadId: parent } : {};
   if (explicit) {
-    const name = explicit.client ?? client;
-    return name ? { ...explicit, client: name } : { ...explicit };
+    const { parentThreadId: _asked, ...rest } = explicit;
+    const name = rest.client ?? client;
+    // `parent` is the answer to what the command asked for, not a second
+    // opinion beside it: the caller resolved the id the command named against
+    // the threads this daemon holds, and an id that named nothing is gone.
+    return { ...rest, ...(name ? { client: name } : {}), ...from };
   }
-  if (!client) return undefined;
-  return { by: client === USER_CLIENT ? "user" : "agent", client };
+  if (!client && !parent) return undefined;
+  // A connection that named a parent thread is a program by that fact alone:
+  // the one client a person types into never names one.
+  return { by: client === USER_CLIENT ? "user" : "agent", ...(client ? { client } : {}), ...from };
 }
 
 /** Whether covey still owns this thread's title. Threads from before

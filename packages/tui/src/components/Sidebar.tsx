@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { archiveKey, liveThreads, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { archiveKey, liveThreads, runKey, runNeedsPerson, runProject, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -41,6 +41,24 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
  */
 export const AGENT_MARK = "◇";
 
+/**
+ * How far from the left a row of each kind starts, in columns.
+ *
+ * One number cannot serve every kind, because they spend different room before
+ * the title: a thread row keeps a two-column gutter for the caret or the `◇`
+ * and two more for its status dot, while a run, a project and the archive
+ * folder spend two columns on a caret and a space. These three put the title of
+ * a run and of a run member at the same column as the title of a thread at the
+ * same depth, which is what makes the indent read as "under" rather than as a
+ * second kind of list.
+ *
+ * A run under the machine — one the client cannot place in a project — keeps
+ * the two columns it always had, beside the projects it sits among.
+ */
+export function threadIndent(depth: number): number { return Math.max(1, 1 + 2 * (depth - 2)); }
+export function runIndent(depth: number): number { return depth <= 1 ? 2 : threadIndent(depth) + 2; }
+export function memberIndent(depth: number): number { return runIndent(depth - 1) + 2; }
+
 function isActive(s: AppState, r: SidebarRow) {
   return r.kind === "thread" && s.selected?.machine === r.machine && s.selected.threadId === r.thread!.id;
 }
@@ -80,7 +98,12 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const open = state.expanded[`${row.machine}:${row.projectId}`] ?? true;
       const threads = liveThreads(m, row.projectId);
       const busy = threads.some((t) => t.status === "running" || t.status === "starting");
-      const waiting = threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0);
+      // The project's runs count too, now that they fold away with it. A
+      // member the operator or the tracker called `blocked` has no thread
+      // status to read, so the fold would otherwise hide the one thing a fold
+      // may never hide: that something in there is waiting on a person.
+      const waiting = threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0)
+        || [...m.runs.values()].some((r) => runProject(m, r) === row.projectId && runNeedsPerson(state, r));
       const agg = !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
       return (
         <Box paddingLeft={2} paddingRight={1} height={1} backgroundColor={bg}>
@@ -112,9 +135,10 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const meta = st === "planning" ? `${t.total} planned` : st === "finished" ? "done" : `${left} of ${t.total} left`;
       const tint = t.blocked > 0 ? T.awaiting : st === "finished" ? T.success : st === "planning" ? T.subtle : T.working;
       return (
-        <Box paddingLeft={2} paddingRight={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={runIndent(row.depth)} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={tint}>{open ? "▾" : "▸"}</Text>
-          <Text color={T.text}> {truncate(run.name, width - 9 - meta.length)}</Text>
+          {/* The caret, its space, the two before the meta, and the padding. */}
+          <Text color={T.text}> {truncate(run.name, width - runIndent(row.depth) - 5 - meta.length)}</Text>
           <Text color={T.subtle}>  {meta}</Text>
         </Box>
       );
@@ -132,12 +156,27 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
         : mem.state === "merged" ? T.success
         : mem.state === "withdrawn" ? T.faint : T.subtle;
       const right = `${label}${where && where !== who?.info?.name ? ` · ${where}` : ""}`;
-      const titleW = Math.max(6, width - 5 - right.length);
+      const indent = memberIndent(row.depth);
+      // Every column the row spends beside the title: the state mark, the space
+      // before the title, the space before the state, and the padding on the
+      // right. A row that asks for more than it has is not refused — Ink gives
+      // the extra back by shrinking a cell, and the cell it took was the state
+      // mark, so a member row painted its state twice in words and never once
+      // as the mark this pane reads by.
+      //
+      // The floor under the title is the other half of that sum: `right` holds
+      // the state *and* the name of the machine the task went to, which is as
+      // long as somebody's machine name, so the two together outran the width
+      // whatever the sum said. The title keeps its floor; the state takes the
+      // room that is left and no more.
+      const titleW = Math.max(6, width - indent - 4 - right.length);
+      const room = width - indent - 4 - titleW;
+      const shownRight = room > 0 ? truncate(right, room) : "";
       return (
-        <Box paddingLeft={4} paddingRight={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={tint}>{mem.state === "working" ? "●" : mem.state === "blocked" ? "◼" : mem.state === "merged" ? "✓" : mem.state === "withdrawn" ? "–" : "·"}</Text>
           <Text color={mem.state === "withdrawn" ? T.faint : T.muted}> {truncate(`${mem.task.key} ${mem.task.title}`, titleW).padEnd(titleW)}</Text>
-          <Text color={tint}> {right}</Text>
+          <Text color={tint}>{shownRight ? ` ${shownRight}` : ""}</Text>
         </Box>
       );
     }
@@ -153,11 +192,9 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // never grow a second line — that is what silently breaks the mouse hit
       // test, because `sidebarCells` gives every row exactly one line.
       //
-      // The indent reproduces what it was before nesting existed: depth 2 (a
-      // thread in its project) leads with 3 columns, and an archived thread —
-      // depth 3, lining up under "Archived" — with 5. A child of a thread is
-      // depth 3 and lands on the same 5.
-      const indent = Math.max(1, 1 + 2 * (row.depth - 2));
+      // The indent reproduces what it was before nesting existed, and a run
+      // and its members are measured against it — see `threadIndent`.
+      const indent = threadIndent(row.depth);
       const open = state.expanded[threadGroupKey(row.machine, t.id)] ?? false;
       // The tree gutter: one fixed two-column cell, so every thread title in
       // the sidebar starts in the same column. It holds the caret when the row
@@ -175,7 +212,9 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const caret = row.group ? (open ? "▾ " : "▸ ") : row.agent ? `${AGENT_MARK} ` : "  ";
       // What a furled group is holding back, so the way in is visible.
       const held = row.group && !open && row.hidden ? ` ${row.hidden}` : "";
-      const titleW = Math.max(4, width - indent - 2 - 3 - time.length - held.length);
+      // The same sum for a thread row: the gutter, the status dot and its
+      // space, the space before the time, and the padding on the right.
+      const titleW = Math.max(4, width - indent - 6 - time.length - held.length);
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={row.group ? T.subtle : T.awaiting}>{caret}</Text>
