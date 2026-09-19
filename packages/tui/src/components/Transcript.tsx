@@ -26,6 +26,9 @@ export interface TranscriptLayout {
   toggles: Map<number, string>;
 }
 
+/** Nothing at all, for a layout with no thread open. */
+const EMPTY_ITEMS: Map<string, TimelineItem> = new Map();
+
 /** A turn with fewer than this many calls is shorter left alone than folded. */
 const MIN_GROUP = 2;
 
@@ -53,11 +56,13 @@ export function layoutTranscript(view: ThreadView | null, width: number, expande
   const lines: Line[] = [];
   const itemStarts: TranscriptLayout["itemStarts"] = [];
   const toggles = new Map<number, string>();
+  // Before the `!view` guard, not after it: a reader leaving a thread is the
+  // case `prune` exists for, and `state.view` is null the moment they do.
+  cache?.prune(view?.items ?? EMPTY_ITEMS);
   if (!view) return { lines, itemStarts, toggles };
   const items = [...view.items.values()].sort((a, b) => a.seq - b.seq);
   const opts = { width, expanded, question, links };
   const draw = cache ? (it: TimelineItem) => cache.render(it, opts) : (it: TimelineItem) => renderItem(it, opts);
-  cache?.prune(view.items);
 
   const liveTurn = view.thread?.latestTurn?.turnId ?? null;
   const groups = new Map<string, ToolCallItem[]>();

@@ -160,10 +160,63 @@ test("however bad it gets, the screen is never staler than MAX_FRAME_MS", () => 
     "or the reader cannot tell covey from a hang");
 });
 
-test("stop gives up the pending frame, so a client on its way out paints nothing", () => {
+test("stop gives up the pending frame, and nothing arriving afterwards arms another", () => {
   const { f, c, paints } = frames();
   f.soon();
   f.stop();
+  // `Store.shutdown` stops the budget first and the machine clients last, and
+  // a socket's `close` lands a tick later: `MachineClient.stop` only asks. That
+  // late callback reaches `touchFromMachine`, and without a latch it would arm
+  // a fresh frame and notify React in the middle of teardown — on the relaunch
+  // path, before the App has unmounted.
+  f.soon();
+  f.now();
+  assert.equal(f.pending, false, "stop is a latch, not one cancellation");
   c.run(MAX_FRAME_MS * 2);
   assert.deepEqual(paints, []);
+});
+
+test("a clock that jumps backwards cannot park the screen minutes away", () => {
+  // The default clock is monotonic for this reason, but a bound the budget
+  // promises has to hold here too, whatever clock it is handed: NTP steps, VM
+  // snapshots and laptops waking with a corrected time all move a wall clock.
+  const { f, c, paints } = frames();
+  c.run(10_000);
+  f.soon();
+  c.run(FRAME_MS);
+  assert.equal(paints.length, 1, "a frame at the far end of the clock");
+
+  c.stall(-5 * 60_000);          // five minutes backwards, between two frames
+  f.soon();
+  c.run(MAX_FRAME_MS);
+  assert.equal(paints.length, 2,
+    "the wait was computed from a `paintedAt` five minutes in the future, so the frame was " +
+    "armed five minutes out — and `soon` arms nothing while one is pending, so the screen " +
+    "stops until the clock catches up");
+});
+
+test("a keystroke's paint pushes the owed frame out rather than letting it land on top", () => {
+  const { f, c, paints } = frames();
+  f.soon();                       // a machine event: frame due at FRAME_MS
+  c.run(10);
+  f.painted();                    // the reader typed; Ink painted for that
+  c.run(FRAME_MS - 10);           // the frame's original due time
+  assert.deepEqual(paints, [],
+    "the owed frame fired a few milliseconds after the keystroke's paint, which is the " +
+    "stacking `painted` exists to prevent");
+  c.run(10);
+  assert.equal(paints.length, 1, "and it still runs, a full interval from that paint");
+});
+
+test("a frame dropped while overdue still tells the budget how late the loop is", () => {
+  const { f, c } = frames();
+  f.soon();
+  // The loop stalls past the frame's due time, and then the reader does
+  // something: `set` drops the frame and paints. That frame never ran, so
+  // without reading it here the stall goes unmeasured — and the reverse case,
+  // a reader typing steadily through a stall that has ended, would hold a
+  // stale lateness and a stale interval with it.
+  c.stall(FRAME_MS + 120);
+  f.now();
+  assert.equal(f.lagMs, 120, "the frame nobody ran is the clearest reading there is");
 });

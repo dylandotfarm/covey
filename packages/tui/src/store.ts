@@ -186,6 +186,23 @@ export interface RelaunchRequest {
 /** How often the client asks whether a newer build has landed on disk. */
 const BUILD_POLL_MS = 30_000;
 
+/** How often the spinner turns, while there is anything to turn. */
+const SPIN_MS = 700;
+
+/**
+ * How often an otherwise idle client re-renders anyway.
+ *
+ * The sidebar and the summaries date every thread with `relTime`, which reads
+ * `Date.now()` at render time, so a client that never renders shows the time a
+ * thread was last spoken to frozen at whatever it read when the last event
+ * arrived: a turn that finished a minute ago still says "now", and there is no
+ * heartbeat on the machine socket to disturb it. `relTime` is minutes below an
+ * hour, so this only has to be finer than a minute — three renders a minute
+ * rather than eighty-six, and none of the 700 ms ones an idle client used to
+ * pay for.
+ */
+const CLOCK_MS = 20_000;
+
 export interface StoreOptions {
   /** The checkout this client runs from, as worked out by the CLI. */
   source?: MachineSource | null;
@@ -208,6 +225,8 @@ export interface StoreOptions {
   client?: ClientOptions;
   /** How often the screen may go out. Only a test moves the frame budget. */
   frames?: FrameOptions;
+  /** How often an idle client refreshes its relative times. Only a test moves it. */
+  clockMs?: number;
 }
 
 /**
@@ -224,6 +243,27 @@ export interface Selection {
 }
 
 /** Normalised [start, end] of a selection, in reading order. */
+/**
+ * Is this thread doing something a reader would watch?
+ *
+ * One predicate, because two places need the same answer and a disagreement
+ * between them is invisible: `Store.animating` decides whether the spinner
+ * ticks at all, and the components decide whether to draw something that
+ * spins. A thread the first calls still and the second draws moving is a
+ * spinner frozen mid-turn, which reads exactly like an agent that has died.
+ *
+ * `status` and `latestTurn.state` are separate facts and this takes both.
+ * A daemon that has a turn running says so on the turn before the session
+ * settles into `running`, and `noticeRunProgress` already treats the two as
+ * independent; leaning on either alone leaves a gap where the screen moves and
+ * the clock behind it does not.
+ */
+export function threadIsBusy(t: Thread): boolean {
+  if (t.pendingApprovals > 0) return true;
+  if (t.latestTurn?.state === "running") return true;
+  return t.status === "running" || t.status === "starting" || t.status === "waiting";
+}
+
 export function selectionBounds(s: Selection): { from: { line: number; col: number }; to: { line: number; col: number } } {
   const { anchor, head } = s;
   const backwards = head.line < anchor.line || (head.line === anchor.line && head.col < anchor.col);
@@ -252,8 +292,11 @@ export class Store {
   readonly canRelaunch: boolean;
   private buildTimer: NodeJS.Timeout | null = null;
   private clientOpts: ClientOptions;
-  /** Drives `state.tick`, which animates the spinner. */
+  /** Drives `state.tick`, which animates the spinner and dates the rows. */
   private tickTimer: NodeJS.Timeout | null = null;
+  private readonly clockMs: number;
+  /** When the tick last fired, so an idle client can fire it rarely. */
+  private lastTick = Date.now();
   /**
    * What decides when the screen may go out. A change the reader made paints
    * at once; a change a machine sent waits for a frame, so a turn streaming
@@ -276,10 +319,18 @@ export class Store {
       clientBuild: opts.build ?? null, clientStale: false,
     };
     this.frames = new Frames(() => { for (const l of this.listeners) l(); }, opts.frames);
+    this.clockMs = opts.clockMs ?? CLOCK_MS;
     for (const m of machines) this.addMachine(m, false);
-    // The spinner. A tick repaints the whole screen, so it only runs while
-    // there is something on it that moves — see `animating`.
-    this.tickTimer = setInterval(() => { if (this.animating()) this.setFromMachine({ tick: this.state.tick + 1 }); }, 700);
+    // The spinner turns at `SPIN_MS` while there is anything to turn, and at
+    // `CLOCK_MS` when there is not — slowly, because a tick is a repaint of the
+    // whole screen, and quickly enough that the relative times stay true. See
+    // `animating` and `CLOCK_MS`.
+    this.tickTimer = setInterval(() => {
+      const now = Date.now();
+      if (!this.animating() && now - this.lastTick < this.clockMs) return;
+      this.lastTick = now;
+      this.setFromMachine({ tick: this.state.tick + 1 });
+    }, SPIN_MS);
     this.tickTimer.unref();
     if (opts.watchBuild) this.watchOwnBuild(opts.watchBuild, opts.buildPollMs ?? BUILD_POLL_MS);
     if (opts.notice) this.notify(opts.notice.text, opts.notice.tone);
@@ -344,19 +395,21 @@ export class Store {
 
   /**
    * Is anything on the screen moving? Only three things animate, and all three
-   * are driven by `tick`: the dot beside a thread that is running, starting or
-   * waiting (`statusColor`), the activity row under a running turn, and the
-   * spinner on an update's running step. With none of them there, a tick is a
-   * repaint of a screen that is identical to the one already up — which an
-   * idle client used to pay for every 700 ms, for as long as it was left open.
+   * are driven by `tick`: the dot beside a busy thread (`statusColor`), the
+   * activity row under a running turn (`activityLine`), and the spinner on an
+   * update's running step (`StepRow`). With none of them there, a tick is a
+   * repaint of a screen identical to the one already up — which an idle client
+   * used to pay for every 700 ms, for as long as it was left open.
+   *
+   * `threadIsBusy` is shared with the components rather than restated here,
+   * because the two halves have to mean the same thing: a thread this calls
+   * still and a component draws moving is a spinner that never advances, and a
+   * reader cannot tell that from an agent that has died.
    */
   private animating(): boolean {
     for (const ms of this.state.machines.values()) {
       if (ms.update?.steps.some((st) => st.status === "running")) return true;
-      for (const t of ms.threads.values()) {
-        if (t.pendingApprovals > 0) return true;
-        if (t.status === "running" || t.status === "starting" || t.status === "waiting") return true;
-      }
+      for (const t of ms.threads.values()) if (threadIsBusy(t)) return true;
     }
     return false;
   }
@@ -683,10 +736,22 @@ export class Store {
     if (this.state.selection) this.set({ selection: null });
   }
 
+  /**
+   * A line at the foot of the screen.
+   *
+   * Frame-paced, even though a reader's own action raises some of these. Most
+   * of them come from a machine — `noticeTransition` fires when any of eight
+   * agents wants an approval or finishes, `noticeUpdate` on every step of an
+   * update — and those arrive one websocket frame at a time, so an immediate
+   * paint each would be eight full renders back to back at exactly the moment
+   * the budget exists to protect. A notice a reader's own keypress raised rides
+   * out on that keypress's own paint, or lands within a frame; either way it is
+   * under the threshold at which anybody could tell.
+   */
   notify(text: string, tone: Notice["tone"] = "info") {
-    this.set({ notice: { text, tone, at: Date.now() } });
+    this.setFromMachine({ notice: { text, tone, at: Date.now() } });
     if (this.noticeTimer) clearTimeout(this.noticeTimer);
-    this.noticeTimer = setTimeout(() => this.set({ notice: null }), tone === "error" ? 8000 : 4000);
+    this.noticeTimer = setTimeout(() => this.setFromMachine({ notice: null }), tone === "error" ? 8000 : 4000);
   }
 
   private persist() { try { saveConfig(this.config); } catch { /* ignore */ } }

@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 /**
  * When the client is allowed to repaint.
  *
@@ -27,19 +29,32 @@
  *     `FRAME_MS + late` ms. Under load that settles at a small share of the
  *     loop and leaves the rest for input.
  *
- * `late` is measured, never assumed, and it is recomputed on every frame, so a
- * machine that gets quiet is back at `FRAME_MS` on the next one. The reading is
- * one frame stale after an idle spell — the last frame's lateness paces the
- * first frame after it — which costs one interval and then corrects itself.
+ * `late` is measured, never assumed, and every frame takes a fresh reading —
+ * including a frame `now()` drops that was already due, because a frame nobody
+ * ran past its due time is the clearest reading there is. A machine that gets
+ * quiet is back at `FRAME_MS` on the next one. The reading is one frame stale
+ * after an idle spell — the last frame's lateness paces the first frame after
+ * it — which costs one interval and then corrects itself.
+ *
+ * The clock is `performance.now()`, not `Date.now()`. It is the wall clock that
+ * jumps: an NTP step, a VM restored from a snapshot, a laptop waking with a
+ * corrected time. A wall clock that went backwards would put `paintedAt` in the
+ * future and arm the next frame for the size of the step, and since `soon()`
+ * does nothing while a frame is armed, the screen would stop for minutes with
+ * nothing the reader could do about it. The wait is clamped to the interval as
+ * well, so the bound holds locally whatever clock is handed in.
  */
 
 /**
- * The shortest gap between two frames a machine asked for: about 30 a second,
- * which is also Ink's own ceiling (`maxFps`). Asking for more would only queue
- * paints that Ink throttles away, at the price of the React render in front of
- * each one.
+ * The shortest gap between two frames a machine asked for. This is Ink's own
+ * ceiling, to the millisecond: `maxFps` defaults to 30 and Ink throttles on
+ * `Math.ceil(1000 / maxFps)`, which is 34, not the 33⅓ that 30 fps sounds like.
+ * Asking for frames any faster only queues paints Ink throttles away, at the
+ * price of the React render in front of each one — so the number has to be the
+ * one Ink really uses. `inkOptions` leaves `maxFps` at its default; move one
+ * and move the other.
  */
-export const FRAME_MS = 32;
+export const FRAME_MS = 34;
 
 /**
  * The longest gap, however late the loop runs. The screen may fall behind the
@@ -76,11 +91,13 @@ export class Frames {
   private paintedAt = 0;
   /** How late the last frame ran — the budget is spent against this. */
   private lateMs = 0;
+  /** Latched by `stop`. A client on its way out never paints again. */
+  private stopped = false;
 
   constructor(private readonly paint: () => void, opts: FrameOptions = {}) {
     this.frameMs = opts.frameMs ?? FRAME_MS;
     this.maxFrameMs = opts.maxFrameMs ?? MAX_FRAME_MS;
-    this.now_ = opts.now ?? (() => Date.now());
+    this.now_ = opts.now ?? (() => performance.now());
     this.setTimer = opts.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
     this.clearTimer = opts.clearTimer ?? ((t) => clearTimeout(t as NodeJS.Timeout));
     this.paintedAt = this.now_();
@@ -99,9 +116,12 @@ export class Frames {
 
   /**
    * Something the person did. Paint it now, and drop any frame a machine was
-   * owed: the state that frame would have shown is in this one.
+   * owed: the state that frame would have shown is in this one, because this
+   * notifies synchronously and the render that follows reads the same state.
    */
   now(): void {
+    if (this.stopped) return;
+    this.readLateness();
     this.cancel();
     this.paintedAt = this.now_();
     this.paint();
@@ -109,9 +129,54 @@ export class Frames {
 
   /** Something a machine said. Paint it at the next boundary. */
   soon(): void {
-    if (this.timer !== null) return;
-    const wait = Math.max(0, this.paintedAt + this.intervalMs - this.now_());
-    this.dueAt = this.now_() + wait;
+    if (this.stopped || this.timer !== null) return;
+    this.arm(Math.max(0, this.paintedAt + this.intervalMs - this.now_()));
+  }
+
+  /**
+   * The screen went out for some other reason — React repainted for a
+   * keystroke, a resize, anything Ink noticed. The next frame is measured from
+   * here, so a frame and a keystroke's paint do not stack up back to back:
+   * a frame already armed is pushed out to a full interval from this paint.
+   *
+   * Pushed out, never dropped, however much it looks like this paint has
+   * already covered it. Ink throttles its writes with a trailing edge, so the
+   * frame that just reached the terminal can be an older commit than the state
+   * the pending frame was armed for — and nothing else is coming to draw that
+   * state. At the end of a reply that is its last words missing until the
+   * reader happens to press a key. Deferring is safe where dropping is not,
+   * because the frame still runs inside an interval; and while a reader types
+   * fast enough to keep pushing it, every one of those renders reads the store
+   * afresh, so the machine's changes are reaching the screen anyway.
+   *
+   * `frames.test.ts` holds this, and it is the only thing that does — an
+   * end-to-end case for it was written and thrown away, because a round of
+   * daemon traffic is several events and any one of them re-arms the frame the
+   * paint before it dropped. It passed whether or not this cancelled, which
+   * makes it worse than nothing.
+   */
+  painted(): void {
+    if (this.stopped) return;
+    const armed = this.timer !== null;
+    if (armed) { this.readLateness(); this.cancel(); }
+    this.paintedAt = this.now_();
+    if (armed) this.arm(this.intervalMs);
+  }
+
+  /** Give up any pending frame, for good. The client is going away. */
+  stop(): void {
+    this.stopped = true;
+    this.cancel();
+  }
+
+  /**
+   * Arm the one frame. `wait` is clamped to the interval: the bound the budget
+   * promises has to hold here, not only in `intervalMs`, or a clock that moved
+   * under us arms a frame minutes out and `soon()` will not arm another.
+   */
+  private arm(wait: number): void {
+    const w = Math.min(this.intervalMs, Math.max(0, wait));
+    this.dueAt = this.now_() + w;
     const t = this.setTimer(() => {
       // How late the timer ran is how long a keystroke arriving beside it
       // would have waited. Read it before anything else, then paint.
@@ -119,7 +184,7 @@ export class Frames {
       this.timer = null;
       this.paintedAt = this.now_();
       this.paint();
-    }, wait);
+    }, w);
     // A frame is never the last thing holding covey open; Ink's hold on stdin
     // is. An unref'd timer cannot keep a client alive that has nothing to show.
     (t as { unref?: () => void }).unref?.();
@@ -127,23 +192,17 @@ export class Frames {
   }
 
   /**
-   * The screen went out for some other reason — React repainted for a
-   * keystroke, a resize, anything Ink noticed. The next frame is measured from
-   * here, so a frame and a keystroke's paint do not stack up back to back.
-   *
-   * What this must *not* do is cancel the frame a machine is owed, however
-   * much it looks like that paint has already covered it. Ink throttles its
-   * writes with a trailing edge, so the frame that just reached the terminal
-   * can be an older commit than the state the pending frame was armed for —
-   * and nothing else is coming to draw that state. At the end of a reply that
-   * is its last words missing until the reader happens to press a key.
+   * A frame that is armed and already past its due time has measured the loop
+   * for us, whoever is about to take it away. Without this a reader typing
+   * steadily — every keystroke's paint pushing the frame out, every `set`
+   * dropping it — could hold a stale lateness, and with it a stale interval,
+   * long after the machine went quiet.
    */
-  painted(): void {
-    this.paintedAt = this.now_();
+  private readLateness(): void {
+    if (this.timer === null) return;
+    const late = this.now_() - this.dueAt;
+    if (late > 0) this.lateMs = late;
   }
-
-  /** Give up any pending frame. The client is going away. */
-  stop(): void { this.cancel(); }
 
   private cancel(): void {
     if (this.timer === null) return;

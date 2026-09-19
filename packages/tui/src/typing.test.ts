@@ -34,9 +34,10 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-typing-"));
 import React from "react";
 import { render } from "ink";
 import type { MachineInfo, Project, Thread, TimelineItem } from "@covey/protocol";
-import { Store, type MachineState, type ThreadView } from "./store.js";
+import { Store, threadIsBusy, type MachineState, type ThreadView } from "./store.js";
 import { App } from "./components/App.js";
 import { inkOptions } from "./index.js";
+import { FRAME_MS } from "./frames.js";
 import { ItemLines } from "./lines.js";
 import { layoutTranscript } from "./components/Transcript.js";
 
@@ -83,8 +84,8 @@ function transcript(n: number): Map<string, TimelineItem> {
  * A store with one machine, eight agents at work on it, and one of their
  * threads open — the shape of a run in flight.
  */
-function storeWithRun(items = 200) {
-  const store = new Store([]);
+function storeWithRun(items = 200, opts: ConstructorParameters<typeof Store>[1] = {}) {
+  const store = new Store([], opts);
   const threads = new Map<string, Thread>();
   threads.set("alpha", thread("alpha", true));
   for (let i = 1; i < 8; i++) threads.set(`agent-${i}`, thread(`agent-${i}`, true));
@@ -169,8 +170,8 @@ function storm(store: Store, machine: MachineState) {
   return {
     get events() { return events; },
     /** One round: the open thread grows its reply, seven others report progress. */
-    round() {
-      text += "another few words ";
+    round(words = "another few words ") {
+      text += words;
       (store as any).applyThread(PI, "alpha", {
         kind: "item.upserted", seq: ++seq,
         item: { id: "streaming", threadId: "alpha", turnId: "t1", seq: 999, kind: "assistant", text, streaming: true, model: "claude", createdAt: AT, updatedAt: new Date().toISOString() },
@@ -236,7 +237,9 @@ test("a keystroke rewrites the line it changed, not the screen", async () => {
 
 test("an idle client paints nothing at all: no machine, nothing running, no spinner to turn", async () => {
   // The whole client, with nothing connected — a covey left open on a second
-  // monitor. It used to repaint the screen every 700 ms for ever.
+  // monitor. It used to repaint the screen every 700 ms for ever. It still
+  // re-renders on `CLOCK_MS` to keep its relative times true (the case below),
+  // but that is three a minute and none of them land in this window.
   const store = new Store([]);
   const ink = await mount(store);
   try {
@@ -263,6 +266,96 @@ test("a thread that is running still turns the spinner", async () => {
       "so a reader watching an agent work cannot tell it apart from one that has died");
     assert.ok(ink.bytes > 0, "and the frames reached the terminal");
   } finally { ink.unmount(); store.shutdown(); }
+});
+
+test("an idle client still keeps its clock honest", async () => {
+  // The sidebar dates every thread with `relTime`, which reads `Date.now()` at
+  // render time. Nothing else re-renders an idle client — there is no
+  // heartbeat on the machine socket — so with the tick gated on "is anything
+  // animating", a turn that finished a minute ago would go on saying "now" for
+  // as long as the client was left open. `clockMs` is the real cadence, moved
+  // here so the case does not have to wait twenty seconds for it.
+  const { store } = storeWithRun(4, { clockMs: 100 });
+  for (const t of store.getState().machines.get(PI)!.threads.values()) {
+    Object.assign(t, { status: "idle", latestTurn: null, pendingApprovals: 0 });
+  }
+  const ink = await mount(store);
+  try {
+    ink.reset();
+    await ink.settle(1_600);
+    assert.ok(ink.renders >= 1,
+      "an idle client never re-rendered, so every relative time on the screen is frozen at " +
+      "whatever it read when the last event arrived");
+    assert.ok(ink.renders <= 4,
+      `and it rendered ${ink.renders} times, which is the 700 ms spinner tick back again`);
+  } finally { ink.unmount(); store.shutdown(); }
+});
+
+test("a notice from a machine waits for a frame like everything else a machine says", async () => {
+  // Eight agents finishing their turns arrive as eight separate websocket
+  // frames, so eight separate turns of the loop. `noticeTransition` fires on
+  // each, and a notice that painted on the spot would be eight full renders
+  // back to back at exactly the moment the budget exists to protect.
+  const { store, machine } = storeWithRun(20);
+  const ink = await mount(store);
+  try {
+    ink.reset();
+    for (let i = 1; i < 8; i++) {
+      const prev = machine.threads.get(`agent-${i}`)!;
+      (store as any).applyShell(machine, {
+        kind: "thread.upserted", seq: 9000 + i,
+        thread: { ...prev, status: "idle", latestTurn: { ...prev.latestTurn!, state: "completed" } },
+      });
+    }
+    assert.equal(ink.renders, 0, "not one of the seven painted on the spot");
+    await ink.settle(300);
+    assert.ok(store.getState().notice, "and the notice still arrived");
+    assert.ok(ink.renders <= 3, `seven finishing agents cost ${ink.renders} renders`);
+  } finally { ink.unmount(); store.shutdown(); }
+});
+
+test("threadIsBusy is what both halves ask, so a spinner cannot outlive its clock", () => {
+  // The store decides whether to tick; the components decide whether to draw
+  // something that moves. A thread the first calls still and the second draws
+  // moving is a spinner frozen mid-turn, which reads like an agent that died.
+  // `status` and `latestTurn.state` are separate facts and a daemon can report
+  // a running turn on a session that has not settled into `running` yet.
+  const idle = thread("t", false);
+  assert.equal(threadIsBusy(idle), false);
+  assert.equal(threadIsBusy({ ...idle, latestTurn: { turnId: "t1", state: "running", startedAt: AT } } as Thread), true,
+    "the activity row draws on the turn, so the tick has to run on the turn");
+  assert.equal(threadIsBusy({ ...idle, status: "waiting" } as Thread), true);
+  assert.equal(threadIsBusy({ ...idle, pendingApprovals: 1 } as Thread), true);
+});
+
+test("the frame rate is Ink's own, to the millisecond", () => {
+  // Ink throttles on `Math.ceil(1000 / maxFps)`, which for the default 30 is
+  // 34 ms — not the 33⅓ that "30 fps" sounds like, and not the 32 this started
+  // as. Asking for frames any faster only queues paints Ink throttles away, at
+  // the price of the React render in front of each one. The two numbers have to
+  // move together, and this is the only place they can be seen side by side.
+  const store = new Store([]);
+  try {
+    const maxFps = (inkOptions(store) as { maxFps?: number }).maxFps ?? 30;
+    assert.equal(FRAME_MS, Math.max(1, Math.ceil(1000 / maxFps)),
+      `FRAME_MS is ${FRAME_MS} and Ink throttles at ${Math.ceil(1000 / maxFps)}ms. ` +
+      "Every frame in the gap costs a full render of App and is then deferred to Ink's " +
+      "trailing edge, which is the cost this whole file is about");
+  } finally { store.shutdown(); }
+});
+
+test("leaving a thread lets go of the lines it was holding", () => {
+  // `layoutTranscript` returns early when no thread is open, which is exactly
+  // when the reader has just left one — so the prune has to happen in front of
+  // that guard, or the whole rendered screenful of the thread they left is held
+  // until some other thread happens to be laid out.
+  const { store } = storeWithRun(200);
+  const view = store.getState().view!;
+  const cache = new ItemLines();
+  layoutTranscript(view, 118, new Set(), { cursor: 0, answered: [] }, false, undefined, cache);
+  assert.ok(cache.size > 100);
+  layoutTranscript(null, 118, new Set(), { cursor: 0, answered: [] }, false, undefined, cache);
+  assert.equal(cache.size, 0, "escaping out of a thread left its lines held");
 });
 
 test("one item changing lays out one item, not the two hundred around it", () => {

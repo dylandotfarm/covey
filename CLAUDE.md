@@ -26,13 +26,18 @@
   Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the
   store has two ways to change state: `set` paints at once and is for what the reader
   did, `setFromMachine` paints on a frame boundary and is for everything a daemon said.
-  Every `MachineClient` callback is on the second side of that line; nothing else is.
-  `frames.ts` paces the boundary off the lateness its own timer measures, so a loaded
-  machine paints less and types the same. Three things hold it: don't notify React per
-  event (`typing.test.ts`), don't tick the spinner with nothing to animate
-  (`Store.animating`), and don't lay out two hundred timeline items to follow one of
-  them changing (`ItemLines` in `lines.ts`, keyed on item identity — sound only while
-  the daemon keeps re-sending items whole).
+  Every `MachineClient` callback is on the second side of that line, and so is `notify`,
+  because most notices are raised from those callbacks. `frames.ts` paces the boundary
+  off the lateness its own timer measures, so a loaded machine paints less and types the
+  same; `FRAME_MS` is Ink's own throttle period, so move it with `maxFps` or not at all.
+  Four things hold the budget up. Don't notify React per event (`typing.test.ts`). Don't
+  tick the spinner with nothing to animate — but do keep ticking at `CLOCK_MS`, because
+  `relTime` dates every sidebar row from `Date.now()` and nothing else re-renders an idle
+  client. Ask `threadIsBusy` on both sides of that, never a restatement of it: a thread
+  the store calls still and a component draws moving is a spinner that never advances.
+  And don't lay out two hundred timeline items to follow one of them changing
+  (`ItemLines` in `lines.ts`, keyed on item identity — sound only while the daemon keeps
+  re-sending items whole).
 - Screen rows are not row indices: the sidebar puts a blank line above each machine
   and windows a long tree. `sidebar.ts` builds the painted line list and `App.tsx` gives
   the same array to the renderer and to the mouse hit test — change both or neither.

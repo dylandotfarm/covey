@@ -189,7 +189,11 @@ export function App({ store }: { store: Store }) {
   // The lines of every item that did not change. A streamed reply replaces one
   // item and leaves the rest alone, so without this the client lays out the
   // whole transcript sixteen times a second to follow a single paragraph.
-  const itemLines = useRef(new ItemLines());
+  // Lazily: `useRef`'s argument is evaluated on every render and all but the
+  // first are thrown away, which in a file about per-render cost would be a Map
+  // and a wrapper allocated thousands of times a session for no effect.
+  const itemLines = useRef<ItemLines>(undefined);
+  itemLines.current ??= new ItemLines();
   const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded, linkCtx, itemLines.current), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded, linkCtx]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
