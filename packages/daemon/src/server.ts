@@ -94,6 +94,15 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
    * it (`ThreadOrigin`).
    */
   let clientName = "";
+  /**
+   * The thread this connection said it speaks for at `hello` — an agent inside
+   * a covey thread, passing on the `COVEY_THREAD_ID` the daemon gave its
+   * session. Every thread and every run the connection creates is a child of
+   * it, so the sidebar can put the work under the thread that asked for it.
+   * Self-declared, exactly like `clientName`, and checked against the db
+   * before it is used rather than trusted.
+   */
+  let callerThread = "";
 
   const rpc = async (req: RpcRequest): Promise<RpcResponse> => {
     try {
@@ -111,6 +120,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
       case "hello":
         if (p.protocolVersion !== PROTOCOL_VERSION) throw new EngineError("protocol", `daemon speaks v${PROTOCOL_VERSION}, client v${p.protocolVersion}`);
         clientName = typeof p.client === "string" ? p.client : "";
+        callerThread = typeof p.threadId === "string" ? p.threadId : "";
         return engine.machine;
       case "shell.snapshot":
         return engine.shellSnapshot();
@@ -153,7 +163,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
         subs.delete(p.subscriptionId);
         return null;
       case "command": {
-        const seq = await engine.dispatch(p, clientName);
+        const seq = await engine.dispatch(p, clientName, callerThread);
         return { commandId: p.commandId, ok: true, seq };
       }
       case "thread.export":

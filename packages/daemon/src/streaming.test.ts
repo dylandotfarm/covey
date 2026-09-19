@@ -66,7 +66,7 @@ function harness(streaming: boolean): Harness {
   const { q, push } = fakeQuery();
   const session = new ClaudeSession(
     {
-      threadId: "thread-01-abcdef", sessionId: "sess-1", cwd: "/tmp", model: "opus",
+      threadId: "thread-01-abcdef", sessionId: "sess-1", projectId: "p1", cwd: "/tmp", model: "opus",
       permissionMode: "default", permissionModeExplicit: false, streaming,
       resume: false, sessionStore: store,
     },

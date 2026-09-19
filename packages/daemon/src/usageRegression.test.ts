@@ -92,7 +92,7 @@ function session() {
     now: () => new Date().toISOString(),
   };
   const s = new ClaudeSession({
-    threadId: "t1", sessionId: "s1", cwd: "/tmp", model: OPUS,
+    threadId: "t1", sessionId: "s1", projectId: "p1", cwd: "/tmp", model: OPUS,
     permissionMode: "default", permissionModeExplicit: false, streaming: false, resume: false,
     sessionStore: { append: () => {}, load: () => null } as any,
   }, sink);

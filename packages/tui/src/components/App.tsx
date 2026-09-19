@@ -1339,7 +1339,17 @@ export function App({ store }: { store: Store }) {
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
       if (row.archived) { const k = archiveKey(row.machine, row.projectId!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
-      if (row.run) { const k = runKey(row.machine, row.run.id); if (store.isExpanded(k)) store.toggleExpanded(k); return; }
+      if (row.run) {
+        const k = runKey(row.machine, row.run.id);
+        if (store.isExpanded(k)) { store.toggleExpanded(k); return; }
+        // A furled run under the thread that asked for it: left moves to that
+        // thread, the way it moves from a child thread to its parent, so ←←
+        // is the way out of a run from any row inside it.
+        const parent = row.run.parentThreadId;
+        const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine && r.thread!.id === parent) : -1;
+        if (at >= 0) setCursorKey(rows[at]!.key);
+        return;
+      }
       if (row.kind === "thread") {
         // An unfurled group furls. A child has no group of its own, so left
         // moves to its parent — which is where the group's furl lives, so a

@@ -29,8 +29,8 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-group-"));
 
 import React from "react";
 import { render } from "ink";
-import type { MachineInfo, Project, Thread, ThreadOrigin } from "@covey/protocol";
-import { Store, sidebarRows, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
+import type { MachineInfo, Project, Run, RunMember, RunMemberState, Thread, ThreadOrigin } from "@covey/protocol";
+import { Store, sidebarRows, runKey, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
 import { sidebarCells, rowAtScreenRow } from "./sidebar.js";
 import { App } from "./components/App.js";
 import { AGENT_MARK } from "./components/Sidebar.js";
@@ -68,12 +68,31 @@ const started = (id: string, at: string, parent: string | null, over: Partial<Th
   return thread(id, at, { origin, ...over });
 };
 
-function storeWith(threads: Thread[]) {
+/**
+ * A run of this machine's project, with one member per state given. `parent`
+ * is the thread that asked for it, which is what puts the run inside that
+ * thread's group rather than under the project.
+ */
+function run(id: string, states: RunMemberState[], parent?: string): Run {
+  const members: RunMember[] = states.map((state, i) => ({
+    id: `${id}-m${i}`, task: { key: `#${i}`, title: `task ${i}`, issue: null, url: null, requires: [] },
+    machineId: info.machineId, projectId: project.id, threadId: null, branch: null, worktreePath: null,
+    pullRequest: null, state, note: null, brief: null, dispatchedAt: null,
+    updatedAt: "2026-01-01T00:00:00Z", review: null,
+  } as unknown as RunMember));
+  return {
+    id, machineId: info.machineId, name: id, goal: "", briefTemplate: "", workspaceMode: "worktree-default",
+    members, closedAt: null, createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z",
+    ...(parent ? { parentThreadId: parent } : {}),
+  };
+}
+
+function storeWith(threads: Thread[], runs: Run[] = []) {
   const store = new Store([]);
   const m: MachineState = {
     key: PI, saved: { name: "pi", url: PI }, conn: "connected", error: null, info,
     projects: new Map([[project.id, project]]), threads: new Map(threads.map((t) => [t.id, t])),
-    runs: new Map(), update: null, restarting: false,
+    runs: new Map(runs.map((r) => [r.id, r])), update: null, restarting: false,
   } as unknown as MachineState;
   store.state.machines.set(PI, m);
   store.state.order.push(PI);
@@ -146,6 +165,128 @@ test("two threads naming each other as parent still each get exactly one row", (
   store.state.expanded[threadGroupKey(PI, "a")] = true;
   store.state.expanded[threadGroupKey(PI, "b")] = true;
   assert.deepEqual(painted(store.state as AppState), ["a@2", "b@3"], "and the walk stops rather than looping");
+});
+
+// ---- a run in the tree --------------------------------------------------------
+
+/**
+ * Where a run sits, which is the other half of "a child sits under its parent".
+ *
+ * A run used to be painted under the machine, above every project, wherever its
+ * members worked. So a run of five threads in one project stood beside the
+ * project those five threads were in, and the thread that asked for the run had
+ * nothing under it at all — the reader had to know the two were the same piece
+ * of work. A run goes where its work goes: inside the project its members work
+ * in, and inside the thread that asked for it when a thread did.
+ */
+const shape = (s: AppState) => sidebarRows(s).map((r) => `${r.kind}@${r.depth}`);
+
+test("a run sits in the project its members work in, above that project's threads", () => {
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["working", "working"])]);
+  assert.deepEqual(shape(store.state as AppState), [
+    "machine@0", "project@1", "run@2", "member@3", "member@3", "thread@2",
+  ], "the run is a child of the project, and its members are a level below it again");
+});
+
+test("a run a thread asked for sits inside that thread's group", () => {
+  const store = storeWith(tree(), [run("build", ["working"], "manager")]);
+  store.state.expanded[threadGroupKey(PI, "manager")] = true;
+  assert.deepEqual(shape(store.state as AppState), [
+    "machine@0", "project@1",
+    "thread@2", "run@3", "member@4", "thread@3", "thread@3", "thread@3",
+    "thread@2",
+  ], "the run comes first inside the group, then the threads the manager started");
+});
+
+test("a run whose parent thread has no row of its own falls back to the project", () => {
+  // The thread that asked for the run is archived, so the sidebar cannot paint
+  // it. A run is never hidden behind a link that leads nowhere, exactly as a
+  // thread is not.
+  const store = storeWith(
+    [thread("gone", "2026-01-09T00:00:00Z", { archivedAt: "2026-02-01T00:00:00Z" })],
+    [run("build", ["working"], "gone")],
+  );
+  assert.deepEqual(shape(store.state as AppState).slice(0, 3), ["machine@0", "project@1", "run@2"]);
+});
+
+test("a furled thread holds its run as it holds its children, and counts it", () => {
+  const store = storeWith(tree(), [run("build", ["working"], "manager")]);
+  const rows = sidebarRows(store.state as AppState);
+  assert.deepEqual(rows.filter((r) => r.kind === "run"), [], "the run is inside the fold");
+  const manager = rows.find((r) => r.kind === "thread" && r.thread!.id === "manager")!;
+  assert.equal(manager.group, true);
+  assert.equal(manager.hidden, 4, "three threads and the run — the row says what it is holding");
+});
+
+/**
+ * The deadlock rule of #69, one fold deeper. A run furled inside a thread group
+ * is two folds away from the operator, and a member blocked on an approval
+ * stops the whole run until somebody answers it.
+ */
+test("a furled thread never hides a run whose member needs a person", () => {
+  const store = storeWith(tree(), [run("build", ["working", "blocked"], "manager")]);
+  const rows = sidebarRows(store.state as AppState);
+  assert.deepEqual(rows.filter((r) => r.kind === "run").map((r) => r.run!.id), ["build"], "the run is let through");
+  assert.deepEqual(rows.filter((r) => r.kind === "member").map((r) => r.member!.state), ["working", "blocked"],
+    "open, as a run is until the operator furls it, so both members are on screen");
+
+  // Furled as well, and the two folds still let the one member through.
+  store.state.expanded[runKey(PI, "build")] = false;
+  const furled = sidebarRows(store.state as AppState);
+  assert.deepEqual(furled.filter((r) => r.kind === "member").map((r) => r.member!.state), ["blocked"]);
+});
+
+test("a run this client cannot place in one project keeps its old row under the machine", () => {
+  // A member dispatched to another machine: a project id only means anything
+  // on the machine that holds the project, so there is no honest place for the
+  // run inside this tree. One level too high is a run the operator can still
+  // find; a run filed under a project it does not work in is a lie.
+  const away = run("build", ["working"]);
+  away.members[0]!.machineId = "m-elsewhere";
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [away]);
+  assert.deepEqual(shape(store.state as AppState), ["machine@0", "run@1", "member@2", "project@1", "thread@2"]);
+});
+
+/**
+ * The sidebar of 2026-09-18, the whole tree, in one case.
+ *
+ * The operator's screenshot: a thread they opened by hand ("Create issues for
+ * zoom-scaled outline…") had started five run members and six review threads,
+ * and the sidebar painted the run beside the project its members worked in,
+ * the review threads beside the thread that asked for them, and nothing under
+ * the thread at all. Three rows of one piece of work, on three levels, none of
+ * them pointing at the others.
+ *
+ * Every id an agent's thread needs to nest was already on the wire; nothing
+ * filled it in, because no agent knew which thread it was — see
+ * `packages/daemon/src/threadOrigin.test.ts` for the other half.
+ */
+test("the tree of 2026-09-18: one project, one thread, and everything it started under it", () => {
+  const store = storeWith([
+    thread("create-issues", "2026-01-09T00:00:00Z"),
+    started("review-278", "2026-01-08T00:00:00Z", "create-issues"),
+    started("review-277", "2026-01-07T00:00:00Z", "create-issues"),
+    thread("mine", "2026-01-06T00:00:00Z"),
+  ], [run("pre-release", ["working", "working"], "create-issues")]);
+
+  // Furled, which is how a group starts: one row for the eleven.
+  assert.deepEqual(shape(store.state as AppState), ["machine@0", "project@1", "thread@2", "thread@2"]);
+  const head = sidebarRows(store.state as AppState).find((r) => r.thread?.id === "create-issues")!;
+  assert.equal(head.hidden, 3, "two review threads and the run");
+
+  store.state.expanded[threadGroupKey(PI, "create-issues")] = true;
+  const rows = sidebarRows(store.state as AppState);
+  assert.deepEqual(rows.map((r) => `${r.kind}@${r.depth}`), [
+    "machine@0", "project@1",
+    "thread@2", "run@3", "member@4", "member@4", "thread@3", "thread@3",
+    "thread@2",
+  ]);
+  const run278 = rows.find((r) => r.thread?.id === "review-278")!;
+  const preRelease = rows.find((r) => r.kind === "run")!;
+  assert.equal(run278.depth, preRelease.depth, "the review threads and the run are siblings under the thread");
+  assert.ok(rows.indexOf(preRelease) < rows.indexOf(run278), "and the run comes first");
+  assert.deepEqual(rows.filter((r) => r.depth === 2 && r.kind === "thread").map((r) => r.thread!.id),
+    ["create-issues", "mine"], "nothing an agent started is a row of the project any more");
 });
 
 // ---- the attention rule (#49) -------------------------------------------------
@@ -391,6 +532,49 @@ test("a click below a furled group opens the row that is painted there", async (
     // And the line the middle child was painted on opens that child.
     await click(rowOf("agent-b"));
     assert.equal(opened.at(-1), "agent-b");
+  } finally { unmount(); }
+});
+
+/**
+ * The indent is the sidebar's one way of saying "under", and a run has to spell
+ * it the same way a thread does or the tree reads as two lists.
+ *
+ * Every kind of row spends a different number of columns before its title — a
+ * thread keeps a two-column gutter for its caret or its `◇`, a run and a
+ * project spend two on a caret and a space — so the three indents are worked
+ * out against each other (`threadIndent`, `runIndent`, `memberIndent`) and this
+ * reads the columns the terminal was really sent.
+ */
+test("a run's title starts in the same column as the title of a thread beside it", async () => {
+  const store = storeWith(tree(), [run("build", ["working"])]);
+  store.state.expanded[threadGroupKey(PI, "manager")] = true;
+  const { frame, unmount } = await paint(store);
+  try {
+    const lines = frame();
+    const columnOf = (text: string) => {
+      const line = lines.find((l) => l.slice(0, 33).includes(text));
+      assert.ok(line, `"${text}" was never painted — the frame was:\n${lines.join("\n")}`);
+      return line!.slice(0, 33).indexOf(text);
+    };
+    assert.equal(columnOf("build"), columnOf("manager"), "the run sits at the level of the project's own threads");
+    assert.equal(columnOf("#0 task 0"), columnOf("agent-a"), "and its members at the level of a thread's children");
+  } finally { unmount(); }
+});
+
+/**
+ * A row that asks for more columns than it has does not overflow and does not
+ * wrap: Ink gives the extra back by shrinking one of the cells, and nothing
+ * says which. A member row asked for four too many and paid with its state
+ * mark, so the one glyph that tells a blocked member from a working one at a
+ * glance was never painted at any width.
+ */
+test("a run member row paints its state mark, not only the word", async () => {
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["blocked"])]);
+  const { frame, unmount } = await paint(store);
+  try {
+    const line = frame().find((l) => l.slice(0, 33).includes("#0 task 0")) ?? "";
+    assert.ok(line.includes("◼"), `the blocked member lost its mark: "${line.slice(0, 33)}"`);
+    assert.ok(line.includes("blocked"), "and it still says so in words");
   } finally { unmount(); }
 });
 
