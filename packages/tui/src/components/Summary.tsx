@@ -19,7 +19,8 @@ export function Summary({ state, row, width, height }: { state: AppState; row: S
   if (!m) return null;
   const inner = width - 4;
   return (
-    <Box flexDirection="column" width={width} height={height} paddingX={2} paddingTop={1} overflow="hidden">
+    /* `100%` for the same reason as `Transcript`: this box clips. */
+    <Box flexDirection="column" width="100%" height={height} paddingX={2} paddingTop={1} overflow="hidden">
       {row.kind === "project" && row.projectId
         ? <ProjectSummary m={m} projectId={row.projectId} width={inner} height={height - 1} tick={state.tick} />
         : <MachineSummary m={m} state={state} width={inner} height={height - 1} tick={state.tick} />}

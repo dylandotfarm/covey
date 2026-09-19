@@ -135,7 +135,10 @@ export function Transcript({ view, layout, height, scrollFromBottom, width, sele
   }
   const pad = Math.max(0, height - visible.slice.length);
   return (
-    <Box flexDirection="column" flexGrow={1} width={width} overflow="hidden">
+    /* `100%`, not `width`: this box clips, and a clip is the innermost one that
+       wins. Sized off the prop it would go on clipping at the old width through
+       a resize, over the top of the bound App's root box sets. */
+    <Box flexDirection="column" flexGrow={1} width="100%" overflow="hidden">
       {pad > 0 && <Box height={pad} />}
       {painted.map((l, i) => <LineView key={visible.start + i} line={l} />)}
       {scrollFromBottom > 0 && (

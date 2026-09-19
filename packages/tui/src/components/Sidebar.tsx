@@ -10,7 +10,11 @@ import { buildSkew } from "../build.js";
 export function Sidebar({ state, rows, cells, cursor, width, focused }: { state: AppState; rows: SidebarRow[]; cells: SidebarCell[]; cursor: number; width: number; focused: boolean }) {
   const inner = width - 1;
   return (
-    <Box flexDirection="column" width={width} borderStyle="single" borderRight borderTop={false} borderBottom={false} borderLeft={false} borderColor={T.border}>
+    /* `flexShrink={0}`: the sidebar is a rail of a fixed width, and the pane
+       beside it takes what is left. Without this the two shrink together
+       whenever their natural widths overrun the terminal — which the pane's now
+       always does, its width being the width of its content. */
+    <Box flexDirection="column" width={width} flexShrink={0} borderStyle="single" borderRight borderTop={false} borderBottom={false} borderLeft={false} borderColor={T.border}>
       <Box paddingX={1} height={1}>
         <Text color={T.text} bold>covey</Text>
         {/* A client goes stale while it runs and cannot feel it, so the one
