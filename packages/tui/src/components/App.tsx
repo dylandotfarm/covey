@@ -1571,7 +1571,30 @@ export function App({ store }: { store: Store }) {
   const summaryTitle = summaryRow && (summaryRow.kind === "project" ? summaryRow.project!.title : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
   const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? "") : "machine");
   return (
-    <Box width={size.cols} height={size.rows} flexDirection="row">
+    /* One invariant holds this screen together: nothing covey paints may be
+       wider than the terminal it is painted into. Ink's incremental renderer
+       writes one screen row per line of its frame and finds the next frame with
+       `cursorUp(lines - 1)`; a line the terminal itself has to wrap costs a
+       second row Ink never counted, and from there every frame lands a row too
+       high — for good, because the lines that would paint over the mess are the
+       ones the diff calls unchanged.
+
+       A resize is where that used to happen. Ink registers its own handler for
+       the signal inside `render()` and repaints on the spot, from the tree React
+       last committed — measured for the terminal that has just gone away — and
+       React cannot beat it there: even a synchronous-lane update commits a
+       microtask later, after Ink has already written the frame.
+
+       So the frame is bounded by the terminal rather than by `size`: `100%` of
+       the yoga root, which Ink resizes before it repaints, and a clip for the
+       stale children still inside it. `size` remains what the layout maths
+       reads; it is this outermost box alone that may not trust it. The clip has
+       to be the outermost one, too — Ink keeps clips on a stack and takes the
+       innermost, so a box inside this one that clips at a width of its own
+       replaces this bound instead of narrowing it. That is why `Transcript` and
+       `Summary` size their clipping boxes off their parent and not off the
+       width they are handed. `resize.test.ts` holds the invariant. */
+    <Box width="100%" height={size.rows} flexDirection="row" overflow="hidden">
       {sidebarVisible && <Sidebar state={state} rows={rows} cells={cells} cursor={cursor} width={SIDEBAR_W} focused={state.focus === "sidebar"} />}
       <Box flexDirection="column" width={mainW}>
         <Box height={1} paddingX={2} justifyContent="space-between">
