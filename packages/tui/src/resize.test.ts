@@ -34,7 +34,7 @@ import React from "react";
 import { render } from "ink";
 import type { MachineInfo, Project, Thread, TimelineItem } from "@covey/protocol";
 import { Store, type MachineState, type ThreadView } from "./store.js";
-import { App } from "./components/App.js";
+import { App, SIDEBAR_W } from "./components/App.js";
 import { inkOptions } from "./index.js";
 import { width } from "./lines.js";
 
@@ -54,11 +54,20 @@ const info: MachineInfo = {
   settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
 };
 
+/**
+ * A thread with everything that makes a row long on it.
+ *
+ * The `branch` and the `model` are not decoration: they are what the composer's
+ * status row is made of, and with them null that row fits any terminal and the
+ * case below cannot see it overflow. A review of the first version of this file
+ * found exactly that hole, and a 99-column row going into an 80-column terminal
+ * through it.
+ */
 function thread(id: string): Thread {
   return {
     id, projectId: "p", title: `${id} — a title long enough to need the room it is given`,
-    provider: "claude", sessionId: id, model: null,
-    permissionMode: "default", branch: null, worktreePath: null,
+    provider: "claude", sessionId: id, model: "claude-sonnet-4-5",
+    permissionMode: "default", branch: "feature/JIRA-1234-rework-the-parser-completely", worktreePath: "/src/covey/.covey/worktrees/abcd1234",
     status: "running", lastError: null, pendingApprovals: 0, queuedTurns: 0,
     latestTurn: { turnId: "t1", state: "running", startedAt: AT },
     lastMessageAt: AT, archivedAt: null, pinnedAt: null, movedTo: null, createdAt: AT, updatedAt: AT,
@@ -151,6 +160,7 @@ async function mount(cols: number, rowCount: number) {
       await settle();
       return writes;
     },
+    store,
     unmount: () => app.unmount(),
   };
 }
@@ -162,6 +172,22 @@ function tooWide(writes: string[], cols: number): string[] {
 
 /** The widths of the rows that overflowed, for an assertion that names them. */
 const overflow = (writes: string[], cols: number) => tooWide(writes, cols).map(width);
+
+/**
+ * Paint the pane a case is about, and prove it is on screen.
+ *
+ * Both halves matter. Setting state on the store does not render anything by
+ * itself, so without the paint a case asserts on the tree the *previous* case
+ * left committed — which is how the first version of this file managed to check
+ * the transcript three times over and call one of them an overlay. And without
+ * the marker a case goes on passing when the state stops reaching the screen for
+ * some reason that has nothing to do with a resize.
+ */
+async function show(cols: number, marker: string) {
+  const painted = (await app.resize(cols)).flatMap(rows).join("\n");
+  assert.ok(painted.includes(marker),
+    `expected ${JSON.stringify(marker)} on screen before the resize under test, got:\n${painted.slice(0, 400)}`);
+}
 
 let app: Awaited<ReturnType<typeof mount>>;
 before(async () => { app = await mount(120, 30); });
@@ -180,7 +206,91 @@ test("the same holds for a shrink small enough to drop the sidebar", async () =>
 
 test("and for a drag that narrows a few columns at a time", async () => {
   await app.resize(140, 30);
-  for (const cols of [130, 110, 90, 70, 66]) {
+  for (const cols of [130, 110, 90, 70, 66, 40, 20]) {
     assert.deepEqual(overflow(await app.resize(cols), cols), [], `rows too wide at ${cols} columns`);
   }
+});
+
+/**
+ * The three cases above paint the transcript, because that is what a client with
+ * a conversation open shows. Every other pane is a different tree with its own
+ * boxes in it, and the same mistake in any of them costs the same screen — so
+ * each one is put on screen and the terminal taken out from under it.
+ *
+ * The state is set on the store and the resize does the rendering: it is the
+ * frame *after* the size changes that these are about, and it reads the state
+ * as it stands when Ink asks for it.
+ */
+/**
+ * The other way a resize can go wrong, and the one no width check can see.
+ *
+ * Every row here fits the terminal; they are simply in the wrong columns. The
+ * pane beside the sidebar is sized by what is left over, which makes its natural
+ * width the width of its *content* — and two flexible children whose natural
+ * widths overrun the terminal shrink together, rail included. The sidebar is a
+ * rail: it is the one part of this screen that is the same width at every
+ * terminal size, and the mouse hit test in `App.tsx` reads that width as a
+ * constant.
+ */
+test("the sidebar keeps its rail when the pane beside it cannot", async () => {
+  await app.resize(120);
+  // The settled frame, not everything the resize wrote: the frame in front of
+  // it is the one measured for the terminal that has gone, and at a width with
+  // no sidebar in it at all the composer's own border is the only `|` there is.
+  const frames = (await app.resize(80)).map(rows).filter((r) => r.length > 10);
+  const settled = frames.at(-1) ?? [];
+  const painted = settled.filter((r) => r.includes("\u2502"));
+  assert.ok(painted.length > 5, `expected the sidebar's border on most rows, saw ${painted.length} of ${settled.length}`);
+  const columns = [...new Set(painted.map((r) => r.indexOf("\u2502")))];
+  assert.deepEqual(columns, [SIDEBAR_W - 1],
+    `the rail should stand in one column, ${SIDEBAR_W - 1}, on every row that has it`);
+});
+
+test("the machine summary is bounded too", async () => {
+  // `summaryRow` needs the focus in the sidebar with the cursor on a machine
+  // row, which is where it starts. Through the store's own setter, not by
+  // writing to `state`: a bare write notifies nobody, and the client goes on
+  // painting whatever it last committed.
+  app.store.setFocus("sidebar");
+  await show(120, "threads in");
+  assert.deepEqual(overflow(await app.resize(80), 80), [],
+    "rows too wide for 80 columns with the machine summary on screen");
+});
+
+test("so is an overlay", async () => {
+  app.store.setOverlay({ kind: "help" });
+  await show(120, "shift+tab");
+  assert.deepEqual(overflow(await app.resize(80), 80), [],
+    "rows too wide for 80 columns with the help overlay open");
+});
+
+test("so is the diff panel", async () => {
+  app.store.setOverlay(null);
+  // No setter for this one — the real path fetches the diff from a machine, and
+  // there is no machine here. Written, then a setter called to notify, which
+  // also takes the focus out of the sidebar: the preview effect that follows a
+  // sidebar cursor closes the diff panel on its way past.
+  app.store.state.diffView = {
+    threadId: "alpha",
+    loading: false,
+    scroll: 0,
+    diff: {
+      turnId: "t1", additions: 12, deletions: 3,
+      files: [
+        { path: "packages/tui/src/components/App.tsx", additions: 9, deletions: 2, status: "M" },
+        { path: "packages/tui/src/components/Transcript.tsx", additions: 3, deletions: 1, status: "M" },
+      ],
+      patch: [
+        "diff --git a/packages/tui/src/components/App.tsx b/packages/tui/src/components/App.tsx",
+        "@@ -1571,7 +1571,30 @@ export function App({ store }: { store: Store }) {",
+        "-    <Box width={size.cols} height={size.rows} flexDirection=\"row\">",
+        "+    <Box width=\"100%\" height={size.rows} flexDirection=\"row\">",
+        "       {sidebarVisible && <Sidebar state={state} rows={rows} cells={cells} cursor={cursor} width={SIDEBAR_W} />}",
+      ].join("\n"),
+    },
+  };
+  app.store.setFocus("composer");
+  await show(120, "Changes");
+  assert.deepEqual(overflow(await app.resize(80), 80), [],
+    "rows too wide for 80 columns with the diff panel open");
 });

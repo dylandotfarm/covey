@@ -26,7 +26,8 @@ import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mention
 import { readClipboardImage, readDroppedFiles, applyDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
-const SIDEBAR_W = 34;
+/** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
+export const SIDEBAR_W = 34;
 /** Screen row (1-based) of the sidebar list's first line: below the title. */
 const SIDEBAR_TOP = 2;
 /**
@@ -1585,18 +1586,27 @@ export function App({ store }: { store: Store }) {
        React cannot beat it there: even a synchronous-lane update commits a
        microtask later, after Ink has already written the frame.
 
-       So the frame is bounded by the terminal rather than by `size`: `100%` of
-       the yoga root, which Ink resizes before it repaints, and a clip for the
-       stale children still inside it. `size` remains what the layout maths
-       reads; it is this outermost box alone that may not trust it. The clip has
-       to be the outermost one, too — Ink keeps clips on a stack and takes the
-       innermost, so a box inside this one that clips at a width of its own
-       replaces this bound instead of narrowing it. That is why `Transcript` and
-       `Summary` size their clipping boxes off their parent and not off the
-       width they are handed. `resize.test.ts` holds the invariant. */
-    <Box width="100%" height={size.rows} flexDirection="row" overflow="hidden">
+       So that frame has to be *right*, not merely cut down to size. This box is
+       `100%` of the yoga root, which Ink resizes before it repaints; the pane
+       beside the sidebar takes the remainder; and the three panes that set a
+       width of their own inside it — `Composer`, `DiffPanel`, `OverlayView` —
+       take theirs from their parent. `size` is still what every layout sum
+       reads, and stays so. It is the *boxes* that may not trust it, because a
+       box is what the stale frame is measured with.
+
+       A clip here would do the same job in one line, and the first draft of this
+       had one. Measured at this size on this project's Pi, it costs 3–4 ms of a
+       34 ms paint — around a tenth of the budget #78 spent four commits buying —
+       because a clip on the stack puts an uncached `sliceAnsi` through every
+       write of every frame, for ever, to bound the one frame a resize paints.
+       Correct widths measure the same as no fix at all. `resize.test.ts` holds
+       the invariant, a case per pane. */
+    <Box width="100%" height={size.rows} flexDirection="row">
       {sidebarVisible && <Sidebar state={state} rows={rows} cells={cells} cursor={cursor} width={SIDEBAR_W} focused={state.focus === "sidebar"} />}
-      <Box flexDirection="column" width={mainW}>
+      {/* The remainder, whatever the sidebar took — `mainW` is the same number
+          in a frame whose `size` is current, and the right one in a frame whose
+          `size` is a terminal ago. */}
+      <Box flexDirection="column" flexGrow={1}>
         <Box height={1} paddingX={2} justifyContent="space-between">
           <Box>
             {summaryRow ? (<><Text color={T.text} bold>{truncate(summaryTitle || "", Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {summarySub}</Text></>)
@@ -1605,7 +1615,10 @@ export function App({ store }: { store: Store }) {
           </Box>
           <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : state.scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
         </Box>
-        <Box height={1}><Text color={T.border}>{"─".repeat(Math.max(0, mainW))}</Text></Box>
+        {/* Truncated because this is a length, not a box: laid out with a
+            `mainW` from the terminal before last it would wrap onto a second row
+            and make the frame taller than the screen it is going to. */}
+        <Box height={1}><Text color={T.border} wrap="truncate">{"─".repeat(Math.max(0, mainW))}</Text></Box>
         <Box height={transcriptH} flexDirection="column">
           {state.overlay
             ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} run={overlayRun} machineNameOf={(id) => store.machineNameOf(id)} />
