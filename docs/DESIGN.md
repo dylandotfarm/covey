@@ -176,6 +176,54 @@ processes than this daemon started.
 `COVEY_SESSION_IDLE_MINUTES` and `COVEY_MAX_LIVE_SESSIONS` seed the two settings for a machine
 whose `daemon.json` says nothing. `sessionIdleMinutes: 0` keeps every session for ever.
 
+## Credentials, and the 401 that follows a rotation
+
+Every session on a machine reads one credential store, and then holds its access token in its
+own memory. The token lives about eight hours. Whichever process refreshes it first receives a
+new pair, and the server revokes the old one. Every other live session now holds a token the
+API refuses:
+
+```
+Failed to authenticate. API Error: 401 OAuth access token has been revoked.
+```
+
+Measured on 2026-09-18 against a daemon with six live sessions: the store changed at 21:09:20,
+a session that started at 20:52 failed at 21:17, and a new process on the same credentials
+answered at once. The process cannot recover. An SDK session has no terminal, so `/login`
+answers `isn't available in this environment`, and every later message to that process fails
+the same way — a thread where even a bare `ping` returns the 401.
+
+The daemon cannot refresh the token for the user. A refresh **is** the rotation that revokes
+what the other sessions hold, so a daemon that refreshed early would cause the fault it means
+to prevent. It does three other things, in `auth.ts` and the engine.
+
+1. **It knows this failure from a failure of the work.** The error text must name the
+   credential *and* say that the credential was refused. `401` alone is a page a tool fetched,
+   and `invalid` alone is most of what a model ever gets told.
+2. **It stops the processes that hold the dead token.** The thread that failed loses its
+   session at once. Every session that owes nobody an answer goes with it, because they hold
+   the same token. A busy session stays: to kill a turn in flight costs more than the failure
+   it saves, and that turn arrives here by itself if its own token is dead.
+3. **It restarts the work, once.** A turn that had already written something gets `Go on from
+   the point where it stopped`, because the transcript holds that work. A turn that died
+   before its first word is sent again word for word, because "go on" means nothing to a model
+   that never started. The second failure in a row is a note that names `claude auth login`,
+   not a third process — a thread must not talk to itself while the credentials stay broken.
+
+The sweep timer also reads a fingerprint of the credential store: the `mdat` attribute of the
+macOS keychain item, or the size and time of `~/.claude/.credentials.json`. A fingerprint that
+changed means a rotation, and the idle sessions then go before anybody types into them. The
+daemon never reads the token itself. An attribute needs no keychain prompt and costs about
+40 ms, and a secret the daemon never reads is a secret it cannot leak. The macOS item holds
+the MCP tokens beside the account token, so an MCP login cycles the idle sessions too; that
+costs one resume. A store this daemon cannot read gives `null`, the watch stays off, and the
+failure path above still catches the fault.
+
+One credential ends the race for good. `claude setup-token` issues a long-lived token, and a
+daemon started with that token in `CLAUDE_CODE_OAUTH_TOKEN` never refreshes and never rotates.
+That is a choice for the user, not a default: covey runs on whatever credentials Claude Code
+itself runs on, and it keeps no token of its own.
+
 ## Remote access and auth
 
 The daemon binds to the tailnet IPv4 by default (plus loopback), never `0.0.0.0` unless
