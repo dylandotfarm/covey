@@ -1315,15 +1315,24 @@ export function App({ store }: { store: Store }) {
     if (key.pageDown) return moveCursor(10);
     if (input === "?") return store.setOverlay({ kind: "help" });
     if (!row) return;
-    // The group a thread row heads, when it heads one (#69).
-    const groupOf = (r: SidebarRow) => r.kind === "thread" && r.group ? threadGroupKey(r.machine, r.thread!.id) : null;
+    // The group a row heads, when it heads one, and whether that kind of group
+    // is open before anyone touches it (#69). A run is open by default and a
+    // thread group furled, so the default travels with the key — reading one
+    // without the other answers "is it furled?" wrongly for half the tree.
+    const groupOf = (r: SidebarRow): { key: string; dflt: boolean } | null =>
+      r.kind === "thread" && r.group ? { key: threadGroupKey(r.machine, r.thread!.id), dflt: false }
+      : r.kind === "run" ? { key: runKey(r.machine, r.run!.id), dflt: true }
+      : null;
     if (key.return || input === "l" || key.rightArrow) {
-      // → unfurls a furled group of threads, the way it unfurls a project.
-      // enter always opens the thread, and so does a click: a click on a thread
-      // row has always meant "open this conversation", and the row that most
-      // wants clicking is the one that dispatched everything below it (#69).
+      // → unfurls a furled group, the way it unfurls a project. enter always
+      // opens the row — the thread, or the run's panel — and so does a click:
+      // a click on a thread row has always meant "open this conversation", and
+      // the row that most wants clicking is the one that dispatched everything
+      // below it (#69). A run had only the second half of this rule: ← furled
+      // it and → opened its panel, so a run the operator closed could not be
+      // opened again from the sidebar at all.
       const g = !key.return ? groupOf(row) : null;
-      if (g && !store.isExpanded(g, false)) return store.toggleExpanded(g, false);
+      if (g && !store.isExpanded(g.key, g.dflt)) return store.toggleExpanded(g.key, g.dflt);
       return activateRow(row);
     }
     if (input === "h" || key.leftArrow) {
@@ -1337,7 +1346,7 @@ export function App({ store }: { store: Store }) {
         // second left furls the group you were just inside. That is the tree
         // idiom, and it makes ←← the way out of a group from any row in it.
         const g = groupOf(row);
-        if (g && store.isExpanded(g, false)) { store.toggleExpanded(g, false); return; }
+        if (g && store.isExpanded(g.key, g.dflt)) { store.toggleExpanded(g.key, g.dflt); return; }
         const parent = row.thread!.origin?.parentThreadId;
         const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine && r.thread!.id === parent) : -1;
         if (at >= 0) { setCursorKey(rows[at]!.key); return; }

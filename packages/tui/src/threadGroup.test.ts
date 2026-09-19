@@ -192,6 +192,28 @@ test("the mark is painted on the screen, on the agent's line and on no other", a
   } finally { unmount(); }
 });
 
+/**
+ * The indent is the sidebar's one way of saying "under", and nothing else may
+ * spend it. The mark used to sit between the status dot and the title, which
+ * pushed an agent's title two columns right: a thread that is nobody's child
+ * read as somebody's child, sorted into the project by recency with no parent
+ * above it and no caret to furl it with. The mark now shares the caret's cell,
+ * so every thread title in the tree starts in the same column.
+ */
+test("the mark does not indent the row it is on", async () => {
+  const store = storeWith([
+    thread("mine", "2026-01-09T00:00:00Z"),
+    started("loner", "2026-01-08T00:00:00Z", null),
+  ]);
+  const { frame, unmount } = await paint(store);
+  try {
+    const lines = frame();
+    const columnOf = (id: string) => (lines.find((l) => l.slice(0, 33).includes(id)) ?? "").slice(0, 33).indexOf(id);
+    assert.ok(columnOf("mine") > 0, "both rows were painted");
+    assert.equal(columnOf("loner"), columnOf("mine"), "the agent's title starts where every other title starts");
+  } finally { unmount(); }
+});
+
 // ---- furl state survives a restart (#69) --------------------------------------
 
 test("a group the user furled is still furled after a restart", () => {
@@ -260,7 +282,11 @@ async function paint(store: Store) {
     stdin.write(`\x1b[<0;12;${row}m`);
     await settle(150);
   };
-  const key = async (seq: string) => { stdin.write(seq); await settle(150); };
+  // Longer than it looks it needs to be: moving the cursor onto a thread opens
+  // it through a 120ms debounce (`PREVIEW_MS`), and a case that reads what the
+  // cursor landed on reads it from that. 150ms left 30ms for React, Ink and a
+  // write to the stream, which is enough on a laptop and not on a Pi.
+  const key = async (seq: string) => { stdin.write(seq); await settle(260); };
   return { rowOf, frame, click, key, settle, unmount: () => app.unmount() };
 }
 

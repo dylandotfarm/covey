@@ -1739,8 +1739,55 @@ export function needsPerson(t: Thread): boolean {
   return t.status === "error" || t.status === "waiting" || t.pendingApprovals > 0;
 }
 
+/**
+ * The same rule, one level up: a member a furled run must paint anyway.
+ *
+ * A member is `blocked` when the operator or the tracker said so, and its
+ * thread needs a person under `needsPerson`. Without this, furling a run in a
+ * strict permission mode buries the approval that the whole run is waiting on —
+ * the deadlock #69 already refused to allow inside a thread group.
+ */
+export function memberNeedsPerson(s: AppState, m: RunMember): boolean {
+  if (m.state === "blocked") return true;
+  if (!m.threadId) return false;
+  const t = threadOnMachineId(s, m.machineId, m.threadId);
+  return !!t && needsPerson(t);
+}
+
+/** A thread by machine *id* — a run's members name machines, not client keys. */
+function threadOnMachineId(s: AppState, machineId: string, threadId: string): Thread | null {
+  for (const k of s.order) {
+    const ms = s.machines.get(k);
+    if (ms?.info?.machineId === machineId) return ms.threads.get(threadId) ?? null;
+  }
+  return null;
+}
+
 export function sidebarRows(s: AppState): SidebarRow[] {
   const rows: SidebarRow[] = [];
+  // The threads a run already speaks for, as `<machine key>:<thread id>`.
+  //
+  // A run's member row *is* that thread: clicking it opens the conversation.
+  // Painting the thread again under its project put the same work on screen
+  // twice — once as a task under the run, once as a `◇` row sorted into the
+  // project by recency — and the project copy belonged to no group, so there
+  // was nothing to furl it into. A member's thread lives under its run and
+  // nowhere else, which is what `docs/DESIGN.md` has always said it did.
+  //
+  // Read from the runs this client actually holds, so the claim can only hide
+  // a thread that something else is really painting: a run whose machine has
+  // not answered yet claims nothing, and its threads stay in their projects.
+  const keyOfMachineId = new Map<string, string>();
+  for (const k of s.order) { const id = s.machines.get(k)?.info?.machineId; if (id) keyOfMachineId.set(id, k); }
+  const inRun = new Set<string>();
+  for (const k of s.order) {
+    for (const run of s.machines.get(k)?.runs.values() ?? []) {
+      for (const mem of run.members) {
+        const mk = keyOfMachineId.get(mem.machineId);
+        if (mem.threadId && mk) inRun.add(`${mk}:${mem.threadId}`);
+      }
+    }
+  }
   for (const key of s.order) {
     const m = s.machines.get(key)!;
     rows.push({ key: `m:${key}`, kind: "machine", machine: key, depth: 0 });
@@ -1748,9 +1795,14 @@ export function sidebarRows(s: AppState): SidebarRow[] {
     // exist, and it is what the operator is watching. Closed runs stay, so the
     // record of what a run did does not vanish the moment it finishes.
     for (const run of [...m.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      const open = s.expanded[runKey(key, run.id)] ?? true;
+      // Furled, a run holds its members the way a thread group holds its
+      // children — and lets through the ones that need a person.
+      const shown = open ? run.members : run.members.filter((x) => memberNeedsPerson(s, x));
+      // No `hidden` count: a run row's meta already says how many members it
+      // has, which is what that count exists to tell a thread row.
       rows.push({ key: `r:${key}:${run.id}`, kind: "run", machine: key, run, depth: 1 });
-      if (!(s.expanded[runKey(key, run.id)] ?? true)) continue;
-      for (const member of run.members) {
+      for (const member of shown) {
         rows.push({ key: `rm:${key}:${run.id}:${member.id}`, kind: "member", machine: key, run, member, depth: 2 });
       }
     }
@@ -1760,7 +1812,7 @@ export function sidebarRows(s: AppState): SidebarRow[] {
       const pk = `${key}:${p.id}`;
       rows.push({ key: `p:${pk}`, kind: "project", machine: key, projectId: p.id, project: p, depth: 1 });
       if (!(s.expanded[pk] ?? true)) continue;
-      const threads = liveThreads(m, p.id).sort(byRecency);
+      const threads = liveThreads(m, p.id).filter((t) => !inRun.has(`${key}:${t.id}`)).sort(byRecency);
       // A thread a program started sits under the thread that started it.
       // `origin.parentThreadId` is the only record of that (#49); a parent that
       // is not in this list — archived, deleted, or on another machine — leaves
