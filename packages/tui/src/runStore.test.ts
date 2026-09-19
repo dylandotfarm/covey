@@ -387,6 +387,89 @@ test("a run is a sidebar row that opens to its members", async () => {
   assert.equal(sidebarRows(state).filter((r) => r.kind === "member").length, 0);
 });
 
+/**
+ * The threads a dispatch made, pushed back as the daemon would push them. The
+ * store does not invent these: without them the sidebar has no thread rows at
+ * all, and a case about painting one twice would pass on an empty list.
+ */
+function pushThreads(store: Store, machine: string, runId: string, over: Partial<Thread> = {}) {
+  const ms = store.state.machines.get(machine)!;
+  for (const m of store.run(machine, runId)!.members) {
+    if (!m.threadId) continue;
+    ms.threads.set(m.threadId, {
+      id: m.threadId, projectId: m.projectId, title: m.task.title, status: "idle",
+      pendingApprovals: 0, archivedAt: null, movedTo: null, pinnedAt: null, lastMessageAt: null,
+      origin: { by: "agent" }, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+      ...over,
+    } as unknown as Thread);
+  }
+}
+
+/**
+ * The run of 2026-09-16, as the sidebar painted it: every dispatched thread
+ * appeared twice — once as a task under the run, and once more as a `◇` row
+ * sorted into its project by recency. The project copy was under no group, so
+ * there was nothing to furl it into, and fifteen rows the operator had already
+ * read as tasks filled the tree a second time.
+ */
+test("a member's thread is painted under its run and not again in its project", async () => {
+  const { store } = twoMachines();
+  const id = await runOf(store, "44 45");
+  await store.dispatchRun(MAC, id);
+  pushThreads(store, MAC, id);
+  const rows = sidebarRows(store.state as AppState);
+  assert.equal(rows.filter((r) => r.kind === "member").length, 2, "both tasks are under the run");
+  assert.deepEqual(rows.filter((r) => r.kind === "thread"), [], "and neither thread is a second row in the project");
+});
+
+test("a thread nobody's run owns keeps its project row", async () => {
+  const { store } = twoMachines();
+  const id = await runOf(store, "44 45");
+  await store.dispatchRun(MAC, id);
+  pushThreads(store, MAC, id);
+  const ms = store.state.machines.get(MAC)!;
+  ms.threads.set("mine", {
+    id: "mine", projectId: "p-mac", title: "the one I opened", status: "idle", pendingApprovals: 0,
+    archivedAt: null, movedTo: null, pinnedAt: null, lastMessageAt: null,
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  } as unknown as Thread);
+  const threads = sidebarRows(store.state as AppState).filter((r) => r.kind === "thread");
+  assert.deepEqual(threads.map((r) => r.thread!.id), ["mine"], "the claim only covers the threads a run really holds");
+});
+
+test("furling a run takes its threads off the screen — the point of a group", async () => {
+  const { store } = twoMachines();
+  const id = await runOf(store, "44 45");
+  await store.dispatchRun(MAC, id);
+  pushThreads(store, MAC, id);
+  const state = store.state as AppState;
+  state.expanded[runKey(MAC, id)] = false;
+  const rows = sidebarRows(state);
+  assert.equal(rows.filter((r) => r.kind === "member").length, 0);
+  assert.equal(rows.filter((r) => r.kind === "thread").length, 0, "a furled run leaves one row, not fifteen");
+  assert.ok(rows.some((r) => r.kind === "run"), "and the run itself is still on the screen to open again");
+});
+
+/**
+ * The same rule a thread group follows, one level up. A run in a strict
+ * permission mode deadlocks in silence if furling it buries the approval the
+ * whole run is waiting on — and nobody else is watching a blocked member.
+ */
+test("a furled run still paints the member that needs a person", async () => {
+  const { store } = twoMachines();
+  const id = await runOf(store, "44 45");
+  await store.dispatchRun(MAC, id);
+  pushThreads(store, MAC, id);
+  const state = store.state as AppState;
+  state.expanded[runKey(MAC, id)] = false;
+  const blocked = store.run(MAC, id)!.members[1]!;
+  const ms = store.state.machines.get(MAC)!;
+  ms.threads.set(blocked.threadId!, { ...ms.threads.get(blocked.threadId!)!, pendingApprovals: 1 });
+  const members = sidebarRows(state).filter((r) => r.kind === "member");
+  assert.deepEqual(members.map((r) => r.member!.id), [blocked.id], "the one waiting on an approval is let through");
+  assert.equal(sidebarRows(state).filter((r) => r.kind === "thread").length, 0, "and the quiet one stays inside the fold");
+});
+
 test("sidebarCells gives one line to a run row and one to each member", async () => {
   const { store } = twoMachines();
   await runOf(store, "44 45");
@@ -434,8 +517,40 @@ async function paint(store: Store) {
     stdin.write(`\x1b[<0;12;${row}m`);
     await new Promise((r) => setTimeout(r, 120));
   };
-  return { rowOf, click, unmount: () => app.unmount() };
+  const key = async (seq: string) => { stdin.write(seq); await new Promise((r) => setTimeout(r, 200)); };
+  return { rowOf, click, key, unmount: () => app.unmount() };
 }
+
+const DOWN = "\x1b[B";
+const LEFT = "\x1b[D";
+const RIGHT = "\x1b[C";
+
+/**
+ * A run the operator furls has to come back.
+ *
+ * `←` has always furled a run, and `→` opened its panel — so a run that was
+ * closed could not be opened again from the sidebar at all, and the threads
+ * now folded into it went with it. `→` unfurls first and opens second, which
+ * is the rule a thread group already followed; `enter` still goes straight to
+ * the panel, and so does a click.
+ */
+test("→ reopens a run the operator furled, before it opens the run's panel", async () => {
+  const { store } = twoMachines();
+  const id = await runOf(store, "44 45");
+  // `createRun` leaves the run panel open; this is about the sidebar.
+  store.setOverlay(null);
+  const { key, unmount } = await paint(store);
+  try {
+    await key(DOWN);  // the machine row, then the run
+    await key(LEFT);
+    assert.equal(store.isExpanded(runKey(MAC, id)), false, "← furled the run");
+    await key(RIGHT);
+    assert.equal(store.isExpanded(runKey(MAC, id)), true, "→ brought it back");
+    assert.equal(store.getState().overlay, null, "and did not open the panel over the top of it");
+    await key(RIGHT);
+    assert.equal(store.getState().overlay?.kind, "run", "with nothing left to unfurl, → opens the run");
+  } finally { unmount(); }
+});
 
 test("a click lands on the row that was painted there, run rows and all", async () => {
   const { store } = twoMachines();

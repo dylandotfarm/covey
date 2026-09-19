@@ -416,12 +416,27 @@ holding. `◇` marks a thread a program started: a glyph, not colour alone,
 because covey runs over ssh and in tmux, and colour alone also fails a reader
 who cannot tell the pair apart.
 
+**One gutter cell, two columns, every thread row.** It holds the caret when the
+row heads a group and the `◇` when it does not. The mark used to sit between the
+status dot and the title, which pushed an agent's title two columns right: the
+indent is the sidebar's one way of saying *under*, so a thread that was nobody's
+child read as somebody's child. A row that is both a group and an agent spends
+the cell on the caret — what it is holding is the more useful of the two, and
+its children carry the mark.
+
 **The arrow keys furl; the click never does.** `→` unfurls a furled group as it
 unfurls a project, `←` furls it, and `enter` and a click both open the thread —
 the mouse keeps no vocabulary of its own. Were a click to furl, the row that
 most wants clicking, the thread that dispatched everything below it, could not
 be opened without collapsing everything under it. `←` on a *child* moves to its
 parent, so `←←` is the way out of a group from any row inside it.
+
+The same two keys work a run row, and for a while only one of them did: `←`
+furled a run and `→` opened its panel, so a run the operator closed could not be
+opened again from the sidebar at all. `→` unfurls first and opens second, on
+every kind of group there is. Which default a key reads travels with the key —
+a run is open until furled, a thread group furled until opened — because reading
+one without the other answers "is this furled?" wrongly for half the tree.
 
 A furled group hides the children that are **working**. It never hides one that
 failed, is `waiting`, or has a pending approval: nobody else is watching a
@@ -449,6 +464,27 @@ inventing a run nobody named or a parent thread that does not exist. What they
 share is the furl mechanism, and that is reused rather than rebuilt: a third
 grouping *key*, not a third grouping *model*. A run member's thread is marked
 `agent` with no parent, so it is grouped under its run row and nowhere else.
+
+**Nowhere else means nowhere else.** `sidebarRows` claims every thread a run's
+members name and takes it out of its project's list, because the member row *is*
+that thread — clicking it opens the conversation. Until it did, a dispatched
+thread was painted twice: once as a task under the run, once more as a `◇` row
+sorted into the project by recency, belonging to no group and so with nothing to
+furl it into. The claim is read from the runs this client actually holds, so it
+can only hide a thread that something else is really painting; a machine that
+has not answered yet claims nothing and its threads stay where they are.
+
+The project row still counts them. Its number has always meant *threads in this
+project*, furled ones included — a thread group's children are already in it —
+and the attention dot a furled project shows has to reach every one of them or
+the fold hides the thing it must not hide.
+
+A furled run follows the thread group's rule exactly: it hides the members that
+are working and lets through the ones that need a person — `blocked`, or a
+thread that `needsPerson` answers for. A run in a strict permission mode would
+otherwise deadlock in silence behind an approval the operator furled away. It
+carries no hidden-count: a run row's meta already says how many members it has,
+which is the thing that count exists to tell a thread row.
 
 Nothing yet tells an agent its own thread id, so a program running *inside* a
 covey thread cannot fill `parentThreadId` by itself — the caller has to know it

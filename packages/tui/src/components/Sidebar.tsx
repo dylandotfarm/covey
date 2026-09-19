@@ -159,23 +159,27 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // depth 3 and lands on the same 5.
       const indent = Math.max(1, 1 + 2 * (row.depth - 2));
       const open = state.expanded[threadGroupKey(row.machine, t.id)] ?? false;
-      // A fixed two-column cell, blank on a thread that heads no group, so
-      // every thread title starts in the same place whether or not the list
-      // holds a group at all.
-      const caret = row.group ? (open ? "▾ " : "▸ ") : "  ";
-      // A glyph, not a colour. covey runs over ssh, in tmux, and on terminals
-      // with a narrow palette, and colour alone also fails a reader who cannot
-      // tell the pair apart — so the mark carries the meaning and the colour
-      // only reinforces it.
-      const mark = row.agent ? `${AGENT_MARK} ` : "";
+      // The tree gutter: one fixed two-column cell, so every thread title in
+      // the sidebar starts in the same column. It holds the caret when the row
+      // heads a group, and otherwise the mark of a thread a program started —
+      // a glyph, not a colour, because covey runs over ssh, in tmux, and on
+      // terminals with a narrow palette, and colour alone also fails a reader
+      // who cannot tell the pair apart.
+      //
+      // The mark used to sit between the status dot and the title, which
+      // pushed an agent's title two columns right and made a thread that is
+      // nobody's child read as somebody's child — the indent is the sidebar's
+      // one way of saying "under", and nothing else may spend it. A row that is
+      // both a group and an agent spends the cell on the caret: what it is
+      // holding is the more useful of the two, and its children carry the mark.
+      const caret = row.group ? (open ? "▾ " : "▸ ") : row.agent ? `${AGENT_MARK} ` : "  ";
       // What a furled group is holding back, so the way in is visible.
       const held = row.group && !open && row.hidden ? ` ${row.hidden}` : "";
-      const titleW = Math.max(4, width - indent - 2 - 3 - time.length - mark.length - held.length);
+      const titleW = Math.max(4, width - indent - 2 - 3 - time.length - held.length);
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
-          <Text color={T.subtle}>{caret}</Text>
+          <Text color={row.group ? T.subtle : T.awaiting}>{caret}</Text>
           <Text color={attention === "done" ? T.success : attention === "error" ? T.danger : statusColor(st, pulse)}>{showDot ? (attention === "done" ? "✓" : attention === "error" ? "✗" : "●") : t.pinnedAt ? "⋆" : " "} </Text>
-          {mark ? <Text color={T.awaiting}>{mark}</Text> : null}
           <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{truncate(t.title, titleW).padEnd(titleW)}</Text>
           <Text color={T.subtle}>{held}</Text>
           <Text color={T.faint}> {time}</Text>
