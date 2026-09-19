@@ -22,6 +22,17 @@
   Test the TUI in tmux with small delays between `send-keys`, and capture with
   `tmux capture-pane -p -e` to see colours.
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.
+- A paint is the client's dearest act — 30–45 ms of its one thread on this project's
+  Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the
+  store has two ways to change state: `set` paints at once and is for what the reader
+  did, `setFromMachine` paints on a frame boundary and is for everything a daemon said.
+  Every `MachineClient` callback is on the second side of that line; nothing else is.
+  `frames.ts` paces the boundary off the lateness its own timer measures, so a loaded
+  machine paints less and types the same. Three things hold it: don't notify React per
+  event (`typing.test.ts`), don't tick the spinner with nothing to animate
+  (`Store.animating`), and don't lay out two hundred timeline items to follow one of
+  them changing (`ItemLines` in `lines.ts`, keyed on item identity — sound only while
+  the daemon keeps re-sending items whole).
 - Screen rows are not row indices: the sidebar puts a blank line above each machine
   and windows a long tree. `sidebar.ts` builds the painted line list and `App.tsx` gives
   the same array to the renderer and to the mouse hit test — change both or neither.
