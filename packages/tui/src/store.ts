@@ -7,6 +7,7 @@ import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
+import { Frames, type FrameOptions } from "./frames.js";
 
 /**
  * How many timeline items a thread opens with when the reader means it. Big
@@ -205,6 +206,8 @@ export interface StoreOptions {
   notice?: { text: string; tone: Notice["tone"] };
   /** Passed to every MachineClient. Only a test moves the retry backoff. */
   client?: ClientOptions;
+  /** How often the screen may go out. Only a test moves the frame budget. */
+  frames?: FrameOptions;
 }
 
 /**
@@ -251,6 +254,12 @@ export class Store {
   private clientOpts: ClientOptions;
   /** Drives `state.tick`, which animates the spinner. */
   private tickTimer: NodeJS.Timeout | null = null;
+  /**
+   * What decides when the screen may go out. A change the reader made paints
+   * at once; a change a machine sent waits for a frame, so a turn streaming
+   * through eight agents costs one paint rather than eight. See `frames.ts`.
+   */
+  private frames: Frames;
 
   constructor(machines: SavedMachine[], opts: StoreOptions = {}) {
     this.config = loadConfig();
@@ -266,8 +275,11 @@ export class Store {
       selection: null, relaunch: null,
       clientBuild: opts.build ?? null, clientStale: false,
     };
+    this.frames = new Frames(() => { for (const l of this.listeners) l(); }, opts.frames);
     for (const m of machines) this.addMachine(m, false);
-    this.tickTimer = setInterval(() => this.set({ tick: this.state.tick + 1 }), 700);
+    // The spinner. A tick repaints the whole screen, so it only runs while
+    // there is something on it that moves — see `animating`.
+    this.tickTimer = setInterval(() => { if (this.animating()) this.setFromMachine({ tick: this.state.tick + 1 }); }, 700);
     this.tickTimer.unref();
     if (opts.watchBuild) this.watchOwnBuild(opts.watchBuild, opts.buildPollMs ?? BUILD_POLL_MS);
     if (opts.notice) this.notify(opts.notice.text, opts.notice.tone);
@@ -307,9 +319,47 @@ export class Store {
 
   private set(patch: Partial<AppState>) {
     this.state = { ...this.state, ...patch };
-    for (const l of this.listeners) l();
+    this.frames.now();
   }
   private touch() { this.set({}); }
+
+  /**
+   * The same, for a change that arrived from a daemon rather than from the
+   * hands at the keyboard. It lands in the state immediately — anything that
+   * renders after this sees it — but the screen waits for a frame, so a flood
+   * of timeline events cannot spend the loop the typist needs.
+   */
+  private setFromMachine(patch: Partial<AppState>) {
+    this.state = { ...this.state, ...patch };
+    this.frames.soon();
+  }
+  private touchFromMachine() { this.setFromMachine({}); }
+
+  /**
+   * Ink painted — for a frame this asked for, or for a keystroke or a resize it
+   * did not. Either way the next frame is measured from here. `index.tsx` wires
+   * Ink's `onRender` to it.
+   */
+  painted = () => { this.frames.painted(); };
+
+  /**
+   * Is anything on the screen moving? Only three things animate, and all three
+   * are driven by `tick`: the dot beside a thread that is running, starting or
+   * waiting (`statusColor`), the activity row under a running turn, and the
+   * spinner on an update's running step. With none of them there, a tick is a
+   * repaint of a screen that is identical to the one already up — which an
+   * idle client used to pay for every 700 ms, for as long as it was left open.
+   */
+  private animating(): boolean {
+    for (const ms of this.state.machines.values()) {
+      if (ms.update?.steps.some((st) => st.status === "running")) return true;
+      for (const t of ms.threads.values()) {
+        if (t.pendingApprovals > 0) return true;
+        if (t.status === "running" || t.status === "starting" || t.status === "waiting") return true;
+      }
+    }
+    return false;
+  }
 
   // ---- machines ------------------------------------------------------------
 
@@ -318,6 +368,12 @@ export class Store {
     const ms: MachineState = { key: saved.url, saved, conn: "connecting", error: null, info: null, projects: new Map(), threads: new Map(), runs: new Map(), update: null, restarting: false };
     this.state.machines.set(saved.url, ms);
     this.state.order.push(saved.url);
+    // Everything a machine reports goes through `touchFromMachine`, and
+    // nothing else does. That is the line the frame budget is drawn on: a
+    // daemon can talk as fast as it likes and the screen still goes out at a
+    // frame rate, while a key the reader pressed still paints on the spot.
+    // An update's step output streams the same way a reply does, which is why
+    // `machineUpdate` is on this side of it too.
     const client = new MachineClient(saved, {
       state: (s, err) => {
         // A machine that is off reports the same state over and over. Painting
@@ -335,7 +391,7 @@ export class Store {
           if (ms.update?.state === "restarting") ms.update = { ...ms.update, state: "succeeded", finishedAt: new Date().toISOString() };
           this.notify(`${ms.info?.name ?? ms.saved.name} is back up${at ? ` on ${at}` : ""}`, "success");
         }
-        if (changed) this.touch();
+        if (changed) this.touchFromMachine();
       },
       shellSnapshot: (snap) => {
         ms.info = snap.machine;
@@ -343,12 +399,12 @@ export class Store {
         ms.threads = new Map(snap.threads.map((t) => [t.id, t]));
         ms.runs = new Map((snap.runs ?? []).map((r) => [r.id, r]));
         if (saved.machineId !== snap.machine.machineId) { saved.machineId = snap.machine.machineId; this.persist(); }
-        this.touch();
+        this.touchFromMachine();
       },
       shellEvent: (ev) => this.applyShell(ms, ev),
-      shellSynchronized: () => this.touch(),
+      shellSynchronized: () => this.touchFromMachine(),
       threadEvent: (threadId, ev) => this.applyThread(saved.url, threadId, ev),
-      threadSynchronized: () => this.touch(),
+      threadSynchronized: () => this.touchFromMachine(),
       machineUpdate: (update) => {
         const prev = ms.update;
         ms.update = update;
@@ -357,7 +413,7 @@ export class Store {
         // asked to restart, and the reconnect that reports success never comes.
         if (update.state === "restarting") { ms.restarting = true; client.expectRestart(); }
         this.noticeUpdate(ms, prev, update);
-        this.touch();
+        this.touchFromMachine();
       },
     }, this.clientOpts);
     this.clients.set(saved.url, client);
@@ -421,7 +477,7 @@ export class Store {
       case "run.upserted": ms.runs.set(ev.run.id, ev.run); break;
       case "run.removed": ms.runs.delete(ev.runId); break;
     }
-    this.touch();
+    this.touchFromMachine();
   }
 
   /** Bell + notice when a background thread needs you or finishes. */
@@ -464,7 +520,7 @@ export class Store {
     // A resent snapshot carries each item's own seq, which is older than the
     // subscription's, so take the highest and never go backwards.
     v.seq = Math.max(v.seq, ev.seq);
-    this.set({ view: { ...v } });
+    this.setFromMachine({ view: { ...v } });
   }
 
   // ---- selection -----------------------------------------------------------
@@ -1414,6 +1470,7 @@ export class Store {
   private advancing = new Set<string>();
 
   shutdown() {
+    this.frames.stop();
     this.stopWatchingBuild();
     if (this.noticeTimer) { clearTimeout(this.noticeTimer); this.noticeTimer = null; }
     if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null; }
