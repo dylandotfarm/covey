@@ -1,5 +1,5 @@
 import React from "react";
-import { render } from "ink";
+import { render, type RenderOptions } from "ink";
 import type { BuildInfo, MachineSource, SavedMachine } from "@covey/protocol";
 import { Store, type RelaunchRequest } from "./store.js";
 import { App } from "./components/App.js";
@@ -24,17 +24,29 @@ export interface RunTuiResult {
   relaunch?: RelaunchRequest;
 }
 
-export async function runTui(opts: RunTuiOptions): Promise<RunTuiResult> {
-  const store = new Store(opts.machines, { source: opts.source, build: opts.build, watchBuild: opts.watchBuild, canRelaunch: opts.canRelaunch, notice: opts.notice });
-  // alternate screen so the TUI doesn't pollute scrollback
-  process.stdout.write("\x1b[?1049h\x1b[H");
-  // Take over the mouse so selection can be scoped to one pane. Shift+drag
-  // still falls through to the terminal's own selection in every emulator we
-  // know of, which is the escape hatch for copying across panes.
-  enableMouse();
-  const inst = render(<App store={store} />, {
+/**
+ * How the client asks Ink to paint.
+ *
+ * Exported because two of these are the difference between a client somebody
+ * can type in and one they cannot, and both read like tidying-up: an option
+ * nobody passes, and a callback that appears to do nothing. `typing.test.ts`
+ * mounts the App through this very function so that removing either of them
+ * fails a test rather than a working day. See `frames.ts` for why.
+ */
+export function inkOptions(store: Store): RenderOptions {
+  return {
     exitOnCtrlC: false,
     patchConsole: true,
+    // Rewrite the lines that changed, not the screen. A full frame at this
+    // size is 5–20 KB of escape codes and covey writes one per keystroke, so
+    // over ssh or through tmux that traffic is itself part of why typing feels
+    // slow — something has to parse every byte of it at the other end. With
+    // this on, a keystroke costs a few hundred bytes.
+    incrementalRendering: true,
+    // Every paint, however it was asked for, so the store can measure the next
+    // frame from the last time the screen actually went out rather than from
+    // the last time it asked. See `Frames.painted`.
+    onRender: store.painted,
     // Without this, terminals send a bare CR for both Enter and Shift+Enter and
     // swallow Cmd entirely, so those bindings are unreachable no matter what we
     // do in the handler. `auto` probes for support and silently stays off where
@@ -45,7 +57,18 @@ export async function runTui(opts: RunTuiOptions): Promise<RunTuiResult> {
     // the legacy CSI form, where Ink folds super into meta. It also turns on
     // key *release* events, which App.tsx has to drop or every key doubles.
     kittyKeyboard: { mode: "auto", flags: ["disambiguateEscapeCodes", "reportEventTypes"] },
-  });
+  };
+}
+
+export async function runTui(opts: RunTuiOptions): Promise<RunTuiResult> {
+  const store = new Store(opts.machines, { source: opts.source, build: opts.build, watchBuild: opts.watchBuild, canRelaunch: opts.canRelaunch, notice: opts.notice });
+  // alternate screen so the TUI doesn't pollute scrollback
+  process.stdout.write("\x1b[?1049h\x1b[H");
+  // Take over the mouse so selection can be scoped to one pane. Shift+drag
+  // still falls through to the terminal's own selection in every emulator we
+  // know of, which is the escape hatch for copying across panes.
+  enableMouse();
+  const inst = render(<App store={store} />, inkOptions(store));
   // Mouse reporting must be switched off even on an abnormal exit, or the
   // user's shell is left emitting escape codes on every click. This covers
   // every death the client can see; `bin/covey` covers the rest, because an

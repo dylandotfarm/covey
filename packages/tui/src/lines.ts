@@ -599,3 +599,62 @@ export function diffToLines(patch: string, w: number): Line[] {
   }
   return out;
 }
+
+/**
+ * Lines already rendered for a timeline item, so that one item changing does
+ * not cost the other two hundred.
+ *
+ * A screenful of transcript is a couple of hundred items and four hundred
+ * lines, and laying it out is about ten milliseconds on a small machine —
+ * which the client used to spend again in full every time any one of those
+ * items changed. During a streamed reply that is sixteen times a second, for a
+ * single item's worth of new text.
+ *
+ * An item is its own cache key. The daemon re-sends an item whole whenever it
+ * changes — there is no delta channel, which is exactly what makes this sound
+ * — so a new object is a new value, and identity is an exact test where a
+ * hand-rolled signature would be a guess that goes stale the next time
+ * `renderItem` learns to read another field.
+ *
+ * `renderItem` reads three things that are not on the item: the width, the
+ * link context, and whether the item is unfolded. The first two empty the
+ * cache when they move; the third is kept per item.
+ *
+ * A `question` item is never cached. It is the one kind rendered from state
+ * the item does not carry — which option the cursor sits on, what has been
+ * answered so far — and there is at most one open at a time.
+ */
+export class ItemLines {
+  private width = -1;
+  private links: LinkContext | undefined;
+  private cached = new Map<string, { item: TimelineItem; open: boolean; lines: Line[] }>();
+
+  /** `renderItem`, but only once per version of an item. */
+  render(item: TimelineItem, o: RenderOpts): Line[] {
+    if (o.width !== this.width || o.links !== this.links) {
+      this.width = o.width;
+      this.links = o.links;
+      this.cached.clear();
+    }
+    if (item.kind === "question") return renderItem(item, o);
+    const open = o.expanded.has(item.id);
+    const hit = this.cached.get(item.id);
+    if (hit && hit.item === item && hit.open === open) return hit.lines;
+    const lines = renderItem(item, o);
+    this.cached.set(item.id, { item, open, lines });
+    return lines;
+  }
+
+  /**
+   * Forget what the transcript no longer holds — the thread the reader just
+   * left. Without it a client open for a day keeps every item it ever painted.
+   * Unconditional rather than guarded on a size that could rise for ever: this
+   * is a few hundred map lookups against a layout that costs milliseconds.
+   */
+  prune(items: Map<string, TimelineItem>) {
+    for (const id of this.cached.keys()) if (!items.has(id)) this.cached.delete(id);
+  }
+
+  /** How many items are held, for a test. */
+  get size() { return this.cached.size; }
+}
