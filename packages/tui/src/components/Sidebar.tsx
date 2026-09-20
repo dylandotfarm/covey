@@ -131,10 +131,15 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const open = state.expanded[archiveKey(row.machine, row.projectId!)] ?? false;
       // A sibling of the project's threads, so it folds away with the project:
       // the caret lands under the first letter of the thread titles above it.
+      //
+      // The width is the sum of the cells, as every other row in this pane is,
+      // though this one cannot be beaten: the title is the literal "Archived",
+      // so the row is 16 columns and the digits of the count. It would take a
+      // project of a quadrillion archived threads to fill a pane.
       return (
         <Box paddingLeft={4} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={T.faint}>{open ? "▾" : "▸"}</Text>
-          <Text color={T.subtle}> {truncate("Archived", width - 10)}</Text>
+          <Text color={T.subtle}> {truncate("Archived", width - 8 - String(row.count).length)}</Text>
           <Text color={T.faint}> {row.count}</Text>
         </Box>
       );

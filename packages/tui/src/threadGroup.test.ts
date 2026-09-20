@@ -828,8 +828,10 @@ test("a project with a long title and hundreds of tasks keeps its attention dot"
     assert.ok(line.length > 0, "the project row was painted");
     assert.ok(line.includes("●"), `the count ate the attention dot: "${line.slice(0, 34)}"`);
     assert.ok(/ 121\b/.test(line), `the count is the work in the project: "${line.slice(0, 34)}"`);
+    // The exact column, not an upper bound: a sum that asks for too little
+    // wastes the pane and cuts the title early, and nothing else would say so.
     const last = line.slice(0, 33).replace(/\s+$/, "").length - 1;
-    assert.ok(last <= 32, `the row ran past its pane to column ${last}`);
+    assert.equal(last, 31, `the project row ends at column ${last}, so its width sum is out by ${31 - last}`);
   } finally { unmount(); }
 });
 
