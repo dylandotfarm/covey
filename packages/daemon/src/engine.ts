@@ -14,6 +14,7 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
+import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { realGhHost, type GhHost } from "./integrate/gh.js";
@@ -61,6 +62,9 @@ export interface EngineOptions {
   now?: () => number;
   /** Where the daemon writes its own lines. */
   log?: (m: string) => void;
+  /** The fingerprint of the credential store. A test hands in a stand-in, so
+   *  a rotation is a variable rather than a login. */
+  credentialStamp?: () => Promise<string | null>;
 }
 
 /**
@@ -87,6 +91,18 @@ export class Engine {
   /** Title queries in flight, so a requeue cannot start a second and a
    *  shutdown can cancel the one already running. */
   private titling = new Map<string, AbortController>();
+  /**
+   * Threads whose last turn died on the credentials. `scheduled` holds the one
+   * restart this daemon sends, so a second failure cannot make a thread talk
+   * to itself; `spent` says that restart has gone and the next failure is the
+   * user's to fix; `told` says the thread has been given the command that
+   * fixes it. A turn that completes clears the entry.
+   */
+  private authRetry = new Map<string, "scheduled" | "spent" | "told">();
+  /** The restarts waiting on their tick, so a shutdown can drop them. */
+  private retryTimers = new Map<string, NodeJS.Timeout>();
+  /** What the credential store looked like when we last read it. */
+  private credStamp: string | null = null;
   private sessionStore;
 
   constructor(readonly db: Db, readonly machine: MachineInfo, private opts: EngineOptions = {}) {
@@ -103,7 +119,7 @@ export class Engine {
     }
     // `unref` so the sweep never holds the process open: a daemon with no work
     // left must still exit, and a test must not wait on this timer.
-    this.sweepTimer = setInterval(() => this.sweepSessions(), SWEEP_INTERVAL_MS);
+    this.sweepTimer = setInterval(() => { this.sweepSessions(); void this.checkCredentials(); }, SWEEP_INTERVAL_MS);
     this.sweepTimer.unref?.();
   }
 
@@ -333,6 +349,7 @@ export class Engine {
         if (!t) return this.db.shellSeq();
         this.dropSession(t.id);
         this.queues.delete(t.id);
+        this.forgetAuthFailure(t.id);
         const proj = this.db.getProject(t.projectId);
         if (proj) void deleteCheckpointRefs(this.gitCwd(t, proj), t.id);
         rmSync(attachmentsDir(t.id), { recursive: true, force: true });
@@ -1086,6 +1103,125 @@ export class Engine {
     this.opts.log?.(`session released thread=${threadId.slice(0, 8)} reason=${why} live=${this.sessions.size}/${this.liveSessionLimit()}`);
   }
 
+  // ---- credentials ----------------------------------------------------------
+
+  /**
+   * Look for a token rotation, and stop the sessions it left holding a dead
+   * token — before a user types into one of them.
+   *
+   * This runs on the sweep timer. The first read only records: a daemon that
+   * has just started has no stale session to cycle. A store this daemon cannot
+   * read gives `null`, and then the watch does nothing at all; `onAuthFailure`
+   * is what catches the fault on a machine like that.
+   *
+   * @returns the threads whose session it stopped.
+   */
+  async checkCredentials(): Promise<string[]> {
+    const stamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null);
+    if (!stamp) return [];
+    const seen = this.credStamp;
+    this.credStamp = stamp;
+    if (seen === null || seen === stamp) return [];
+    const cycled = this.cycleSessions(null, "Your Claude credentials changed while this session was live, so the token it holds no longer works.");
+    if (cycled.length) this.opts.log?.(`credentials rotated: cycled ${cycled.length} session${cycled.length === 1 ? "" : "s"}`);
+    return cycled;
+  }
+
+  /**
+   * Stop every session that is free to go, because what they hold is what just
+   * failed. A busy session stays: it owes somebody an answer, and to kill a
+   * turn in flight costs more than the failure it saves. If that turn's token
+   * is dead the turn fails on its own, and lands in `onAuthFailure`.
+   */
+  private cycleSessions(except: string | null, why: string): string[] {
+    const cycled: string[] = [];
+    for (const threadId of [...this.sessions.keys()]) {
+      if (threadId === except || this.sessionBusy(threadId)) continue;
+      this.release(threadId, "credentials changed", why);
+      cycled.push(threadId);
+    }
+    return cycled;
+  }
+
+  /**
+   * A turn died on the credentials rather than on the work.
+   *
+   * The dead token lives in the subprocess memory and nothing can replace it
+   * there: an SDK session has no terminal for `/login`, so every later message
+   * to that process fails the same way — which is what a thread looks like
+   * when a `ping` answers `401 OAuth access token has been revoked`. So the
+   * process goes, and the next one reads whatever the store holds now. Its
+   * siblings hold the same token, so they go too.
+   *
+   * Then the work restarts itself, once. A second restart would be a thread
+   * that talks to itself while the credentials stay broken, so the second
+   * failure is a note that names the command which fixes it.
+   */
+  private onAuthFailure(threadId: string, turnId: string | null, error: string) {
+    const state = this.authRetry.get(threadId);
+    // One failure reaches this twice — the turn's result and the session's
+    // status both carry it — and the user needs to read it once.
+    if (state === "scheduled" || state === "told") return;
+    this.dropSession(threadId);
+    const cycled = this.cycleSessions(threadId, "Another thread's session could not authenticate, and this one holds the same credentials.");
+    this.opts.log?.(`auth failure thread=${threadId.slice(0, 8)} restart=${state !== "spent"} cycled=${cycled.length} error=${error.slice(0, 120)}`);
+    if (state === "spent") {
+      this.authRetry.set(threadId, "told");
+      this.note(threadId, "warning", `This thread could not authenticate twice in a row: ${error} Covey stopped the session and stops here. Run "claude auth login" in a terminal on this machine, then send a message.`);
+      return;
+    }
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) {
+      this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it. The next message in the queue starts a new session, which reads your credentials again.`);
+      return;
+    }
+    this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it and starts a new one, which reads your credentials again.`);
+    this.authRetry.set(threadId, "scheduled");
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(threadId);
+      this.authRetry.set(threadId, "spent");
+      void this.restartWork(threadId, turnId);
+    }, 0);
+    timer.unref?.();
+    this.retryTimers.set(threadId, timer);
+  }
+
+  /** A thread that is gone restarts nothing. */
+  private forgetAuthFailure(threadId: string) {
+    const timer = this.retryTimers.get(threadId);
+    if (timer) { clearTimeout(timer); this.retryTimers.delete(threadId); }
+    this.authRetry.delete(threadId);
+  }
+
+  /** Send the failed work to a new session, unless the thread found other work
+   *  in the meantime. */
+  private async restartWork(threadId: string, turnId: string | null) {
+    const t = this.db.getThread(threadId);
+    if (!t || t.movedTo || t.latestTurn?.state === "running") return;
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) return;
+    const text = this.restartText(threadId, turnId);
+    if (!text) return;
+    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text })
+      .catch((e: any) => this.note(threadId, "warning", `Could not start a new session after the authentication error: ${e?.message ?? String(e)}`));
+  }
+
+  /**
+   * What to say to the new session. A turn that had already written something
+   * carries on, because the transcript holds that work and the model can read
+   * it. A turn that died before its first word is sent again instead: "go on"
+   * means nothing to a model that never started.
+   */
+  private restartText(threadId: string, turnId: string | null): string | null {
+    if (!turnId) return null;
+    const started = this.db.sql.prepare(
+      "SELECT 1 FROM items WHERE thread_id = ? AND json_extract(json,'$.turnId') = ? AND json_extract(json,'$.kind') IN ('assistant','thinking','tool') LIMIT 1",
+    ).get(threadId, turnId);
+    if (started) return "Your last session could not authenticate and stopped part way through that turn. This is a new session on the same transcript. Go on from the point where it stopped.";
+    const item = this.db.getItem(`u:${turnId}`);
+    // Text alone: the CLI already mirrored the attachments of that message
+    // into the transcript, and the new session reads them from there.
+    return item && item.kind === "user" ? item.text : null;
+  }
+
   /** One line in a thread's timeline, from the daemon rather than the model. */
   private note(threadId: string, tone: "info" | "warning", text: string) {
     const now = new Date().toISOString();
@@ -1118,6 +1254,7 @@ export class Engine {
         if (status === "error" && wasRunning) { t.latestTurn!.state = "error"; t.latestTurn!.completedAt = new Date().toISOString(); }
         this.putThreadAndEmit(t);
         if (status === "error" && wasRunning && t.latestTurn) void this.finishTurn(threadId, t.latestTurn.turnId);
+        if (status === "error" && isAuthFailure(error)) this.onAuthFailure(threadId, t.latestTurn?.turnId ?? null, error!);
       },
       onTurnComplete: (info) => {
         const t = this.db.getThread(threadId);
@@ -1141,6 +1278,10 @@ export class Engine {
           if (info.userMessageUuid) { const cp = this.db.getCheckpoint(threadId, t.latestTurn.turnId); if (cp) this.db.putCheckpoint({ ...cp, threadId, userMessageUuid: info.userMessageUuid }); }
           void this.finishTurn(threadId, t.latestTurn.turnId);
         }
+        // A turn that answered is a session that authenticated, so the one
+        // restart this thread is allowed comes back for the next rotation.
+        if (info.isError && isAuthFailure(info.result)) this.onAuthFailure(threadId, t.latestTurn?.turnId ?? null, info.result);
+        else if (!info.isError) this.forgetAuthFailure(threadId);
       },
       onSessionInit: (info) => {
         const t = this.db.getThread(threadId);
@@ -1248,6 +1389,9 @@ export class Engine {
     this.released.clear();
     for (const a of this.titling.values()) a.abort();
     this.titling.clear();
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
+    this.authRetry.clear();
   }
 }
 

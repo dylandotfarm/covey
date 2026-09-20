@@ -58,6 +58,12 @@
   resumes it from the transcript. Never release a session that runs a turn, waits on an
   approval, or still owns a background task — `Engine.sessionBusy` decides, and a background
   task dies with its session. `/health` reports `sessions.live`.
+- Every session on a machine reads one credential store and then holds its access token in
+  memory, so a refresh anywhere revokes what the others hold: `401 OAuth access token has
+  been revoked`, and that process never recovers — an SDK session has no `/login`. Never make
+  the daemon refresh a token; a refresh is the rotation that breaks the siblings. `auth.ts`
+  tells this failure from a failure of the work, and the engine drops the session, cycles the
+  idle ones and restarts the turn once (`authRecovery.test.ts`).
 - The daemon listens on port 3790 by default. `COVEY_PORT` moves it.
 - A machine's control panel (enter on a sidebar machine row) makes the daemon pull, rebuild
   and restart itself (`packages/daemon/src/update.ts`). Restarting ends every turn that
