@@ -14,6 +14,7 @@ import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, rest
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
+import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { realGhHost, type GhHost } from "./integrate/gh.js";
@@ -61,6 +62,9 @@ export interface EngineOptions {
   now?: () => number;
   /** Where the daemon writes its own lines. */
   log?: (m: string) => void;
+  /** The fingerprint of the credential store. A test hands in a stand-in, so
+   *  a rotation is a variable rather than a login. */
+  credentialStamp?: () => Promise<string | null>;
 }
 
 /**
@@ -87,6 +91,18 @@ export class Engine {
   /** Title queries in flight, so a requeue cannot start a second and a
    *  shutdown can cancel the one already running. */
   private titling = new Map<string, AbortController>();
+  /**
+   * Threads whose last turn died on the credentials. `scheduled` holds the one
+   * restart this daemon sends, so a second failure cannot make a thread talk
+   * to itself; `spent` says that restart has gone and the next failure is the
+   * user's to fix; `told` says the thread has been given the command that
+   * fixes it. A turn that completes clears the entry.
+   */
+  private authRetry = new Map<string, "scheduled" | "spent" | "told">();
+  /** The restarts waiting on their tick, so a shutdown can drop them. */
+  private retryTimers = new Map<string, NodeJS.Timeout>();
+  /** What the credential store looked like when we last read it. */
+  private credStamp: string | null = null;
   private sessionStore;
 
   constructor(readonly db: Db, readonly machine: MachineInfo, private opts: EngineOptions = {}) {
@@ -103,7 +119,7 @@ export class Engine {
     }
     // `unref` so the sweep never holds the process open: a daemon with no work
     // left must still exit, and a test must not wait on this timer.
-    this.sweepTimer = setInterval(() => this.sweepSessions(), SWEEP_INTERVAL_MS);
+    this.sweepTimer = setInterval(() => { this.sweepSessions(); void this.checkCredentials(); }, SWEEP_INTERVAL_MS);
     this.sweepTimer.unref?.();
   }
 
@@ -198,16 +214,21 @@ export class Engine {
    * keeps it for the life of the connection and hands it back here, because it
    * is what says whether a person or a program asked for a thread. It is
    * self-declared and unverifiable — a hint for a reader, never a permission.
+   *
+   * `caller` is the thread that connection said it runs inside, and the same
+   * rules apply to it. A thread or a run it creates becomes a child of that
+   * thread, which is how the sidebar puts an agent's work under the thread
+   * that asked for it.
    */
-  async dispatch(cmd: CommandEnvelope, client = ""): Promise<number> {
+  async dispatch(cmd: CommandEnvelope, client = "", caller = ""): Promise<number> {
     const prior = this.db.receipt(cmd.commandId);
     if (prior !== null) return prior;
-    const seq = await this.apply(cmd, client);
+    const seq = await this.apply(cmd, client, caller);
     this.db.putReceipt(cmd.commandId, seq);
     return seq;
   }
 
-  private async apply(cmd: Command, client = ""): Promise<number> {
+  private async apply(cmd: Command, client = "", caller = ""): Promise<number> {
     const now = new Date().toISOString();
     // Any command about a thread is use of that thread, so the idle clock for
     // its session starts again here — before the command runs, because some of
@@ -287,7 +308,10 @@ export class Engine {
           worktreePath = wt.path; branch = wt.branch;
         }
         const machineMode = this.machine.settings.defaultPermissionMode;
-        const origin = threadOrigin(cmd.origin, client);
+        // The command's parent wins over the connection's, and both are checked
+        // against this database: a link to a thread nobody can paint loses the
+        // child, and `run.create` has never taken one on trust either.
+        const origin = threadOrigin(cmd.origin, client, this.knownThread(cmd.origin?.parentThreadId ?? caller, cmd.threadId));
         const t: Thread = {
           id: cmd.threadId, projectId: p.id, title: cmd.title ?? "New thread", titleAuto: cmd.title === undefined, provider: "claude",
           ...(origin ? { origin } : {}),
@@ -325,6 +349,7 @@ export class Engine {
         if (!t) return this.db.shellSeq();
         this.dropSession(t.id);
         this.queues.delete(t.id);
+        this.forgetAuthFailure(t.id);
         const proj = this.db.getProject(t.projectId);
         if (proj) void deleteCheckpointRefs(this.gitCwd(t, proj), t.id);
         rmSync(attachmentsDir(t.id), { recursive: true, force: true });
@@ -493,10 +518,14 @@ export class Engine {
         if (existing) return this.emitShell({ kind: "run.upserted", run: existing });
         if (cmd.run.workspaceMode === "checkout")
           throw new EngineError("bad_workspace", "a run works in worktrees; parallel agents in one checkout is the defect");
+        // The run's parent, by the same rule a thread's parent follows: the
+        // command wins, then the thread the connection speaks for.
+        const parent = this.knownThread(cmd.run.parentThreadId ?? caller);
         const run: Run = {
           id: cmd.run.runId,
           machineId: this.machine.machineId,
           name: cmd.run.name,
+          ...(parent ? { parentThreadId: parent } : {}),
           goal: cmd.run.goal,
           briefTemplate: cmd.run.briefTemplate,
           workspaceMode: cmd.run.workspaceMode,
@@ -550,6 +579,17 @@ export class Engine {
       // would ack a command that never ran.
       default: throw new EngineError("unknown_command", `this daemon does not know the command ${(cmd as { type: string }).type}`);
     }
+  }
+
+  /**
+   * A parent id this daemon can stand behind: a thread it holds, and never the
+   * thread that is being created. Everything else — an empty string, a thread
+   * on another machine, an id a client invented — becomes `undefined`, so a
+   * child is never linked to a parent nobody can paint.
+   */
+  private knownThread(id: string | undefined, self?: string): string | undefined {
+    if (!id || id === self) return undefined;
+    return this.db.getThread(id) ? id : undefined;
   }
 
   private requireRun(runId: string): Run {
@@ -932,7 +972,7 @@ export class Engine {
     };
     const session = new ClaudeSession(
       {
-        threadId: t.id, sessionId: t.sessionId, cwd: t.worktreePath ?? p.workspaceRoot,
+        threadId: t.id, sessionId: t.sessionId, projectId: p.id, cwd: t.worktreePath ?? p.workspaceRoot,
         model: t.model, permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
         streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
@@ -1063,6 +1103,125 @@ export class Engine {
     this.opts.log?.(`session released thread=${threadId.slice(0, 8)} reason=${why} live=${this.sessions.size}/${this.liveSessionLimit()}`);
   }
 
+  // ---- credentials ----------------------------------------------------------
+
+  /**
+   * Look for a token rotation, and stop the sessions it left holding a dead
+   * token — before a user types into one of them.
+   *
+   * This runs on the sweep timer. The first read only records: a daemon that
+   * has just started has no stale session to cycle. A store this daemon cannot
+   * read gives `null`, and then the watch does nothing at all; `onAuthFailure`
+   * is what catches the fault on a machine like that.
+   *
+   * @returns the threads whose session it stopped.
+   */
+  async checkCredentials(): Promise<string[]> {
+    const stamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null);
+    if (!stamp) return [];
+    const seen = this.credStamp;
+    this.credStamp = stamp;
+    if (seen === null || seen === stamp) return [];
+    const cycled = this.cycleSessions(null, "Your Claude credentials changed while this session was live, so the token it holds no longer works.");
+    if (cycled.length) this.opts.log?.(`credentials rotated: cycled ${cycled.length} session${cycled.length === 1 ? "" : "s"}`);
+    return cycled;
+  }
+
+  /**
+   * Stop every session that is free to go, because what they hold is what just
+   * failed. A busy session stays: it owes somebody an answer, and to kill a
+   * turn in flight costs more than the failure it saves. If that turn's token
+   * is dead the turn fails on its own, and lands in `onAuthFailure`.
+   */
+  private cycleSessions(except: string | null, why: string): string[] {
+    const cycled: string[] = [];
+    for (const threadId of [...this.sessions.keys()]) {
+      if (threadId === except || this.sessionBusy(threadId)) continue;
+      this.release(threadId, "credentials changed", why);
+      cycled.push(threadId);
+    }
+    return cycled;
+  }
+
+  /**
+   * A turn died on the credentials rather than on the work.
+   *
+   * The dead token lives in the subprocess memory and nothing can replace it
+   * there: an SDK session has no terminal for `/login`, so every later message
+   * to that process fails the same way — which is what a thread looks like
+   * when a `ping` answers `401 OAuth access token has been revoked`. So the
+   * process goes, and the next one reads whatever the store holds now. Its
+   * siblings hold the same token, so they go too.
+   *
+   * Then the work restarts itself, once. A second restart would be a thread
+   * that talks to itself while the credentials stay broken, so the second
+   * failure is a note that names the command which fixes it.
+   */
+  private onAuthFailure(threadId: string, turnId: string | null, error: string) {
+    const state = this.authRetry.get(threadId);
+    // One failure reaches this twice — the turn's result and the session's
+    // status both carry it — and the user needs to read it once.
+    if (state === "scheduled" || state === "told") return;
+    this.dropSession(threadId);
+    const cycled = this.cycleSessions(threadId, "Another thread's session could not authenticate, and this one holds the same credentials.");
+    this.opts.log?.(`auth failure thread=${threadId.slice(0, 8)} restart=${state !== "spent"} cycled=${cycled.length} error=${error.slice(0, 120)}`);
+    if (state === "spent") {
+      this.authRetry.set(threadId, "told");
+      this.note(threadId, "warning", `This thread could not authenticate twice in a row: ${error} Covey stopped the session and stops here. Run "claude auth login" in a terminal on this machine, then send a message.`);
+      return;
+    }
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) {
+      this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it. The next message in the queue starts a new session, which reads your credentials again.`);
+      return;
+    }
+    this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it and starts a new one, which reads your credentials again.`);
+    this.authRetry.set(threadId, "scheduled");
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(threadId);
+      this.authRetry.set(threadId, "spent");
+      void this.restartWork(threadId, turnId);
+    }, 0);
+    timer.unref?.();
+    this.retryTimers.set(threadId, timer);
+  }
+
+  /** A thread that is gone restarts nothing. */
+  private forgetAuthFailure(threadId: string) {
+    const timer = this.retryTimers.get(threadId);
+    if (timer) { clearTimeout(timer); this.retryTimers.delete(threadId); }
+    this.authRetry.delete(threadId);
+  }
+
+  /** Send the failed work to a new session, unless the thread found other work
+   *  in the meantime. */
+  private async restartWork(threadId: string, turnId: string | null) {
+    const t = this.db.getThread(threadId);
+    if (!t || t.movedTo || t.latestTurn?.state === "running") return;
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) return;
+    const text = this.restartText(threadId, turnId);
+    if (!text) return;
+    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text })
+      .catch((e: any) => this.note(threadId, "warning", `Could not start a new session after the authentication error: ${e?.message ?? String(e)}`));
+  }
+
+  /**
+   * What to say to the new session. A turn that had already written something
+   * carries on, because the transcript holds that work and the model can read
+   * it. A turn that died before its first word is sent again instead: "go on"
+   * means nothing to a model that never started.
+   */
+  private restartText(threadId: string, turnId: string | null): string | null {
+    if (!turnId) return null;
+    const started = this.db.sql.prepare(
+      "SELECT 1 FROM items WHERE thread_id = ? AND json_extract(json,'$.turnId') = ? AND json_extract(json,'$.kind') IN ('assistant','thinking','tool') LIMIT 1",
+    ).get(threadId, turnId);
+    if (started) return "Your last session could not authenticate and stopped part way through that turn. This is a new session on the same transcript. Go on from the point where it stopped.";
+    const item = this.db.getItem(`u:${turnId}`);
+    // Text alone: the CLI already mirrored the attachments of that message
+    // into the transcript, and the new session reads them from there.
+    return item && item.kind === "user" ? item.text : null;
+  }
+
   /** One line in a thread's timeline, from the daemon rather than the model. */
   private note(threadId: string, tone: "info" | "warning", text: string) {
     const now = new Date().toISOString();
@@ -1095,6 +1254,7 @@ export class Engine {
         if (status === "error" && wasRunning) { t.latestTurn!.state = "error"; t.latestTurn!.completedAt = new Date().toISOString(); }
         this.putThreadAndEmit(t);
         if (status === "error" && wasRunning && t.latestTurn) void this.finishTurn(threadId, t.latestTurn.turnId);
+        if (status === "error" && isAuthFailure(error)) this.onAuthFailure(threadId, t.latestTurn?.turnId ?? null, error!);
       },
       onTurnComplete: (info) => {
         const t = this.db.getThread(threadId);
@@ -1118,6 +1278,10 @@ export class Engine {
           if (info.userMessageUuid) { const cp = this.db.getCheckpoint(threadId, t.latestTurn.turnId); if (cp) this.db.putCheckpoint({ ...cp, threadId, userMessageUuid: info.userMessageUuid }); }
           void this.finishTurn(threadId, t.latestTurn.turnId);
         }
+        // A turn that answered is a session that authenticated, so the one
+        // restart this thread is allowed comes back for the next rotation.
+        if (info.isError && isAuthFailure(info.result)) this.onAuthFailure(threadId, t.latestTurn?.turnId ?? null, info.result);
+        else if (!info.isError) this.forgetAuthFailure(threadId);
       },
       onSessionInit: (info) => {
         const t = this.db.getThread(threadId);
@@ -1225,6 +1389,9 @@ export class Engine {
     this.released.clear();
     for (const a of this.titling.values()) a.abort();
     this.titling.clear();
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
+    this.authRetry.clear();
   }
 }
 
@@ -1247,14 +1414,28 @@ function clampSetting(v: number | null, min: number): number | null {
  * self-declared and the daemon cannot check it, which makes this a hint for a
  * reader and never a permission. A connection that named nothing gets no
  * origin at all, so it behaves exactly as it did before this field existed.
+ *
+ * `parent` is the thread this one belongs under, already checked against the
+ * database by the caller — the id the command named, or else the thread the
+ * connection said it runs inside at `hello`. The `hello` half is the only way
+ * an agent can put its own children under itself: nothing else on the wire
+ * knows which thread a program speaks for. Whatever `explicit` says about a
+ * parent is ignored here, because it is what the caller resolved.
  */
-export function threadOrigin(explicit: ThreadOrigin | undefined, client: string): ThreadOrigin | undefined {
+export function threadOrigin(explicit: ThreadOrigin | undefined, client: string, parent = ""): ThreadOrigin | undefined {
+  const from = parent ? { parentThreadId: parent } : {};
   if (explicit) {
-    const name = explicit.client ?? client;
-    return name ? { ...explicit, client: name } : { ...explicit };
+    const { parentThreadId: _asked, ...rest } = explicit;
+    const name = rest.client ?? client;
+    // `parent` is the answer to what the command asked for, not a second
+    // opinion beside it: the caller resolved the id the command named against
+    // the threads this daemon holds, and an id that named nothing is gone.
+    return { ...rest, ...(name ? { client: name } : {}), ...from };
   }
-  if (!client) return undefined;
-  return { by: client === USER_CLIENT ? "user" : "agent", client };
+  if (!client && !parent) return undefined;
+  // A connection that named a parent thread is a program by that fact alone:
+  // the one client a person types into never names one.
+  return { by: client === USER_CLIENT ? "user" : "agent", ...(client ? { client } : {}), ...from };
 }
 
 /** Whether covey still owns this thread's title. Threads from before

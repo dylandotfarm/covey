@@ -379,6 +379,11 @@ test("a run is a sidebar row that opens to its members", async () => {
   const run = rows.find((r) => r.kind === "run");
   assert.ok(run, "the run has a row");
   assert.equal(run!.machine, MAC);
+  // Inside the project its members work in, not beside it: the run is why
+  // those threads exist, and the operator reads the tree by project.
+  assert.equal(run!.projectId, "p-mac");
+  const project = rows.find((r) => r.kind === "project" && r.projectId === "p-mac");
+  assert.equal(run!.depth, project!.depth + 1);
   const members = rows.filter((r) => r.kind === "member");
   assert.equal(members.length, 2);
   assert.equal(members[0]!.member!.task.key, "#44");
@@ -541,7 +546,9 @@ test("→ reopens a run the operator furled, before it opens the run's panel", a
   store.setOverlay(null);
   const { key, unmount } = await paint(store);
   try {
-    await key(DOWN);  // the machine row, then the run
+    await key(DOWN);  // the machine row, then the project the run works in
+    await key(DOWN);  // and then the run itself
+
     await key(LEFT);
     assert.equal(store.isExpanded(runKey(MAC, id)), false, "← furled the run");
     await key(RIGHT);

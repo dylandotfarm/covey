@@ -61,6 +61,30 @@ test("a connection that names nothing leaves the thread as it was before this fi
   assert.equal(threadOrigin(undefined, ""), undefined);
 });
 
+test("the thread a connection speaks for becomes the parent of what it creates", () => {
+  assert.deepEqual(
+    threadOrigin(undefined, "claude-code", "t-parent"),
+    { by: "agent", client: "claude-code", parentThreadId: "t-parent" },
+  );
+  assert.deepEqual(
+    threadOrigin(undefined, "", "t-parent"),
+    { by: "agent", parentThreadId: "t-parent" },
+    "a connection that names a thread is a program by that fact alone",
+  );
+  // Which of the two parents wins is `Engine.apply`'s question, because only
+  // it can check an id against the database. What arrives here is the answer.
+  assert.deepEqual(
+    threadOrigin({ by: "agent", parentThreadId: "asked-for-this-one" }, "claude-code", "checked-this-one"),
+    { by: "agent", client: "claude-code", parentThreadId: "checked-this-one" },
+    "the id the caller checked is the one recorded",
+  );
+  assert.deepEqual(
+    threadOrigin({ by: "agent", parentThreadId: "a-thread-nobody-holds" }, "claude-code"),
+    { by: "agent", client: "claude-code" },
+    "and an id that survived no check is not recorded at all",
+  );
+});
+
 test("the command wins over the client name, and keeps the name beside it", () => {
   // The TUI dispatching a run member: a person's client, a program's thread.
   assert.deepEqual(
@@ -69,9 +93,9 @@ test("the command wins over the client name, and keeps the name beside it", () =
     "a caller that says it is a program is a program, whatever its client is called",
   );
   assert.deepEqual(
-    threadOrigin({ by: "agent", parentThreadId: "t-parent" }, "covey-ctl"),
+    threadOrigin({ by: "agent" }, "covey-ctl", "t-parent"),
     { by: "agent", client: "covey-ctl", parentThreadId: "t-parent" },
-    "the parent link the caller gave survives",
+    "the parent link the caller checked survives",
   );
 });
 
@@ -104,8 +128,12 @@ async function daemon() {
   return { engine, port: server.port, workspaceRoot };
 }
 
-/** One connection that says `hello` under `client`, then speaks rpc. */
-async function connect(port: number, client: string) {
+/**
+ * One connection that says `hello` under `client`, then speaks rpc. `threadId`
+ * is the thread the connection runs inside — what an agent reads from
+ * `COVEY_THREAD_ID` and passes on, so the daemon can file its work under it.
+ */
+async function connect(port: number, client: string, threadId?: string) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   await new Promise<void>((res, rej) => { ws.once("open", () => res()); ws.once("error", rej); });
   closers.push(() => ws.close());
@@ -121,7 +149,7 @@ async function connect(port: number, client: string) {
     ws.on("message", onMessage);
     ws.send(JSON.stringify({ id: reqId, method, params }));
   });
-  await rpc("hello", { protocolVersion: PROTOCOL_VERSION, client });
+  await rpc("hello", { protocolVersion: PROTOCOL_VERSION, client, ...(threadId ? { threadId } : {}) });
   return {
     rpc,
     command: (cmd: Record<string, unknown>) => rpc("command", { ...cmd, commandId: randomUUID() }),
@@ -172,6 +200,80 @@ test("a caller that knows better than its client name says so, parent and all", 
   });
   assert.deepEqual(threadOf(engine, child).origin, { by: "agent", client: USER_CLIENT, parentThreadId: manager });
   assert.equal(threadOf(engine, manager).origin?.by, "user", "the thread the person opened is still theirs");
+});
+
+/**
+ * The half that was missing, and the reason some agent threads nested and some
+ * did not. Nothing told an agent which thread it was running inside, so a
+ * program that made a thread could not name its parent even when it wanted to,
+ * and its work landed beside the thread that asked for it instead of under it.
+ * The session now carries `COVEY_THREAD_ID`, and a connection that passes it on
+ * at `hello` has every thread and every run it creates filed under that thread.
+ */
+test("a connection that names its own thread has its work filed under that thread", async () => {
+  const { engine, port, workspaceRoot } = await daemon();
+  const tui = await connect(port, USER_CLIENT);
+  await tui.command({ type: "project.create", workspaceRoot, title: "repo" });
+  const projectId = engine.shellSnapshot().projects[0]!.id;
+  const manager = randomUUID();
+  await tui.command({ type: "thread.create", projectId, threadId: manager, sessionId: randomUUID() });
+
+  // The agent inside that thread, connecting on its own.
+  const agent = await connect(port, "claude-code", manager);
+  const first = randomUUID();
+  const second = randomUUID();
+  for (const threadId of [first, second]) {
+    await agent.command({ type: "thread.create", projectId, threadId, sessionId: randomUUID() });
+  }
+  for (const id of [first, second]) {
+    assert.deepEqual(threadOf(engine, id).origin, { by: "agent", client: "claude-code", parentThreadId: manager },
+      "every thread of the connection is a child, not only the first");
+  }
+
+  // And the runs it asks for.
+  const runId = randomUUID();
+  await agent.command({
+    type: "run.create",
+    run: { runId, name: "pre-release", goal: "g", briefTemplate: "b", workspaceMode: "worktree-default", members: [] },
+  });
+  assert.equal(engine.shellSnapshot().runs?.[0]?.parentThreadId, manager);
+});
+
+test("a parent this daemon does not hold is dropped rather than recorded", async () => {
+  const { engine, port, workspaceRoot } = await daemon();
+  const tui = await connect(port, USER_CLIENT);
+  await tui.command({ type: "project.create", workspaceRoot, title: "repo" });
+  const projectId = engine.shellSnapshot().projects[0]!.id;
+
+  // A thread id from another machine, and a thread naming itself. Neither can
+  // ever be painted, and a link that leads nowhere loses the child.
+  const stranger = await connect(port, "claude-code", "a-thread-on-another-machine");
+  const child = randomUUID();
+  await stranger.command({ type: "thread.create", projectId, threadId: child, sessionId: randomUUID() });
+  assert.deepEqual(threadOf(engine, child).origin, { by: "agent", client: "claude-code" });
+
+  const itself = randomUUID();
+  const loop = await connect(port, "claude-code", itself);
+  await loop.command({ type: "thread.create", projectId, threadId: itself, sessionId: randomUUID() });
+  assert.equal(threadOf(engine, itself).origin?.parentThreadId, undefined, "a thread is never its own parent");
+
+  // The same check on the other road in. A command may name a parent outright,
+  // and for a while only the `hello` id was checked — so the daemon would
+  // store a link to a thread it does not hold, which nothing can ever paint.
+  const named = randomUUID();
+  await stranger.command({
+    type: "thread.create", projectId, threadId: named, sessionId: randomUUID(),
+    origin: { by: "agent", parentThreadId: "invented-by-the-client" },
+  });
+  assert.equal(threadOf(engine, named).origin?.parentThreadId, undefined,
+    "a parent named in the command is checked exactly as one named at hello");
+
+  const own = randomUUID();
+  await stranger.command({
+    type: "thread.create", projectId, threadId: own, sessionId: randomUUID(),
+    origin: { by: "agent", parentThreadId: own },
+  });
+  assert.equal(threadOf(engine, own).origin?.parentThreadId, undefined);
 });
 
 test("a thread created before this existed has none, and the daemon still serves it", async () => {

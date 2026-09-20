@@ -46,7 +46,7 @@ async function run(messages: unknown[], commands: unknown[] = []): Promise<Seen 
   const store = { append: () => {}, load: () => null, listSessions: () => [] } as unknown as SessionStore;
   const { q, calls } = fakeQuery(messages, commands);
   const session = new ClaudeSession(
-    { threadId: "t1", sessionId: "s1", cwd: "/tmp", model: null, permissionMode: "default", permissionModeExplicit: false, streaming: false, resume: false, sessionStore: store },
+    { threadId: "t1", sessionId: "s1", projectId: "p1", cwd: "/tmp", model: null, permissionMode: "default", permissionModeExplicit: false, streaming: false, resume: false, sessionStore: store },
     sink,
     () => q,
   );
@@ -55,6 +55,37 @@ async function run(messages: unknown[], commands: unknown[] = []): Promise<Seen 
   for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
   return { ...seen, supportedCommandsCalls: calls.supportedCommands };
 }
+
+/**
+ * An agent inside a covey thread has no other way to learn which thread it is.
+ * The daemon sees a websocket, not the process behind it, so a program that
+ * creates a thread can only say "I am a child of this one" if the session told
+ * it — which is what made some agent threads nest and some stand alone.
+ *
+ * The SDK replaces the subprocess environment with this object instead of
+ * merging it, so the case also holds the spread of `process.env`: without it a
+ * session starts with no PATH, no HOME and no credentials.
+ */
+test("the session tells the agent which thread and project it is working in", async () => {
+  const sink: SessionSink = {
+    now: () => "2026-01-01T00:00:00Z",
+    upsertItem: () => {}, getItemByToolUse: () => null,
+    onStatus: () => {}, onTurnComplete: () => {}, onSessionInit: () => {}, onModelUsed: () => {},
+    onCommands: () => {},
+  };
+  const store = { append: () => {}, load: () => null, listSessions: () => [] } as unknown as SessionStore;
+  const { q } = fakeQuery([]);
+  let options: any = null;
+  const session = new ClaudeSession(
+    { threadId: "t-42", sessionId: "s1", projectId: "p-9", cwd: "/tmp", model: null, permissionMode: "default", permissionModeExplicit: false, streaming: false, resume: false, sessionStore: store },
+    sink,
+    (args) => { options = args.options; return q; },
+  );
+  session.start();
+  assert.equal(options.env.COVEY_THREAD_ID, "t-42");
+  assert.equal(options.env.COVEY_PROJECT_ID, "p-9");
+  assert.equal(options.env.PATH, process.env.PATH, "and the environment it had before, which the SDK would otherwise replace");
+});
 
 test("the `/` menu is read off the session as soon as it starts", async () => {
   const r = await run([INIT], [{ name: "compact", description: "Compact the conversation", argumentHint: "" }]);

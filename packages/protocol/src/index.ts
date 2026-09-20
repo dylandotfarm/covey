@@ -328,8 +328,11 @@ export interface ThreadOrigin {
    * the child stays a top-level row: a thread is never hidden by a link that
    * leads nowhere.
    *
-   * A caller sets this. The daemon cannot work out which thread a program
-   * speaks for, so a program that starts a thread must say so itself.
+   * A caller sets this, in one of two ways. The command carries it, or the
+   * connection named its own thread at `hello` and the daemon fills it in for
+   * every thread that connection creates. The daemon cannot work out which
+   * thread a program speaks for, so the program says so itself — and an agent
+   * inside a covey thread reads its own id from `COVEY_THREAD_ID`.
    */
   parentThreadId?: ThreadId;
 }
@@ -755,6 +758,17 @@ export interface Run {
   machineId: MachineId;
   /** What the operator called it, e.g. "covey issues". */
   name: string;
+  /**
+   * The thread that asked for this run, on this machine. A run an agent
+   * started sits under that thread in the sidebar, the same place a thread it
+   * started sits. Absent on a run the operator made in the TUI, and on every
+   * run created before this field existed: such a run sits under the project
+   * its members work in.
+   *
+   * The caller sets it, exactly as `ThreadOrigin.parentThreadId` is set, and
+   * the daemon drops an id that names no thread of its own.
+   */
+  parentThreadId?: ThreadId;
   /** The one goal, in the operator's words. */
   goal: string;
   /**
@@ -981,6 +995,9 @@ export interface RunInit {
   briefTemplate: string;
   workspaceMode: WorkspaceMode;
   members: RunMemberInit[];
+  /** The thread that asked for the run. Omitted = the daemon reads the thread
+   *  the connection named at `hello`, and otherwise the run has no parent. */
+  parentThreadId?: ThreadId;
 }
 
 /** A member as the client places it, before any thread exists. */
@@ -1240,7 +1257,14 @@ export interface ThreadExport {
 // ---------------------------------------------------------------------------
 
 export interface RpcMethods {
-  "hello": { params: { protocolVersion: number; client: string }; result: MachineInfo };
+  /**
+   * `threadId` is the thread this connection speaks *for*: an agent running
+   * inside a covey thread reads `COVEY_THREAD_ID` from its environment and
+   * gives it here, so every thread and every run it creates is recorded as a
+   * child of that thread. Self-declared, like `client`, and a hint for a
+   * reader rather than a permission. The daemon ignores an id it does not know.
+   */
+  "hello": { params: { protocolVersion: number; client: string; threadId?: ThreadId }; result: MachineInfo };
   "shell.snapshot": { params: Record<string, never>; result: ShellSnapshot };
   "shell.subscribe": { params: { afterSeq?: number }; result: { subscriptionId: string } };
   "thread.snapshot": {
