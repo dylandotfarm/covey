@@ -109,11 +109,21 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // Threads, and the tasks that are not threads yet.
       const count = threads.length + pendingTasks(m, row.projectId!);
       const agg = !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
+      // The last row whose width was a constant rather than a sum of the cells
+      // it paints: the indent, the caret or the dot, the space before the
+      // title, the space before the number, and the padding on the right. The
+      // constant was sized for a count of one digit, and Ink pays for an
+      // overfull row by shrinking a cell — the cell it took here was the one
+      // holding the caret and the attention dot. So a project with a hundred
+      // planned tasks lost the dot that says a member inside it is blocked,
+      // and could not even show that it was furled. The number is as long as
+      // the work in the project, so the title takes what is left.
+      const num = count ? String(count) : "";
       return (
         <Box paddingLeft={2} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
-          <Text color={T.text}> {truncate(row.project!.title, width - 8)}</Text>
-          <Text color={T.faint}> {count || ""}</Text>
+          <Text color={T.text}> {truncate(row.project!.title, width - 6 - num.length)}</Text>
+          <Text color={T.faint}> {num}</Text>
         </Box>
       );
     }

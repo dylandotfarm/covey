@@ -688,6 +688,8 @@ test("a furled project says that a run inside it is working, as it does for a th
   const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["working"])]);
   const m = store.state.machines.get(PI)!;
   assert.equal(projectRuns(m, project.id).some(runIsBusy), true);
+  assert.equal(runIsBusy(run("build", ["dispatched"])), true,
+    "a task whose thread was made and has not answered yet is work in flight — and on another machine it is the only sign of it");
   assert.equal(runIsBusy(run("build", ["planned", "merged"])), false, "a run nobody has started is not work in flight");
 });
 
@@ -793,6 +795,41 @@ test("a run row with a long name fills its pane exactly", async () => {
     assert.equal(last, 31, `the run row ends at column ${last}, so its width sum is out by ${31 - last}`);
     assert.ok(line.includes("…"), "the name is cut, not the meta");
     assert.ok(line.includes("1 of 1 left"), "and the meta is whole");
+  } finally { unmount(); }
+});
+
+/**
+ * The project row, at the size its own number can now reach.
+ *
+ * Its width was the last one in this pane written as a constant instead of as
+ * the sum of the cells it paints, and the constant was sized for a count of
+ * one digit. Ink pays for an overfull row by shrinking a cell, and the cell it
+ * took here was the one holding the caret and the attention dot — so a project
+ * with a hundred planned tasks and a blocked member said nothing, and could
+ * not show that it was furled either. Three digits used to need a hundred live
+ * conversations in one project; a covey run is a list of GitHub issues, so
+ * four runs of thirty is an ordinary week.
+ */
+test("a project with a long title and hundreds of tasks keeps its attention dot", async () => {
+  const long = { ...project, title: "covey-monorepo-main-branch" };   // 26 columns
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")]);
+  const m = store.state.machines.get(PI)!;
+  m.projects.set(long.id, long);
+  // Four runs of thirty tasks, one of them blocked: 121 with the thread.
+  for (let i = 0; i < 4; i++) {
+    const r = run(`run-${i}`, Array.from({ length: 30 }, (_, k) => (i === 0 && k === 0 ? "blocked" : "planned")));
+    m.runs.set(r.id, r);
+  }
+  store.state.expanded[`${PI}:${project.id}`] = false;
+
+  const { frame, unmount } = await paint(store);
+  try {
+    const line = frame().find((l) => l.slice(0, 33).includes("covey-monorepo")) ?? "";
+    assert.ok(line.length > 0, "the project row was painted");
+    assert.ok(line.includes("●"), `the count ate the attention dot: "${line.slice(0, 34)}"`);
+    assert.ok(/ 121\b/.test(line), `the count is the work in the project: "${line.slice(0, 34)}"`);
+    const last = line.slice(0, 33).replace(/\s+$/, "").length - 1;
+    assert.ok(last <= 32, `the row ran past its pane to column ${last}`);
   } finally { unmount(); }
 });
 
