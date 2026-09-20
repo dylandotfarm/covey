@@ -1765,6 +1765,49 @@ export function runNeedsPerson(s: AppState, run: Run): boolean {
 }
 
 /**
+ * A run with work in flight. `working` is a member whose thread is running;
+ * `dispatched` is one whose thread was made and has not answered yet.
+ *
+ * The project row reads this beside the status of its threads. Most of the
+ * time the two say the same thing, because a working member has a thread in
+ * the project and that thread is running — but a member dispatched to a
+ * machine this client has not heard from has no thread here to read, and a
+ * fold that says nothing about it looks exactly like a fold over nothing.
+ */
+export function runIsBusy(run: Run): boolean {
+  return run.members.some((x) => x.state === "working" || x.state === "dispatched");
+}
+
+/** The runs of one project on one machine, in the order the sidebar paints
+ *  them. One pass for the three questions the project row asks. */
+export function projectRuns(m: MachineState, projectId: string): Run[] {
+  return [...m.runs.values()]
+    .filter((r) => runProject(m, r) === projectId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/**
+ * The tasks of a project's runs that are not threads yet.
+ *
+ * The number on a project row means the work inside it, and it has always
+ * been the count of its threads because threads were all there was. A run
+ * spends most of its life planned rather than dispatched, and a planned task
+ * has no thread — so a project holding one thread and three runs of five read
+ * "1", and a furled row hid fifteen pieces of work behind that number.
+ *
+ * A dispatched task is already a thread in this project and is already
+ * counted; a task that merged or was withdrawn is over. Neither is counted
+ * again here.
+ */
+export function pendingTasks(m: MachineState, projectId: string): number {
+  let n = 0;
+  for (const run of projectRuns(m, projectId)) {
+    for (const x of run.members) if (!x.threadId && !isFinalMemberState(x.state)) n++;
+  }
+  return n;
+}
+
+/**
  * The project a run belongs to, or null when no single project can be named.
  *
  * A run's members carry a project each, and a project id only means anything

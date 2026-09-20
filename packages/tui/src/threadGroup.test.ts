@@ -30,7 +30,7 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-group-"));
 import React from "react";
 import { render } from "ink";
 import type { MachineInfo, Project, Run, RunMember, RunMemberState, Thread, ThreadOrigin } from "@covey/protocol";
-import { Store, archiveKey, sidebarRows, runKey, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
+import { Store, archiveKey, pendingTasks, projectRuns, runIsBusy, sidebarRows, runKey, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
 import { sidebarCells, rowAtScreenRow } from "./sidebar.js";
 import { App } from "./components/App.js";
 import { AGENT_MARK } from "./components/Sidebar.js";
@@ -681,6 +681,33 @@ test("a furled project says that a run inside it is waiting on somebody", async 
   } finally { unmount(); }
 });
 
+test("a furled project says that a run inside it is working, as it does for a thread", () => {
+  // The dot and the count are the whole of what a furled project tells the
+  // reader. A run whose member is working, or dispatched to a machine this
+  // client has not heard from, has no thread here for the row to read.
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["working"])]);
+  const m = store.state.machines.get(PI)!;
+  assert.equal(projectRuns(m, project.id).some(runIsBusy), true);
+  assert.equal(runIsBusy(run("build", ["dispatched"])), true,
+    "a task whose thread was made and has not answered yet is work in flight — and on another machine it is the only sign of it");
+  assert.equal(runIsBusy(run("build", ["planned", "merged"])), false, "a run nobody has started is not work in flight");
+});
+
+test("a project counts the tasks of its runs that are not threads yet", () => {
+  // One thread and a run of five, none dispatched: the row read "1" and a
+  // furled project hid the other five behind it.
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["planned", "planned", "planned"])]);
+  const m = store.state.machines.get(PI)!;
+  assert.equal(pendingTasks(m, project.id), 3);
+
+  // A task that became a thread is already counted as that thread, and a task
+  // that is over is not work at all.
+  const mixed = run("mixed", ["planned", "merged", "withdrawn", "working"]);
+  mixed.members[3]!.threadId = "mine";
+  store.state.machines.get(PI)!.runs.set(mixed.id, mixed);
+  assert.equal(pendingTasks(m, project.id), 4, "three planned in the first run, one in the second");
+});
+
 /**
  * `←` walks one step out, and a run row is a step of its own.
  *
@@ -733,6 +760,78 @@ test("← on a run never jumps the cursor into another part of the tree", async 
     assert.equal(store.isExpanded(ak, false), true,
       "the cursor walked into the Archived folder and the next ← folded it away");
     assert.equal(store.isExpanded(runKey(PI, "build")), false, "and the run is where it was left");
+  } finally { unmount(); }
+});
+
+test("a furled project paints the dot and the count for what its runs hold", async () => {
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["working", "planned", "planned"])]);
+  store.state.expanded[`${PI}:${project.id}`] = false;
+  const { frame, unmount } = await paint(store);
+  try {
+    const line = frame().find((l) => l.slice(0, 33).indexOf("covey") === 4) ?? "";
+    assert.ok(line.includes("●"), `the fold said nothing about the run working inside it: "${line.slice(0, 33)}"`);
+    assert.ok(/covey 4\b/.test(line), `one thread and three tasks that are not threads yet: "${line.slice(0, 33)}"`);
+  } finally { unmount(); }
+});
+
+/**
+ * The run row's own width sum, which nothing held.
+ *
+ * Every cell the row spends is counted in one place — the caret, its space,
+ * the two before the meta, and the padding on the right — and the only way to
+ * see the sum is wrong is to paint a name long enough to reach the edge. A sum
+ * that asks for too little truncates every long run name early and wastes the
+ * columns; one that asks for too much makes Ink shrink a cell, which is what
+ * cost the member row its state mark.
+ */
+test("a run row with a long name fills its pane exactly", async () => {
+  const long = run("a run name long enough to reach the edge of the pane and go on", ["working"]);
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [long]);
+  const { frame, unmount } = await paint(store);
+  try {
+    const line = frame().find((l) => l.slice(0, 33).includes("a run name lo")) ?? "";
+    assert.ok(line.length > 0, "the run row was painted");
+    const last = line.slice(0, 33).replace(/\s+$/, "").length - 1;
+    assert.equal(last, 31, `the run row ends at column ${last}, so its width sum is out by ${31 - last}`);
+    assert.ok(line.includes("…"), "the name is cut, not the meta");
+    assert.ok(line.includes("1 of 1 left"), "and the meta is whole");
+  } finally { unmount(); }
+});
+
+/**
+ * The project row, at the size its own number can now reach.
+ *
+ * Its width was the last one in this pane written as a constant instead of as
+ * the sum of the cells it paints, and the constant was sized for a count of
+ * one digit. Ink pays for an overfull row by shrinking a cell, and the cell it
+ * took here was the one holding the caret and the attention dot — so a project
+ * with a hundred planned tasks and a blocked member said nothing, and could
+ * not show that it was furled either. Three digits used to need a hundred live
+ * conversations in one project; a covey run is a list of GitHub issues, so
+ * four runs of thirty is an ordinary week.
+ */
+test("a project with a long title and hundreds of tasks keeps its attention dot", async () => {
+  const long = { ...project, title: "covey-monorepo-main-branch" };   // 26 columns
+  const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")]);
+  const m = store.state.machines.get(PI)!;
+  m.projects.set(long.id, long);
+  // Four runs of thirty tasks, one of them blocked: 121 with the thread.
+  for (let i = 0; i < 4; i++) {
+    const r = run(`run-${i}`, Array.from({ length: 30 }, (_, k) => (i === 0 && k === 0 ? "blocked" : "planned")));
+    m.runs.set(r.id, r);
+  }
+  store.state.expanded[`${PI}:${project.id}`] = false;
+
+  const { frame, unmount } = await paint(store);
+  try {
+    const line = frame().find((l) => l.slice(0, 33).includes("covey-monorepo")) ?? "";
+    assert.ok(line.length > 0, "the project row was painted");
+    assert.ok(line.includes("●"), `the count ate the attention dot: "${line.slice(0, 34)}"`);
+    assert.ok(/ 121\b/.test(line), `the count is the work in the project: "${line.slice(0, 34)}"`);
+    // The exact column, not an upper bound: a sum that asks for too little
+    // wastes the pane and cuts the title early, and nothing else would say so.
+    const last = line.slice(0, 33).replace(/\s+$/, "").length - 1;
+    assert.equal(last, 31, `the project row ends at column ${last}, so its width sum is out by ${31 - last}`);
   } finally { unmount(); }
 });
 

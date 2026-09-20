@@ -526,10 +526,18 @@ furl it into. The claim is read from the runs this client actually holds, so it
 can only hide a thread that something else is really painting; a machine that
 has not answered yet claims nothing and its threads stay where they are.
 
-The project row still counts them. Its number has always meant *threads in this
-project*, furled ones included — a thread group's children are already in it —
-and the attention dot a furled project shows has to reach every one of them or
-the fold hides the thing it must not hide.
+The project row still counts them. Its number means *the work in this project*,
+furled work included — a thread group's children are already in it — and so are
+the tasks of its runs that are not threads yet (`pendingTasks`). A run spends
+most of its life planned rather than dispatched, and a planned task has no
+thread, so a project holding one thread and three runs of five used to read
+"1" and a furled row hid fifteen pieces of work behind that number. A task that
+was dispatched is a thread in the project and is counted as that thread; a task
+that merged or was withdrawn is over and is counted nowhere.
+
+The dot beside the number answers for the runs as well (`runIsBusy`,
+`runNeedsPerson`). A fold may hide a row; it may never hide that something
+inside it is working, or that something inside it is waiting on a person.
 
 A furled run follows the thread group's rule exactly: it hides the members that
 are working and lets through the ones that need a person — `blocked`, or a
