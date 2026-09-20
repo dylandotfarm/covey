@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { archiveKey, liveThreads, runKey, runNeedsPerson, runProject, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { archiveKey, liveThreads, pendingTasks, projectRuns, runIsBusy, runKey, runNeedsPerson, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -97,19 +97,23 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
     case "project": {
       const open = state.expanded[`${row.machine}:${row.projectId}`] ?? true;
       const threads = liveThreads(m, row.projectId);
-      const busy = threads.some((t) => t.status === "running" || t.status === "starting");
-      // The project's runs count too, now that they fold away with it. A
-      // member the operator or the tracker called `blocked` has no thread
-      // status to read, so the fold would otherwise hide the one thing a fold
-      // may never hide: that something in there is waiting on a person.
+      // The project's runs answer all three questions with it, now that they
+      // fold away with it: a fold may never hide that something inside it is
+      // working, that something is waiting on a person, or how much there is.
+      // A member the operator or the tracker called `blocked` has no thread
+      // status to read, and a task that is planned has no thread at all.
+      const runs = projectRuns(m, row.projectId!);
+      const busy = threads.some((t) => t.status === "running" || t.status === "starting") || runs.some(runIsBusy);
       const waiting = threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0)
-        || [...m.runs.values()].some((r) => runProject(m, r) === row.projectId && runNeedsPerson(state, r));
+        || runs.some((r) => runNeedsPerson(state, r));
+      // Threads, and the tasks that are not threads yet.
+      const count = threads.length + pendingTasks(m, row.projectId!);
       const agg = !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
       return (
         <Box paddingLeft={2} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
           <Text color={T.text}> {truncate(row.project!.title, width - 8)}</Text>
-          <Text color={T.faint}> {threads.length || ""}</Text>
+          <Text color={T.faint}> {count || ""}</Text>
         </Box>
       );
     }
