@@ -37,7 +37,7 @@ export async function generateTitle(text: string, cwd: string, abort = new Abort
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
   try {
     const q = query({
-      prompt: text.slice(0, MAX_INPUT),
+      prompt: titlePrompt(text),
       options: {
         cwd,
         model: MODEL,
@@ -62,6 +62,18 @@ export async function generateTitle(text: string, cwd: string, abort = new Abort
   }
 }
 
+/**
+ * The prompt that carries the message to the model.
+ *
+ * The SDK reads a prompt that starts with `/` as a slash command, and this
+ * throwaway session knows none of the skills, so a first message such as
+ * `/covey take issue 12` came back as "Unknown command: /covey" and that
+ * became the title. A label in front of the text keeps it a message.
+ */
+export function titlePrompt(text: string): string {
+  return `The user's first message:\n\n${text.slice(0, MAX_INPUT)}`;
+}
+
 /** Strip the decoration models add around a one-line answer. */
 export function cleanTitle(raw: string): string | null {
   const line = raw.split("\n").map((l) => l.trim()).find((l) => l.length > 0);
@@ -77,9 +89,19 @@ export function cleanTitle(raw: string): string | null {
   return truncate(title);
 }
 
-/** Instant title taken from the message itself, shown until the model answers. */
+/** A line that holds a command name and nothing else, such as `/covey`. */
+const BARE_COMMAND = /^\/[A-Za-z0-9:_-]+$/;
+
+/**
+ * Instant title taken from the message itself, shown until the model answers.
+ *
+ * The first line that says something. A line that is only a command name is
+ * skipped: `/covey` on a line of its own names the skill, and the request
+ * that the thread is about comes on the next line.
+ */
 export function fallbackTitle(text: string): string {
-  const first = text.trim().split("\n")[0] ?? "";
+  const lines = text.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+  const first = lines.find((l) => !BARE_COMMAND.test(l)) ?? lines[0] ?? "";
   return first ? truncate(first) : "New thread";
 }
 

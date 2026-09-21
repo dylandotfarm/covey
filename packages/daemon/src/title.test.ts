@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cleanTitle, fallbackTitle } from "./title.js";
+import { cleanTitle, fallbackTitle, titlePrompt } from "./title.js";
 
 test("cleanTitle strips the decoration models put around one-line answers", () => {
   assert.equal(cleanTitle("Fix websocket reconnect loop"), "Fix websocket reconnect loop");
@@ -29,4 +29,20 @@ test("fallbackTitle takes the first line", () => {
   assert.equal(fallbackTitle("  fix the reconnect loop\nand the timer  "), "fix the reconnect loop");
   assert.equal(fallbackTitle("   "), "New thread");
   assert.equal(fallbackTitle("x".repeat(100)), "x".repeat(59) + "…");
+});
+
+test("fallbackTitle skips a line that is only a command name", () => {
+  assert.equal(fallbackTitle("/covey\nthe menu does not open in a new thread"), "the menu does not open in a new thread");
+  assert.equal(fallbackTitle("/covey:covey\n\nfix the menu"), "fix the menu");
+  // A command with arguments says what the thread is about.
+  assert.equal(fallbackTitle("/covey take issue 12"), "/covey take issue 12");
+  // A bare command and nothing else is still better than no title.
+  assert.equal(fallbackTitle("/compact"), "/compact");
+});
+
+test("the prompt never starts with a slash, or the SDK runs it as a command", () => {
+  const p = titlePrompt("/covey\nfix the menu");
+  assert.ok(!p.startsWith("/"));
+  assert.ok(p.includes("/covey\nfix the menu"));
+  assert.ok(titlePrompt("x".repeat(3000)).length < 2100);
 });

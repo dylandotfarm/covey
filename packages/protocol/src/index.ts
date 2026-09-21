@@ -924,9 +924,11 @@ export interface PathEntry {
 }
 
 /**
- * The commands a thread knows about. `null` is "not known yet" — the thread
- * has never had a session, so nobody has asked the SDK. An empty array is
- * "the session answered, and it has no commands".
+ * The commands a thread knows about. A thread that has never had a session
+ * carries the newest list a sibling thread's session reported, so the menu
+ * is there for the first message. `null` is "not known yet" — no session on
+ * the machine has reported a list. An empty array is "the session answered,
+ * and it has no commands".
  */
 export type ThreadCommands = SlashCommandInfo[] | null;
 
