@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { repoOptions } from "../repos.js";
-import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
@@ -438,8 +438,10 @@ export function App({ store }: { store: Store }) {
     const g = at.machine && at.projectId ? groupOfProject(state, at.machine, at.projectId) : null;
     const url = g?.members.map((x) => x.project.remoteUrl).find(Boolean);
     if (!g || !url) { store.notify("select a project that covey cloned from a URL", "error"); return; }
-    // Machines that hold it, and machines that will once they answer.
-    const inPool = [...g.members.map((x) => x.machine), ...store.pendingFor(url)];
+    // Machines that hold a clone of it, and machines that will once they
+    // answer. A machine with only a checkout from before is offered: the
+    // clone goes in beside it.
+    const inPool = [...g.members.filter((x) => x.project.kind === "clone").map((x) => x.machine), ...store.pendingFor(url)];
     const options = machineOptions(inPool);
     if (options.length === 0) { store.notify("every machine already has this project"); return; }
     openPickMany(`Add ${g.title} to which machines?`, options, [], (ids) => {
@@ -1509,13 +1511,19 @@ export function App({ store }: { store: Store }) {
       // A machine key is a URL, so it can never read as `no` or `all`.
       const opts: PickOption[] = [
         { id: "no", label: "Cancel" },
-        ...(pool.length > 1 ? [{ id: "all", label: `Remove from every machine (${pool.length}) and delete its threads` }] : []),
-        ...pool.map((x) => ({ id: x.machine, label: pool.length > 1 ? `Remove from ${name(x.machine)} and delete its threads there` : "Remove project and all its threads", hint: name(x.machine) })),
+        ...(pool.length > 1 ? [{ id: "all", label: `Remove from every machine (${poolMachines(pool)}) and delete its threads` }] : []),
+        // A machine that holds the repository twice, as a clone and as a
+        // checkout from before, gets a row for each, named by kind.
+        ...pool.map((x) => {
+          const twice = pool.filter((y) => y.machine === x.machine).length > 1;
+          const what = twice ? ` (${x.project.kind === "clone" ? "the clone" : "your checkout"})` : "";
+          return { id: `${x.machine}\n${x.projectId}`, label: pool.length > 1 ? `Remove from ${name(x.machine)}${what} and delete its threads there` : "Remove project and all its threads", hint: name(x.machine) };
+        }),
       ];
       return openPick(`Remove project "${row.project!.title}"?`, opts, (id) => {
         store.setOverlay(null);
         if (id === "no") return;
-        const targets = id === "all" ? pool : pool.filter((x) => x.machine === id);
+        const targets = id === "all" ? pool : pool.filter((x) => `${x.machine}\n${x.projectId}` === id);
         for (const x of targets) void store.removeFromPool(x.machine, x.projectId);
       });
     }

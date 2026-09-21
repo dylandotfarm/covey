@@ -17,7 +17,7 @@ import { join } from "node:path";
 process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-pool-"));
 
 import type { Command, Project, Thread } from "@covey/protocol";
-import { Store, MACHINES_KEY, archiveKey, projectGroups, sidebarRows, type AppState, type MachineState } from "./store.js";
+import { Store, MACHINES_KEY, archiveKey, poolMachines, projectGroups, sidebarRows, type AppState, type MachineState } from "./store.js";
 import { rankMachines, type PlacementMachine } from "./run.js";
 import { loadConfig } from "./config.js";
 
@@ -227,4 +227,31 @@ test("rankMachines puts the machines with room first, fastest among them, the wa
   assert.deepEqual(rankMachines([pi, mac, box]).map((x) => x.name), ["box", "mac", "pi"], "fastest first when all have room");
   const full = new Map([["box", 20], ["mac", 3]]);
   assert.deepEqual(rankMachines([pi, mac, box], full).map((x) => x.name), ["mac", "pi", "box"], "a machine at its limit goes last, whatever its size");
+});
+
+test("a machine that holds a repository as a checkout and as a clone sends new work to the clone", () => {
+  const identity = "github.com/dylandotfarm/covey";
+  const { store } = storeWith([machine(PI, "pi", "connected", [
+    project("p-old", "covey", identity),
+    project("p-clone", "covey", identity, { kind: "clone", remoteUrl: "git@github.com:dylandotfarm/covey.git" }),
+  ], [])]);
+  assert.deepEqual(store.placementMachines(identity).map((m) => [m.key, m.projectId]), [[PI, "p-clone"]]);
+  const rows = sidebarRows(store.state as AppState);
+  assert.equal(rows.filter((r) => r.kind === "project").length, 1, "and the sidebar shows the two rows as one project");
+  assert.deepEqual(rows[0]!.pool!.map((x) => x.projectId), ["p-old", "p-clone"]);
+});
+
+test("two rows of one repository on one machine are one machine, not a pool of two", () => {
+  const identity = "github.com/dylandotfarm/covey";
+  const { store } = storeWith([machine(PI, "pi", "connected", [
+    project("p-old", "covey", identity),
+    project("p-clone", "covey", identity, { kind: "clone", remoteUrl: "git@github.com:dylandotfarm/covey.git" }),
+  ], [thread("only", "p-clone", "2026-01-03T00:00:00Z")])]);
+  // Every Store in this file shares one config, and a case above furls this
+  // very project, so the fold is set here rather than left to the default.
+  store.state.expanded[identity] = true;
+  const rows = sidebarRows(store.state as AppState);
+  assert.equal(poolMachines(rows[0]!.pool!), 1, "one machine holds both rows");
+  const t = rows.find((r) => r.kind === "thread")!;
+  assert.equal(t.tag, undefined, "so a thread carries no machine tag: there is no other machine to tell it from");
 });

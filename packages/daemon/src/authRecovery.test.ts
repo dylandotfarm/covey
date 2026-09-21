@@ -104,8 +104,24 @@ function makeCli(prompt: AsyncIterable<SDKUserMessage>, options: Options): FakeC
   return cli;
 }
 
-/** Let the engine's queued microtasks, the session pump and the restart run. */
-const settle = async () => { for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0)); };
+/**
+ * Let the engine's queued microtasks, the session pump and the restart run.
+ *
+ * A restart is a timer, then a new session, then the prompt that goes to it,
+ * and each step is its own turn of the loop. A fixed number of turns is
+ * therefore a race: it passed here every time and failed on a loaded runner,
+ * with the second process made and its prompt not yet sent. So a caller that
+ * waits for a step gives the step, and this waits for it to happen.
+ */
+const settle = async (ok?: () => boolean, ms = 10_000) => {
+  for (let i = 0; i < 16; i++) await new Promise((r) => setTimeout(r, 0));
+  if (!ok) return;
+  const deadline = Date.now() + ms;
+  while (!ok() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 5));
+};
+
+/** The prompt a restarted process was given, once it has one. */
+const restarted = (clis: { prompts: string[] }[], n: number) => () => (clis[n]?.prompts.length ?? 0) > 0;
 
 function setup(stamps: (string | null)[] = []) {
   const dir = mkdtempSync(join(tmpdir(), "covey-auth-"));
@@ -146,7 +162,7 @@ test("a turn that dies on the credentials loses its process, and a new one goes 
   await s.send("t1", "review the diff");
   s.clis[0]!.say("I read the diff.");
   s.clis[0]!.fail(AUTH_ERROR);
-  await settle();
+  await settle(restarted(s.clis, 1));
 
   // The process that holds the dead token is gone, not reused.
   assert.equal(s.clis[0]!.aborted, true);
@@ -163,7 +179,7 @@ test("a turn that died before its first word is sent again, word for word", asyn
   s.newThread("t1");
   await s.send("t1", "count the open PRs");
   s.clis[0]!.fail(AUTH_ERROR);
-  await settle();
+  await settle(restarted(s.clis, 1));
 
   assert.equal(s.clis.length, 2);
   assert.deepEqual(s.clis[1]!.prompts, ["count the open PRs"], "\"go on\" means nothing to a model that never started");
@@ -175,7 +191,7 @@ test("one restart, not two: the second failure names the command that fixes it",
   s.newThread("t1");
   await s.send("t1", "hello");
   s.clis[0]!.fail(AUTH_ERROR);
-  await settle();
+  await settle(restarted(s.clis, 1));
   assert.equal(s.clis.length, 2);
 
   s.clis[1]!.fail(AUTH_ERROR);
@@ -191,13 +207,13 @@ test("a turn that answers gives the thread its restart back", async (t) => {
   s.newThread("t1");
   await s.send("t1", "one");
   s.clis[0]!.fail(AUTH_ERROR);
-  await settle();
+  await settle(restarted(s.clis, 1));
   s.clis[1]!.finish("done");
   await settle();
 
   await s.send("t1", "two");
   s.clis[1]!.fail(AUTH_ERROR);
-  await settle();
+  await settle(restarted(s.clis, 2));
   assert.equal(s.clis.length, 3, "the next rotation is a new fault, and gets its own restart");
 });
 
@@ -231,7 +247,7 @@ test("the sessions that hold the same credentials are stopped before a user meet
 
   await s.send("t1", "again");
   s.clis[0]!.fail(AUTH_ERROR);
-  await settle();
+  await settle(() => s.clis[1]!.aborted);
 
   assert.equal(s.clis[1]!.aborted, true, "the idle sibling holds the same dead token");
   assert.ok(s.notes("t2").some((n) => n.includes("same credentials")), s.notes("t2").join(" | "));
