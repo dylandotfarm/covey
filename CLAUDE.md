@@ -15,8 +15,8 @@
   in `main.ts`); a `--bind` flag wins at start and is never written to `daemon.json`.
   No bundler: `tsc -b` writes browser ES modules and the import map in `static/index.html`
   names `@covey/protocol` and `@covey/client`. Nothing in `client` or `protocol` may import
-  a node module, or the page stops loading. `web/src/state.ts` and `markdown.ts` hold no
-  DOM and node tests them; `render.ts` and `main.ts` are DOM and are checked by `tsc` only,
+  a node module, or the page stops loading. `web/src/state.ts`, `commandMenu.ts` and `markdown.ts`
+  hold no DOM and node tests them; `render.ts` and `main.ts` are DOM and are checked by `tsc` only,
   so try a change against a real daemon in a browser. `packages/daemon/test/web.test.ts`
   fetches every module the page names.
 - `pnpm run setup` (`scripts/setup.mjs`) is the one-machine install: it installs, builds, and

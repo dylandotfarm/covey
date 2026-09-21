@@ -7,5 +7,6 @@
     "types": []
   },
   "include": ["src"],
-  "references": [{ "path": "../protocol" }]
+  "references": [{ "path": "../protocol" }],
+  "exclude": ["src/**/*.test.ts"]
 }
