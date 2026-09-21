@@ -194,6 +194,14 @@ a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px dotted v
 .item-bar select { font: inherit; color: inherit; background: var(--surface-alt); border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; min-height: 36px; }
 .item-bar .who { font-size: 12px; color: var(--subtle); text-align: right; }
 
+/* ---- media inline, and full size over the page (#110) ---- */
+.media { display: block; max-width: 100%; max-height: 40vh; width: auto; height: auto; border-radius: 8px; background: var(--surface); margin: 6px 0; }
+img.media { cursor: zoom-in; object-fit: contain; }
+video.media { min-width: 160px; }
+.media-p { margin: 0 0 8px; }
+.lightbox { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, .92); cursor: zoom-out; padding: var(--sat) 0 var(--sab); }
+.lightbox img { max-width: 100vw; max-height: 100dvh; object-fit: contain; }
+
 .composer-bar { position: relative; display: flex; align-items: flex-end; gap: 8px; padding: 8px 10px calc(8px + var(--sab)); border-top: 1px solid var(--border); background: var(--bg); }
 /* The `/` popover: over the bottom of the timeline, never under it. Ink cannot do this; a browser can. */
 .cmd-menu { position: absolute; left: 10px; right: 10px; bottom: calc(100% + 2px); max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 -6px 24px rgba(0, 0, 0, .45); z-index: 2; }

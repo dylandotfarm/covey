@@ -13,7 +13,7 @@ import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type Gi
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
 
 export interface Actions {
   openThread(machine: string, threadId: string): void;
@@ -95,8 +95,19 @@ export class Renderer {
   private mergeMethod: MergeMethod = "merge";
   /** The item's act was in flight at the last paint, so the paint that ends it takes the draft the state holds. */
   private itemWasBusy = false;
+  /** An image full size over the page (#110). A tap anywhere shuts it. */
+  private lightbox: HTMLElement;
+  private lightboxImg: HTMLImageElement;
+  /** How markdown loads its media: a GitHub attachment through the daemon, with the page's token. */
+  private markdown: { media: (url: string) => string };
 
-  constructor(private root: HTMLElement, private a: Actions) {
+  /**
+   * `token` is the one the page holds for a LAN address, so the media route
+   * can authenticate an `<img>` request; a tailnet or a loopback page holds
+   * none and needs none.
+   */
+  constructor(private root: HTMLElement, private a: Actions, token: string | undefined = undefined) {
+    this.markdown = { media: (url) => mediaSrc(url, token) };
     this.banner = h("div", { class: "banner hidden", onclick: () => this.a.retry() });
     this.list = h("main", { class: "list" });
     this.header = h("header", { class: "thread-header" });
@@ -114,11 +125,15 @@ export class Renderer {
     this.itemDraft.addEventListener("input", () => this.a.setItemDraft(this.itemDraft.value));
     this.itemBar = h("div", { class: "item-bar" });
     this.itemScreen = h("main", { class: "item hidden" }, this.itemHeader, this.itemBody, this.itemBar);
-    root.append(this.banner, this.list, this.threadScreen, this.itemScreen);
+    this.lightboxImg = h("img", { alt: "" });
+    this.lightbox = h("div", { class: "lightbox hidden", onclick: () => this.closeLightbox() }, this.lightboxImg);
+    root.append(this.banner, this.list, this.threadScreen, this.itemScreen, this.lightbox);
     // A `#N` anywhere in the transcript, or in an item's own text, opens that
-    // item. One listener per surface; the anchor carries only the number.
+    // item, and an inline image opens full size. One listener per surface;
+    // the anchor carries only the number, the image its own source.
     this.timeline.addEventListener("click", (ev) => this.refClick(ev));
     this.itemBody.addEventListener("click", (ev) => this.refClick(ev));
+    addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !this.lightbox.classList.contains("hidden")) this.closeLightbox(); });
 
     this.timeline.addEventListener("scroll", () => {
       const t = this.timeline;
@@ -234,9 +249,23 @@ export class Renderer {
     else { this.threadScreen.classList.add("hidden"); this.list.classList.remove("hidden"); this.paintList(s); }
   }
 
-  /** A click on a `#N` anchor: open the item of the thread on screen, or of the item on screen. */
+  /** A tap on an inline image: the same image, full size, over the page. */
+  private openLightbox(img: HTMLImageElement) {
+    this.lightboxImg.src = img.currentSrc || img.src;
+    this.lightboxImg.alt = img.alt;
+    this.lightbox.classList.remove("hidden");
+  }
+
+  private closeLightbox() {
+    this.lightbox.classList.add("hidden");
+    this.lightboxImg.removeAttribute("src");
+  }
+
+  /** A click on a `#N` anchor opens the item of the thread on screen, or of the item on screen; one on an image opens it full size. */
   private refClick(ev: Event) {
-    const a = (ev.target as HTMLElement | null)?.closest?.("a.ref") as HTMLElement | null;
+    const target = ev.target as HTMLElement | null;
+    if (target instanceof HTMLImageElement && target.classList.contains("media")) { ev.preventDefault(); this.openLightbox(target); return; }
+    const a = target?.closest?.("a.ref") as HTMLElement | null;
     if (!a) return;
     ev.preventDefault();
     const number = Number(a.dataset.number);
@@ -486,7 +515,7 @@ export class Renderer {
       seen.add(item.id);
       let row = this.rows.get(item.id);
       if (!row || row.item !== item) {
-        const el = renderItem(item, this.a);
+        const el = renderItem(item, this.a, this.markdown);
         if (row) row.el.replaceWith(el); else this.timeline.insertBefore(el, cursor);
         row = { item, el };
         this.rows.set(item.id, row);
@@ -606,7 +635,7 @@ export class Renderer {
     }
     if (item.labels.length) out.push(h("div", { class: "meta" }, ...item.labels.map((l) => h("span", { class: "chip" }, l))));
     const body = h("div", { class: "markdown" });
-    body.innerHTML = item.body.trim() ? markdownToHtml(item.body) : "<p class=\"empty-body\">no description</p>";
+    body.innerHTML = item.body.trim() ? markdownToHtml(item.body, this.markdown) : "<p class=\"empty-body\">no description</p>";
     out.push(body);
     const holder = holderOf(s, iv.machine, iv.projectId, iv.number);
     if (holder) {
@@ -620,7 +649,7 @@ export class Renderer {
       for (const r of item.reviews) {
         const word = r.state === "APPROVED" ? "approved" : r.state === "CHANGES_REQUESTED" ? "requested changes" : r.state === "DISMISSED" ? "dismissed" : "commented";
         const entry = h("div", { class: `entry review ${r.state.toLowerCase()}` }, h("div", { class: "who" }, h("b", {}, r.author), ` ${word}`, r.submittedAt ? ` · ${relTime(r.submittedAt)}` : ""));
-        if (r.body.trim()) { const md = h("div", { class: "markdown" }); md.innerHTML = markdownToHtml(r.body); entry.append(md); }
+        if (r.body.trim()) { const md = h("div", { class: "markdown" }); md.innerHTML = markdownToHtml(r.body, this.markdown); entry.append(md); }
         out.push(entry);
       }
     }
@@ -628,7 +657,7 @@ export class Renderer {
       out.push(h("h3", {}, "Comments"));
       for (const c of item.comments) {
         const md = h("div", { class: "markdown" });
-        md.innerHTML = markdownToHtml(c.body);
+        md.innerHTML = markdownToHtml(c.body, this.markdown);
         out.push(h("div", { class: "entry" }, h("div", { class: "who" }, h("b", {}, c.author), c.createdAt ? ` · ${relTime(c.createdAt)}` : ""), md));
       }
     }
@@ -657,13 +686,13 @@ function splitKey(key: string): [string, string] {
   return [key.slice(0, i), key.slice(i + 1)];
 }
 
-function renderItem(item: TimelineItem, a: Actions): HTMLElement {
+function renderItem(item: TimelineItem, a: Actions, markdown: { media: (url: string) => string }): HTMLElement {
   switch (item.kind) {
     case "user":
       return h("div", { class: `msg user${item.queued ? " queued" : ""}` }, h("div", { class: "body" }, ...refNodes(item.text)), item.queued ? h("span", { class: "tag" }, "queued") : null);
     case "assistant": {
       const el = h("div", { class: `msg assistant${item.streaming ? " streaming" : ""}` });
-      el.innerHTML = markdownToHtml(item.text);
+      el.innerHTML = markdownToHtml(item.text, markdown);
       return el;
     }
     case "thinking":

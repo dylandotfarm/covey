@@ -312,6 +312,20 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
   host built for that one write (see *The loop*). The TUI has no such screen: a `#N`
   there is an OSC 8 hyperlink to GitHub, and the palette opens the issue or the pull
   request in the browser.
+- **Media is inline, and a private attachment loads (#110).** `markdown.ts` makes an
+  `![name](url)` and GitHub's own `<img src>` an image, and a video URL or a bare user
+  attachment on a line of its own a video with its controls; the style sheet caps both at
+  40% of the screen, and a tap on an image opens it full size over the page. GitHub serves
+  `github.com/user-attachments/assets/<id>` only to a request with the account's token:
+  404 without one, 302 to a signed link on its store with one, good for five minutes and
+  then served to anyone. A phone's browser holds no GitHub token, and the daemon holds one
+  through `gh`. So an attachment loads from `GET /media?url=…` on the page's own origin:
+  the daemon authenticates the request the way it does the socket, refuses any host but
+  the two GitHub uses (`media.ts`, `mediaTarget`), asks GitHub with the token, and answers
+  the phone with the same redirect. The bytes never pass through the daemon, a range
+  request for a video goes straight to the store, and the browser keeps the answer for
+  four minutes. The route is on only with the web client. A LAN page puts its token on
+  the media URL; a tailnet or loopback page needs none.
 - **Not yet:** runs, moving threads, attachments, and push notifications. The last needs a service worker, which needs a secure context, which
   `http://100.x.y.z` is not; `tailscale serve` can front the daemon with HTTPS later.
 

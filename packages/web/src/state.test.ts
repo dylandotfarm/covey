@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { GitHubIssue, GitHubPullRequest, MachineInfo, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
-  itemActions, itemHash, itemStateLabel, openHomes, openView, orderedItems, projectRows, relTime, routeOf, threadHash, threadRefs, threadStatusLabel, threadTone,
+  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, threadHash, threadRefs, threadStatusLabel, threadTone,
 } from "./state.js";
 
 const info = (name: string): MachineInfo => ({
@@ -213,4 +213,20 @@ test("the thread that holds a number is found on its machine, and an archived on
   assert.equal(holderOf(s, "ws://box:3790", "p1", 12), null);
   assert.equal(holderOf(s, "ws://box:3790", "p2", 94), null);
   assert.equal(holderOf(s, "ws://nope", "p1", 94), null);
+});
+
+test("a GitHub attachment loads through the daemon with the page's token; anything else loads as it is (#110)", () => {
+  const a = "https://github.com/user-attachments/assets/abc";
+  assert.equal(isGitHubAttachment(a), true);
+  assert.equal(isGitHubAttachment("https://private-user-images.githubusercontent.com/1/2.png?jwt=x"), true);
+  assert.equal(isGitHubAttachment("https://github.com/o/r/blob/main/x.png"), false);
+  assert.equal(isGitHubAttachment("https://x.example/a.png"), false);
+  assert.equal(isGitHubAttachment("not a url"), false);
+  assert.equal(mediaSrc(a, "tok"), `/media?url=${encodeURIComponent(a)}&token=tok`);
+  assert.equal(mediaSrc(a, undefined), `/media?url=${encodeURIComponent(a)}`);
+  assert.equal(mediaSrc("https://x.example/a.png", "tok"), "https://x.example/a.png");
+  assert.equal(mediaKind("https://x.example/a.PNG?x=1"), "image");
+  assert.equal(mediaKind("https://x.example/a.webm"), "video");
+  assert.equal(mediaKind(a), "video", "a bare attachment is a video; an image comes in an image tag");
+  assert.equal(mediaKind("https://x.example/page"), null);
 });

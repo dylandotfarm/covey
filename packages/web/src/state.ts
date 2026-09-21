@@ -434,3 +434,40 @@ export function holderOf(s: State, machine: string, projectId: string, number: n
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// Media (#110)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when GitHub serves the URL only to the account: a user attachment, or
+ * the image host GitHub rewrites one to. Those go through the daemon, which
+ * holds the token; any other image loads as it is.
+ */
+export function isGitHubAttachment(url: string): boolean {
+  let u: URL;
+  try { u = new URL(url); } catch { return false; }
+  if (u.protocol !== "https:") return false;
+  if (u.hostname === "github.com") return u.pathname.startsWith("/user-attachments/assets/");
+  return u.hostname === "private-user-images.githubusercontent.com" || u.hostname === "user-images.githubusercontent.com";
+}
+
+/**
+ * Where the page loads a piece of media from: the daemon's media route for a
+ * GitHub attachment, with the page's token when it has one, else the URL
+ * itself. The route answers with the signed link GitHub gives the token.
+ */
+export function mediaSrc(url: string, token: string | undefined): string {
+  if (!isGitHubAttachment(url)) return url;
+  return `/media?url=${encodeURIComponent(url)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+}
+
+/** What a bare URL on a line of its own is, by its extension, or by being a GitHub attachment, which is a video when it is not an image. */
+export function mediaKind(url: string): "image" | "video" | null {
+  const path = url.split(/[?#]/)[0]!.toLowerCase();
+  if (/\.(png|jpe?g|gif|webp|svg|avif)$/.test(path)) return "image";
+  if (/\.(mp4|mov|webm|m4v)$/.test(path)) return "video";
+  // GitHub puts an image in `![]()` or `<img>`, and a video as a bare URL.
+  if (isGitHubAttachment(url) && new URL(url).hostname === "github.com") return "video";
+  return null;
+}
