@@ -181,6 +181,7 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
         <Text color={T.subtle}>web server: </Text>
         <Text color={settings?.webEnabled ? T.success : T.subtle}>{settings?.webEnabled ? "on" : "off"}</Text>
         {settings?.webEnabled && <Text color={T.subtle}>  ·  {webAt ?? "no address the daemon listens on"}</Text>}
+        {settings?.bind && <Text color={T.subtle}>  ·  listens on {settings.bind}</Text>}
       </Text>
       {m.update && (
         <Text wrap="truncate">

@@ -81,11 +81,17 @@ card shows whether it is on and at which address, and starting it on a second ma
 it on the first, so a phone always has one address to keep. `covey info` prints the
 address. On the tailnet the phone needs no token: the daemon accepts it because
 `tailscale whois` says it is yours. On the LAN, run the daemon with `--bind all` and open the
-URL that carries `?token=`; the page keeps the token, so you type it one time. Or skip the
+URL that carries `?token=`; the page keeps the token, so you type it one time. The daemon
+binds to the tailnet by default; "Reachable on" in the machine's control panel, or on the
+page's settings screen, moves it to the LAN as well while it runs, no restart needed. Or skip the
 typing: open the page over the tailnet first, tap the gear, and under "Get LAN address" tap
 the LAN address. The link carries the token, and that address keeps it from then on. The
 browser keeps a token per address, so this hand-off is the way one address learns it from
 another. Add the page to the home screen and it opens without the browser's bars.
+
+The gear on the page lists every machine with its build, where it listens, and two
+buttons: update from git and restart, or restart alone. Both ask first, because both end
+the turns that machine runs.
 
 The phone shows the projects and threads of every machine the TUI knows, with the same
 status dots the TUI shows. The machine that serves the page gets the list from the TUI when
