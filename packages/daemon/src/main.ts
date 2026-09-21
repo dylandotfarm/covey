@@ -12,8 +12,7 @@ import { clearPidFile, writePidFile } from "./pidfile.js";
 import { machineResources } from "./resources.js";
 import { webAddresses } from "./addresses.js";
 import { sourceRoot } from "./update.js";
-import { linkSkill, describeSkillLink } from "./skill.js";
-import { homedir } from "node:os";
+import { coveyPlugin } from "./plugin.js";
 
 export interface RunDaemonOptions {
   port?: number;
@@ -57,7 +56,12 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     webAddresses: webAddresses({ port: config.port, bind: config.bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips }),
   };
   const db = new Db(join(dataDir()));
-  const engine = new Engine(db, machine, { log });
+  // The `/covey` skill goes to every session as a plugin from this checkout.
+  // A personal skill in ~/.claude/skills would not do: a resumed session reads
+  // a temporary config directory the SDK builds, which has no skills in it.
+  const plugin = coveyPlugin(sourceRoot());
+  log(plugin ? `plugin: ${plugin} (the /covey skill)` : "plugin: none, this daemon does not run from a checkout with plugin/");
+  const engine = new Engine(db, machine, { log, ...(plugin ? { plugins: [plugin] } : {}) });
   const updater = new Updater(config.machineId, log);
   const server = await startServer({ config, engine, updater, host, log });
   log(`listening on ws://${host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
@@ -75,18 +79,6 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   void machineResources()
     .then((r) => { engine.setResources(r); log(`resources: ${r.cpuCount} cores, ${Math.round(r.totalMemoryBytes / 1e9)} GB, up to ${r.concurrency} run members, tools ${r.tools.map((t) => t.name).join(" ") || "none"}`); })
     .catch((e) => log(`could not read machine resources: ${e.message}`));
-
-  // The `/covey` skill, linked into the user's Claude Code skills from this
-  // checkout. Every start does it, so the internal update — pull, build,
-  // restart — puts a new skill in place on every machine, and nobody has to
-  // run the setup again. A throwaway instance (`COVEY_HOME` set: a test
-  // daemon, or a scratch clone on another port) must not take the link away
-  // from the real checkout, so it links nothing unless `COVEY_SKILL_HOME`
-  // names a home for it.
-  const skillHome = process.env.COVEY_SKILL_HOME ?? (process.env.COVEY_HOME ? null : homedir());
-  try {
-    log(skillHome ? describeSkillLink(linkSkill(sourceRoot(), skillHome)) : "skill: not linked, COVEY_HOME is set (a throwaway instance)");
-  } catch (e: any) { log(`skill: could not link it: ${e?.message ?? e}`); }
 
   // The pid file lets `covey stop --port N` name one daemon. Write it only
   // after the listener binds, so a failed start leaves no false record.

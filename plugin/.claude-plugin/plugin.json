@@ -1,0 +1,5 @@
+{
+  "name": "covey",
+  "description": "The covey loop: take an issue to a merged pull request from inside a covey thread.",
+  "version": "0.0.1"
+}

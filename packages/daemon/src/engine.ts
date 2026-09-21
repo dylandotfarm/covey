@@ -66,6 +66,9 @@ export interface EngineOptions {
    *  hands in a fake, so nothing reaches GitHub and nothing opens a pull
    *  request. */
   ghHost?: (options: RealHostOptions) => GhHost;
+  /** Plugin directories every session gets: the covey plugin with the `/covey`
+   *  skill. `main.ts` finds it in the checkout; a test passes none. */
+  plugins?: string[];
   /** The clock the idle sweep reads, in milliseconds. A test moves it by hand. */
   now?: () => number;
   /** Where the daemon writes its own lines. */
@@ -1326,6 +1329,7 @@ export class Engine {
         model: t.model, permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
         streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
+        ...(this.opts.plugins?.length ? { plugins: this.opts.plugins } : {}),
       },
       this.sinkFor(t.id),
       // `undefined` selects the SDK's own `query`, which is what a daemon uses.
