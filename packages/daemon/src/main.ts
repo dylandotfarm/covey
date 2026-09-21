@@ -10,6 +10,7 @@ import { tailscaleSelf } from "./tailscale.js";
 import { Updater } from "./update.js";
 import { clearPidFile, writePidFile } from "./pidfile.js";
 import { machineResources } from "./resources.js";
+import { webAddresses } from "./addresses.js";
 import { sourceRoot } from "./update.js";
 import { coveyPlugin } from "./plugin.js";
 
@@ -52,6 +53,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
     settings: machineSettings(config),
     projectsDir: projectsDir(),
+    webAddresses: webAddresses({ port: config.port, bind: config.bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips }),
   };
   const db = new Db(join(dataDir()));
   // The `/covey` skill goes to every session as a plugin from this checkout.

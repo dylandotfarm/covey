@@ -6,13 +6,13 @@ import type {
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin,
 } from "@covey/protocol";
-import { USER_CLIENT } from "@covey/protocol";
+import { isUserClient } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
-import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir } from "./config.js";
+import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { Attachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod } from "@covey/protocol";
@@ -267,11 +267,19 @@ export class Engine {
           ...(cmd.defaultStreaming !== undefined ? { defaultStreaming: cmd.defaultStreaming } : {}),
           ...(cmd.sessionIdleMinutes !== undefined ? { sessionIdleMinutes: clampSetting(cmd.sessionIdleMinutes, 0) } : {}),
           ...(cmd.maxLiveSessions !== undefined ? { maxLiveSessions: clampSetting(cmd.maxLiveSessions, 1) } : {}),
+          ...(cmd.webEnabled !== undefined ? { webEnabled: cmd.webEnabled === true ? true : null } : {}),
         });
         // A lower limit applies to the sessions already live, not only to the
         // next one: the user asked for less memory now.
         this.sweepSessions();
         return this.emitShell({ kind: "machine.updated", machine: this.machine });
+      }
+      case "machine.fleet": {
+        // Not broadcast: the list is for the page this daemon serves, and it
+        // is not part of `MachineInfo`. A client that wants it asks
+        // `machine.access`.
+        saveFleet(Array.isArray(cmd.machines) ? cmd.machines.filter((m) => typeof m?.url === "string" && typeof m?.name === "string").map((m) => ({ name: m.name, url: m.url, ...(m.token ? { token: m.token } : {}), ...(m.machineId ? { machineId: m.machineId } : {}) })) : []);
+        return this.db.shellSeq();
       }
       case "project.create": {
         const url = cmd.url.trim();
@@ -1807,7 +1815,7 @@ export function threadOrigin(explicit: ThreadOrigin | undefined, client: string,
   if (!client && !parent) return undefined;
   // A connection that named a parent thread is a program by that fact alone:
   // the one client a person types into never names one.
-  return { by: client === USER_CLIENT ? "user" : "agent", ...(client ? { client } : {}), ...from };
+  return { by: isUserClient(client) ? "user" : "agent", ...(client ? { client } : {}), ...from };
 }
 
 /** Whether covey still owns this thread's title. Threads from before

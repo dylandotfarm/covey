@@ -1,13 +1,13 @@
 {
-  "name": "@covey/tui",
+  "name": "@covey/client",
   "version": "0.0.1",
-  "description": "The covey terminal client, built with Ink and React.",
+  "description": "The covey daemon client: one WebSocket per machine, with reconnect and replay. Runs in node and in a browser.",
   "license": "MIT",
   "author": "dylan <270018429+dylandotfarm@users.noreply.github.com>",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dylandotfarm/covey.git",
-    "directory": "packages/tui"
+    "directory": "packages/client"
   },
   "type": "module",
   "main": "dist/index.js",
@@ -16,13 +16,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "dependencies": {
-    "@covey/client": "workspace:*",
-    "@covey/protocol": "workspace:*",
-    "ink": "^7.1.1",
-    "react": "^19.2.0",
-    "ws": "^8.18.0"
+    "@covey/protocol": "workspace:*"
   }
 }

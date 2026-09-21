@@ -537,6 +537,7 @@ export function App({ store }: { store: Store }) {
       { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
       { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
+      { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
     openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
@@ -564,6 +565,11 @@ export function App({ store }: { store: Store }) {
           const on = !settings.defaultStreaming;
           void store.setMachineDefaults(machineKey!, { defaultStreaming: on });
           store.notify(`${info.name}: new threads ${on ? "show text as it arrives" : "show each reply whole"}`);
+          return;
+        }
+        case "web": {
+          store.setOverlay(null);
+          void store.setWebServer(machineKey!, !settings.webEnabled);
           return;
         }
         case "log": { store.setOverlay({ kind: "update", machine: machineKey! }); return; }

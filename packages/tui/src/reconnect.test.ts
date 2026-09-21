@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer, type WebSocket as Socket } from "ws";
 import type { MachineInfo, MachineUpdate } from "@covey/protocol";
-import { MachineClient, TRIES, type ClientEvents, type ConnState } from "./client.js";
+import { MachineClient, TRIES, type ClientEvents, type ConnState } from "@covey/client";
 import { Store } from "./store.js";
 
 // ---- waiting, without waiting out a clock -----------------------------------

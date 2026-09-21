@@ -13,6 +13,8 @@ A multi-agent terminal UI for Claude Code, built from scratch on the official
   update and relaunch *itself* the same way — no quitting to pull and build.
 - Per-turn diffs from git checkpoints, message queueing while a turn runs, and a bell when a
   background thread needs approval or finishes.
+- A web client for a phone, served by the daemon on your tailnet or LAN: the same projects
+  and threads, one open at a time, to check on the work and start a new idea from anywhere.
 - Runs on Node 22+ with zero native dependencies (Linux, macOS; Windows-friendly paths and
   process handling, untested there).
 
@@ -70,6 +72,28 @@ covey machines add ws://other-host.your-tailnet.ts.net:3790 --name other
 ```
 
 Outside Tailscale, append `--token <token from covey info>`.
+
+### On a phone
+
+One machine in your fleet serves a web client at `http://<machine>:3790/`. Turn it on from
+the TUI: press enter on the machine row, then choose "Web server: off". The machine's info
+card shows whether it is on and at which address, and starting it on a second machine stops
+it on the first, so a phone always has one address to keep. `covey info` prints the
+address. On the tailnet the phone needs no token: the daemon accepts it because
+`tailscale whois` says it is yours. On the LAN, run the daemon with `--bind all` and open the
+URL that carries `?token=`; the page keeps the token, so you type it one time. Or skip the
+typing: open the page over the tailnet first, tap the gear, and under "Get LAN address" tap
+the LAN address. The link carries the token, and that address keeps it from then on. The
+browser keeps a token per address, so this hand-off is the way one address learns it from
+another. Add the page to the home screen and it opens without the browser's bars.
+
+The phone shows the projects and threads of every machine the TUI knows, with the same
+status dots the TUI shows. The machine that serves the page gets the list from the TUI when
+you start the web server there, and again whenever you add or remove a machine. A project
+checked out on two machines is one row, and `+` asks which machine the new thread goes to.
+On the tailnet the phone needs no token for any of them. Tap a thread to read it, follow a turn as it streams, send a message, stop a turn,
+and answer an approval or a question. Tap `+` on a project to start a thread. The phone does
+not dispatch runs, move threads, or update machines; the TUI does those.
 
 ## Keys
 

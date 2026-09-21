@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { RpcMethodName, RpcMethods, BuildInfo, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { isFinalMemberState } from "@covey/protocol";
-import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
+import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import { DEFAULT_PORT, isFinalMemberState, threadIsBusy } from "@covey/protocol";
+import WebSocket from "ws";
+import { MachineClient, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
@@ -264,11 +265,7 @@ export interface Selection {
  * independent; leaning on either alone leaves a gap where the screen moves and
  * the clock behind it does not.
  */
-export function threadIsBusy(t: Thread): boolean {
-  if (t.pendingApprovals > 0) return true;
-  if (t.latestTurn?.state === "running") return true;
-  return t.status === "running" || t.status === "starting" || t.status === "waiting";
-}
+export { threadIsBusy };
 
 export function selectionBounds(s: Selection): { from: { line: number; col: number }; to: { line: number; col: number } } {
   const { anchor, head } = s;
@@ -326,7 +323,9 @@ export class Store {
     this.config = loadConfig();
     this.clientSource = opts.source ?? null;
     this.canRelaunch = opts.canRelaunch ?? false;
-    this.clientOpts = opts.client ?? {};
+    // The `ws` package, for its handshake timeout: a host that swallows the
+    // handshake instead of refusing it would otherwise hold a dial for ever.
+    this.clientOpts = { dial: (url) => new WebSocket(url, { handshakeTimeout: 8000 }), ...(opts.client ?? {}) };
     this.state = {
       machines: new Map(), order: [], selected: null, view: null, focus: "sidebar",
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
@@ -457,6 +456,9 @@ export class Store {
         // A restarting daemon cannot report its own success — it is gone by
         // then. Reconnecting is the success, so say so here.
         if (s === "connected") void this.drainPending(ms.key);
+        // The machine that serves the phone's page needs the fleet as this
+        // client knows it now, and it may have changed while it was away.
+        if (s === "connected" && client.info?.settings?.webEnabled) void this.syncFleet(ms.key);
         if (s === "connected" && ms.restarting) {
           ms.restarting = false;
           const at = ms.update?.state === "restarting" ? ms.update.toCommit : null;
@@ -491,7 +493,7 @@ export class Store {
     }, this.clientOpts);
     this.clients.set(saved.url, client);
     client.start();
-    if (persist) { this.config.machines.push(saved); this.persist(); }
+    if (persist) { this.config.machines.push(saved); this.persist(); void this.syncFleets(); }
     this.touch();
   }
 
@@ -507,6 +509,7 @@ export class Store {
     if (this.state.selected?.machine === key) this.select(null);
     this.viewCache.dropMachine(key);
     this.touch();
+    void this.syncFleets();
   }
 
   client(key: string): MachineClient | undefined { return this.clients.get(key); }
@@ -950,6 +953,71 @@ export class Store {
   /** Machine-wide defaults for new threads. Persisted by the daemon. */
   async setMachineDefaults(machine: string, patch: Partial<MachineSettings>) {
     await this.threadCommand({ type: "machine.settings", ...patch }, machine);
+  }
+
+  /**
+   * Serve the web client from `machine`, or stop.
+   *
+   * One machine in the fleet serves it. A phone keeps one address, and two
+   * daemons that both answer it would each hold half the reader's threads.
+   * So turning it on here turns it off on every other connected machine
+   * first. A machine the client cannot reach keeps its setting, and the
+   * reader is told which one, so nothing is claimed that was not done.
+   */
+  async setWebServer(machine: string, on: boolean) {
+    const name = (k: string) => this.state.machines.get(k)?.info?.name ?? this.state.machines.get(k)?.saved.name ?? k;
+    if (on) {
+      for (const [k, ms] of this.state.machines) {
+        if (k === machine || !ms.info?.settings?.webEnabled) continue;
+        if (ms.conn !== "connected") { this.notify(`${name(k)} also serves the web client and is not connected; stop it there when it is back`, "error"); continue; }
+        await this.setMachineDefaults(k, { webEnabled: false });
+        this.notify(`${name(k)}: web server stopped`);
+      }
+    }
+    await this.setMachineDefaults(machine, { webEnabled: on });
+    if (on) await this.syncFleet(machine);
+    const at = this.state.machines.get(machine)?.info?.webAddresses?.find((a) => a.reachable)?.url;
+    this.notify(on ? `${name(machine)}: web server on${at ? ` at ${at}` : ""}` : `${name(machine)}: web server off`, on ? "success" : "info");
+  }
+
+  /**
+   * The fleet as a phone can dial it, for the page that `serving` serves.
+   *
+   * Every other machine this client knows, with a URL the phone can reach.
+   * The client dials its own machine on loopback, and a phone that dialled
+   * loopback would reach itself; that entry is rewritten to the machine's
+   * tailnet name or address, taken from what the daemon said about itself.
+   * A loopback machine that has no tailnet is left out: there is no address
+   * to give. The serving machine itself is left out too; the page has it.
+   */
+  fleetFor(serving: string): FleetMember[] {
+    const self = this.state.machines.get(serving);
+    const out: FleetMember[] = [];
+    for (const [key, ms] of this.state.machines) {
+      if (key === serving) continue;
+      const id = ms.info?.machineId ?? ms.saved.machineId;
+      if (id && self?.info?.machineId && id === self.info.machineId) continue;
+      let url = ms.saved.url;
+      if (isLoopbackUrl(url)) {
+        const host = ms.info?.tailnetName ?? ms.info?.tailnetIps?.find((ip) => ip.includes("."));
+        if (!host) continue;
+        url = `ws://${host}:${new URL(ms.saved.url).port || DEFAULT_PORT}`;
+      }
+      out.push({ name: ms.info?.name ?? ms.saved.name, url, ...(ms.saved.token ? { token: ms.saved.token } : {}), ...(id ? { machineId: id } : {}) });
+    }
+    return out;
+  }
+
+  /** Hand `machine` the fleet, if it is connected. Quiet on failure: the page still works for that machine alone. */
+  async syncFleet(machine: string) {
+    const client = this.clients.get(machine);
+    if (!client || client.state !== "connected") return;
+    try { await client.command({ type: "machine.fleet", machines: this.fleetFor(machine) }); } catch { /* an older daemon does not know the command */ }
+  }
+
+  /** The list changed: every machine that serves the page gets the new one. */
+  private async syncFleets() {
+    for (const [key, ms] of this.state.machines) if (ms.conn === "connected" && ms.info?.settings?.webEnabled) await this.syncFleet(key);
   }
 
   /** What the daemon is running (checkout, branch, commit). Null if unreachable. */

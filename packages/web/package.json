@@ -1,0 +1,26 @@
+{
+  "name": "@covey/web",
+  "version": "0.0.1",
+  "description": "The covey web client for a phone: projects and threads in a list, one thread open at a time. Served by the daemon.",
+  "license": "MIT",
+  "author": "dylan <270018429+dylandotfarm@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dylandotfarm/covey.git",
+    "directory": "packages/web"
+  },
+  "type": "module",
+  "main": "dist/state.js",
+  "types": "dist/state.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/state.d.ts",
+      "import": "./dist/state.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dependencies": {
+    "@covey/client": "workspace:*",
+    "@covey/protocol": "workspace:*"
+  }
+}
