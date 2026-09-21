@@ -8,7 +8,9 @@
  * so the skeleton is built once and kept, and each timeline row is keyed by
  * item id and rebuilt only when the daemon re-sent that item.
  */
-import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type QuestionItem, type Thread, type TimelineItem, type ToolCallItem } from "@covey/protocol";
+import { acceptCommand, commandLabel } from "@covey/client";
+import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem } from "@covey/protocol";
+import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
 import { addressLink, connectionSummary, isCurrentAddress, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadStatusLabel, threadTone, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
@@ -41,6 +43,15 @@ export class Renderer {
   private sendBtn: HTMLButtonElement;
   private stopBtn: HTMLButtonElement;
   private banner: HTMLElement;
+  /** The `/` popover over the bottom of the timeline. */
+  private menuEl: HTMLElement;
+  /** What the popover shows, while it is open. */
+  private menu: CommandMenu | null = null;
+  private menuIndex = 0;
+  /** The token the reader dismissed with escape; the popover stays shut until the token changes. */
+  private menuClosedFor: string | null = null;
+  /** The open thread's commands, as of the last paint. */
+  private commands: ThreadCommands = null;
   private rows = new Map<string, { item: TimelineItem; el: HTMLElement }>();
   private activity: HTMLElement;
   /** `machine:thread` of the view the skeleton holds. */
@@ -57,20 +68,33 @@ export class Renderer {
     this.composer = h("textarea", { class: "composer", rows: "1", placeholder: "Message", enterkeyhint: "send" });
     this.sendBtn = h("button", { class: "send", type: "button", "aria-label": "Send" }, "↑");
     this.stopBtn = h("button", { class: "stop", type: "button", "aria-label": "Stop" }, "■");
-    this.threadScreen = h("main", { class: "thread hidden" }, this.header, this.timeline, h("div", { class: "composer-bar" }, this.composer, this.stopBtn, this.sendBtn));
+    // A tap on a row must not take the focus, and with it the keyboard, off the composer.
+    this.menuEl = h("div", { class: "cmd-menu hidden", role: "listbox", onmousedown: (ev) => ev.preventDefault() });
+    this.threadScreen = h("main", { class: "thread hidden" }, this.header, this.timeline, h("div", { class: "composer-bar" }, this.menuEl, this.composer, this.stopBtn, this.sendBtn));
     root.append(this.banner, this.list, this.threadScreen);
 
     this.timeline.addEventListener("scroll", () => {
       const t = this.timeline;
       this.atBottom = t.scrollHeight - t.scrollTop - t.clientHeight < 48;
     });
-    this.composer.addEventListener("input", () => {
-      this.grow();
-      if (this.shownThread) { const [machine, threadId] = splitKey(this.shownThread); this.a.setDraft(machine, threadId, this.composer.value); }
-    });
+    this.composer.addEventListener("input", () => this.draftChanged());
     this.composer.addEventListener("keydown", (ev) => {
-      if (ev.key !== "Enter") return;
       if (ev.isComposing) return;
+      // While the popover is open it takes the keys that mean "choose", and
+      // nothing else: every other key edits the draft, and editing the draft
+      // is what filters the list.
+      if (this.menu) {
+        if (ev.key === "Escape") { ev.preventDefault(); this.menuClosedFor = this.menu.token; this.paintMenu(); return; }
+        if (this.menu.commands.length > 0) {
+          if (ev.key === "ArrowUp" || ev.key === "ArrowDown") { ev.preventDefault(); this.menuIndex = stepRow(this.menuIndex, ev.key === "ArrowUp" ? -1 : 1, this.menu.commands.length); this.paintMenu(); return; }
+          if ((ev.key === "Tab" && !ev.shiftKey) || (ev.key === "Enter" && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey)) {
+            ev.preventDefault();
+            this.takeCommand(this.menu.commands[this.menuIndex]!);
+            return;
+          }
+        }
+      }
+      if (ev.key !== "Enter") return;
       const sends = (ev.ctrlKey || ev.metaKey) || (!ev.shiftKey && !coarse());
       if (sends) { ev.preventDefault(); this.submit(); }
     });
@@ -83,8 +107,64 @@ export class Renderer {
     if (!text) return;
     this.a.send(text);
     this.composer.value = "";
-    this.grow();
+    this.draftChanged();
     this.atBottom = true;
+  }
+
+  /** The draft is different: size the box, keep the text, and refilter the popover. */
+  private draftChanged() {
+    this.grow();
+    if (this.shownThread) { const [machine, threadId] = splitKey(this.shownThread); this.a.setDraft(machine, threadId, this.composer.value); }
+    this.paintMenu();
+  }
+
+  /**
+   * Take a row: the draft becomes the name and a space, which is no longer a
+   * bare name, so the popover closes. The reader goes on to the arguments.
+   */
+  private takeCommand(c: SlashCommandInfo) {
+    const { value, caret } = acceptCommand(c);
+    this.composer.value = value;
+    this.composer.setSelectionRange(caret, caret);
+    this.composer.focus();
+    this.draftChanged();
+  }
+
+  /**
+   * Paint the popover for the draft in the box. Called on every keystroke,
+   * and again when the thread's list changes under an open popover: the SDK
+   * pushes a new one when it finds more skills.
+   */
+  private paintMenu() {
+    const next = commandMenuFor(this.composer.value, this.commands);
+    if (!next || next.token === this.menuClosedFor) {
+      this.menu = null;
+      this.menuEl.classList.add("hidden");
+      clear(this.menuEl);
+      return;
+    }
+    // A new token starts at the top, and forgets the escape that shut the old one.
+    if (this.menu?.token !== next.token) { this.menuIndex = 0; this.menuClosedFor = null; }
+    this.menuIndex = stepRow(this.menuIndex, 0, next.commands.length);
+    this.menu = next;
+    clear(this.menuEl);
+    this.menuEl.classList.remove("hidden");
+    if (next.commands.length === 0) {
+      this.menuEl.append(h("div", { class: "cmd-empty" }, next.empty));
+      return;
+    }
+    let chosen: HTMLElement | null = null;
+    next.commands.forEach((c, i) => {
+      const selected = i === this.menuIndex;
+      const row = h("div", { class: `cmd-row${selected ? " selected" : ""}`, role: "option", "aria-selected": selected ? "true" : "false", onclick: () => this.takeCommand(c) },
+        h("span", { class: "name" }, commandLabel(c)),
+        c.description ? h("span", { class: "hint" }, c.description) : null,
+      );
+      this.menuEl.append(row);
+      if (selected) chosen = row;
+    });
+    // The list scrolls; the highlighted row stays on screen.
+    (chosen as HTMLElement | null)?.scrollIntoView?.({ block: "nearest" });
   }
 
   private grow() {
@@ -96,7 +176,7 @@ export class Renderer {
   paint(s: State) {
     this.paintBanner(s);
     if (s.view) { this.list.classList.add("hidden"); this.threadScreen.classList.remove("hidden"); this.paintThread(s, s.view); }
-    else { this.threadScreen.classList.add("hidden"); this.list.classList.remove("hidden"); this.shownThread = null; this.paintList(s); }
+    else { this.threadScreen.classList.add("hidden"); this.list.classList.remove("hidden"); this.shownThread = null; this.commands = null; this.paintList(s); }
   }
 
   private paintBanner(s: State) {
@@ -215,14 +295,18 @@ export class Renderer {
     this.composer.placeholder = busy ? "Message (queues behind the turn)" : "Message";
 
     const key = `${v.machine}:${v.threadId}`;
-    if (this.shownThread !== key) {
+    const switched = this.shownThread !== key;
+    if (switched) {
       this.shownThread = key;
       this.rows.clear();
       clear(this.timeline);
       this.atBottom = true;
       this.composer.value = s.drafts.get(key) ?? "";
+      this.menuClosedFor = null;
       this.grow();
     }
+    // A draft kept from before may be a command name, and the list may have changed.
+    if (switched || this.commands !== v.commands) { this.commands = v.commands; this.paintMenu(); }
     // Keyed rows: only an item the daemon re-sent is rebuilt.
     const items = orderedItems(v);
     const seen = new Set<string>();

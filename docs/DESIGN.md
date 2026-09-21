@@ -277,6 +277,11 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
   holds the reader's text and keyboard, and each timeline row is keyed by item id and
   rebuilt only when the daemon re-sent that item. Events schedule one paint per animation
   frame, never a paint per event.
+- **The `/` menu is a popover.** A draft that starts a command name opens a list over the
+  bottom of the timeline, filtered on every keystroke; a tap or enter takes a row, the arrows
+  move on a keyboard, escape shuts it until the name changes. The TUI draws the same list
+  above its composer, because Ink cannot paint over the transcript, and both rank it with
+  `commandMenu` in `@covey/client`, so the phone and the desk agree on what `/co` offers.
 - **A phone sleeps.** The socket drops, the client dials its budget out and goes offline. When
   the page becomes visible again it retries, and the subscriptions resume from the seq the
   page holds, so what it missed is replayed rather than refetched.
