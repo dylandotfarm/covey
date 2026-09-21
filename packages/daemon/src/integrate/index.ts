@@ -3,6 +3,7 @@
  * one party that merges. See `../../../docs/DESIGN.md` → Integrating a run.
  */
 export * from "./gh.js";
+export * from "./attach.js";
 export * from "./checks.js";
 export * from "./evidence.js";
 export * from "./gate.js";

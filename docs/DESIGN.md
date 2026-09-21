@@ -469,6 +469,28 @@ the second write on `GhHost`, beside `mergePullRequest`; a host has neither unle
 built with it, and `assertReadOnly` still refuses `pr create` on the read path. A pull request
 opened by hand is handed to covey with `thread.watch`.
 
+**Media on the pull request** is `attachments` on `thread.openPullRequest` and on
+`thread.commentPullRequest` (#105), which `covey pr open --attach F` and `covey pr comment
+--attach F` ask for. GitHub renders a video or an image inline only when the file is a *user
+attachment*, the kind the web form makes; a release asset, a raw file in the repository or an
+outside host stays a link, and the markdown sanitizer strips a `<video>` with an outside
+source. The REST and GraphQL APIs have no endpoint for one, but the route the web form uses
+takes the `gh` token: `POST uploads.github.com/user-attachments/assets` with the name, the
+media type and the repository id in the query, and the bytes as the body, answers 201 and a
+`github.com/user-attachments/assets/<uuid>` URL. `uploadAttachment` on `GhHost` is that
+call, the third write, and `commentPullRequest` the fourth; each exists only on a host built
+with `allowAttach` or `allowComment`. `integrate/attach.ts` is pure and holds the rules: the
+media type comes from the extension and only what GitHub renders is allowed; an image may be
+10 MB and a video 10 MB on the free plan or 100 MB on a paid one, with the free cap when the
+token cannot read the plan; every check runs before the first upload, and every upload runs
+before the push, so a refusal leaves no branch on the remote and no pull request with a path
+in its body. Anything but 201 is shown whole, with the by-hand fallback, because the route is
+undocumented and the answer is the only clue. A video goes into the body as a bare URL on its
+own line and an image as an image, at the end in the order the flags were given, or where a
+`{{attach:NAME}}` stands. Each file is copied into the thread's attachment store first, the
+place #85 keeps a dropped file, and a note names the file, its URL and the copy, so a person
+can re-upload by hand when the URL dies.
+
 **The daemon that holds the branch watches.** A poll runs on a timer, thirty seconds after
 the last one and half as long again after every quiet poll, up to five minutes. It reads the
 pull request and its line comments through `GhHost`, so a test hands in `fakeHost` and
@@ -500,8 +522,8 @@ runs 72 hours without a merge or a close ends in `blocked` too. The TUI reads a 
 thread and moves the member to `blocked` with that reason, which is the run's own word for
 "a person has to look".
 
-**An agent asks from its shell.** `covey issue take <n>`, `covey pr open`, `covey pr watch`,
-`covey pr policy` and `covey pr status` (`packages/cli/src/loop.ts`) speak to the local
+**An agent asks from its shell.** `covey issue take <n>`, `covey pr open`, `covey pr comment`,
+`covey pr watch`, `covey pr policy` and `covey pr status` (`packages/cli/src/loop.ts`) speak to the local
 daemon over loopback for the thread in `COVEY_THREAD_ID`, with Node's own `WebSocket`, so
 they need nothing installed in the agent's shell. The `/covey` skill
 (`plugin/skills/covey/SKILL.md`) tells the agent the loop: take the issue, work, prove it,

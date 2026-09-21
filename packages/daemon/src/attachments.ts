@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, copyFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import { MAX_ATTACHMENT_BYTES, isImageMime, type Attachment } from "@covey/protocol";
 import { dataDir } from "./config.js";
@@ -41,6 +41,21 @@ export function materialiseAttachments(threadId: string, atts: Attachment[]): At
     const { data: _drop, ...rest } = a;
     return { ...rest, path: dest };
   });
+}
+
+/**
+ * Keep a copy of a file the thread put on its pull request (#105), beside the
+ * files that were dropped on it. The copy is what a person re-uploads by hand
+ * when the attachment URL dies, and the name in the note says which is which.
+ *
+ * @returns the path of the copy.
+ */
+export function keepAttachmentFile(threadId: string, path: string, name: string): string {
+  const dir = attachmentsDir(threadId);
+  mkdirSync(dir, { recursive: true });
+  const dest = join(dir, `${randomUUID()}${extname(name) || extname(path) || ""}`);
+  copyFileSync(path, dest);
+  return dest;
 }
 
 /**

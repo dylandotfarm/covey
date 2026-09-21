@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertReadOnly, realGhHost, parsePullRequestUrl, parsePullRequest } from "./gh.js";
+import { assertReadOnly, realGhHost, parsePullRequestUrl, parsePullRequest, parseUploadAnswer, uploadRequest, UPLOAD_URL } from "./gh.js";
 
 test("the read path allows the commands it reads with", () => {
   for (const args of [
@@ -85,4 +85,30 @@ test("gh pr view output becomes the facts the watch reads", () => {
   assert.deepEqual(facts.reviews, [{ id: "PRR_1", author: "dylan", state: "CHANGES_REQUESTED", body: "no", submittedAt: "2026-09-21T10:00:00Z", url: null }]);
   assert.deepEqual(facts.comments, [{ id: "IC_1", author: "dylan", body: "hi", createdAt: "2026-09-21T10:00:00Z", url: "https://github.com/o/r/pull/7#issuecomment-1", path: null, line: null }]);
   assert.deepEqual(facts.files, ["a.ts"]);
+});
+
+test("a host built without the attach or comment capability has no way to upload or comment", () => {
+  const readOnly = realGhHost({ cwd: process.cwd() });
+  assert.equal(readOnly.uploadAttachment, undefined, "nothing can call what is not there");
+  assert.equal(readOnly.commentPullRequest, undefined);
+  const attacher = realGhHost({ cwd: process.cwd(), allowAttach: true, allowComment: true });
+  assert.equal(typeof attacher.uploadAttachment, "function");
+  assert.equal(typeof attacher.commentPullRequest, "function");
+  assert.equal(attacher.createPullRequest, undefined, "attach does not bring create along");
+});
+
+test("the upload is the request the web form makes: the route, the name, the type and the repository id in the query, the token in the header", () => {
+  const bytes = Buffer.from("MP4!");
+  const { url, init } = uploadRequest({ name: "demo.mp4", contentType: "video/mp4", bytes }, 1371967523, "gho_x");
+  assert.equal(url, `${UPLOAD_URL}?name=demo.mp4&content_type=video%2Fmp4&repository_id=1371967523`);
+  assert.equal(init.method, "POST");
+  assert.deepEqual(init.headers, { Authorization: "Bearer gho_x", Accept: "application/json", "Content-Type": "video/mp4" });
+  assert.deepEqual(Buffer.from(init.body as Uint8Array), bytes);
+});
+
+test("the upload's answer is the URL it gives on 201, and anything else is null", () => {
+  assert.equal(parseUploadAnswer('{"url":"https://github.com/user-attachments/assets/8b5a1e2c"}'), "https://github.com/user-attachments/assets/8b5a1e2c");
+  assert.equal(parseUploadAnswer('{"url":"https://evil.example/x"}'), null, "only a user attachment renders inline");
+  assert.equal(parseUploadAnswer("<html>"), null);
+  assert.equal(parseUploadAnswer('{"message":"Forbidden"}'), null);
 });

@@ -11,12 +11,14 @@
  * pure, so a test can prove what each spelling asks for without a daemon.
  */
 import { readFileSync } from "node:fs";
-import { DEFAULT_PORT, PROTOCOL_VERSION, type MergeMethod, type MergePolicy, type Thread } from "@covey/protocol";
+import { basename, resolve } from "node:path";
+import { DEFAULT_PORT, PROTOCOL_VERSION, type MergeMethod, type MergePolicy, type PullRequestAttachment, type Thread } from "@covey/protocol";
 
 /** What one invocation asks the daemon for. */
 export type LoopRequest =
   | { kind: "issue.take"; issue: number | null }
-  | { kind: "pr.open"; title: string; body: string; draft: boolean; merge: MergePolicy; mergeMethod: MergeMethod; maxRounds?: number }
+  | { kind: "pr.open"; title: string; body: string; draft: boolean; merge: MergePolicy; mergeMethod: MergeMethod; maxRounds?: number; attachments: PullRequestAttachment[] }
+  | { kind: "pr.comment"; body: string; attachments: PullRequestAttachment[] }
   | { kind: "pr.watch"; number: number | null; merge: MergePolicy; mergeMethod: MergeMethod; maxRounds?: number }
   | { kind: "pr.policy"; merge: MergePolicy; mergeMethod?: MergeMethod }
   | { kind: "pr.status" };
@@ -26,9 +28,14 @@ export const LOOP_CLIENT = "covey-cli";
 
 export const LOOP_USAGE = `  covey issue take <n>       record the issue this thread owns (refused when another thread holds it)
   covey issue drop           clear it
-  covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N]
+  covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N] [--attach F]...
                              push this thread's branch, open the pull request, and watch it.
                              --auto: covey merges when the checks pass; else a person merges
+                             --attach F: put a video or an image on the pull request, rendered
+                             inline (mp4, mov, webm, png, jpg, jpeg, gif, webp, svg). Repeatable.
+                             The URL goes where the body says {{attach:NAME}}, else at the end
+  covey pr comment [--body "…" | --body-file F] [--attach F]...
+                             comment on this thread's pull request, with media the same way
   covey pr watch <n> [--auto] [--squash|--rebase] [--rounds N]
                              watch a pull request opened by hand
   covey pr watch --stop      stop the watch
@@ -68,17 +75,43 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
   }
   if (cmd !== "pr") return { error: `covey does not know ${cmd ?? ""} ${sub ?? ""}`.trim() };
 
+  // `--body-file` wins over `--body`; a long body needs no quoting that way.
+  const body = (): string | { error: string } => {
+    const file = flag("--body-file");
+    if (!file) return flag("--body") ?? "";
+    try { return readFileSync(file, "utf8"); } catch (e: any) { return { error: `could not read --body-file ${file}: ${e?.message ?? e}` }; }
+  };
+  // Every `--attach F`, in the order given. The path is made absolute here,
+  // because the daemon reads it and the daemon's cwd is not this shell's.
+  const attachments = (): PullRequestAttachment[] | { error: string } => {
+    const out: PullRequestAttachment[] = [];
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] !== "--attach") continue;
+      const path = rest[i + 1];
+      if (!path || path.startsWith("--")) return { error: "--attach needs a path to a video or an image" };
+      out.push({ name: basename(path), path: resolve(path) });
+    }
+    return out;
+  };
+
   if (sub === "open") {
     const title = flag("--title")?.trim();
     if (!title) return { error: "covey pr open needs --title" };
-    const file = flag("--body-file");
-    let body = flag("--body") ?? "";
-    if (file) {
-      try { body = readFileSync(file, "utf8"); } catch (e: any) { return { error: `could not read --body-file ${file}: ${e?.message ?? e}` }; }
-    }
+    const b = body();
+    if (typeof b !== "string") return b;
     const r = rounds();
     if ("error" in r) return r;
-    return { request: { kind: "pr.open", title, body, draft: has("--draft"), merge: has("--auto") ? "auto" : "manual", mergeMethod: method(), ...r } };
+    const a = attachments();
+    if (!Array.isArray(a)) return a;
+    return { request: { kind: "pr.open", title, body: b, draft: has("--draft"), merge: has("--auto") ? "auto" : "manual", mergeMethod: method(), ...r, attachments: a } };
+  }
+  if (sub === "comment") {
+    const b = body();
+    if (typeof b !== "string") return b;
+    const a = attachments();
+    if (!Array.isArray(a)) return a;
+    if (!b.trim() && a.length === 0) return { error: "covey pr comment needs --body, --body-file or --attach" };
+    return { request: { kind: "pr.comment", body: b, attachments: a } };
   }
   if (sub === "watch") {
     if (has("--stop")) return { request: { kind: "pr.watch", number: null, merge: "manual", mergeMethod: "merge" } };
@@ -94,7 +127,7 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
     return { request: { kind: "pr.policy", merge, ...(has("--squash") || has("--rebase") ? { mergeMethod: method() } : {}) } };
   }
   if (sub === "status") return { request: { kind: "pr.status" } };
-  return { error: "covey pr takes `open`, `watch`, `policy` or `status`" };
+  return { error: "covey pr takes `open`, `comment`, `watch`, `policy` or `status`" };
 }
 
 export interface LoopEnv {
@@ -144,8 +177,16 @@ export async function runLoop(request: LoopRequest, env: LoopEnv, connect: (url:
         const r = (await rpc.call("thread.openPullRequest", {
           threadId, title: request.title, body: request.body, draft: request.draft,
           merge: request.merge, mergeMethod: request.mergeMethod, maxRounds: request.maxRounds,
+          ...(request.attachments.length ? { attachments: request.attachments } : {}),
         })) as { number: number; url: string };
-        return { ok: true, lines: [`opened pull request #${r.number} ${r.url}`, ...policyLine(request.merge, request.mergeMethod)] };
+        return { ok: true, lines: [`opened pull request #${r.number} ${r.url}`, ...attachedLine(request.attachments), ...policyLine(request.merge, request.mergeMethod)] };
+      }
+      case "pr.comment": {
+        const r = (await rpc.call("thread.commentPullRequest", {
+          threadId, body: request.body,
+          ...(request.attachments.length ? { attachments: request.attachments } : {}),
+        })) as { number: number; url: string };
+        return { ok: true, lines: [`commented on pull request #${r.number}${r.url ? ` ${r.url}` : ""}`, ...attachedLine(request.attachments)] };
       }
       case "pr.watch":
         await command({ type: "thread.watch", number: request.number, merge: request.merge, mergeMethod: request.mergeMethod, maxRounds: request.maxRounds });
@@ -161,6 +202,10 @@ export async function runLoop(request: LoopRequest, env: LoopEnv, connect: (url:
   } finally {
     rpc.close();
   }
+}
+
+function attachedLine(attachments: PullRequestAttachment[]): string[] {
+  return attachments.length ? [`attached ${attachments.map((a) => a.name).join(", ")}; each renders inline on GitHub`] : [];
 }
 
 function policyLine(merge: MergePolicy, method: MergeMethod): string[] {

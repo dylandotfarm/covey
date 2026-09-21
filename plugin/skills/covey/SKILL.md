@@ -41,12 +41,15 @@ unless the user told you to merge on their behalf.
 4. **Open the pull request** through covey, not by hand:
 
    ```
-   covey pr open --title "<one line, what changed>" --body-file /tmp/pr-body.md [--auto]
+   covey pr open --title "<one line, what changed>" --body-file /tmp/pr-body.md [--auto] [--attach demo.mp4]
    ```
 
    Write the body to a file first: what changed, why, and how you tested it.
    Covey adds `Closes #<n>` when the body does not name the issue. Do not run
    `git push` or `gh pr create` for this; covey pushes the branch itself.
+   When the change is something a person should see, put a video or a
+   screenshot on the pull request with `--attach` (see *Media on the pull
+   request* below).
 5. **Stop the turn.** Say which pull request you opened and what you are
    waiting for. Covey sends the next answer as a message.
 6. **Act on each message from covey.** Each starts with `covey watch:` and
@@ -59,8 +62,9 @@ unless the user told you to merge on their behalf.
      older base*: `git fetch origin && git merge origin/<base>`, resolve,
      test, commit, `git push`.
    - *A review asks for changes*, or *a comment*: make the change or answer
-     it. Reply on the pull request with `gh pr comment <n> --body "..."` so the
-     reviewer sees the answer where they asked. Push, then stop the turn.
+     it. Reply on the pull request with `covey pr comment --body "..."` so the
+     reviewer sees the answer where they asked; add `--attach` when a
+     screenshot or a video shows the fix. Push, then stop the turn.
    - *The checks passed* and the policy is manual: nothing to do. Say the
      pull request is ready for a person. Stop the turn.
    - *Covey merged the pull request*, or *the pull request was merged*: the
@@ -68,6 +72,60 @@ unless the user told you to merge on their behalf.
    - *Blocked*: covey sent as many rounds as it may, or watched for too long.
      Stop. Tell the user what still fails and what you tried.
 7. **Check the state** at any time with `covey pr status`.
+
+## Media on the pull request
+
+GitHub shows a video or an image inline only when the file is a *user
+attachment*, the kind the web form makes. A link to a release asset, a raw
+file in the repository, or an outside host stays a link. Covey owns that
+step: `--attach` uploads the file with the token the daemon holds and puts
+the URL in the body, so you never handle the URL, never make a release, and
+never push a media file into the repository.
+
+Attach media when the user asks for a video, a recording, a screenshot or a
+demo, and when the change alters what an app shows on screen: a page, a
+terminal UI, a chart, a layout. Do not attach media for a change with
+nothing to look at.
+
+```
+covey pr open --title "…" --body-file /tmp/pr-body.md --attach demo.mp4 --attach after.png
+covey pr comment --body "After the fix:" --attach after.png
+covey pr comment --attach demo.mp4
+```
+
+The rules:
+
+- `--attach` is repeatable. Each file lands on the pull request in the order
+  the flags were given: a video as a player, an image as an image.
+- The URL goes at the end of the body, one per line. To put one in a set
+  place, write `{{attach:NAME}}` in the body, where `NAME` is the file's base
+  name, and covey replaces it. A placeholder that names no `--attach` file is
+  an error.
+- Only what GitHub renders may go up: `mp4`, `mov`, `webm`, `png`, `jpg`,
+  `jpeg`, `gif`, `webp`, `svg`. Anything else is refused before the push,
+  with this list. A log or a text file goes in the body, in a fenced block.
+- An image may be up to 10 MB. A video may be up to 10 MB on the free plan
+  and 100 MB on a paid plan; when the plan cannot be read, the free cap
+  applies. A file over the cap is refused before the upload, with its size
+  and the cap. Re-encode a video under the cap, for example:
+
+  ```
+  ffmpeg -i in.webm -c:v libx264 -preset slow -crf 30 -pix_fmt yuv420p -movflags +faststart -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" out.mp4
+  ```
+
+- Covey fails closed. When GitHub answers anything but 201 to the upload, the
+  command prints the status and the answer, nothing is pushed and nothing is
+  opened. Tell the user: a person can drag the file into the pull request by
+  hand. The file is kept at the path the message names.
+- Every attached file is copied into the thread's attachment store, and a
+  note in the thread names the file, its URL and the copy.
+- `covey pr comment` comments on the pull request this thread opened or
+  watches. For any other pull request, use `gh pr comment` and no media.
+
+Make the media yourself, with what the project has: the project's own
+harness, a browser driven by a script, `ffmpeg`, or a terminal capture. Keep
+a video short, under a minute, and name what it shows in the body next to
+the placeholder.
 
 ## What not to do
 
@@ -82,7 +140,9 @@ unless the user told you to merge on their behalf.
 ```
 covey issue take <n>          record the issue this thread owns
 covey issue drop              clear it
-covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N]
+covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N] [--attach F]...
+covey pr comment [--body "…" | --body-file F] [--attach F]...
+                              comment on this thread's pull request, with media
 covey pr watch <n> [--auto]   watch a pull request opened by hand
 covey pr watch --stop         stop the watch
 covey pr policy auto|manual   change who merges

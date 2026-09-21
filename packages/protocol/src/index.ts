@@ -505,6 +505,19 @@ export interface ThreadIssue {
   takenAt: string;
 }
 
+/**
+ * One file to put on a pull request as a user attachment (#105): a video or
+ * an image GitHub renders inline. The path is on the daemon's machine; the
+ * command that asks runs there, over loopback. The daemon keeps a copy in
+ * the thread's attachment store and puts the URL in the body.
+ */
+export interface PullRequestAttachment {
+  /** The name GitHub shows. A `{{attach:NAME}}` in the body names it. */
+  name: string;
+  /** Absolute path on the daemon's machine. */
+  path: string;
+}
+
 /** The pull request a thread opened through covey, or handed to covey to watch. */
 export interface ThreadPullRequest {
   number: number;
@@ -1601,9 +1614,14 @@ export interface RpcMethods {
    * the thread and starts the watch. When the thread took an issue and the
    * body does not name it, `Closes #N` is added to the body.
    *
-   * The one `gh` write beside a run's merge and `repos.create`. `maxRounds`
-   * bounds the loop: how many turns the watch may send that ask for more
-   * work before it ends in `blocked`.
+   * A `gh` write beside a run's merge, `repos.create` and
+   * `thread.commentPullRequest`. `maxRounds` bounds the loop: how many turns
+   * the watch may send that ask for more work before it ends in `blocked`.
+   *
+   * `attachments` are uploaded first, as user attachments, and their URLs go
+   * into the body (#105): where a `{{attach:NAME}}` stands, else at the end.
+   * A file GitHub would not render, a file over the plan's cap, or an upload
+   * GitHub refuses is an error before the push, so nothing is left behind.
    */
   "thread.openPullRequest": {
     params: {
@@ -1612,7 +1630,17 @@ export interface RpcMethods {
       merge?: MergePolicy;
       /** How the daemon merges under `auto`. Omitted = `merge`. */
       mergeMethod?: MergeMethod;
+      attachments?: PullRequestAttachment[];
     };
+    result: { number: number; url: string };
+  };
+  /**
+   * Leave a comment on the thread's pull request, with the same attachment
+   * rules as `thread.openPullRequest`. The pull request is the one the thread
+   * opened or watches. A comment needs a body or at least one attachment.
+   */
+  "thread.commentPullRequest": {
+    params: { threadId: ThreadId; body?: string; attachments?: PullRequestAttachment[] };
     result: { number: number; url: string };
   };
   /**

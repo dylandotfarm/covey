@@ -26,9 +26,10 @@ test("each spelling asks for what it says", () => {
   assert.deepEqual(request("issue take 94"), { kind: "issue.take", issue: 94 });
   assert.deepEqual(request("issue drop"), { kind: "issue.take", issue: null });
   assert.deepEqual(requestOf(["pr", "open", "--title", "Fix the flag", "--body", "It was wrong."]),
-    { kind: "pr.open", title: "Fix the flag", body: "It was wrong.", draft: false, merge: "manual", mergeMethod: "merge" });
+    { kind: "pr.open", title: "Fix the flag", body: "It was wrong.", draft: false, merge: "manual", mergeMethod: "merge", attachments: [] });
   assert.deepEqual(requestOf(["pr", "open", "--title", "x", "--auto", "--squash", "--draft", "--rounds", "5"]),
-    { kind: "pr.open", title: "x", body: "", draft: true, merge: "auto", mergeMethod: "squash", maxRounds: 5 });
+    { kind: "pr.open", title: "x", body: "", draft: true, merge: "auto", mergeMethod: "squash", maxRounds: 5, attachments: [] });
+  assert.deepEqual(requestOf(["pr", "comment", "--body", "Here is the video."]), { kind: "pr.comment", body: "Here is the video.", attachments: [] });
   assert.deepEqual(request("pr watch 7"), { kind: "pr.watch", number: 7, merge: "manual", mergeMethod: "merge" });
   assert.deepEqual(request("pr watch 7 --auto --rebase"), { kind: "pr.watch", number: 7, merge: "auto", mergeMethod: "rebase" });
   assert.deepEqual(request("pr watch --stop"), { kind: "pr.watch", number: null, merge: "manual", mergeMethod: "merge" });
@@ -52,8 +53,22 @@ test("a bad spelling is a sentence, not a stack", () => {
   assert.match(error("pr open --title x --rounds 0"), /whole number above zero/);
   assert.match(error("pr watch"), /needs a number/);
   assert.match(error("pr policy sometimes"), /auto/);
-  assert.match(error("pr merge 7"), /open.*watch.*policy.*status/);
+  assert.match(error("pr merge 7"), /open.*comment.*watch.*policy.*status/);
   assert.match(error("pr open --title x --body-file /nonexistent/body.md"), /could not read --body-file/);
+  assert.match(error("pr comment"), /needs --body, --body-file or --attach/);
+  assert.match(error("pr open --title x --attach"), /--attach needs a path/);
+  assert.match(error("pr comment --attach --body x"), /--attach needs a path/);
+});
+
+test("each --attach names a file, absolute, in the order given, so the daemon can read it from its own cwd", () => {
+  const r = requestOf(["pr", "open", "--title", "x", "--attach", "demo.mp4", "--body", "See {{attach:demo.mp4}}", "--attach", "/abs/shot.png"]);
+  assert.ok(r.kind === "pr.open");
+  assert.deepEqual(r.attachments, [{ name: "demo.mp4", path: join(process.cwd(), "demo.mp4") }, { name: "shot.png", path: "/abs/shot.png" }]);
+  assert.equal(r.body, "See {{attach:demo.mp4}}");
+  const c = requestOf(["pr", "comment", "--attach", "shot.png"]);
+  assert.ok(c.kind === "pr.comment");
+  assert.equal(c.body, "");
+  assert.deepEqual(c.attachments, [{ name: "shot.png", path: join(process.cwd(), "shot.png") }]);
 });
 
 test("--body-file reads the body from disk, so a long body needs no quoting", () => {
@@ -101,13 +116,26 @@ test("the thread goes into hello, and each request becomes the right method", as
   d.answer = (method) => method === "thread.openPullRequest" ? { number: 101, url: "https://github.com/o/r/pull/101" } : { seq: 1 };
   const env = { threadId: "t-1", port: d.port };
 
-  const open = await runLoop({ kind: "pr.open", title: "Fix", body: "Body", draft: false, merge: "auto", mergeMethod: "squash", maxRounds: 2 }, env);
+  const open = await runLoop({ kind: "pr.open", title: "Fix", body: "Body", draft: false, merge: "auto", mergeMethod: "squash", maxRounds: 2, attachments: [] }, env);
   assert.equal(open.ok, true);
   assert.match(open.lines[0]!, /opened pull request #101 https:\/\/github.com\/o\/r\/pull\/101/);
   assert.match(open.lines[1]!, /merge policy: auto.*do not poll/);
   assert.deepEqual(d.calls[0], { method: "hello", params: { protocolVersion: 1, client: LOOP_CLIENT, threadId: "t-1" } });
   assert.equal(d.calls[1]!.method, "thread.openPullRequest");
   assert.deepEqual(d.calls[1]!.params, { threadId: "t-1", title: "Fix", body: "Body", draft: false, merge: "auto", mergeMethod: "squash", maxRounds: 2 });
+
+  const media = [{ name: "demo.mp4", path: "/tmp/demo.mp4" }];
+  const withMedia = await runLoop({ kind: "pr.open", title: "Fix", body: "", draft: false, merge: "manual", mergeMethod: "merge", attachments: media }, env);
+  assert.equal(withMedia.ok, true);
+  assert.deepEqual(d.calls.at(-1)!.params.attachments, media, "the files go to the daemon as name and path; the daemon uploads");
+  assert.match(withMedia.lines[1]!, /attached demo\.mp4; each renders inline/);
+
+  d.answer = (method) => method === "thread.commentPullRequest" ? { number: 101, url: "https://github.com/o/r/pull/101#issuecomment-1" } : { seq: 1 };
+  const comment = await runLoop({ kind: "pr.comment", body: "Look", attachments: media }, env);
+  assert.equal(comment.ok, true);
+  assert.equal(d.calls.at(-1)!.method, "thread.commentPullRequest");
+  assert.deepEqual(d.calls.at(-1)!.params, { threadId: "t-1", body: "Look", attachments: media });
+  assert.match(comment.lines[0]!, /commented on pull request #101 https:\/\/github.com\/o\/r\/pull\/101#issuecomment-1/);
 
   const take = await runLoop({ kind: "issue.take", issue: 94 }, env);
   assert.equal(take.ok, true);

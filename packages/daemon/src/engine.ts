@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { basename, join, resolve, sep } from "node:path";
-import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
+import { existsSync, statSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
@@ -11,13 +11,14 @@ import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
-import { materialiseAttachments, attachmentsDir } from "./attachments.js";
+import { materialiseAttachments, attachmentsDir, keepAttachmentFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
-import type { Attachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod } from "@covey/protocol";
+import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
-import { realGhHost, type GhHost, type RealHostOptions } from "./integrate/gh.js";
+import { realGhHost, UploadRefused, type GhHost, type RealHostOptions } from "./integrate/gh.js";
+import { AttachError, describeUploadFailure, placeAttachments, planAttachments, type UploadedAttachment } from "./integrate/attach.js";
 import { gateMember } from "./integrate/gate.js";
 import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
@@ -816,7 +817,7 @@ export class Engine {
    * The daemon does it because the daemon has the branch, the `gh` login and
    * the `PATH`; the agent only has to ask.
    */
-  async openPullRequest(params: { threadId: string; title: string; body?: string; draft?: boolean; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }): Promise<{ number: number; url: string }> {
+  async openPullRequest(params: { threadId: string; title: string; body?: string; draft?: boolean; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod; attachments?: PullRequestAttachment[] }): Promise<{ number: number; url: string }> {
     const t = this.db.getThread(params.threadId);
     if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
     if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
@@ -827,10 +828,13 @@ export class Engine {
     const p = this.db.getProject(t.projectId);
     if (!p) throw new EngineError("not_found", "project not found");
     const cwd = t.worktreePath ?? p.workspaceRoot;
-    const host = this.hostFor({ cwd, allowCreate: true });
+    const host = this.hostFor({ cwd, allowCreate: true, allowAttach: true });
     if (!host.createPullRequest) throw new EngineError("unsupported", "this host cannot open a pull request");
     const base = await this.baseBranch(cwd);
-    let body = (params.body ?? "").trim();
+    // The media goes up before the push, so a refused file or a refused
+    // upload leaves nothing behind: no branch on the remote, no pull request
+    // with a path in its body.
+    let body = await this.attachMedia(t, host, (params.body ?? "").trim(), params.attachments ?? []);
     // The issue is the durable place to report, and `Closes #N` closes the
     // loop when the change lands. A body that names the issue is left alone.
     if (t.issue && !new RegExp(`#${t.issue.number}\\b`).test(body)) body = body ? `${body}\n\nCloses #${t.issue.number}` : `Closes #${t.issue.number}`;
@@ -846,6 +850,82 @@ export class Engine {
     this.startWatch(fresh, opened.number, { maxRounds: params.maxRounds, merge: params.merge, mergeMethod: params.mergeMethod });
     this.putThreadAndEmit(fresh);
     return opened;
+  }
+
+  /**
+   * Leave a comment on the thread's pull request, with media when asked
+   * (#105). The pull request is the one the thread opened or watches; an
+   * agent that wants to comment elsewhere has `gh pr comment`.
+   */
+  async commentPullRequest(params: { threadId: string; body?: string; attachments?: PullRequestAttachment[] }): Promise<{ number: number; url: string }> {
+    const t = this.db.getThread(params.threadId);
+    if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
+    if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
+    const number = t.pullRequest?.number ?? t.watch?.number;
+    if (!number) throw new EngineError("no_pull_request", "this thread has no pull request: open one with `covey pr open`, or hand one to covey with `covey pr watch <n>`");
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    const cwd = t.worktreePath ?? p.workspaceRoot;
+    const host = this.hostFor({ cwd, allowComment: true, allowAttach: true });
+    if (!host.commentPullRequest) throw new EngineError("unsupported", "this host cannot comment on a pull request");
+    const body = await this.attachMedia(t, host, (params.body ?? "").trim(), params.attachments ?? []);
+    if (!body) throw new EngineError("bad_body", "a comment needs a body or a file to attach");
+    let left: { url: string };
+    try {
+      left = await host.commentPullRequest(number, body);
+    } catch (e: any) {
+      throw new EngineError("gh", `could not comment on pull request #${number}: ${(e?.stderr ?? e?.message ?? String(e)).toString().trim().split("\n")[0]}`);
+    }
+    this.note(t.id, "info", `Commented on pull request #${number}${left.url ? ` (${left.url})` : ""}.`);
+    return { number, url: left.url };
+  }
+
+  /**
+   * Put each file up as a user attachment and put its URL in the body. Every
+   * check runs before the first upload, and the first refusal stops the whole
+   * request. Each file is copied into the thread's attachment store first, so
+   * the note names a path a person can drag into the pull request by hand.
+   */
+  private async attachMedia(t: Thread, host: GhHost, body: string, files: PullRequestAttachment[]): Promise<string> {
+    if (files.length === 0) return placeAttachments(body, []);
+    if (!host.uploadAttachment) throw new EngineError("unsupported", "this host cannot upload an attachment");
+    const inputs = files.map((f) => {
+      const name = f.name.trim() || basename(f.path);
+      if (!existsSync(f.path) || !statSync(f.path).isFile()) throw new EngineError("no_file", `cannot attach ${name}: ${f.path} is not a file on this machine`);
+      return { name, path: f.path, bytes: statSync(f.path).size };
+    });
+    const seen = new Set<string>();
+    for (const a of inputs) {
+      if (seen.has(a.name)) throw new EngineError("bad_attachment", `two files are called ${a.name}; give each --attach a different name`);
+      seen.add(a.name);
+    }
+    let plan;
+    try {
+      plan = planAttachments(inputs, (await host.repository()).plan);
+    } catch (e) {
+      if (e instanceof AttachError) throw new EngineError("bad_attachment", e.message);
+      throw e;
+    }
+    const uploads: UploadedAttachment[] = [];
+    for (const [i, a] of plan.entries()) {
+      const src = inputs[i]!.path;
+      const kept = keepAttachmentFile(t.id, src, a.name);
+      let url: string;
+      try {
+        url = (await host.uploadAttachment({ name: a.name, contentType: a.contentType, bytes: readFileSync(src) })).url;
+      } catch (e: any) {
+        if (e instanceof UploadRefused) throw new EngineError("upload_refused", describeUploadFailure(a.name, e.status, e.body, kept));
+        throw new EngineError("upload_failed", `could not upload ${a.name}: ${(e?.message ?? String(e)).toString().trim().split("\n")[0]}. The file is kept at ${kept}; a person can drag it into the pull request by hand instead. Nothing was pushed and nothing was opened`);
+      }
+      uploads.push({ name: a.name, kind: a.kind, url });
+      this.note(t.id, "info", `Attached ${a.name} (${a.contentType}) as ${url}; a copy is at ${kept}.`);
+    }
+    try {
+      return placeAttachments(body, uploads);
+    } catch (e) {
+      if (e instanceof AttachError) throw new EngineError("bad_attachment", e.message);
+      throw e;
+    }
   }
 
   /** Begin, or begin again, the watch on a pull request. A note says so. */

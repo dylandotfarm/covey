@@ -112,8 +112,9 @@
   (`integrate/gh.ts`); everything else there is pure. Tests use `fakeHost`, so nothing
   merges and nothing opens a pull request during `pnpm test`. The read path calls
   `assertReadOnly` first, which throws on a `gh` command that can change a repository. The
-  two writes, `mergePullRequest` and `createPullRequest`, exist on a host only when it was
-  built with `allowMerge` or `allowCreate`.
+  four writes, `mergePullRequest`, `createPullRequest`, `commentPullRequest` and
+  `uploadAttachment`, exist on a host only when it was built with `allowMerge`,
+  `allowCreate`, `allowComment` or `allowAttach`.
 - A thread can take an issue (`thread.takeIssue`), open a pull request
   (`thread.openPullRequest`) and be watched (`Thread.watch`): the daemon that holds the
   branch polls the pull request and sends every checks verdict, review, comment and merge to
@@ -124,7 +125,12 @@
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
   ready, and never under a running turn. An agent asks with `covey issue …` and `covey pr …`
   (`packages/cli/src/loop.ts`), and the `/covey` skill in `plugin/skills/covey/SKILL.md`
-  tells it the loop. The daemon hands `plugin/` to every session as a local plugin
+  tells it the loop. `--attach F` on `covey pr open` and `covey pr comment` puts a video or
+  an image on the pull request as a GitHub *user attachment*, the only kind that renders
+  inline (`integrate/attach.ts` holds the rules; the route is undocumented and
+  `uploadAttachment` fails closed on anything but 201, before the push). A video over 10 MB
+  is refused unless the owner's plan reads as paid, and a `gh` token without the `user`
+  scope cannot read the plan, so keep a demo video under 10 MB. The daemon hands `plugin/` to every session as a local plugin
   (`plugin.ts`); a personal skill in `~/.claude/skills` does not reach a resumed session,
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
   Change the CLI and the skill together.

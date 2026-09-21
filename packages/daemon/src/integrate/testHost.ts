@@ -10,7 +10,8 @@
  * request between two polls and the fake answers with the new facts.
  */
 import type { BaseHead, RunMemberRef, RunMemberState } from "@covey/protocol";
-import type { BranchCommit, CommentEntry, GhHost, IssueFacts, PullRequestFacts } from "./gh.js";
+import type { OwnerPlan } from "./attach.js";
+import { UploadRefused, type AttachmentUpload, type BranchCommit, type CommentEntry, type GhHost, type IssueFacts, type PullRequestFacts } from "./gh.js";
 
 export interface FakeHostOptions {
   prs?: Record<string, PullRequestFacts | null>;
@@ -24,6 +25,14 @@ export interface FakeHostOptions {
   canMerge?: boolean;
   /** Give the fake a create method. Left out, the fake cannot open a pull request. */
   canCreate?: boolean;
+  /** Give the fake an upload method. Left out, the fake cannot attach a file. */
+  canAttach?: boolean;
+  /** Give the fake a comment method. Left out, the fake cannot comment. */
+  canComment?: boolean;
+  /** The owner's plan, as `repository()` answers it. Free unless a test says. */
+  plan?: OwnerPlan;
+  /** What GitHub answers to an upload, when a test wants one refused. */
+  uploadFail?: { status: number; body: string } | null;
   /** What a poll throws, when a test wants `gh` to fail. */
   fail?: Error | null;
   /** What a merge throws, when a test wants GitHub to refuse one. */
@@ -35,6 +44,10 @@ export interface FakeHost extends GhHost {
   readonly merges: { number: number; method: string }[];
   /** Every pull request the code under test opened. */
   readonly opened: { branch: string; base: string; title: string; body: string; draft: boolean }[];
+  /** Every file the code under test uploaded, without its bytes, with their count. */
+  readonly uploads: { name: string; contentType: string; size: number; url: string }[];
+  /** Every comment the code under test left. */
+  readonly comments: { number: number; body: string }[];
   /** How many times each read ran, so a test can prove a poll happened or did not. */
   readonly reads: { pullRequest: number; comments: number };
   readonly options: FakeHostOptions;
@@ -43,11 +56,15 @@ export interface FakeHost extends GhHost {
 export function fakeHost(options: FakeHostOptions = {}): FakeHost {
   const merges: { number: number; method: string }[] = [];
   const opened: FakeHost["opened"] = [];
+  const uploads: FakeHost["uploads"] = [];
+  const comments: FakeHost["comments"] = [];
   const reads = { pullRequest: 0, comments: 0 };
   const failing = () => { if (options.fail) throw options.fail; };
   const host: FakeHost = {
     merges,
     opened,
+    uploads,
+    comments,
     reads,
     options,
     async pullRequest(branch) {
@@ -71,6 +88,9 @@ export function fakeHost(options: FakeHostOptions = {}): FakeHost {
     async baseHead() {
       return options.base ?? null;
     },
+    async repository() {
+      return { id: 1, plan: options.plan ?? "free" };
+    },
     async revList(_base, branch) {
       return options.revLists?.[branch] ?? [];
     },
@@ -79,6 +99,20 @@ export function fakeHost(options: FakeHostOptions = {}): FakeHost {
     host.mergePullRequest = async (number, method) => {
       if (options.mergeFail) throw options.mergeFail;
       merges.push({ number, method });
+    };
+  }
+  if (options.canAttach) {
+    host.uploadAttachment = async (file: AttachmentUpload) => {
+      if (options.uploadFail) throw new UploadRefused(options.uploadFail.status, options.uploadFail.body);
+      const url = `https://github.com/user-attachments/assets/${uploads.length + 1}-${file.name}`;
+      uploads.push({ name: file.name, contentType: file.contentType, size: file.bytes.byteLength, url });
+      return { url };
+    };
+  }
+  if (options.canComment) {
+    host.commentPullRequest = async (number, body) => {
+      comments.push({ number, body });
+      return { url: `https://github.com/o/r/pull/${number}#issuecomment-${comments.length}` };
     };
   }
   if (options.canCreate) {
