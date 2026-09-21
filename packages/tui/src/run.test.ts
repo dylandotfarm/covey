@@ -263,6 +263,17 @@ test("a brief for a plain task says nothing about an issue it does not have", ()
   assert.equal(/\n\n\n/.test(plain), false, "a dropped section must not leave a hole");
 });
 
+test("a member of a project that works from a branch is told to target that branch", () => {
+  const brief = renderBrief(DEFAULT_BRIEF, {
+    runName: "r", goal: "g", task: { key: "t1", title: "a task", issue: null, url: null, requires: [] },
+    machineName: "mac", branch: "covey/abcd1234", base: "feature",
+    resources: { port: 3841, coveyHome: "/h", coveyConfig: "/c" }, position: 1, total: 1,
+  });
+  assert.match(brief, /pull request against `feature`/);
+  assert.match(brief, /merge `origin\/feature` into your branch if feature has moved/);
+  assert.equal(/`main`/.test(brief), false, "main is not the base here");
+});
+
 test("a brief for an issue task keeps every issue line", () => {
   const withIssue = brief(0);
   assert.match(withIssue, /gh issue view #44/);

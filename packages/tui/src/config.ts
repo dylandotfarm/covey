@@ -44,7 +44,7 @@ export interface TuiConfig {
      * store sends each one when its machine next answers, and takes it off
      * the list once the machine has the project.
      */
-    pendingProjects?: { machine: string; url: string; title?: string }[];
+    pendingProjects?: { machine: string; url: string; title?: string; baseBranch?: string }[];
   };
 }
 

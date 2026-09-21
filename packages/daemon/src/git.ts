@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync as mkdirp, writeFileSync as writeFile } from "node:fs";
 import { join, dirname } from "node:path";
-import type { ProjectGit } from "@covey/protocol";
+import type { ProjectGit, RemoteBranches } from "@covey/protocol";
 
 const run = promisify(execFile);
 
@@ -169,13 +169,17 @@ export type FetchOutcome =
  *
  *  One entry per repository a daemon has ever dispatched into, which is a
  *  handful, so nothing evicts a good one before `FETCH_FRESH_MS` retires it in
- *  place. A failed one is deleted, so a blip is never remembered. */
-const fetches = new Map<string, { at: number; done: Promise<FetchOutcome> }>();
+ *  place. A failed one is deleted, so a blip is never remembered.
+ *
+ *  `branch` is the one branch the fetch took, or null for the whole remote. A
+ *  fetch of `main` says nothing about `feature`, so a clean start on another
+ *  branch fetches again inside the window. */
+const fetches = new Map<string, { at: number; branch: string | null; done: Promise<FetchOutcome> }>();
 
 /** Record that `root` was fetched whole just now, so the next clean start
  *  within `FETCH_FRESH_MS` reuses it. */
 export function markFetched(root: string): void {
-  fetches.set(root, { at: Date.now(), done: Promise.resolve({ state: "fetched" }) });
+  fetches.set(root, { at: Date.now(), branch: null, done: Promise.resolve({ state: "fetched" }) });
 }
 
 /** Forget the last fetch of `root`, so the next clean start fetches again.
@@ -198,17 +202,19 @@ async function remoteDefaultRef(root: string): Promise<string | null> {
   return null;
 }
 
-/** Bring `origin` up to date, or say why we could not. Never throws. */
-async function fetchOrigin(root: string): Promise<FetchOutcome> {
+/**
+ * Bring `origin` up to date, or say why we could not. Never throws. `branch`
+ * is the one branch to fetch; without it, the remote's default branch.
+ */
+async function fetchOrigin(root: string, branch?: string): Promise<FetchOutcome> {
   if (!(await git(root, ["remote", "get-url", "origin"]))) return { state: "no-remote" };
+  // One branch when we can name it, which is every repo that has ever
+  // fetched; the whole remote only for one that has a remote and no refs
+  // from it yet.
+  const name = branch ?? (await remoteDefaultRef(root))?.replace(/^origin\//, "") ?? null;
   const hit = fetches.get(root);
-  if (hit && Date.now() - hit.at < FETCH_FRESH_MS) return hit.done;
+  if (hit && Date.now() - hit.at < FETCH_FRESH_MS && (hit.branch === null || hit.branch === name)) return hit.done;
   const done = (async (): Promise<FetchOutcome> => {
-    // One branch when we can name it, which is every repo that has ever
-    // fetched; the whole remote only for one that has a remote and no refs
-    // from it yet.
-    const ref = await remoteDefaultRef(root);
-    const name = ref?.replace(/^origin\//, "");
     const args = ["fetch", "--no-tags", "--quiet", "origin", ...(name ? [name] : [])];
     const started = Date.now();
     const r = await gitTry(root, args, FETCH_TIMEOUT_MS);
@@ -219,7 +225,7 @@ async function fetchOrigin(root: string): Promise<FetchOutcome> {
     const quiet = Date.now() - started >= FETCH_TIMEOUT_MS;
     return { state: "failed", error: quiet ? `no answer from origin within ${FETCH_TIMEOUT_MS / 1000}s` : r.err };
   })();
-  fetches.set(root, { at: Date.now(), done });
+  fetches.set(root, { at: Date.now(), branch: name, done });
   // A fetch that worked is remembered for a minute. A fetch that failed is
   // forgotten the moment it settles, so the next thread tries again: a blip
   // that lasted a second must not decide where the next seven agents start,
@@ -252,6 +258,35 @@ export async function defaultBranchRef(cwd: string): Promise<string | null> {
   return null;
 }
 
+/**
+ * The ref for a project's chosen base branch: `origin/<base>` when the remote
+ * has it, the local branch of that name in a repo with no remote, else null.
+ * The remote wins for the reason `defaultBranchRef` gives: the work is pushed
+ * and reviewed there.
+ */
+export async function baseBranchRef(cwd: string, base: string): Promise<string | null> {
+  const root = (await repoRoot(cwd)) ?? cwd;
+  if (await git(root, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${base}`])) return `origin/${base}`;
+  if (await git(root, ["remote", "get-url", "origin"])) return null;
+  if (await git(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${base}`])) return base;
+  return null;
+}
+
+/** True when `origin` in `root` has `branch`, as of the last fetch. */
+export async function remoteHasBranch(root: string, branch: string): Promise<boolean> {
+  return (await git(root, ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`])) !== null;
+}
+
+/**
+ * True when `name` can be a branch name: what `git check-ref-format --branch`
+ * accepts. `-x` and `a..b` and `HEAD` are refused here, before a fetch that
+ * would read them as an option, a range, or the wrong ref.
+ */
+export async function isBranchName(name: string): Promise<boolean> {
+  if (!name || name.startsWith("-") || name === "HEAD") return false;
+  return (await git(process.cwd(), ["check-ref-format", "--branch", name])) !== null;
+}
+
 /** Where a clean-start worktree begins, and how fresh that is. */
 export interface CleanStart {
   /** The ref to branch from: `origin/main`, or `main` in a repo with no remote. */
@@ -271,10 +306,10 @@ export interface CleanStart {
  * can merge the default branch first, and an agent that cannot start does
  * nothing at all.
  */
-export async function cleanStartBase(cwd: string): Promise<CleanStart | null> {
+export async function cleanStartBase(cwd: string, base?: string): Promise<CleanStart | null> {
   const root = (await repoRoot(cwd)) ?? cwd;
-  const fetch = await fetchOrigin(root);
-  const ref = await defaultBranchRef(root);
+  const fetch = await fetchOrigin(root, base);
+  const ref = base ? await baseBranchRef(root, base) : await defaultBranchRef(root);
   if (!ref) return null;
   const commit = await git(root, ["rev-parse", "--short", ref]);
   if (!commit) return null;
@@ -315,6 +350,45 @@ export async function gitInfo(dir: string): Promise<ProjectGit> {
   // the remote's, and it has no branch of its own checked out.
   if (bare) return { isRepo: true, root, currentBranch: null, defaultBranch: def, hasCommits: def !== null };
   return { isRepo: true, root, currentBranch: branch || null, defaultBranch: def, hasCommits: !!head };
+}
+
+/**
+ * The branches of the remote at `url`, and the one its `HEAD` names, without
+ * a clone: `git ls-remote --symref <url> HEAD 'refs/heads/*'`. Runs in `cwd`,
+ * a directory that exists and need not be a repository, with the credentials
+ * a clone from this machine would use. Never throws; a remote that cannot be
+ * read is an `error` and an empty list.
+ */
+export async function listRemoteBranches(url: string, cwd = process.cwd()): Promise<RemoteBranches> {
+  const u = url.trim();
+  if (!u || u.startsWith("-")) return { branches: [], defaultBranch: null, error: "a repository URL is needed" };
+  const r = await gitTry(cwd, ["ls-remote", "--symref", u, "HEAD", "refs/heads/*"], LS_REMOTE_TIMEOUT_MS);
+  if (!r.ok) return { branches: [], defaultBranch: null, error: `could not read the branches of ${u}: ${r.err}` };
+  return parseLsRemote(r.out);
+}
+
+/** A remote that answers nothing gets half a minute, the same as a `gh` call. */
+const LS_REMOTE_TIMEOUT_MS = 30_000;
+
+/**
+ * Read what `git ls-remote --symref` printed: a `ref: refs/heads/main\tHEAD`
+ * line for the default branch, then `<sha>\t<ref>` lines. Pure, so a test can
+ * feed it text. The default branch leads the list, the rest sort by name.
+ */
+export function parseLsRemote(out: string): RemoteBranches {
+  let head: string | null = null;
+  const rest: string[] = [];
+  for (const line of out.split("\n")) {
+    const [left, right] = line.split("\t");
+    if (!left || !right) continue;
+    if (left.startsWith("ref: ") && right === "HEAD") head = left.slice("ref: ".length).replace(/^refs\/heads\//, "");
+    else if (right.startsWith("refs/heads/")) rest.push(right.slice("refs/heads/".length));
+  }
+  rest.sort((a, b) => a.localeCompare(b));
+  // A `HEAD` that names a branch the remote does not have is no default.
+  const defaultBranch = head && rest.includes(head) ? head : null;
+  const branches = defaultBranch ? [defaultBranch, ...rest.filter((b) => b !== defaultBranch)] : rest;
+  return { branches, defaultBranch, error: null };
 }
 
 /**

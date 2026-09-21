@@ -10,7 +10,7 @@ import { isUserClient } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
-import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
+import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
@@ -317,6 +317,8 @@ export class Engine {
       case "project.create": {
         const url = cmd.url.trim();
         if (!url) throw new EngineError("bad_url", "a repository URL is needed");
+        const baseBranch = cmd.baseBranch?.trim() || undefined;
+        if (baseBranch !== undefined && !(await isBranchName(baseBranch))) throw new EngineError("no_branch", `${baseBranch} is not a branch name`);
         const identity = normaliseRemote(url);
         // One clone per repository. A `checkout` row of the same repository
         // from before projects were clones does not count: the clone goes in
@@ -324,16 +326,20 @@ export class Engine {
         // prefer the clone. The old row keeps its threads until the reader
         // removes it.
         const dup = this.db.listProjects().find((p) => p.repositoryIdentity === identity && p.kind === "clone");
-        if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}`);
+        if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}${dup.baseBranch ? ` on ${dup.baseBranch}` : ""}`);
         const root = join(this.projectsDir, projectSlug(identity), "repo.git");
         const cloned = await this.cloneOnce(url, root);
         if ("error" in cloned) throw new EngineError("git", `could not clone ${url}: ${cloned.error}`);
+        // The clone fetched every branch, so the base is checked here, once,
+        // and a project that would have nothing to branch from is never made.
+        if (baseBranch !== undefined && !(await remoteHasBranch(root, baseBranch))) throw new EngineError("no_branch", `${identity} has no branch ${baseBranch}`);
         // Two creates for one repository may have waited on the same clone.
         const raced = this.db.listProjects().find((p) => p.repositoryIdentity === identity && p.kind === "clone");
         if (raced) return this.db.shellSeq();
         const p: Project = {
           id: randomUUID(), title: cmd.title ?? basename(identity), workspaceRoot: root,
           repositoryIdentity: identity, kind: "clone", remoteUrl: url,
+          ...(baseBranch !== undefined ? { baseBranch } : {}),
           defaultModel: null, createdAt: now, updatedAt: now,
         };
         this.db.putProject(p);
@@ -344,6 +350,19 @@ export class Engine {
         if (!p) throw new EngineError("not_found", "project not found");
         if (cmd.title !== undefined) p.title = cmd.title;
         if (cmd.defaultModel !== undefined) p.defaultModel = cmd.defaultModel;
+        if (cmd.baseBranch !== undefined) {
+          const base = cmd.baseBranch?.trim() || null;
+          if (base !== null) {
+            if (!(await isBranchName(base))) throw new EngineError("no_branch", `${base} is not a branch name`);
+            // Fetch it first: the branch may be newer than the last fetch. A
+            // fetch that fails leaves the check to what is here.
+            if (isGitRepo(p.workspaceRoot)) await fetchBranch(p.workspaceRoot, base);
+            if (!isGitRepo(p.workspaceRoot) || !(await baseBranchRef(p.workspaceRoot, base))) throw new EngineError("no_branch", `${p.repositoryIdentity ?? p.title} has no branch ${base}`);
+            p.baseBranch = base;
+          } else {
+            delete p.baseBranch;
+          }
+        }
         p.updatedAt = now;
         this.db.putProject(p);
         return this.emitShell({ kind: "project.upserted", project: p });
@@ -766,13 +785,16 @@ export class Engine {
       turnRunning: t.status === "running" || t.status === "starting" || (t.latestTurn?.state === "running"),
       state,
     };
-    const base = await this.baseBranch(cwd);
+    const base = await this.baseBranch(p, cwd);
     return { ref, host: this.hostFor({ cwd, allowMerge }), base };
   }
 
   /** The base is the ref a worktree branches from, with the remote stripped:
-   *  `origin/main` and `main` name the same branch to `git rev-list`. */
-  private async baseBranch(cwd: string): Promise<string> {
+   *  `origin/main` and `main` name the same branch to `git rev-list`. A
+   *  project with a `baseBranch` names it outright; the rest use the
+   *  remote's default branch. */
+  private async baseBranch(p: Project, cwd: string): Promise<string> {
+    if (p.baseBranch) return p.baseBranch;
     return ((await defaultBranchRef(cwd)) ?? "main").replace(/^origin\//, "");
   }
 
@@ -830,7 +852,7 @@ export class Engine {
     const cwd = t.worktreePath ?? p.workspaceRoot;
     const host = this.hostFor({ cwd, allowCreate: true, allowAttach: true });
     if (!host.createPullRequest) throw new EngineError("unsupported", "this host cannot open a pull request");
-    const base = await this.baseBranch(cwd);
+    const base = await this.baseBranch(p, cwd);
     // The media goes up before the push, so a refused file or a refused
     // upload leaves nothing behind: no branch on the remote, no pull request
     // with a path in its body.
@@ -1364,8 +1386,9 @@ export class Engine {
       if ("error" in wt) throw new EngineError("git", `could not create worktree from origin/${carry}: ${wt.error}`);
       return { worktreePath: wt.path, branch: wt.branch, cleanStart: null, carried: true };
     }
-    const cleanStart = await cleanStartBase(p.workspaceRoot);
+    const cleanStart = await cleanStartBase(p.workspaceRoot, p.baseBranch);
     if (!cleanStart) {
+      if (p.baseBranch) throw new EngineError("git", `no branch origin/${p.baseBranch} to branch from; the project's base branch is gone from the remote`);
       if (p.kind === "clone") throw new EngineError("git", "no default branch (origin/HEAD, main or master) to branch from");
       return inPlace();
     }
@@ -1803,6 +1826,7 @@ export class Engine {
       sourceMachineId: this.machine.machineId, sourceMachineName: this.machine.name,
       project: {
         title: project.title, workspaceRoot: project.workspaceRoot, repositoryIdentity: project.repositoryIdentity,
+        ...(project.baseBranch ? { baseBranch: project.baseBranch } : {}),
         remoteUrl: project.remoteUrl ?? (isGitRepo(project.workspaceRoot) ? await remoteUrl(project.workspaceRoot) : null),
       },
       thread, items: this.db.allItems(threadId), transcripts,
@@ -1817,7 +1841,7 @@ export class Engine {
     if (!project) {
       const url = opts.url ?? exp.project.remoteUrl;
       if (!url) throw new EngineError("no_project", "no project here for this repository, and no URL to clone it from");
-      await this.apply({ type: "project.create", url, title: exp.project.title });
+      await this.apply({ type: "project.create", url, title: exp.project.title, ...(exp.project.baseBranch ? { baseBranch: exp.project.baseBranch } : {}) });
       project = this.db.listProjects().find((p) => p.repositoryIdentity === normaliseRemote(url)) ?? null;
     }
     if (!project) throw new EngineError("no_project", "no destination project; pass projectId or url");

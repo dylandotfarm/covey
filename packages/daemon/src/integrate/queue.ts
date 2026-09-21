@@ -84,7 +84,7 @@ export function buildQueue(entries: QueueEntry[]): QueuePosition[] {
 }
 
 /** The message a run sends to one member about its place in the queue. */
-export function queueBrief(position: QueuePosition, diff: MemberDiff): string {
+export function queueBrief(position: QueuePosition, diff: MemberDiff, base = "main"): string {
   const lines: string[] = [];
   lines.push(
     `You are ${position.position} of ${position.total} in the merge queue. ` +
@@ -119,7 +119,7 @@ export function queueBrief(position: QueuePosition, diff: MemberDiff): string {
   );
   lines.push("");
   lines.push(
-    `When the change ahead of you lands: \`git fetch origin\`, merge \`origin/main\` into \`${position.branch}\`, ` +
+    `When the change ahead of you lands: \`git fetch origin\`, merge \`origin/${base}\` into \`${position.branch}\`, ` +
     "run `pnpm run check`, and push. Do not merge your own pull request — one party merges.",
   );
   return lines.join("\n");
@@ -132,13 +132,13 @@ export function queueBrief(position: QueuePosition, diff: MemberDiff): string {
  * same break and wrote the same two-line fix. One member repairs it; the rest
  * leave the file alone.
  */
-export function baseBrokenBrief(what: string, owner: string, files: string[]): string {
+export function baseBrokenBrief(what: string, owner: string, files: string[], base = "main"): string {
   const list = files.map((f) => `\`${f}\``).join(", ");
   return [
-    `\`main\` is broken: ${what}`,
+    `\`${base}\` is broken: ${what}`,
     "",
     `${owner} repairs it. Leave ${list || "the file"} alone — fifteen agents that each fix the same line produce fifteen pull requests that each conflict with the other fourteen.`,
     "",
-    "Your own checks may fail against the broken base until the repair lands. Wait for it, then merge `origin/main` into your branch and run `pnpm run check` again.",
+    `Your own checks may fail against the broken base until the repair lands. Wait for it, then merge \`origin/${base}\` into your branch and run \`pnpm run check\` again.`,
   ].join("\n");
 }

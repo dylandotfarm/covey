@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { DEFAULT_PORT, isFinalMemberState, threadIsBusy } from "@covey/protocol";
 import WebSocket from "ws";
 import { MachineClient, type ClientOptions, type ConnState } from "@covey/client";
@@ -823,24 +823,25 @@ export class Store {
    * the machine next answers. That is what lets an offline machine join a
    * pool now.
    */
-  async createProject(machine: string, url: string, title?: string): Promise<void> {
+  async createProject(machine: string, url: string, title?: string, baseBranch?: string): Promise<void> {
     const name = machineLabel(this.state, machine);
+    const extra = { ...(title ? { title } : {}), ...(baseBranch ? { baseBranch } : {}) };
     if (this.state.machines.get(machine)?.conn !== "connected") {
       if (!this.pending.some((p) => p.machine === machine && p.url === url)) {
-        this.pending.push({ machine, url, ...(title ? { title } : {}) });
+        this.pending.push({ machine, url, ...extra });
         this.persist();
       }
       this.notify(`${name} is not connected; it clones ${url} when it next answers`);
       return;
     }
     this.notify(`clone of ${url} started on ${name}…`);
-    const err = await this.threadCommand({ type: "project.create", url, ...(title ? { title } : {}) }, machine, CLONE_WAIT_MS);
-    if (err === null) this.notify(`project added on ${name}`, "success");
+    const err = await this.threadCommand({ type: "project.create", url, ...extra }, machine, CLONE_WAIT_MS);
+    if (err === null) this.notify(`project added on ${name}${baseBranch ? `, working from ${baseBranch}` : ""}`, "success");
   }
 
   /** Clone a repository on every machine given: the pool of a new project. */
-  async createProjectOn(machines: string[], url: string, title?: string): Promise<void> {
-    await Promise.all(machines.map((mk) => this.createProject(mk, url, title)));
+  async createProjectOn(machines: string[], url: string, title?: string, baseBranch?: string): Promise<void> {
+    await Promise.all(machines.map((mk) => this.createProject(mk, url, title, baseBranch)));
   }
 
   /**
@@ -848,7 +849,7 @@ export class Store {
    * list lives in the config, and nowhere else, so what `pendingFor` reports
    * and what `persist` writes are one thing.
    */
-  private get pending(): { machine: string; url: string; title?: string }[] {
+  private get pending(): { machine: string; url: string; title?: string; baseBranch?: string }[] {
     return this.config.prefs.pendingProjects ??= [];
   }
 
@@ -866,7 +867,7 @@ export class Store {
     const done = new Set<typeof mine[number]>();
     await Promise.all(mine.map(async (p) => {
       try {
-        await client.command({ type: "project.create", url: p.url, ...(p.title ? { title: p.title } : {}) }, CLONE_WAIT_MS);
+        await client.command({ type: "project.create", url: p.url, ...(p.title ? { title: p.title } : {}), ...(p.baseBranch ? { baseBranch: p.baseBranch } : {}) }, CLONE_WAIT_MS);
         this.notify(`${name} cloned ${p.url}`, "success");
         done.add(p);
       } catch (e: any) {
@@ -893,6 +894,17 @@ export class Store {
    */
   async renameProject(pool: { machine: string; projectId: string }[], title: string): Promise<void> {
     await Promise.all(pool.map((x) => this.threadCommand({ type: "project.update", projectId: x.projectId, title }, x.machine)));
+  }
+
+  /**
+   * Change the branch a project works from, on every machine of its pool.
+   * `null` returns it to the remote's default branch. The threads that exist
+   * keep their worktrees; the next thread starts from the new base and the
+   * next pull request targets it.
+   */
+  async setProjectBase(pool: { machine: string; projectId: string }[], baseBranch: string | null): Promise<void> {
+    const errors = await Promise.all(pool.map((x) => this.threadCommand({ type: "project.update", projectId: x.projectId, baseBranch }, x.machine)));
+    if (errors.every((e) => e === null)) this.notify(baseBranch ? `new threads start from ${baseBranch}, and pull requests target it` : "new threads start from the remote's default branch", "success");
   }
 
   /**
@@ -1394,6 +1406,18 @@ export class Store {
 
   private repoCache: { at: number; value: { repos: RepoInfo[]; error: string | null; machine: string | null } } | null = null;
 
+  /**
+   * The branches of a repository, read with `git ls-remote` on `machine`, or
+   * on the first connected machine when none is named. A remote that cannot
+   * be read is an `error` and an empty list, never a throw: the pick that
+   * asked falls back to the default branch.
+   */
+  async listBranches(url: string, machine: string | null = null): Promise<RemoteBranches> {
+    const on = machine ?? this.state.order.find((k) => this.state.machines.get(k)?.conn === "connected") ?? null;
+    if (!on) return { branches: [], defaultBranch: null, error: "no connected machine" };
+    return this.ask(on, "repos.branches", { url }, (error) => ({ branches: [], defaultBranch: null, error }), REPO_LIST_WAIT_MS);
+  }
+
   /** Make a repository on GitHub through `gh` on `machine`; null, with a notice, when it could not. */
   async createRepo(machine: string, o: { name: string; visibility: "private" | "public"; description?: string }): Promise<{ nameWithOwner: string; cloneUrl: string } | null> {
     this.repoCache = null;
@@ -1603,6 +1627,7 @@ export class Store {
         task: m.task,
         machineName: this.machineNameOf(m.machineId),
         branch: snap.thread.branch ?? "",
+        base: this.state.machines.get(key!)?.projects.get(m.projectId)?.baseBranch ?? "",
         resources: m.resources,
         position: run.members.indexOf(m) + 1,
         total: run.members.length,

@@ -67,6 +67,7 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
       <Text wrap="truncate">
         <Counts t={tally} where={` on ${pool.length} machine${pool.length === 1 ? "" : "s"}`} />
         {hidden > 0 && <Text color={T.faint}>  ·  {hidden} archived or moved</Text>}
+        {p.baseBranch && <Text color={T.subtle}>  ·  from {p.baseBranch}</Text>}
         {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel)}</Text>}
       </Text>
       <Box height={1} />
@@ -76,7 +77,7 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
       {threads.length === 0 && <Text color={T.subtle} italic>no threads yet — press n to start one</Text>}
       {threads.length > shown.length && <Text color={T.faint}>  … {threads.length - shown.length} more</Text>}
       <Box flexGrow={1} />
-      <Text color={T.faint} wrap="truncate">enter fold · n new thread · ctrl+k add a machine to this project · D remove project</Text>
+      <Text color={T.faint} wrap="truncate">enter fold · n new thread · b base branch · ctrl+k add a machine to this project · D remove project</Text>
     </>
   );
 }

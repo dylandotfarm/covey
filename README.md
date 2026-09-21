@@ -117,7 +117,8 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `ctrl+c` ×2 | anywhere | quit |
 | `j/k` `enter` | sidebar | move, open thread / fold project / machine control panel |
 | `n` / `N` | sidebar | new thread (asks worktree vs. checkout in a repo) / straight to a worktree from HEAD |
-| `a` | sidebar | add a project by browsing directories on that machine |
+| `a` | sidebar | add a project: pick a repository, the branch it works from, and the machines that clone it |
+| `b` | sidebar | change the branch a project's threads start from and its pull requests target |
 | `m` | sidebar | move thread to another machine |
 | `r` `x` `D` | sidebar | rename, archive, delete |
 | `enter` / `ctrl+j` | composer | send (a turn already running picks it up at its next tool call) / newline |

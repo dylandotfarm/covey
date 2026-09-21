@@ -284,6 +284,9 @@ export interface BriefContext {
   machineName: string;
   /** The branch the daemon made the worktree on. Empty before dispatch. */
   branch: string;
+  /** The branch the member's pull request targets: the project's base
+   *  branch, else `main`. */
+  base?: string;
   resources: MemberResources;
   /** 1-based. */
   position: number;
@@ -315,6 +318,7 @@ export function renderBrief(template: string, c: BriefContext): string {
     url: c.task.url ?? "",
     machine: c.machineName,
     branch: c.branch,
+    base: c.base || "main",
     port: String(c.resources.port),
     home: c.resources.coveyHome,
     config: c.resources.coveyConfig,
@@ -373,12 +377,12 @@ the pull request. Do it before you open the pull request, not after.
 {{#issue}}**Report on the issue as you learn**, with \`gh issue comment {{issue}}\`. The
 issue is the durable record; your thread is not.
 
-**Finish with a pull request against \`main\` that says \`Closes {{issue}}\`.** Do
+**Finish with a pull request against \`{{base}}\` that says \`Closes {{issue}}\`.** Do
 not merge it yourself — one party merges. Before you open it, \`git fetch origin\`
-and merge \`origin/main\` into your branch if main has moved.
-{{/issue}}{{^issue}}**Finish with a pull request against \`main\`** that says what you changed
+and merge \`origin/{{base}}\` into your branch if {{base}} has moved.
+{{/issue}}{{^issue}}**Finish with a pull request against \`{{base}}\`** that says what you changed
 and why. Do not merge it yourself — one party merges. Before you open it,
-\`git fetch origin\` and merge \`origin/main\` into your branch if main has moved.
+\`git fetch origin\` and merge \`origin/{{base}}\` into your branch if {{base}} has moved.
 {{/issue}}`;
 
 // ---------------------------------------------------------------------------
