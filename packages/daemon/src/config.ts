@@ -69,6 +69,8 @@ export interface DaemonConfig {
   sessionIdleMinutes: number | null;
   /** Sessions kept live at one time; null = a limit derived from memory. */
   maxLiveSessions: number | null;
+  /** Whether this daemon serves the web client; null = off. */
+  webEnabled?: boolean | null;
 }
 
 /**
@@ -107,7 +109,7 @@ function readConfigFile(): Record<string, unknown> {
 }
 
 /** Settings written before these fields existed simply read as "no opinion". */
-export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions">>): MachineSettings {
+export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled">>): MachineSettings {
   return {
     defaultModel: cfg.defaultModel ?? null,
     defaultPermissionMode: cfg.defaultPermissionMode ?? null,
@@ -119,6 +121,8 @@ export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" |
     // daemon.json, and the file still wins when it holds a value.
     sessionIdleMinutes: cfg.sessionIdleMinutes ?? envNumber("COVEY_SESSION_IDLE_MINUTES"),
     maxLiveSessions: cfg.maxLiveSessions ?? envNumber("COVEY_MAX_LIVE_SESSIONS"),
+    // `COVEY_WEB=1` seeds a throwaway daemon that has no TUI to turn it on.
+    webEnabled: cfg.webEnabled ?? (process.env.COVEY_WEB === "1" ? true : null),
   };
 }
 

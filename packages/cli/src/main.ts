@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { openSync, mkdirSync } from "node:fs";
 import { DEFAULT_PORT } from "@covey/protocol";
 import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } from "@covey/tui";
-import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive, buildInfo, buildDirs, newestBuildMtime, buildIsNewerThan } from "@covey/daemon";
+import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, webAddresses, withToken, tailscaleSelf, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive, buildInfo, buildDirs, newestBuildMtime, buildIsNewerThan } from "@covey/daemon";
 import { daemonArgs } from "./daemonArgs.js";
 import { childEnv, releaseNodeEnv } from "./nodeEnv.js";
 
@@ -79,9 +79,15 @@ async function main() {
       return;
     }
     case "info": {
-      const c = loadDaemonConfig();
+      // `--port` and `--bind` name the daemon the way `covey daemon` does, so
+      // the hint matches a daemon started with the same flags.
+      const c = loadDaemonConfig({ port: flag("--port") ? portFlag() : process.env.COVEY_PORT ? localPort() : undefined, bind: flag("--bind") });
       console.log(`machine id : ${c.machineId}\nname       : ${c.name}\nport       : ${c.port}\nbind       : ${c.bind}\ntoken      : ${c.token}\ndata dir   : ${dataDir()}`);
       console.log(`\nFrom another machine on your tailnet (auto-authenticated, same tailscale user):\n  covey machines add ws://<this-machine>.<tailnet>.ts.net:${c.port} --name ${c.name}\nOutside tailscale, add --token ${c.token}`);
+      const ts = await tailscaleSelf();
+      const addresses = webAddresses({ port: c.port, bind: c.bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips });
+      const lines = addresses.map((a) => `  ${withToken(a, c.token).padEnd(60)} ${a.kind}${a.reachable ? "" : `  (not with --bind ${c.bind}; use --bind all)`}`);
+      console.log(`\nOn a phone (a tailnet address needs no token; the others carry it one time and the page keeps it):\n${lines.join("\n") || "  no address: tailscale is not running and the machine has no LAN interface"}`);
       return;
     }
     case "restart":

@@ -194,6 +194,12 @@ importers:
         specifier: workspace:*
         version: link:../tui
 
+  packages/client:
+    dependencies:
+      '@covey/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+
   packages/daemon:
     dependencies:
       '@anthropic-ai/claude-agent-sdk':
@@ -202,6 +208,9 @@ importers:
       '@covey/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@covey/web':
+        specifier: workspace:*
+        version: link:../web
       ws:
         specifier: ^8.18.0
         version: 8.21.3
@@ -210,6 +219,9 @@ importers:
 
   packages/tui:
     dependencies:
+      '@covey/client':
+        specifier: workspace:*
+        version: link:../client
       '@covey/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -222,6 +234,15 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.21.3
+
+  packages/web:
+    dependencies:
+      '@covey/client':
+        specifier: workspace:*
+        version: link:../client
+      '@covey/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
 packages:
 

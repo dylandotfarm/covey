@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { isFinalMemberState } from "@covey/protocol";
-import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
+import { isFinalMemberState, threadIsBusy } from "@covey/protocol";
+import WebSocket from "ws";
+import { MachineClient, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
@@ -264,11 +265,7 @@ export interface Selection {
  * independent; leaning on either alone leaves a gap where the screen moves and
  * the clock behind it does not.
  */
-export function threadIsBusy(t: Thread): boolean {
-  if (t.pendingApprovals > 0) return true;
-  if (t.latestTurn?.state === "running") return true;
-  return t.status === "running" || t.status === "starting" || t.status === "waiting";
-}
+export { threadIsBusy };
 
 export function selectionBounds(s: Selection): { from: { line: number; col: number }; to: { line: number; col: number } } {
   const { anchor, head } = s;
@@ -326,7 +323,9 @@ export class Store {
     this.config = loadConfig();
     this.clientSource = opts.source ?? null;
     this.canRelaunch = opts.canRelaunch ?? false;
-    this.clientOpts = opts.client ?? {};
+    // The `ws` package, for its handshake timeout: a host that swallows the
+    // handshake instead of refusing it would otherwise hold a dial for ever.
+    this.clientOpts = { dial: (url) => new WebSocket(url, { handshakeTimeout: 8000 }), ...(opts.client ?? {}) };
     this.state = {
       machines: new Map(), order: [], selected: null, view: null, focus: "sidebar",
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
@@ -950,6 +949,30 @@ export class Store {
   /** Machine-wide defaults for new threads. Persisted by the daemon. */
   async setMachineDefaults(machine: string, patch: Partial<MachineSettings>) {
     await this.threadCommand({ type: "machine.settings", ...patch }, machine);
+  }
+
+  /**
+   * Serve the web client from `machine`, or stop.
+   *
+   * One machine in the fleet serves it. A phone keeps one address, and two
+   * daemons that both answer it would each hold half the reader's threads.
+   * So turning it on here turns it off on every other connected machine
+   * first. A machine the client cannot reach keeps its setting, and the
+   * reader is told which one, so nothing is claimed that was not done.
+   */
+  async setWebServer(machine: string, on: boolean) {
+    const name = (k: string) => this.state.machines.get(k)?.info?.name ?? this.state.machines.get(k)?.saved.name ?? k;
+    if (on) {
+      for (const [k, ms] of this.state.machines) {
+        if (k === machine || !ms.info?.settings?.webEnabled) continue;
+        if (ms.conn !== "connected") { this.notify(`${name(k)} also serves the web client and is not connected; stop it there when it is back`, "error"); continue; }
+        await this.setMachineDefaults(k, { webEnabled: false });
+        this.notify(`${name(k)}: web server stopped`);
+      }
+    }
+    await this.setMachineDefaults(machine, { webEnabled: on });
+    const at = this.state.machines.get(machine)?.info?.webAddresses?.find((a) => a.reachable)?.url;
+    this.notify(on ? `${name(machine)}: web server on${at ? ` at ${at}` : ""}` : `${name(machine)}: web server off`, on ? "success" : "info");
   }
 
   /** What the daemon is running (checkout, branch, commit). Null if unreachable. */

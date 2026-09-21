@@ -4,8 +4,17 @@
   `npm i -g pnpm@12.4.0`, no corepack), TypeScript project
   references. Build everything with `pnpm run build` (`tsc -b`). No bundler, no native deps.
   Node ≥ 22 (uses `node:sqlite`).
-- Packages: `protocol` (types only) → `daemon` and `tui` → `cli`. Change the protocol first,
-  then both sides.
+- Packages: `protocol` (types only) → `client` (the `MachineClient`, node and browser) →
+  `daemon`, `tui` and `web` → `cli`. Change the protocol first, then both sides.
+- `packages/web` is the phone's client, served by the daemon at `/` (`packages/daemon/src/web.ts`)
+  when `settings.webEnabled` is on — the machine control panel sets it, `COVEY_WEB=1` seeds
+  it for a throwaway daemon, and the TUI keeps it to one machine (`store.setWebServer`).
+  No bundler: `tsc -b` writes browser ES modules and the import map in `static/index.html`
+  names `@covey/protocol` and `@covey/client`. Nothing in `client` or `protocol` may import
+  a node module, or the page stops loading. `web/src/state.ts` and `markdown.ts` hold no
+  DOM and node tests them; `render.ts` and `main.ts` are DOM and are checked by `tsc` only,
+  so try a change against a real daemon in a browser. `packages/daemon/test/web.test.ts`
+  fetches every module the page names.
 - `pnpm run setup` (`scripts/setup.mjs`) is the one-machine install: it installs, builds, and
   links `bin/covey` into a directory on the PATH. The launcher follows its own symlink back
   to the checkout, so a linked `covey` always runs that checkout — keep it that way.

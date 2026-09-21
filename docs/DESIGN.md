@@ -75,6 +75,10 @@ renderer-agnostic and an OpenTUI front end could replace `components/`.
   reconnect loop, the shell subscription and at most one thread subscription.
 - **CLI** (`packages/cli`): `covey` opens the TUI and spawns a detached local daemon if the
   health check fails.
+- **Client** (`packages/client`): the one `MachineClient`. It owns the reconnect loop, the
+  shell subscription and at most one thread subscription. It runs in node and in a browser,
+  so the TUI and the web client speak to a daemon through the same code.
+- **Web** (`packages/web`): the phone's client. The daemon serves it; see below.
 
 ## Persistence
 
@@ -236,6 +240,49 @@ asked. On WebSocket upgrade:
 
 `whois` runs through the CLI (with macOS App Store and Homebrew paths tried) so the same code
 works on every OS; results are cached for a minute. Tailscale ACLs remain the outer wall.
+
+## The web client
+
+The TUI is the tool at a desk. On a phone a person wants less: which threads are busy, what
+an agent said, an approval to answer, one new idea to type. `packages/web` is that, and the
+daemon serves it beside `/health`, so a machine that runs covey already runs the page.
+
+- **One machine serves it, and the control panel says which.** `MachineSettings.webEnabled`
+  turns the routes on and off while the daemon runs; a daemon says no with a line that
+  names the panel. A phone keeps one address, so the TUI's `setWebServer` stops the client
+  on every other connected machine before it starts one, and names a machine it could not
+  reach rather than pretend. `COVEY_WEB=1` seeds a daemon that has no TUI to turn it on.
+- **The daemon serves files, and the WebSocket stays the one gate.** `web.ts` maps four URL
+  prefixes to four directories and nothing else: `/` and `/static/*` to the page and its
+  style, `/app/*` to the page's own modules, `/lib/protocol/*` and `/lib/client/*` to the
+  two packages the page imports. The files carry no secret, so anyone the listener can hear
+  may read them. Auth happens when the page dials `ws://` on its own origin, through the
+  policy above: a tailnet phone passes `whois`, a LAN phone carries `?token=` on the page
+  URL one time and the page keeps it in local storage.
+- **The token moves between addresses by a tap, not by itself.** Local storage is per
+  origin, and browsers partition what a cross-site frame can store, so the tailnet page
+  cannot write the token into the LAN address for the reader. Instead `machine.access`
+  hands any accepted connection the token and every address the daemon has
+  (`addresses.ts`, which `covey info` prints too), and the gear on the page lists them as
+  links that carry the token. A tailnet peer may hold the token because `whois` already
+  says it is the owner; a loopback or token client holds it already.
+- **No bundler.** `tsc -b` writes browser ES modules into `packages/web/dist`, and an import
+  map in `index.html` turns `@covey/protocol` and `@covey/client` into URLs. The daemon test
+  for the route fetches every module the page names and checks that each import is either
+  relative or in the map, because a bare specifier the map does not know fails only in a
+  browser.
+- **One fold, no framework.** `state.ts` folds shell and thread events the way the TUI store
+  does — whole items under stable ids — and node tests it. `render.ts` paints with plain DOM:
+  the list is rebuilt per paint, the open thread keeps its skeleton because the composer
+  holds the reader's text and keyboard, and each timeline row is keyed by item id and
+  rebuilt only when the daemon re-sent that item. Events schedule one paint per animation
+  frame, never a paint per event.
+- **A phone sleeps.** The socket drops, the client dials its budget out and goes offline. When
+  the page becomes visible again it retries, and the subscriptions resume from the seq the
+  page holds, so what it missed is replayed rather than refetched.
+- **Not yet:** more than one machine, runs, moving threads, attachments, and push
+  notifications. The last needs a service worker, which needs a secure context, which
+  `http://100.x.y.z` is not; `tailscale serve` can front the daemon with HTTPS later.
 
 ## Moving a thread between machines
 

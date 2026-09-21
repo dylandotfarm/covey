@@ -2,10 +2,12 @@ import { createServer, type IncomingMessage } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { PROTOCOL_VERSION, KNOWN_MODELS, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon } from "@covey/protocol";
 import { Engine, EngineError } from "./engine.js";
-import { isLoopback, isTailnetIp, whois, tailscaleSelf } from "./tailscale.js";
+import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
 import type { DaemonConfig } from "./config.js";
 import { listRepos, createRepo } from "./repos.js";
+import { findWebRoots, serveWeb } from "./web.js";
+import { webAddresses } from "./addresses.js";
 
 const STARTED_AT = new Date().toISOString();
 
@@ -42,6 +44,8 @@ async function authenticate(req: IncomingMessage, cfg: DaemonConfig, selfUserId:
 export async function startServer(o: ServerOptions): Promise<{ close(): void; port: number }> {
   const self = await tailscaleSelf();
   const selfUserId = self?.userId ?? null;
+  // Found once: the package graph does not move while the daemon runs.
+  const webRoots = findWebRoots();
   const http = createServer((req, res) => {
     if (req.url === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -52,6 +56,15 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
       // two limits that govern that number. A process list with more `claude`
       // processes than `sessions.live` holds something this daemon did not start.
       res.end(JSON.stringify({ ok: true, machineId: o.config.machineId, name: o.config.name, pid: process.pid, startedAt: STARTED_AT, sessions: o.engine.sessionCensus() }));
+      return;
+    }
+    // The phone's client: static files only, and the WebSocket above stays the
+    // one gate. See `web.ts` for what is reachable. Read per request, because
+    // the control panel turns it on and off while the daemon runs.
+    if (o.engine.machine.settings.webEnabled) { if (serveWeb(req, res, webRoots)) return; }
+    else if (req.url === "/") {
+      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      res.end(`The web client is off on ${o.config.name}. In the TUI, press enter on this machine and choose "Web server: off" to start it.\n`);
       return;
     }
     res.writeHead(404); res.end();
@@ -68,7 +81,7 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       o.log(`client connected from ${req.socket.remoteAddress} via ${auth.via}`);
-      handleConnection(ws, o);
+      handleConnection(ws, o, self);
     });
   });
 
@@ -79,7 +92,7 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
   return { close: () => { wss.close(); http.close(); }, port: o.config.port };
 }
 
-function handleConnection(ws: WebSocket, o: ServerOptions) {
+function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSelf | null) {
   const { engine } = o;
   const send = (m: WireFromDaemon) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
   const subs = new Map<string, () => void>();
@@ -183,6 +196,10 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
         return engine.usageReport({ since: p.since, until: p.until, groupBy: p.groupBy });
       case "machine.source":
         return sourceInfo();
+      case "machine.access":
+        // Every connection here passed `authenticate`, so it may hold the
+        // token: a tailnet peer is the owner, and the others already have it.
+        return { token: o.config.token, addresses: webAddresses({ port: o.config.port, bind: o.config.bind, tailnetName: tailnet?.dnsName, tailnetIps: tailnet?.ips }) };
       case "machine.update":
         return o.updater.start({ restart: p.restart });
       case "run.issues":

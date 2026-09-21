@@ -1,10 +1,31 @@
-import WebSocket from "ws";
 import {
   PROTOCOL_VERSION, USER_CLIENT, isPush, type RpcMethods, type RpcMethodName, type WireFromDaemon, type PushMessage,
   type MachineInfo, type ShellSnapshot, type ShellEvent, type ThreadEvent, type SavedMachine, type CommandEnvelope, type Command,
   type MachineUpdate,
 } from "@covey/protocol";
-import { randomUUID } from "node:crypto";
+import { uuid } from "./uuid.js";
+
+/**
+ * What the client needs from a socket, and no more. The browser's `WebSocket`
+ * and the `ws` package both satisfy it, so one client runs in the TUI and on
+ * a phone. Events are read through `addEventListener`, which is the one
+ * surface the two share; `on` is node only.
+ */
+export interface SocketLike {
+  readyState: number;
+  send(data: string): void;
+  close(): void;
+  addEventListener(type: "open", listener: () => void): void;
+  addEventListener(type: "message", listener: (ev: { data: unknown }) => void): void;
+  addEventListener(type: "close", listener: () => void): void;
+  addEventListener(type: "error", listener: (ev: { message?: string }) => void): void;
+}
+
+/** Open a socket to `url`. The default is the runtime's own `WebSocket`. */
+export type Dial = (url: string) => SocketLike;
+
+/** `readyState` of a socket that is open. The same number on every runtime. */
+const OPEN = 1;
 
 /**
  * What the socket is doing, as the sidebar reads it.
@@ -52,6 +73,13 @@ export const TRIES = { first: 3, again: 6, restarting: 40 } as const;
 export interface ClientOptions {
   /** Delays between dials, in milliseconds. Only a test moves it. */
   backoff?: readonly number[];
+  /**
+   * How to open a socket. The TUI passes the `ws` package, for its handshake
+   * timeout; a browser and a test leave it out and get the global `WebSocket`.
+   */
+  dial?: Dial;
+  /** The name given at `hello`. `USER_CLIENT` unless the caller is another client. */
+  clientName?: string;
 }
 
 /**
@@ -62,9 +90,9 @@ export interface ClientOptions {
 export class MachineClient {
   info: MachineInfo | null = null;
   state: ConnState = "connecting";
-  private ws: WebSocket | null = null;
+  private ws: SocketLike | null = null;
   private nextId = 1;
-  private waits = new Map<number, { res: (v: any) => void; rej: (e: Error) => void; timer: NodeJS.Timeout }>();
+  private waits = new Map<number, { res: (v: any) => void; rej: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   private attempt = 0;
   private closed = false;
   /** This machine has answered at least once, so its address is not the problem. */
@@ -78,11 +106,15 @@ export class MachineClient {
   private threadSub: { threadId: string; subId: string | null; seq: number } | null = null;
   /** Bumped per watchThread, so a slow snapshot cannot take back the stream. */
   private watchGen = 0;
-  private timer: NodeJS.Timeout | null = null;
+  private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly backoff: readonly number[];
+  private readonly dial: Dial;
+  private readonly clientName: string;
 
   constructor(readonly saved: SavedMachine, private ev: ClientEvents, opts: ClientOptions = {}) {
     this.backoff = opts.backoff ?? BACKOFF;
+    this.dial = opts.dial ?? ((url) => new WebSocket(url));
+    this.clientName = opts.clientName ?? USER_CLIENT;
   }
 
   get key() { return this.saved.url; }
@@ -135,11 +167,11 @@ export class MachineClient {
     const url = new URL(this.saved.url);
     if (this.saved.token) url.searchParams.set("token", this.saved.token);
     this.setState("connecting");
-    const ws = new WebSocket(url.toString(), { handshakeTimeout: 8000 });
+    const ws = this.dial(url.toString());
     this.ws = ws;
-    ws.on("open", async () => {
+    ws.addEventListener("open", async () => {
       try {
-        this.info = await this.rpc("hello", { protocolVersion: PROTOCOL_VERSION, client: USER_CLIENT });
+        this.info = await this.rpc("hello", { protocolVersion: PROTOCOL_VERSION, client: this.clientName });
         // The budget resets here, not when the socket opens: a socket that
         // opens is not a machine that answered. A daemon a protocol version
         // behind opens every socket and refuses every hello, and a budget that
@@ -159,12 +191,11 @@ export class MachineClient {
         ws.close();
       }
     });
-    ws.on("message", (d) => this.onMessage(JSON.parse(d.toString())));
-    ws.on("close", () => { if (ws === this.ws) this.onClose(); });
-    ws.on("error", (e) => { this.setState("error", e.message); });
-    ws.on("unexpected-response", (_req, res) => {
-      this.setState("error", res.statusCode === 401 ? "unauthorized (not a tailnet peer of the owner, or bad token)" : `http ${res.statusCode}`);
-    });
+    ws.addEventListener("message", (m) => this.onMessage(JSON.parse(String(m.data))));
+    ws.addEventListener("close", () => { if (ws === this.ws) this.onClose(); });
+    // A browser's error event says nothing. The `ws` package names the status
+    // the daemon refused with, and 401 is the one a reader can act on.
+    ws.addEventListener("error", (e) => { this.setState("error", refusal(e.message ?? "socket error")); });
   }
 
   private onClose() {
@@ -312,7 +343,7 @@ export class MachineClient {
    */
   rpc<M extends RpcMethodName>(method: M, params: RpcMethods[M]["params"], timeoutMs = 60_000): Promise<RpcMethods[M]["result"]> {
     return new Promise((res, rej) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return rej(new Error("not connected"));
+      if (!this.ws || this.ws.readyState !== OPEN) return rej(new Error("not connected"));
       const id = this.nextId++;
       const timer = setTimeout(() => { if (this.waits.delete(id)) rej(new Error(`${method} timed out`)); }, timeoutMs);
       this.waits.set(id, { res, rej, timer });
@@ -321,9 +352,16 @@ export class MachineClient {
   }
 
   command(cmd: Command, timeoutMs?: number) {
-    const env: CommandEnvelope = { ...cmd, commandId: randomUUID() } as CommandEnvelope;
+    const env: CommandEnvelope = { ...cmd, commandId: uuid() } as CommandEnvelope;
     return this.rpc("command", env, timeoutMs);
   }
+}
+
+/** The words for a handshake the daemon refused, where the socket says the status. */
+function refusal(message: string): string {
+  const m = /Unexpected server response: (\d+)/.exec(message);
+  if (!m) return message;
+  return m[1] === "401" ? "unauthorized (not a tailnet peer of the owner, or bad token)" : `http ${m[1]}`;
 }
 
 /**
