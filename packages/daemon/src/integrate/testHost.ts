@@ -26,6 +26,8 @@ export interface FakeHostOptions {
   canCreate?: boolean;
   /** What a poll throws, when a test wants `gh` to fail. */
   fail?: Error | null;
+  /** What a merge throws, when a test wants GitHub to refuse one. */
+  mergeFail?: Error | null;
 }
 
 export interface FakeHost extends GhHost {
@@ -75,6 +77,7 @@ export function fakeHost(options: FakeHostOptions = {}): FakeHost {
   };
   if (options.canMerge) {
     host.mergePullRequest = async (number, method) => {
+      if (options.mergeFail) throw options.mergeFail;
       merges.push({ number, method });
     };
   }
@@ -117,6 +120,7 @@ export function pr(over: Partial<PullRequestFacts> & { number: number }): PullRe
     isDraft: over.isDraft ?? false,
     mergeable: over.mergeable ?? "MERGEABLE",
     mergeStateStatus: over.mergeStateStatus ?? "CLEAN",
+    reviewDecision: over.reviewDecision ?? "",
     additions: over.additions ?? 10,
     deletions: over.deletions ?? 1,
     files: over.files ?? ["a.ts"],

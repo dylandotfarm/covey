@@ -107,4 +107,6 @@
   the thread as a turn (`integrate/news.ts` decides what is news; `Engine.pollWatches` polls).
   Read the checks from the check runs, never from `mergeStateStatus`, and give every watch an
   end — `watch.test.ts` and `news.test.ts` hold the rules. An engine test passes
-  `EngineOptions.ghHost` so no test reaches GitHub.
+  `EngineOptions.ghHost` so no test reaches GitHub. A watch's merge policy is `manual` unless
+  the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
+  ready, and never under a running turn.

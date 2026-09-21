@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  news, emptyCursor, asksForWork, endsWatch, describeNews, pollDelayMs, checksVerdict,
+  news, emptyCursor, asksForWork, endsWatch, describeNews, pollDelayMs, checksVerdict, mergeReadiness,
   NO_CHECKS_GRACE_MS, POLL_MIN_MS, POLL_MAX_MS,
 } from "./news.js";
 import { pr } from "./testHost.js";
@@ -18,7 +18,7 @@ const later = (ms: number) => new Date(Date.parse(T0) + ms).toISOString();
 const FAILED = [{ name: "test", workflowName: "ci", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://ci/run/1" }];
 const GREEN = [{ name: "test", workflowName: "ci", status: "COMPLETED", conclusion: "SUCCESS" }];
 const PENDING = [{ name: "test", workflowName: "ci", status: "IN_PROGRESS" }];
-const CTX = { branch: "covey/abc", rounds: 1, maxRounds: 3 };
+const CTX = { branch: "covey/abc", rounds: 1, maxRounds: 3, merge: "manual" as const };
 
 test("a failed check fires, however the merge state reads", () => {
   // GitHub answers BLOCKED while the checks run and after they fail. The hand
@@ -147,4 +147,48 @@ test("the verdict reads the check runs: a failure beats a pass, a pending check 
   assert.equal(checksVerdict([]).ci, "absent");
   const skipped = [{ name: "close", status: "COMPLETED", conclusion: "SKIPPED" }];
   assert.equal(checksVerdict(skipped).ci, "absent", "a skipped check proves nothing");
+});
+
+// ---- the merge policy ----------------------------------------------------------
+
+const STARTED = [{ name: "test", workflowName: "ci", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-09-21T09:30:00Z" }];
+
+test("under manual, a pass waits for a person; under auto, the text says covey merges next", () => {
+  const facts = pr({ number: 7, checks: STARTED });
+  const manual = news(facts, [], emptyCursor(), T0);
+  assert.match(describeNews(facts, manual.events, CTX), /merge policy is manual: a person merges/);
+  const auto = news(facts, [], emptyCursor(), T0, { merge: "auto", base: { oid: "b", committedAt: "2026-09-21T09:00:00Z" } });
+  assert.equal(auto.events[0]!.kind === "checks" && auto.events[0]!.ci, "passing");
+  assert.match(describeNews(facts, auto.events, { ...CTX, merge: "auto" }), /Covey merges the pull request on its next poll/);
+});
+
+test("under auto, a pass against an older base is stale, and asks the agent to update the branch", () => {
+  const facts = pr({ number: 7, checks: STARTED, headRefOid: "abc1234def" });
+  const moved = { oid: "newer", committedAt: "2026-09-21T09:45:00Z" };
+  const auto = news(facts, [], emptyCursor(), T0, { merge: "auto", base: moved });
+  assert.equal(auto.events[0]!.kind === "checks" && auto.events[0]!.ci, "stale");
+  assert.equal(asksForWork(auto.events[0]!), true, "the agent has to merge the base in and push");
+  assert.match(describeNews(facts, auto.events, { ...CTX, merge: "auto" }), /passed on abc1234, but against an older main.*Merge main into covey\/abc and push/);
+  assert.deepEqual(news(facts, [], auto.cursor, later(60_000), { merge: "auto", base: moved }).events, [], "delivered once");
+  // The same facts under manual are a plain pass: staleness is the person's question there.
+  const manual = news(facts, [], emptyCursor(), T0, { merge: "manual", base: moved });
+  assert.equal(manual.events[0]!.kind === "checks" && manual.events[0]!.ci, "passing");
+});
+
+test("the daemon merges only what is green against the current base, mergeable, and not asked to change", () => {
+  const base = { oid: "b", committedAt: "2026-09-21T09:00:00Z" };
+  assert.deepEqual(mergeReadiness(pr({ number: 7, checks: STARTED }), base), { ready: true });
+  const why = (over: Parameters<typeof pr>[0], b = base) => { const r = mergeReadiness(pr(over), b); return r.ready ? "ready" : r.why; };
+  assert.match(why({ number: 7, checks: STARTED, isDraft: true }), /draft/);
+  assert.match(why({ number: 7, checks: STARTED, reviewDecision: "CHANGES_REQUESTED" }), /review asks for changes/);
+  assert.match(why({ number: 7, checks: STARTED, reviewDecision: "REVIEW_REQUIRED" }), /requires a review/);
+  assert.match(why({ number: 7, checks: STARTED, mergeable: "CONFLICTING" }), /conflicts/);
+  assert.match(why({ number: 7, checks: STARTED, mergeable: "UNKNOWN" }), /not said yet/);
+  assert.match(why({ number: 7, checks: PENDING }), /has not finished/);
+  assert.match(why({ number: 7, checks: FAILED }), /failed/);
+  assert.match(why({ number: 7, checks: [] }), /no checks/);
+  assert.match(why({ number: 7, checks: STARTED }, { oid: "n", committedAt: "2026-09-21T09:45:00Z" }), /started before/);
+  assert.match(why({ number: 7, checks: STARTED, mergeStateStatus: "BEHIND" }), /BEHIND/);
+  assert.match(why({ number: 7, checks: STARTED, state: "MERGED" }), /is merged/);
+  assert.equal(asksForWork({ kind: "mergeFailed", error: "x" }), false, "a refused merge is a person's question, not a round");
 });

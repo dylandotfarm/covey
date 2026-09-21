@@ -15,14 +15,14 @@ import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
-import type { Attachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { realGhHost, type GhHost, type RealHostOptions } from "./integrate/gh.js";
 import { gateMember } from "./integrate/gate.js";
 import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
-import { news, emptyCursor, describeNews, asksForWork, endsWatch, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS } from "./integrate/news.js";
+import { news, emptyCursor, describeNews, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -370,7 +370,18 @@ export class Engine {
         const facts = await host.pullRequestByNumber(cmd.number);
         if (!facts) throw new EngineError("not_found", `pull request #${cmd.number} was not found; gh may be logged out, or the number is wrong`);
         t.pullRequest = { number: facts.number, url: facts.url, branch: facts.headRefName, base: facts.baseRefName, openedAt: now };
-        this.startWatch(t, facts.number, cmd.maxRounds);
+        this.startWatch(t, facts.number, { maxRounds: cmd.maxRounds, merge: cmd.merge, mergeMethod: cmd.mergeMethod });
+        return this.putThreadAndEmit(t);
+      }
+      case "thread.setMerge": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        if (!t.watch || t.watch.state !== "watching") throw new EngineError("no_watch", "this thread has no pull request under watch");
+        if (cmd.merge !== "auto" && cmd.merge !== "manual") throw new EngineError("bad_policy", `${cmd.merge} is not a merge policy; use auto or manual`);
+        t.watch = { ...t.watch, merge: cmd.merge, mergeMethod: mergeMethodOf(cmd.mergeMethod, t.watch.mergeMethod) };
+        this.note(t.id, "info", cmd.merge === "auto"
+          ? `Merge policy set to auto: covey merges pull request #${t.watch.number} (${t.watch.mergeMethod}) once the checks pass against the current base and no review asks for changes.`
+          : `Merge policy set to manual: a person merges pull request #${t.watch.number}.`);
         return this.putThreadAndEmit(t);
       }
       case "thread.archive": {
@@ -762,7 +773,7 @@ export class Engine {
    * The daemon does it because the daemon has the branch, the `gh` login and
    * the `PATH`; the agent only has to ask.
    */
-  async openPullRequest(params: { threadId: string; title: string; body?: string; draft?: boolean; maxRounds?: number }): Promise<{ number: number; url: string }> {
+  async openPullRequest(params: { threadId: string; title: string; body?: string; draft?: boolean; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }): Promise<{ number: number; url: string }> {
     const t = this.db.getThread(params.threadId);
     if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
     if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
@@ -789,20 +800,27 @@ export class Engine {
     // Read the row again: the create took a while, and the thread may have moved on.
     const fresh = this.db.getThread(t.id) ?? t;
     fresh.pullRequest = { number: opened.number, url: opened.url, branch: t.branch, base, openedAt: new Date().toISOString() };
-    this.startWatch(fresh, opened.number, params.maxRounds);
+    this.startWatch(fresh, opened.number, { maxRounds: params.maxRounds, merge: params.merge, mergeMethod: params.mergeMethod });
     this.putThreadAndEmit(fresh);
     return opened;
   }
 
   /** Begin, or begin again, the watch on a pull request. A note says so. */
-  private startWatch(t: Thread, number: number, maxRounds?: number): void {
+  private startWatch(t: Thread, number: number, o: { maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }): void {
     const now = new Date(this.now()).toISOString();
-    const rounds = maxRounds !== undefined && Number.isFinite(maxRounds) ? Math.max(1, Math.floor(maxRounds)) : DEFAULT_MAX_ROUNDS;
+    const rounds = o.maxRounds !== undefined && Number.isFinite(o.maxRounds) ? Math.max(1, Math.floor(o.maxRounds)) : DEFAULT_MAX_ROUNDS;
+    // Manual unless said otherwise: green is not an acceptance, and a merge
+    // is the one act in the loop that a person cannot take back.
+    const merge: MergePolicy = o.merge === "auto" ? "auto" : "manual";
+    const mergeMethod = mergeMethodOf(o.mergeMethod, "merge");
     t.watch = {
-      number, state: "watching", reason: null, rounds: 0, maxRounds: rounds, quiet: 0,
+      number, state: "watching", reason: null, merge, mergeMethod, rounds: 0, maxRounds: rounds, quiet: 0,
       cursor: emptyCursor(), startedAt: now, polledAt: null, endedAt: null, error: null,
     };
-    this.note(t.id, "info", `Watching pull request #${number}${t.pullRequest?.url ? ` (${t.pullRequest.url})` : ""}. Each checks verdict, review, comment and merge arrives here as a turn. The watch sends at most ${rounds} turn${rounds === 1 ? "" : "s"} that ask for more work, then hands the thread to a person.`);
+    const who = merge === "auto"
+      ? `Merge policy: auto. Covey merges (${mergeMethod}) once the checks pass against the current base and no review asks for changes, never under a running turn.`
+      : "Merge policy: manual. A person merges, or switches this thread to auto.";
+    this.note(t.id, "info", `Watching pull request #${number}${t.pullRequest?.url ? ` (${t.pullRequest.url})` : ""}. Each checks verdict, review, comment and merge arrives here as a turn. ${who} The watch sends at most ${rounds} turn${rounds === 1 ? "" : "s"} that ask for more work, then hands the thread to a person.`);
   }
 
   /** End a watch, with the reason in the row and in the transcript. The caller stores the row. */
@@ -869,11 +887,38 @@ export class Engine {
       const fresh = this.db.getThread(t.id);
       const live = fresh?.watch;
       if (!fresh || !live || live.state !== "watching" || live.number !== w.number) return;
-      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso);
+      // The base head is read only under `auto`, where staleness stands
+      // between the thread and its merge. Under `manual` it is the person's
+      // question, and one `gh` call fewer per poll.
+      const base = live.merge === "auto" && facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
+      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base });
       live.cursor = cursor;
       live.polledAt = nowIso;
       live.error = null;
       live.quiet = events.length ? 0 : live.quiet + 1;
+
+      // The merge, under `auto`. Nothing in this batch may ask for work, the
+      // pull request must be ready by every fact GitHub reports, and the
+      // thread must be idle: #45 established that a merge under a running
+      // turn hides the commits it is about to push. One try per head, so a
+      // refusal is not a loop.
+      if (live.merge === "auto" && facts.state === "OPEN" && !events.some(asksForWork) && cursor.mergeTried !== facts.headRefOid) {
+        const ready = mergeReadiness(facts, base);
+        const running = fresh.latestTurn?.state === "running" || fresh.status === "running" || fresh.status === "starting";
+        if (ready.ready && !running) {
+          const merger = this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot, allowMerge: true });
+          try {
+            await merger.mergePullRequest!(live.number, live.mergeMethod);
+            events.push({ kind: "merged", by: "covey", method: live.mergeMethod } satisfies WatchEvent);
+            this.opts.log?.(`watch merged thread=${fresh.id.slice(0, 8)} pr=#${live.number} method=${live.mergeMethod}`);
+          } catch (e: any) {
+            live.cursor = { ...live.cursor, mergeTried: facts.headRefOid };
+            events.push({ kind: "mergeFailed", error: String(e?.stderr ?? e?.message ?? e).trim().split("\n")[0] ?? "gh failed" } satisfies WatchEvent);
+          }
+        } else if (ready.ready && running) {
+          this.opts.log?.(`watch holds the merge thread=${fresh.id.slice(0, 8)} pr=#${live.number}: a turn is running`);
+        }
+      }
       if (events.length === 0) { this.db.putThread(fresh); return; }
 
       const work = events.some(asksForWork);
@@ -881,15 +926,15 @@ export class Engine {
       if (work && live.rounds >= live.maxRounds) {
         // The budget is spent. The news goes in the transcript for the
         // reader, and the thread stops here rather than working for ever.
-        const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds });
+        const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge });
         this.note(fresh.id, "warning", text);
         this.endWatch(fresh, "blocked", `The watch sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work, and the pull request still needs work. A person has to look at it.`);
         this.putThreadAndEmit(fresh);
         return;
       }
       if (work) live.rounds++;
-      const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds });
-      if (end) this.endWatch(fresh, end.kind, end.kind === "merged" ? "The pull request was merged." : "The pull request was closed without a merge.");
+      const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge });
+      if (end) this.endWatch(fresh, end.kind, end.kind === "closed" ? "The pull request was closed without a merge." : end.by === "covey" ? `Covey merged the pull request (${end.method}) under the auto policy.` : "The pull request was merged.");
       this.putThreadAndEmit(fresh);
       this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
       // A turn, not a note: a note is read by a person, and a turn resumes a
@@ -1776,6 +1821,11 @@ function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): R
 }
 
 export type { PermissionMode };
+
+/** A merge method a client named, or the fallback. Nonsense is the fallback. */
+function mergeMethodOf(v: unknown, fallback: MergeMethod): MergeMethod {
+  return v === "merge" || v === "squash" || v === "rebase" ? v : fallback;
+}
 
 /** Two menus are the same when they hold the same commands in the same order. */
 function sameCommands(a: SlashCommandInfo[], b: SlashCommandInfo[]): boolean {

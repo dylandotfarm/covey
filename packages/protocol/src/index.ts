@@ -445,11 +445,24 @@ export type WatchState = "watching" | "merged" | "closed" | "blocked" | "dropped
  * has heard, the counts say how much budget is left, and the times drive the
  * back-off. The daemon that holds the branch polls; nothing else does.
  */
+/**
+ * Who merges when the pull request is ready.
+ *  - `manual` — a person merges, on GitHub or through the run panel, and the
+ *    watch reports it. The default: green is not an acceptance.
+ *  - `auto` — the daemon merges once the checks pass against the current
+ *    base head, the branch is mergeable, and no review asks for changes.
+ *    Never under a running turn. For "fix this, then merge when you're done".
+ */
+export type MergePolicy = "manual" | "auto";
+export type MergeMethod = "merge" | "squash" | "rebase";
+
 export interface PullRequestWatch {
   number: number;
   state: WatchState;
   /** Why the watch ended, in one sentence. Null while it runs. */
   reason: string | null;
+  merge: MergePolicy;
+  mergeMethod: MergeMethod;
   /**
    * Turns this watch sent that asked for more work: a failing check, a merge
    * conflict, or a review that asked for changes. A turn that only reports
@@ -474,10 +487,14 @@ export interface PullRequestWatch {
 export interface WatchCursor {
   /** The head commit the watch last saw, and when it first saw it. */
   head: { sha: string; seenAt: string } | null;
-  /** The checks verdict last delivered, and the head it was for. */
-  checks: { head: string; ci: "passing" | "failing" | "absent" } | null;
+  /** The checks verdict last delivered, and the head it was for. `stale` is
+   *  only read under the `auto` policy, where it stands between the thread
+   *  and its merge. */
+  checks: { head: string; ci: "passing" | "failing" | "absent" | "stale" } | null;
   /** The head a merge conflict was last reported for. */
   conflict: string | null;
+  /** The head the daemon last tried, and failed, to merge. One try per head. */
+  mergeTried: string | null;
   /** Review ids already delivered. */
   reviews: string[];
   /** Comment ids already delivered, conversation and line comments alike. */
@@ -1226,7 +1243,13 @@ export type Command =
    * stop the watch with `null`. `thread.openPullRequest` starts a watch on its
    * own; this is for a pull request opened by hand.
    */
-  | { type: "thread.watch"; threadId: ThreadId; number: number | null; maxRounds?: number }
+  | { type: "thread.watch"; threadId: ThreadId; number: number | null; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }
+  /**
+   * Change who merges, on a thread whose watch runs. A person who has looked
+   * at the change and wants it landed switches the thread to `auto`; the
+   * daemon merges on the next poll that finds it ready.
+   */
+  | { type: "thread.setMerge"; threadId: ThreadId; merge: MergePolicy; mergeMethod?: MergeMethod }
   | { type: "thread.archive"; threadId: ThreadId; archived: boolean }
   | { type: "thread.pin"; threadId: ThreadId; pinned: boolean }
   | { type: "thread.delete"; threadId: ThreadId }
@@ -1481,7 +1504,13 @@ export interface RpcMethods {
    * work before it ends in `blocked`.
    */
   "thread.openPullRequest": {
-    params: { threadId: ThreadId; title: string; body?: string; draft?: boolean; maxRounds?: number };
+    params: {
+      threadId: ThreadId; title: string; body?: string; draft?: boolean; maxRounds?: number;
+      /** Who merges. Omitted = `manual`. */
+      merge?: MergePolicy;
+      /** How the daemon merges under `auto`. Omitted = `merge`. */
+      mergeMethod?: MergeMethod;
+    };
     result: { number: number; url: string };
   };
   /**

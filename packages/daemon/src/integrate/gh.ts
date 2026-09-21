@@ -53,6 +53,8 @@ export interface PullRequestFacts {
   isDraft: boolean;
   mergeable: MemberDiff["mergeable"];
   mergeStateStatus: string;
+  /** `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty when no rule asks for a review. */
+  reviewDecision: string;
   additions: number;
   deletions: number;
   files: string[];
@@ -201,7 +203,7 @@ async function gh(cwd: string, args: string[]): Promise<string> {
 
 const PR_FIELDS = [
   "number", "url", "author", "headRefName", "baseRefName", "headRefOid", "state", "isDraft",
-  "mergeable", "mergeStateStatus", "additions", "deletions", "files", "statusCheckRollup",
+  "mergeable", "mergeStateStatus", "reviewDecision", "additions", "deletions", "files", "statusCheckRollup",
   "reviews", "comments",
 ].join(",");
 
@@ -221,6 +223,7 @@ export function parsePullRequest(j: any): PullRequestFacts {
     isDraft: !!j.isDraft,
     mergeable: j.mergeable ?? "UNKNOWN",
     mergeStateStatus: j.mergeStateStatus ?? "UNKNOWN",
+    reviewDecision: String(j.reviewDecision ?? ""),
     additions: j.additions ?? 0,
     deletions: j.deletions ?? 0,
     files: (j.files ?? []).map((f: { path: string }) => f.path),

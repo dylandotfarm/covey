@@ -437,9 +437,20 @@ thread and moves the member to `blocked` with that reason, which is the run's ow
 thread drops it, as does `thread.watch` with `null`. The two hand-rolled loops still asking
 GitHub every fifteen seconds an hour after their timeout are the reason.
 
-**Who accepts the work.** Green is not the gate (#45), so a passing check ends nothing: the
-watch goes on until a person or the run's merge party merges the pull request. The merge is
-the acceptance.
+**Who accepts the work.** The watch carries a merge policy, `PullRequestWatch.merge`, set at
+`thread.openPullRequest` or `thread.watch` and changed with `thread.setMerge` (`M` on the
+thread row, or the palette). The default is `manual`: green is not the gate (#45), so a
+passing check ends nothing, and the watch goes on until a person or the run's merge party
+merges the pull request. That is the flow for "post screenshots, and I will look". `auto` is
+for "fix this, then merge when you're done": the daemon merges on the first poll that finds
+the pull request ready. Ready is `mergeReadiness` in `news.ts`, and every refusal is a fact
+GitHub reported: open, not a draft, `MERGEABLE`, no review that asks for changes, no review
+the repository still requires, and the checks green against the current base head by the
+same `summariseChecks` the gate reads. Under `auto` a green check against an older base is a
+`stale` event, which asks the agent to merge the base in and push, and costs a round. The
+merge never runs under a running turn: the poll reads the thread row and waits for the next
+poll. GitHub refusing the merge is reported to the thread once per head and the watch goes
+on; a person decides, or a push starts the loop again.
 
 ## Browsing the sidebar
 

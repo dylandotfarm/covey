@@ -837,6 +837,9 @@ export function App({ store }: { store: Store }) {
       opts.push({ id: "revert", label: "Revert to before a turn… (files + conversation)" });
       if (t.queuedTurns > 0) opts.push({ id: "clearqueue", label: `Cancel ${t.queuedTurns} queued message${t.queuedTurns === 1 ? "" : "s"}` });
       opts.push({ id: "archive", label: t.archivedAt ? "Unarchive thread" : "Archive thread", hint: "x" });
+      // Who merges the thread's pull request. Offered only while a watch runs:
+      // there is nothing to merge before one, and nothing left after.
+      if (t.watch?.state === "watching") opts.push({ id: "merge", label: t.watch.merge === "auto" ? `Merge policy: auto — covey merges #${t.watch.number} when it is green` : `Merge policy: manual — a person merges #${t.watch.number}`, hint: "M" });
       opts.push({ id: "stop", label: "Stop session process" });
     }
     opts.push({ id: "new", label: "New thread — in its own worktree", hint: "n" });
@@ -868,6 +871,7 @@ export function App({ store }: { store: Store }) {
         case "clearqueue": { for (const it of [...(state.view?.items.values() ?? [])]) if (it.kind === "user" && it.queued) void store.cancelQueued(it.turnId!); return; }
         case "quiet": return;
         case "archive": return void store.threadCommand({ type: "thread.archive", threadId: t!.id, archived: !t!.archivedAt });
+        case "merge": return void store.threadCommand({ type: "thread.setMerge", threadId: t!.id, merge: t!.watch?.merge === "auto" ? "manual" : "auto" });
         case "stop": return void store.threadCommand({ type: "session.stop", threadId: t!.id });
         case "new": return void newThread();
         case "addproject": return addProject();
@@ -1502,6 +1506,9 @@ export function App({ store }: { store: Store }) {
     // every one of them.
     if (input === "r" && row.kind === "project") return openInput("Rename project", (v) => { store.setOverlay(null); if (v.trim()) void store.renameProject(row.pool ?? [], v.trim()); }, row.project!.title);
     if (input === "x" && row.kind === "thread") return void store.threadCommand({ type: "thread.archive", threadId: row.thread!.id, archived: !row.thread!.archivedAt }, row.machine);
+    // Flip who merges the thread's pull request. A person who has looked at
+    // the change and wants it landed presses this once.
+    if (input === "M" && row.kind === "thread" && row.thread!.watch?.state === "watching") return void store.threadCommand({ type: "thread.setMerge", threadId: row.thread!.id, merge: row.thread!.watch!.merge === "auto" ? "manual" : "auto" }, row.machine);
     if (input === "D" && row.kind === "thread") return openPick(`Delete "${row.thread!.title}"?`, [{ id: "no", label: "Cancel" }, { id: "yes", label: "Delete thread and its transcript" }], (id) => { store.setOverlay(null); if (id === "yes") void store.threadCommand({ type: "thread.delete", threadId: row.thread!.id }, row.machine); });
     if (input === "D" && row.kind === "project") {
       // From one machine of the pool, or from all of them. The clone stays on

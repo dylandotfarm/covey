@@ -200,6 +200,8 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
           body: p.body === undefined ? undefined : String(p.body),
           draft: !!p.draft,
           maxRounds: typeof p.maxRounds === "number" ? p.maxRounds : undefined,
+          merge: p.merge === "auto" ? "auto" : p.merge === "manual" ? "manual" : undefined,
+          mergeMethod: p.mergeMethod,
         });
       case "run.gate":
         return engine.runGate(String(p.threadId), String(p.label ?? ""), p.state, p.evidence ?? null);

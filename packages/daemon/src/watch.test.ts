@@ -41,8 +41,14 @@ function thread(id: string): Thread {
   };
 }
 
-/** A CLI that answers every message with "ok", so a turn the watch sends completes. */
-const autoReply: QueryFactory = ({ prompt, options }) => {
+/**
+ * A CLI that answers every message with "ok", so a turn the watch sends
+ * completes. While `held`, it answers nothing, so a turn stays running.
+ */
+interface Cli { held: boolean; release(): void }
+
+function autoReply(cli: Cli): QueryFactory {
+  return ({ prompt, options }) => {
   const out: unknown[] = [];
   let wake: (() => void) | null = null;
   let done = false;
@@ -50,6 +56,7 @@ const autoReply: QueryFactory = ({ prompt, options }) => {
   options.abortController?.signal.addEventListener("abort", () => { done = true; wake?.(); });
   void (async () => {
     for await (const _ of prompt as AsyncIterable<SDKUserMessage>) {
+      while (cli.held) await new Promise<void>((r) => { const prior = cli.release; cli.release = () => { prior(); r(); }; });
       push({ type: "assistant", parent_tool_use_id: null, message: { id: `msg-${randomUUID()}`, model: "opus", content: [{ type: "text", text: "ok" }] } });
       push({ type: "result", subtype: "success", is_error: false, result: "ok", modelUsage: {}, user_message_uuid: null });
     }
@@ -68,7 +75,8 @@ const autoReply: QueryFactory = ({ prompt, options }) => {
     setModel: async () => {},
     backgroundTasks: async () => true,
   } as unknown as Query;
-};
+  };
+}
 
 /** Let the engine's queued microtasks and the session's pump run. */
 const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0)); };
@@ -81,17 +89,22 @@ function setup() {
     defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   } as Project);
   let clock = Date.parse("2026-09-21T10:00:00Z");
+  const cli: Cli = { held: false, release: () => {} };
   const host = fakeHost({
     canCreate: true,
+    canMerge: true,
     prs: {},
     issues: { 94: { number: 94, title: "Let a thread take an issue", url: "https://github.com/o/r/issues/94", state: "OPEN" } },
   });
-  const make = (database: Db) => new Engine(database, { ...MACHINE }, { now: () => clock, spawn: autoReply, ghHost: () => host });
+  const make = (database: Db) => new Engine(database, { ...MACHINE }, { now: () => clock, spawn: autoReply(cli), ghHost: () => host });
   const engines: Engine[] = [];
   let engine = make(db);
   engines.push(engine);
   const s = {
     db, dir, host,
+    /** Keep the next turns running until `release`. */
+    hold() { cli.held = true; },
+    async release() { cli.held = false; cli.release(); cli.release = () => {}; await settle(); },
     get engine() { return engine; },
     /** Move the clock on, in milliseconds. */
     advance: (ms: number) => { clock += ms; },
@@ -394,4 +407,101 @@ test("a restart resumes the watch from its cursor: nothing is sent twice, and th
   await s.poll();
   assert.equal(s.turns("t1").length, 2);
   assert.match(s.turns("t1")[1]!, /The checks passed on 1111111/);
+});
+
+// ---- who merges --------------------------------------------------------------------
+
+const BASE = { oid: "base1", committedAt: "2026-09-21T09:00:00Z" };
+const GREEN_ON_BASE = [{ name: "test", workflowName: "ci", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-09-21T09:30:00Z" }];
+
+test("the policy is manual unless said otherwise: a green pull request waits for a person, and a person can hand it to covey", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  assert.equal(s.thread("t1").watch?.merge, "manual");
+  s.host.options.base = BASE;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = GREEN_ON_BASE;
+  await s.poll();
+  assert.match(s.turns("t1")[0]!, /merge policy is manual: a person merges/);
+  assert.deepEqual(s.host.merges, [], "nothing merged on a green check alone");
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.state, "watching");
+
+  // The person looked, and wants it landed.
+  await s.command({ type: "thread.setMerge", threadId: "t1", merge: "auto", mergeMethod: "squash" });
+  assert.match(s.notes("t1").at(-1)!, /Merge policy set to auto/);
+  await s.poll();
+  assert.deepEqual(s.host.merges, [{ number: 101, method: "squash" }]);
+  assert.equal(s.thread("t1").watch?.state, "merged");
+  assert.match(s.thread("t1").watch!.reason!, /Covey merged the pull request \(squash\)/);
+  assert.match(s.turns("t1").at(-1)!, /Covey merged the pull request \(squash\)/);
+  await assert.rejects(
+    () => s.command({ type: "thread.setMerge", threadId: "t1", merge: "manual" }),
+    (e: unknown) => e instanceof EngineError && e.code === "no_watch",
+  );
+});
+
+test("under auto, covey merges when the checks pass, but never under a running turn", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1", { merge: "auto" });
+  assert.match(s.notes("t1").at(-1)!, /Merge policy: auto/);
+  s.host.options.base = BASE;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  // The agent is at work when the checks go green.
+  s.hold();
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "still working" });
+  await settle();
+  assert.equal(s.thread("t1").latestTurn?.state, "running");
+  facts.checks = GREEN_ON_BASE;
+  await s.poll();
+  assert.deepEqual(s.host.merges, [], "a merge under a running turn hides the commits it is about to push");
+  assert.match(s.turns("t1").at(-1)!, /The checks passed/, "the pass still reaches the thread");
+  await s.release();
+  assert.equal(s.thread("t1").latestTurn?.state, "completed");
+  await s.poll();
+  assert.deepEqual(s.host.merges, [{ number: 101, method: "merge" }]);
+  assert.equal(s.thread("t1").watch?.state, "merged");
+  assert.match(s.turns("t1").at(-1)!, /Covey merged the pull request \(merge\)/);
+});
+
+test("under auto, a pass against an older base is a round for the agent, not a merge", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1", { merge: "auto" });
+  s.host.options.base = { oid: "moved", committedAt: "2026-09-21T09:45:00Z" };
+  s.host.options.prs!["covey/t1"]!.checks = GREEN_ON_BASE;
+  await s.poll();
+  assert.deepEqual(s.host.merges, []);
+  assert.match(s.turns("t1")[0]!, /but against an older main/);
+  assert.equal(s.thread("t1").watch?.rounds, 1);
+});
+
+test("under auto, a review that asks for changes holds the merge, and a refusal from GitHub is reported once per head", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1", { merge: "auto" });
+  s.host.options.base = BASE;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = GREEN_ON_BASE;
+  facts.reviewDecision = "CHANGES_REQUESTED";
+  facts.reviews = [{ id: "r1", author: "dylan", state: "CHANGES_REQUESTED", body: "not yet", submittedAt: "2026-09-21T10:00:00Z", url: null }];
+  await s.poll();
+  assert.deepEqual(s.host.merges, []);
+  assert.match(s.turns("t1")[0]!, /changes requested/);
+
+  // The reviewer relented, and the repository refuses the merge for a reason of its own.
+  facts.reviewDecision = "APPROVED";
+  s.host.options.mergeFail = new Error("GraphQL: 2 of 2 required status checks are expected.");
+  await s.poll();
+  assert.match(s.turns("t1")[1]!, /GitHub refused: GraphQL: 2 of 2 required status checks are expected/);
+  assert.equal(s.thread("t1").watch?.cursor.mergeTried, "deadbeef");
+  await s.poll();
+  assert.equal(s.turns("t1").length, 2, "one try per head");
+  assert.equal(s.thread("t1").watch?.state, "watching", "a refused merge is a person's question; the watch goes on");
 });
