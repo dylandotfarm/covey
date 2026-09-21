@@ -6,7 +6,7 @@ import type {
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin,
 } from "@covey/protocol";
-import { USER_CLIENT } from "@covey/protocol";
+import { isUserClient } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
@@ -264,6 +264,7 @@ export class Engine {
           ...(cmd.defaultStreaming !== undefined ? { defaultStreaming: cmd.defaultStreaming } : {}),
           ...(cmd.sessionIdleMinutes !== undefined ? { sessionIdleMinutes: clampSetting(cmd.sessionIdleMinutes, 0) } : {}),
           ...(cmd.maxLiveSessions !== undefined ? { maxLiveSessions: clampSetting(cmd.maxLiveSessions, 1) } : {}),
+          ...(cmd.webEnabled !== undefined ? { webEnabled: cmd.webEnabled === true ? true : null } : {}),
         });
         // A lower limit applies to the sessions already live, not only to the
         // next one: the user asked for less memory now.
@@ -1803,7 +1804,7 @@ export function threadOrigin(explicit: ThreadOrigin | undefined, client: string,
   if (!client && !parent) return undefined;
   // A connection that named a parent thread is a program by that fact alone:
   // the one client a person types into never names one.
-  return { by: client === USER_CLIENT ? "user" : "agent", ...(client ? { client } : {}), ...from };
+  return { by: isUserClient(client) ? "user" : "agent", ...(client ? { client } : {}), ...from };
 }
 
 /** Whether covey still owns this thread's title. Threads from before

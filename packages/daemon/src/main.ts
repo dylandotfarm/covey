@@ -10,6 +10,7 @@ import { tailscaleSelf } from "./tailscale.js";
 import { Updater } from "./update.js";
 import { clearPidFile, writePidFile } from "./pidfile.js";
 import { machineResources } from "./resources.js";
+import { webAddresses } from "./addresses.js";
 import { sourceRoot } from "./update.js";
 import { linkSkill, describeSkillLink } from "./skill.js";
 import { homedir } from "node:os";
@@ -53,6 +54,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
     settings: machineSettings(config),
     projectsDir: projectsDir(),
+    webAddresses: webAddresses({ port: config.port, bind: config.bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips }),
   };
   const db = new Db(join(dataDir()));
   const engine = new Engine(db, machine, { log });

@@ -1,9 +1,23 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/protocol" },
-    { "path": "packages/daemon" },
-    { "path": "packages/tui" },
-    { "path": "packages/cli" }
+    {
+      "path": "packages/protocol"
+    },
+    {
+      "path": "packages/client"
+    },
+    {
+      "path": "packages/web"
+    },
+    {
+      "path": "packages/daemon"
+    },
+    {
+      "path": "packages/tui"
+    },
+    {
+      "path": "packages/cli"
+    }
   ]
 }

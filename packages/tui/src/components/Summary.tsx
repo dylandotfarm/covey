@@ -141,7 +141,8 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
   const tally = tallyThreads(liveThreads(m));
   const settings = info?.settings;
   const skew = buildSkew(state.clientBuild, info?.build);
-  const room = Math.max(1, height - (m.update ? 9 : 8) - (m.error ? 1 : 0) - (skew === "same" || skew === "unknown" ? 0 : 1));
+  const room = Math.max(1, height - (m.update ? 10 : 9) - (m.error ? 1 : 0) - (skew === "same" || skew === "unknown" ? 0 : 1));
+  const webAt = info?.webAddresses?.find((a) => a.reachable)?.url;
   const shown = projects.slice(0, room);
   const meta = info
     ? [`${info.os}/${info.arch}`, `daemon ${info.daemonVersion}`, info.claudeCodeVersion ? `claude ${info.claudeCodeVersion}` : "", info.tailnetName ?? ""].filter(Boolean).join("  ·  ")
@@ -176,6 +177,11 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
       <Text color={T.subtle} wrap="truncate">
         new threads here: {settings?.defaultModel ? modelLabel(settings.defaultModel) : "model from Claude settings"}  ·  {permissionModeLabel(settings?.defaultPermissionMode)}
       </Text>
+      <Text wrap="truncate">
+        <Text color={T.subtle}>web server: </Text>
+        <Text color={settings?.webEnabled ? T.success : T.subtle}>{settings?.webEnabled ? "on" : "off"}</Text>
+        {settings?.webEnabled && <Text color={T.subtle}>  ·  {webAt ?? "no address the daemon listens on"}</Text>}
+      </Text>
       {m.update && (
         <Text wrap="truncate">
           <Text color={T.subtle}>last update: </Text>
@@ -190,7 +196,7 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
       <Box flexGrow={1} />
       <Text color={T.faint} wrap="truncate">{m.conn === "offline"
         ? "nobody is dialling this machine any more · enter tries again"
-        : "enter control panel — update, restart, default model and mode · a add project"}</Text>
+        : "enter control panel — update, restart, web server, default model and mode · a add project"}</Text>
     </>
   );
 }

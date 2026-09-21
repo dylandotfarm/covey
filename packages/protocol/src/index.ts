@@ -58,6 +58,12 @@ export interface MachineInfo {
    * Absent on a daemon built before projects were clones.
    */
   projectsDir?: string;
+  /**
+   * Where a phone can open the web client this daemon serves, without the
+   * token. Read when the daemon starts. Absent on a daemon built before the
+   * web client existed; empty on a machine with no tailnet and no LAN.
+   */
+  webAddresses?: WebAddress[];
 }
 
 /**
@@ -114,6 +120,12 @@ export interface MachineSettings {
    * busy. Absent or `null` means a limit derived from the machine's memory.
    */
   maxLiveSessions?: number | null;
+  /**
+   * Whether this daemon serves the web client for a phone. Absent or `null`
+   * means off. One machine in a fleet serves it; the TUI keeps it to one, and
+   * the machine's control panel turns it on and off.
+   */
+  webEnabled?: boolean | null;
 }
 
 export interface MachineCapabilities {
@@ -197,6 +209,33 @@ export function concurrencyLimit(cpuCount: number, totalMemoryBytes: number): nu
 // ---------------------------------------------------------------------------
 
 /** Where the daemon's own code came from, so the TUI can say what it would pull. */
+/**
+ * One address a phone can open the web client at. `kind` says which network
+ * carries it, and so whether the token is needed: a tailnet peer is
+ * authenticated by `whois`, and every other address needs the token.
+ */
+export interface WebAddress {
+  kind: "tailnet" | "lan" | "mdns";
+  /** `http://host:port/`, with no token in it. */
+  url: string;
+  /** Whether the daemon listens on this address as it is bound now. */
+  reachable: boolean;
+}
+
+/**
+ * What a connected client needs to reach this daemon from another address.
+ *
+ * The browser keeps the token per address, so a page that connected over the
+ * tailnet holds nothing the same page at the LAN address can read. The daemon
+ * hands the token to any connection it has already accepted — a tailnet peer
+ * is the owner, and a loopback or token client holds it already — and the
+ * page turns it into a link per address that carries the token one time.
+ */
+export interface MachineAccess {
+  token: string;
+  addresses: WebAddress[];
+}
+
 export interface MachineSource {
   /** Git checkout the daemon is running out of; null when installed some other way. */
   root: string | null;
@@ -315,6 +354,18 @@ export type SessionStatus =
 export const USER_CLIENT = "covey-tui";
 
 /**
+ * The `client` name the web client gives at `hello`. A person types into it
+ * too, from a phone, so a thread it creates is the person's — see `isUserClient`.
+ */
+export const WEB_CLIENT = "covey-web";
+
+/** True when a person types into this client, so the threads it creates are
+ *  the person's and not a program's. Self-declared, like the name itself. */
+export function isUserClient(client: string | undefined): boolean {
+  return client === USER_CLIENT || client === WEB_CLIENT;
+}
+
+/**
  * Who asked for a thread.
  *
  * `client` is self-declared: a connection states its name at `hello` and the
@@ -407,6 +458,18 @@ export interface Thread {
   watch?: PullRequestWatch | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * True while the thread owes the reader something or is at work: a turn in
+ * flight, a session that starts, or an approval or a question on screen. The
+ * sidebar dot, the spinner and the phone's list all read this one function,
+ * so no two of them can disagree about a thread.
+ */
+export function threadIsBusy(t: Thread): boolean {
+  if (t.pendingApprovals > 0) return true;
+  if (t.latestTurn?.state === "running") return true;
+  return t.status === "running" || t.status === "starting" || t.status === "waiting";
 }
 
 /** The issue a thread took. The number is the link; the rest is for the reader. */
@@ -1210,6 +1273,8 @@ export type Command =
       sessionIdleMinutes?: number | null;
       /** How many sessions stay live at one time on this machine. */
       maxLiveSessions?: number | null;
+      /** Serve the web client from this machine, or stop. */
+      webEnabled?: boolean | null;
     }
   | {
       type: "thread.create";
@@ -1452,6 +1517,8 @@ export interface RpcMethods {
   "usage.report": { params: UsageQuery; result: UsageReport };
   /** What the daemon is running: checkout, branch, commit. Read on demand. */
   "machine.source": { params: Record<string, never>; result: MachineSource };
+  /** The token and the addresses of this daemon, for a client that has one address and wants the others. */
+  "machine.access": { params: Record<string, never>; result: MachineAccess };
   /**
    * Pull, reinstall if the lockfile moved, rebuild, and (unless `restart` is
    * false) restart the daemon. Returns as soon as the run starts; progress
