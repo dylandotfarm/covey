@@ -17,7 +17,7 @@ import React from "react";
 import { render } from "ink";
 import type { Project, Thread, TimelineItem } from "@covey/protocol";
 import { App, DRAG_SCROLL_MS } from "./components/App.js";
-import { Store, selectionBounds, type DirEntry, type MachineState } from "./store.js";
+import { Store, selectionBounds, type PickOption, type MachineState } from "./store.js";
 
 const item = (n: number): TimelineItem => ({
   id: `i${n}`, threadId: "t", turnId: null, seq: n, createdAt: "2026-01-01T00:00:00Z",
@@ -166,26 +166,25 @@ test("a wheel notch over the sidebar scrolls the conversation, like any other no
   } finally { inside.unmount(); }
 });
 
-const entries = (n: number): DirEntry[] =>
-  Array.from({ length: n }, (_, i) => ({ name: `dir${String(i + 1).padStart(2, "0")}`, isRepo: false } as DirEntry));
+const options = (n: number): PickOption[] =>
+  Array.from({ length: n }, (_, i) => ({ id: `opt${String(i + 1).padStart(2, "0")}`, label: `option ${i + 1}` }));
 
-test("a wheel notch over a folder browser moves that list and leaves the conversation alone", async () => {
-  const { store, stdin, unmount } = await mount({
-    overlay: { kind: "browse", machine: "m", path: "/w", entries: entries(30), onPick: () => {} },
-  } as Partial<Store["state"]>);
+test("a wheel notch over a pick list moves that list and leaves the conversation alone", async () => {
   // Which row the cursor is on is React state. What it *means* is the row
-  // enter opens, so ask that rather than reading the paint: ink strips the
+  // enter picks, so ask that rather than reading the paint: ink strips the
   // colours when stdout is a pipe, which is what a test runner gives it.
-  const opened: string[] = [];
-  (store as any).browse = async (_m: string, path: string) => { opened.push(path); };
+  const picked: string[] = [];
+  const { store, stdin, unmount } = await mount({
+    overlay: { kind: "pick", title: "pick", options: options(30), onPick: (id: string) => { picked.push(id); } },
+  } as Partial<Store["state"]>);
   try {
     stdin.write(notch(65, 60).repeat(3)); // three down notches over the list
     await tick(150);
     assert.equal(store.getState().scrollFromBottom, 0, "the conversation behind the overlay did not move");
     stdin.write("\r");
     await tick(150);
-    // The rows are `..`, then the directories. Three down from `..` is dir03.
-    assert.deepEqual(opened, ["/w/dir03"], "the notch moved the list by three rows");
+    // Three down from the first option is the fourth.
+    assert.deepEqual(picked, ["opt04"], "the notch moved the list by three rows");
   } finally { unmount(); }
 });
 
@@ -196,7 +195,7 @@ test("a wheel notch over a folder browser moves that list and leaves the convers
 test("an overlay lets no click or drag through to the transcript", async () => {
   const { store, stdin, written, unmount } = await mount({
     scrollFromBottom: 5,
-    overlay: { kind: "browse", machine: "m", path: "/w", entries: entries(30), onPick: () => {} },
+    overlay: { kind: "pick", title: "pick", options: options(30), onPick: () => {} },
   } as Partial<Store["state"]>);
   try {
     stdin.write(press(50, 6));
@@ -210,7 +209,7 @@ test("an overlay lets no click or drag through to the transcript", async () => {
     assert.equal(store.getState().selection, null, "and the release leaves none behind");
     assert.equal(written.join("").includes(`${ESC}]52;c;`), false, "nothing reached the clipboard");
     assert.equal(store.getState().scrollFromBottom, 5, "and the conversation did not move");
-    assert.equal(store.getState().overlay?.kind, "browse", "the overlay is still up");
+    assert.equal(store.getState().overlay?.kind, "pick", "the overlay is still up");
   } finally { unmount(); }
 });
 

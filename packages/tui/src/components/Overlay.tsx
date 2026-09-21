@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { runMemberStateLabel, runState, tallyRun, type MachineUpdate, type Run, type RunMemberState, type UpdateStep } from "@covey/protocol";
-import { browseRows, sumUsage, usageRows, fmtTokens, fmtCost, USAGE_WINDOWS, type Overlay } from "../store.js";
+import { sumUsage, usageRows, fmtTokens, fmtCost, USAGE_WINDOWS, type Overlay } from "../store.js";
 import { PLACEMENT_RULE } from "../run.js";
 import { T } from "../theme.js";
 import { truncate, SPINNER } from "../lines.js";
@@ -43,6 +43,7 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
     case "palette": {
       const options = overlay.kind === "pick" ? overlay.options : [];
       const toggle = overlay.kind === "pick" ? overlay.toggle : undefined;
+      const many = overlay.kind === "pick" ? overlay.many : undefined;
       const filtered = filterOptions(options, filter);
       const start = Math.max(0, Math.min(cursor - Math.floor(maxRows / 2), filtered.length - maxRows));
       return frame(overlay.kind === "pick" ? overlay.title : "Commands", (
@@ -52,13 +53,14 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
             const sel = start + i === cursor;
             // One column of gutter before the hint, or a label that fills the
             // row runs straight into it.
-            const avail = w - 6 - (o.hint ? o.hint.length + 1 : 0);
-            return <Text key={o.id} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>{" "}{truncate(o.label, avail).padEnd(avail)}<Text color={T.subtle}>{o.hint ? " " + o.hint : ""}</Text></Text>;
+            const mark = many ? (many.marked.has(o.id) ? "[x] " : "[ ] ") : "";
+            const avail = w - 6 - mark.length - (o.hint ? o.hint.length + 1 : 0);
+            return <Text key={o.id} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>{" "}<Text color={many?.marked.has(o.id) ? T.accent : T.subtle}>{mark}</Text>{truncate(o.label, avail).padEnd(avail)}<Text color={T.subtle}>{o.hint ? " " + o.hint : ""}</Text></Text>;
           })}
           {filtered.length === 0 && <Text color={T.subtle} italic> no matches</Text>}
           {toggle && <Text color={checked ? T.accent : T.subtle}> {checked ? "[x]" : "[ ]"} {truncate(toggle, w - 10)}</Text>}
         </Box>
-      ), toggle ? "↑↓ move · tab check · enter select · esc cancel" : "↑↓ move · enter select · esc cancel");
+      ), many ? "↑↓ move · space mark · enter done · esc cancel" : toggle ? "↑↓ move · tab check · enter select · esc cancel" : "↑↓ move · enter select · esc cancel");
     }
     case "update": {
       if (!update) return frame("Update", <Box marginY={1}><Text color={T.subtle}>starting…</Text></Box>, "esc close");
@@ -79,30 +81,6 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
           {update.error && <Text color={T.danger}>{truncate(update.error, w - 4)}</Text>}
         </Box>
       ), update.state === "running" || update.state === "restarting" ? "esc close — the update keeps running" : "esc close");
-    }
-    case "browse": {
-      // Same list the key handler walks — one builder, so the highlighted row
-      // and the row enter acts on can never be different things.
-      const rows = browseRows(overlay.entries, filter);
-      const start = Math.max(0, Math.min(cursor - Math.floor(maxRows / 2), rows.length - maxRows));
-      return frame(`Add project on ${machineName ?? "machine"}`, (
-        <Box flexDirection="column">
-          <Text color={T.subtle}>{truncate(overlay.path, w - 4)}</Text>
-          <Text color={T.subtle}>› {filter}<Text inverse> </Text></Text>
-          {overlay.loading ? <Text color={T.subtle}>loading…</Text> : rows.slice(start, start + maxRows).map((r, i) => {
-            const sel = start + i === cursor;
-            const [icon, label] = r.kind === "up" ? ["  ", ".."]
-              : r.kind === "new" ? ["+ ", r.name ? `New folder "${r.name}"` : "New folder…"]
-              : [r.isRepo ? "⎇ " : "  ", r.name];
-            const tint = r.kind === "dir" && r.isRepo ? T.success : r.kind === "new" ? T.accent : T.subtle;
-            return (
-              <Text key={r.kind + ":" + label} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>
-                {" "}<Text color={tint}>{icon}</Text>{truncate(label, w - 9)}
-              </Text>
-            );
-          })}
-        </Box>
-      ), "enter open dir · space select this dir · ctrl+n new folder · esc cancel");
     }
     case "usage":
       return frame("Usage — estimated", <UsageBody overlay={overlay} width={w} maxRows={maxRows} />,
@@ -309,12 +287,12 @@ const HELP: [string, string][] = [
   ["ctrl+c", "quit (press twice)"],
   ["sidebar", ""],
   ["  ↑/↓ j/k", "move — what you land on is shown on the right"],
-  ["  enter", "open thread / fold project or archive / machine panel"],
+  ["  enter", "open thread / fold project, archive or the machines / machine panel"],
   ["  →/←", "unfurl / furl — ← on a nested thread goes to the one above it"],
   ["", "  ◇ marks a thread a program started, not you"],
   ["", "  a furled group still shows a child that failed or is waiting"],
-  ["  n", "new thread, in its own worktree from the remote's default branch"],
-  ["  a", "add project — clone a repository onto this machine"],
+  ["  n", "new thread, in its own worktree — asks which machine when the pool has several"],
+  ["  a", "add project — clone a repository on the machines you pick"],
   ["  m", "move thread to another machine"],
   ["  r", "rename thread"],
   ["  x", "archive / unarchive thread (sending a message unarchives)"],

@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, threadGroupKey, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
@@ -223,8 +223,16 @@ export function App({ store }: { store: Store }) {
   // The key has to name a row that exists. When the row it named has gone,
   // `cursorIndex` has already fallen back to the nearest surviving one; write
   // that row's key back, or the cursor is an index again until the next move.
+  //
+  // Not into the machines section while no project has arrived: at start the
+  // tree is that section alone until the first snapshot lands, and a cursor
+  // written there would sit below the projects once they came. An empty key
+  // falls to row 0, which is the first project as soon as there is one.
   useEffect(() => {
-    if (rows.length > 0 && !rows.some((r) => r.key === cursorKey)) setCursorKey(rows[cursor]!.key);
+    if (rows.length > 0 && !rows.some((r) => r.key === cursorKey)) {
+      if (cursorKey === "" && !rows.some((r) => r.kind === "project" || r.kind === "empty")) return;
+      setCursorKey(rows[cursor]!.key);
+    }
   }, [rows, cursorKey, cursor]);
   // Reset the answer buffer when a different request comes up, so a stale
   // half-typed answer never carries into the next question.
@@ -247,6 +255,8 @@ export function App({ store }: { store: Store }) {
   useEffect(() => { if (mentionDirPath !== null) void store.loadDir(mentionDirPath); }, [mentionDirPath, threadKey, store]);
 
   const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string, onCancel?: () => void) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle, onCancel }); };
+  /** A pick of many: space marks, enter hands over the marked ids. */
+  const openPickMany = (title: string, options: PickOption[], marked: string[], onMany: (ids: string[]) => void) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick: () => {}, many: { marked: new Set(marked), onMany } }); };
   const openInput = (title: string, onSubmit: (v: string) => void, initial = "", placeholder?: string, onCancel?: () => void) => { setOvFilter(initial); store.setOverlay({ kind: "input", title, onSubmit, initial, placeholder, onCancel }); };
 
   // ---- actions ----------------------------------------------------------------
@@ -264,7 +274,9 @@ export function App({ store }: { store: Store }) {
   });
   /** Put the cursor on a row the mouse found, by index. */
   const pointCursor = (index: number) => { const r = rows[index]; if (r) setCursorKey(r.key); };
-  const contextMachine = state.selected?.machine ?? currentRow?.machine ?? state.order[0];
+  // `||`, not `??`: the machines header names no machine, and its empty
+  // string must fall through to the first machine.
+  const contextMachine = state.selected?.machine || currentRow?.machine || state.order[0];
   const contextProject = state.view?.thread?.projectId ?? currentRow?.projectId;
 
   /**
@@ -293,7 +305,7 @@ export function App({ store }: { store: Store }) {
    * project or a machine. The archived folder is a container, not a place, so
    * it keeps showing whatever conversation is open.
    */
-  const summaryRow = sidebarVisible && state.focus === "sidebar" && currentRow && (currentRow.kind === "project" || currentRow.kind === "machine" || currentRow.kind === "empty") ? currentRow : null;
+  const summaryRow = sidebarVisible && state.focus === "sidebar" && currentRow && (currentRow.kind === "project" || currentRow.kind === "machine" || currentRow.kind === "machines" || currentRow.kind === "empty") ? currentRow : null;
 
   /**
    * That page is sized in items but the pane is measured in lines, so a thread
@@ -307,40 +319,73 @@ export function App({ store }: { store: Store }) {
   const shortOfScreen = transcriptOnScreen && !!state.view && !state.view.loading && !state.view.loadingOlder && state.view.hasMore && layout.lines.length < transcriptH;
   useEffect(() => { if (shortOfScreen) void store.loadOlder(previewPage(transcriptH)); }, [shortOfScreen, transcriptH, store]);
 
-  const addProject = (machine = contextMachine) => {
-    if (!machine) return;
-    const connected = state.order.filter((k) => state.machines.get(k)?.conn === "connected");
-    const start = (mk: string) => {
-      const dir = state.machines.get(mk)?.info?.projectsDir;
-      openInput(`Repository to clone${dir ? ` into ${dir}` : ""}`, (v) => { store.setOverlay(null); if (v.trim()) void store.createProject(mk, v.trim()); }, "", "git@github.com:org/repo.git or https://…");
-    };
-    if (connected.length > 1 && !currentRow) openPick("Add project on which machine?", connected.map((k) => ({ id: k, label: state.machines.get(k)!.info!.name })), start);
-    else start(machine);
-  };
+  /** A row per saved machine for a pool pick: name, state, and where the clone goes. */
+  const machineOptions = (except: string[] = []): PickOption[] => state.order.filter((k) => !except.includes(k)).map((k) => {
+    const m = state.machines.get(k)!;
+    const hint = m.conn === "connected" ? (m.info?.projectsDir ?? m.info?.os ?? "") : m.conn === "offline" ? "offline · clones when it answers" : m.conn;
+    return { id: k, label: m.info?.name ?? m.saved.name, hint };
+  });
 
   /**
-   * Make a folder in the directory being browsed, for a project that has no
-   * directory yet. `store.mkdir` reopens the browser inside the new folder, so
-   * the filter that named it has to go — it would hide everything there.
+   * New project: the repository, then the machines that hold it. Every
+   * machine is offered, connected or not — an offline one is asked when it
+   * next answers — and the connected ones start marked, because a pool is
+   * usually the whole fleet.
    */
-  const makeFolder = (ov: Extract<Overlay, { kind: "browse" }>, name: string) => {
-    setOvCursor(0); setOvFilter("");
-    void store.mkdir(ov.machine, ov.path, name, ov.onPick);
+  const addProject = () => {
+    if (state.order.length === 0) { store.notify("add a machine first", "error"); return; }
+    openInput("Repository to clone", (v) => {
+      const url = v.trim();
+      if (!url) { store.setOverlay(null); return; }
+      const connected = state.order.filter((k) => state.machines.get(k)?.conn === "connected");
+      openPickMany(`Clone ${url} on which machines?`, machineOptions(), connected, (ids) => {
+        store.setOverlay(null);
+        if (ids.length === 0) { store.notify("no machine picked; nothing cloned", "error"); return; }
+        void store.createProjectOn(ids, url);
+      });
+    }, "", "git@github.com:org/repo.git or https://…");
   };
 
-  /** Ask for a folder name; esc goes back to the directory it was asked from. */
-  const askFolderName = (ov: Extract<Overlay, { kind: "browse" }>, initial: string) => {
-    const back = () => { setOvCursor(0); setOvFilter(""); void store.browse(ov.machine, ov.path, ov.onPick); };
-    openInput(`New folder in ${ov.path}`, (v) => (v ? makeFolder(ov, v) : back()), initial, "name", back);
+  /** Add a machine to a project's pool: clone the repository there. */
+  const addToPool = (machine = contextMachine, projectId = contextProject) => {
+    const g = machine && projectId ? groupOfProject(state, machine, projectId) : null;
+    const url = g?.members.map((x) => x.project.remoteUrl).find(Boolean);
+    if (!g || !url) { store.notify("select a project that was cloned from a URL", "error"); return; }
+    const inPool = g.members.map((x) => x.machine);
+    const options = machineOptions(inPool);
+    if (options.length === 0) { store.notify("every machine already has this project"); return; }
+    openPickMany(`Add ${g.title} to which machines?`, options, [], (ids) => {
+      store.setOverlay(null);
+      if (ids.length) void store.createProjectOn(ids, url, g.title);
+    });
   };
 
   const project = (machine?: string, projectId?: string) =>
     machine && projectId ? state.machines.get(machine)?.projects.get(projectId) : undefined;
 
-  /** New thread: its own worktree, branched from the remote's default branch. */
+  /**
+   * New thread: its own worktree, branched from the remote's default branch,
+   * on a machine of the project's pool. One connected machine needs no
+   * question; more than one asks, with the machine that has the most room
+   * first, which is the rule a run places by.
+   */
   const newThread = async (machine = contextMachine, projectId = contextProject) => {
     if (!machine || !projectId) { store.notify("select a project first", "error"); return; }
-    await store.createThread(machine, projectId);
+    const g = groupOfProject(state, machine, projectId);
+    const ready = (g?.members ?? []).filter((x) => state.machines.get(x.machine)?.conn === "connected");
+    if (ready.length === 0) { store.notify("no connected machine has this project", "error"); return; }
+    if (ready.length === 1) { await store.createThread(ready[0]!.machine, ready[0]!.projectId); return; }
+    const room = new Map(store.placementMachines(g!.members[0]!.project.repositoryIdentity).map((m) => [m.key, m.concurrency - runningTurns(m.key)]));
+    const sorted = [...ready].sort((a, b) => (room.get(b.machine) ?? 0) - (room.get(a.machine) ?? 0));
+    openPick("New thread on which machine?", sorted.map((x) => {
+      const m = state.machines.get(x.machine)!;
+      const free = room.get(x.machine);
+      return { id: x.machine, label: m.info?.name ?? m.saved.name, hint: free === undefined ? "" : `${Math.max(0, free)} free · ${m.info?.os ?? ""}` };
+    }), (mk) => {
+      store.setOverlay(null);
+      const x = ready.find((y) => y.machine === mk)!;
+      void store.createThread(x.machine, x.projectId);
+    });
   };
 
   const moveThread = () => {
@@ -700,7 +745,8 @@ export function App({ store }: { store: Store }) {
       opts.push({ id: "stop", label: "Stop session process" });
     }
     opts.push({ id: "new", label: "New thread — in its own worktree", hint: "n" });
-    opts.push({ id: "addproject", label: "Add project — clone a repository", hint: "a" });
+    opts.push({ id: "addproject", label: "Add project — clone a repository on the machines you pick", hint: "a" });
+    if (contextProject) opts.push({ id: "pooladd", label: "Add a machine to this project — clone it there too" });
     opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults", hint: "enter on a machine" });
@@ -730,6 +776,7 @@ export function App({ store }: { store: Store }) {
         case "stop": return void store.threadCommand({ type: "session.stop", threadId: t!.id });
         case "new": return void newThread();
         case "addproject": return addProject();
+        case "pooladd": return addToPool();
         case "run": return startRun();
         case "usage": return void store.loadUsage(0, "thread");
         case "machine": return machinePanel();
@@ -761,7 +808,8 @@ export function App({ store }: { store: Store }) {
         store.setFocus("composer");
         return;
       }
-      case "project": return store.toggleExpanded(`${row.machine}:${row.projectId}`);
+      case "project": return store.toggleExpanded(row.groupKey!);
+      case "machines": return store.toggleExpanded(MACHINES_KEY, false);
       case "run": {
         setOvCursor(0);
         return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
@@ -775,9 +823,9 @@ export function App({ store }: { store: Store }) {
         setOvCursor(row.run!.members.indexOf(m));
         return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
       }
-      case "archived": return store.toggleExpanded(archiveKey(row.machine, row.projectId!), false);
+      case "archived": return store.toggleExpanded(archiveKey(row.groupKey!), false);
       case "machine": return machinePanel(row.machine);
-      case "empty": return addProject(row.machine);
+      case "empty": return addProject();
     }
   };
 
@@ -979,9 +1027,7 @@ export function App({ store }: { store: Store }) {
   function scrollOverlay(ev: MouseEvent) {
     const ov = state.overlay;
     if (!ov) return;
-    const rows = ov.kind === "pick" ? filterOptions(ov.options, ovFilter).length
-      : ov.kind === "browse" ? browseRows(ov.entries, ovFilter).length
-      : 0;
+    const rows = ov.kind === "pick" ? filterOptions(ov.options, ovFilter).length : 0;
     if (rows === 0) return;
     const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
     if (delta === 0) return;
@@ -1249,23 +1295,21 @@ export function App({ store }: { store: Store }) {
       return;
     }
     const list = ov.kind === "pick" ? filterOptions(ov.options, ovFilter) : [];
-    const dirs = ov.kind === "browse" ? browseRows(ov.entries, ovFilter) : [];
-    const len = ov.kind === "browse" ? dirs.length : list.length;
+    const len = list.length;
     if (key.upArrow) return setOvCursor((c) => Math.max(0, c - 1));
     if (key.downArrow) return setOvCursor((c) => Math.min(len - 1, c + 1));
     if (key.tab && ov.kind === "pick" && ov.toggle) return setOvToggle((t) => !t);
-    if (ov.kind === "browse") {
-      if (input === " ") { ov.onPick(ov.path); return; }
-      if (key.ctrl && input === "n") { askFolderName(ov, isFolderName(ovFilter.trim()) ? ovFilter.trim() : ""); return; }
-      if (key.return) {
-        const row = dirs[ovCursor];
-        if (!row) return;
-        if (row.kind === "new") { if (row.name) makeFolder(ov, row.name); else askFolderName(ov, ""); return; }
-        const next = row.kind === "up" ? parentPath(ov.path) : joinPath(ov.path, row.name);
-        setOvCursor(0); setOvFilter("");
-        void store.browse(ov.machine, next, ov.onPick);
+    if (ov.kind === "pick" && ov.many) {
+      // Space marks the row under the cursor; enter hands over every mark.
+      if (input === " ") {
+        const o = list[ovCursor] as PickOption | undefined;
+        if (!o) return;
+        const marked = new Set(ov.many.marked);
+        if (marked.has(o.id)) marked.delete(o.id); else marked.add(o.id);
+        store.setOverlay({ ...ov, many: { ...ov.many, marked } });
         return;
       }
+      if (key.return) { setOvFilter(""); ov.many.onMany([...ov.many.marked]); return; }
     } else if (key.return) {
       const o = list[ovCursor] as PickOption | undefined;
       if (o && ov.kind === "pick") { setOvFilter(""); ov.onPick(o.id, ovToggle); }
@@ -1306,7 +1350,8 @@ export function App({ store }: { store: Store }) {
     if (input === "h" || key.leftArrow) {
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
-      if (row.archived) { const k = archiveKey(row.machine, row.projectId!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
+      if (row.archived) { const k = archiveKey(row.groupKey!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
+      if (row.kind === "machine") { if (store.isExpanded(MACHINES_KEY, false)) store.toggleExpanded(MACHINES_KEY, false); return; }
       // A member row carries its run too, so the kinds are told apart here: a
       // member's parent is the run it is in, and a run's is the thread that
       // asked for it. One ← that walked a member all the way out to the thread
@@ -1349,17 +1394,33 @@ export function App({ store }: { store: Store }) {
         const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine && r.thread!.id === parent) : -1;
         if (at >= 0) { setCursorKey(rows[at]!.key); return; }
       }
-      if (row.projectId) { const k = `${row.machine}:${row.projectId}`; if (store.isExpanded(k)) store.toggleExpanded(k); }
+      if (row.groupKey) { if (store.isExpanded(row.groupKey)) store.toggleExpanded(row.groupKey); }
       return;
     }
     if (input === "n") { if (row.projectId) void newThread(row.machine, row.projectId); return; }
-    if (input === "a") return addProject(row.machine);
+    if (input === "a") return addProject();
     if (input === "d" && state.view) return void store.toggleDiff();
     if (input === "m" && row.kind === "thread") return moveThread();
     if (input === "r" && row.kind === "thread") return openInput("Rename thread", (v) => { store.setOverlay(null); void store.threadCommand({ type: "thread.rename", threadId: row.thread!.id, title: v }, row.machine); }, row.thread!.title);
     if (input === "x" && row.kind === "thread") return void store.threadCommand({ type: "thread.archive", threadId: row.thread!.id, archived: !row.thread!.archivedAt }, row.machine);
     if (input === "D" && row.kind === "thread") return openPick(`Delete "${row.thread!.title}"?`, [{ id: "no", label: "Cancel" }, { id: "yes", label: "Delete thread and its transcript" }], (id) => { store.setOverlay(null); if (id === "yes") void store.threadCommand({ type: "thread.delete", threadId: row.thread!.id }, row.machine); });
-    if (input === "D" && row.kind === "project") return openPick(`Remove project "${row.project!.title}"?`, [{ id: "no", label: "Cancel" }, { id: "yes", label: "Remove project and all its threads" }], (id) => { store.setOverlay(null); if (id === "yes") void store.threadCommand({ type: "project.delete", projectId: row.projectId! }, row.machine); });
+    if (input === "D" && row.kind === "project") {
+      // From one machine of the pool, or from all of them. The clone stays on
+      // disk either way; the rows and the threads go.
+      const pool = row.pool ?? [];
+      const name = (k: string) => state.machines.get(k)?.info?.name ?? state.machines.get(k)?.saved.name ?? k;
+      const opts: PickOption[] = [
+        { id: "no", label: "Cancel" },
+        ...(pool.length > 1 ? [{ id: "all", label: `Remove from every machine (${pool.length}) and delete its threads` }] : []),
+        ...pool.map((x) => ({ id: `m:${x.machine}`, label: pool.length > 1 ? `Remove from ${name(x.machine)} and delete its threads there` : "Remove project and all its threads", hint: name(x.machine) })),
+      ];
+      return openPick(`Remove project "${row.project!.title}"?`, opts, (id) => {
+        store.setOverlay(null);
+        if (id === "no") return;
+        const targets = id === "all" ? pool : pool.filter((x) => `m:${x.machine}` === id);
+        for (const x of targets) void store.removeFromPool(x.machine, x.projectId);
+      });
+    }
   }
 
   /**
@@ -1558,7 +1619,7 @@ export function App({ store }: { store: Store }) {
   const notice = state.notice;
   // Overlays that belong to a machine (update progress, directory browsing)
   // read their live data from that machine's state, not from the overlay.
-  const overlayMachine = state.overlay && (state.overlay.kind === "update" || state.overlay.kind === "browse") ? state.machines.get(state.overlay.machine) : undefined;
+  const overlayMachine = state.overlay && state.overlay.kind === "update" ? state.machines.get(state.overlay.machine) : undefined;
   const overlayUpdate = state.overlay?.kind === "update" ? overlayMachine?.update ?? null : null;
   const overlayMachineName = overlayMachine?.info?.name ?? overlayMachine?.saved.name;
   const header = state.view?.thread;
@@ -1566,8 +1627,10 @@ export function App({ store }: { store: Store }) {
   // The title bar follows the pane: naming the open thread over a project
   // summary would describe something that is not on screen.
   const summaryMachine = summaryRow ? state.machines.get(summaryRow.machine) : undefined;
-  const summaryTitle = summaryRow && (summaryRow.kind === "project" ? summaryRow.project!.title : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
-  const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? "") : "machine");
+  const nameOfMachine = (k: string) => state.machines.get(k)?.info?.name ?? state.machines.get(k)?.saved.name ?? k;
+  const summaryTitle = summaryRow && (summaryRow.kind === "project" ? summaryRow.project!.title : summaryRow.kind === "machines" ? "machines" : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
+  // A project's subtitle names its pool; a machine's says what it is.
+  const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => nameOfMachine(x.machine)).join(" · ") : summaryRow.kind === "machines" ? `${state.order.length}` : "machine");
   return (
     /* One invariant holds this screen together: nothing covey paints may be
        wider than the terminal it is painted into. Ink's incremental renderer
@@ -1631,6 +1694,3 @@ export function App({ store }: { store: Store }) {
   );
 }
 
-function joinPath(a: string, b: string) {
-  return a.endsWith("/") || a.endsWith("\\") ? a + b : a + (a.includes("\\") ? "\\" : "/") + b;
-}

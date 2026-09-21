@@ -161,9 +161,9 @@ test("a message in another thread does not move the sidebar cursor", async () =>
     debug: true, exitOnCtrlC: false, patchConsole: false,
   });
   try {
-    // Rows: machine, project, delta, charlie, bravo, alpha. Four downs puts the
-    // cursor on bravo, with one thread below it.
-    for (let i = 0; i < 4; i++) { stdin.type("j"); await settle(20); }
+    // Rows: project, delta, charlie, bravo, alpha, machines. Three downs puts
+    // the cursor on bravo, with one thread below it.
+    for (let i = 0; i < 3; i++) { stdin.type("j"); await settle(20); }
     await until(() => opened.at(-1) === "bravo");
     assert.equal(opened.at(-1), "bravo", "the preview opens the thread under the cursor");
 
@@ -201,7 +201,7 @@ test("after the row under the cursor goes, the cursor holds the row it fell onto
     debug: true, exitOnCtrlC: false, patchConsole: false,
   });
   try {
-    for (let i = 0; i < 4; i++) { stdin.type("j"); await settle(20); }
+    for (let i = 0; i < 3; i++) { stdin.type("j"); await settle(20); }
     await until(() => opened.at(-1) === "bravo");
     assert.equal(opened.at(-1), "bravo", "the preview opens the thread under the cursor");
 

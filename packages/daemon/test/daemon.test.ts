@@ -220,27 +220,6 @@ test("export → import on another daemon → markMoved tombstones the source", 
   await assert.rejects(a.command({ type: "turn.send", threadId, turnId: randomUUID(), text: "hi" }), /moved/);
 });
 
-test("fs.listDir lists directories and flags git repos", async () => {
-  const repoA = tempDir("covey-fs-");
-  mkdirSync(join(repoA, "sub", "inner"), { recursive: true });
-  execFileSync("git", ["init", "-q"], { cwd: join(repoA, "sub", "inner") });
-  const r = await a.rpc("fs.listDir", { path: join(repoA, "sub") });
-  assert.deepEqual(r.entries.map((e) => [e.name, e.isRepo]), [["inner", true]]);
-});
-
-test("fs.mkdir creates a folder, and refuses to escape", async () => {
-  const repoA = tempDir("covey-fs-");
-  const made = await a.rpc("fs.mkdir", { path: repoA, name: "fresh" });
-  assert.equal(made.path, join(repoA, "fresh"));
-  assert.ok(existsSync(made.path));
-  // Nesting is allowed; making one that is already there is not an error.
-  assert.equal((await a.rpc("fs.mkdir", { path: repoA, name: "fresh/deeper" })).path, join(repoA, "fresh", "deeper"));
-  assert.equal((await a.rpc("fs.mkdir", { path: repoA, name: "fresh" })).path, join(repoA, "fresh"));
-  for (const name of ["", "  ", "..", "../escaped", "a/../../escaped"])
-    await assert.rejects(a.rpc("fs.mkdir", { path: repoA, name }), /folder/, `refused ${JSON.stringify(name)}`);
-  assert.ok(!existsSync(join(repoA, "..", "escaped")));
-});
-
 test("project.git reports live branch state", async () => {
   const projectId = (await a.rpc("shell.snapshot", {})).projects[0]!.id;
   const root = (await a.rpc("shell.snapshot", {})).projects[0]!.workspaceRoot;

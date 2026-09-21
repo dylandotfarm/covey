@@ -1295,17 +1295,6 @@ export interface RpcMethods {
     params: { threadId: ThreadId; machineId: MachineId; newThreadId: ThreadId };
     result: null;
   };
-  "fs.listDir": {
-    params: { path: string };
-    result: { path: string; entries: { name: string; isDir: boolean; isRepo: boolean }[] };
-  };
-  /**
-   * Create a directory under `path`, so a project can be started somewhere that
-   * does not exist yet without leaving the TUI. `name` is relative to `path`
-   * and may nest ("work/newthing"); absolute paths and `..` are refused.
-   * Creating a directory that is already there succeeds and returns it.
-   */
-  "fs.mkdir": { params: { path: string; name: string }; result: { path: string } };
   "models.list": { params: Record<string, never>; result: { id: string; label: string }[] };
   /**
    * One directory under a thread's working directory, for the `@` menu. The

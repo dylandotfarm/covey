@@ -259,7 +259,7 @@ The client brokers the transfer, so daemons never need to authenticate to each o
 `packages/protocol/src/index.ts`. JSON over one WebSocket. Requests `{id, method, params}`,
 responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Methods: `hello`,
 `shell.snapshot/subscribe`, `thread.snapshot/subscribe`, `unsubscribe`, `command`,
-`thread.export/import/markMoved`, `fs.listDir/mkdir`, `models.list`, `project.git`, `turn.diff`,
+`thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
 `run.gate/memberDiff/queue/merge/audit`.
 
@@ -381,18 +381,39 @@ the `PATH` and the `gh` login.
 
 ## Browsing the sidebar
 
+The tree is **projects first**. A project is a repository, and one row stands for it however
+many machines hold a clone: the client groups every machine's projects by their normalised
+remote (`projectGroups` in `store.ts`), and the threads of every machine in the pool sit under
+the one row, by recency, each tagged with its machine when the pool has more than one. A
+project with no remote is a group of its own, keyed by machine and id, so two machines'
+directories of the same name never merge. The machines sit in a section of their own below
+the projects, furled by default: they are where the work runs, not what it is. The machine
+row still opens the control panel, and an offline one still says what to press.
+
+A new thread goes to a machine of the pool. One connected machine needs no question; more
+than one asks, with the machine that has the most room first, which is the rule a run places
+by. A new project asks for the URL, then for the machines: every saved machine is offered,
+connected or not, with the connected ones marked. A machine that is not connected is asked
+when it next answers: the request waits in `TuiConfig.prefs.pendingProjects`, and the store
+sends it on the next connection and takes it off the list once the machine has the project.
+That is what lets an offline machine join a pool now, and it needs no channel between
+daemons. A machine can be added to a pool later from the palette, and taken out of one with
+`D` on the project, which removes the rows and the threads from that machine and leaves the
+clone on disk.
+
 Moving the sidebar cursor shows what it is pointing at, so the tree can be read
 without committing to anything:
 
 - a **thread** row opens its transcript, debounced by 120 ms so holding ↓ costs
   one `thread.snapshot` rather than one per row. Focus stays in the sidebar;
   enter is what moves you into the composer.
-- a **project** row draws a summary in place of the transcript: path and git
-  identity, where new threads run, the thread counts, and one line per thread
-  with its status, its latest turn's diff and when it last spoke.
-- a **machine** row draws the same thing one level up: os/arch, daemon and
-  Claude versions, tailnet name, the defaults new threads inherit there, the
-  last update, and a line per project.
+- a **project** row draws a summary in place of the transcript: the repository,
+  one line per machine in the pool with what runs there, the thread counts, and
+  one line per thread with its status, its latest turn's diff and when it last
+  spoke.
+- a **machine** row draws the machine: os/arch, daemon and Claude versions,
+  tailnet name, the defaults new threads inherit there, the last update, and a
+  line per project. The **machines** header draws the fleet.
 
 The cursor is a row *key*, not an index into the row list. The tree re-sorts
 under it — `byRecency` moves a thread to the top of its project on every turn
@@ -424,9 +445,9 @@ paint's worth of data.
 Clicking a row does exactly what enter does on it — open the thread, fold the
 project, open the machine's control panel — because the mouse should not have a
 vocabulary of its own. That requires the click to land on the row that is
-actually painted there, which is not `screenRow - 1`: every machine header is
-preceded by a blank line, and a tree taller than the pane is a window over the
-rows. So `sidebar.ts` turns the rows into the list of lines as painted, and App
+actually painted there, which is not `screenRow - 1`: every top-level row after
+the first is preceded by a blank line, and a tree taller than the pane is a
+window over the rows. So `sidebar.ts` turns the rows into the list of lines as painted, and App
 hands that one array to both `Sidebar` and the hit test — the same trick the
 transcript uses for drag-selection. The wheel over the sidebar moves the cursor
 instead of scrolling a viewport of its own, so one thing decides both what is

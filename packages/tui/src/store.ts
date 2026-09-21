@@ -98,6 +98,12 @@ export type Overlay =
       /** Label for a checkbox row under the list, flipped with tab. */
       toggle?: string;
       /**
+       * A pick of many: space marks a row, enter hands the marked ids to
+       * `onMany`, and `onPick` is not called. `marked` starts as given, so a
+       * pick can open with the usual answer already chosen.
+       */
+      many?: { marked: Set<string>; onMany: (ids: string[]) => void };
+      /**
        * Where esc goes. Without it esc closes everything, which throws the
        * reader out of the run panel they opened the pick from.
        */
@@ -108,7 +114,6 @@ export type Overlay =
   | { kind: "input"; title: string; placeholder?: string; initial?: string; onSubmit: (v: string) => void; onCancel?: () => void }
   /** Live progress of `machine.update`; closing it leaves the update running. */
   | { kind: "update"; machine: string }
-  | { kind: "browse"; machine: string; path: string; entries: DirEntry[]; onPick: (path: string) => void; loading?: boolean }
   /** Token and estimated-cost totals, asked of every connected machine. */
   | {
       kind: "usage";
@@ -133,8 +138,6 @@ export type Overlay =
       /** What the run is doing right now — dispatching, reading pull requests. */
       busy: string | null;
     };
-
-export interface DirEntry { name: string; isDir: boolean; isRepo: boolean }
 
 export interface PickOption { id: string; label: string; hint?: string; }
 
@@ -324,6 +327,7 @@ export class Store {
       selection: null, relaunch: null,
       clientBuild: opts.build ?? null, clientStale: false,
     };
+    this.pendingProjects = this.config.prefs.pendingProjects ?? [];
     this.frames = new Frames(() => { for (const l of this.listeners) l(); }, opts.frames);
     this.clockMs = opts.clockMs ?? CLOCK_MS;
     for (const m of machines) this.addMachine(m, false);
@@ -444,6 +448,7 @@ export class Store {
         if (s !== "connected") this.viewCache.dropMachine(ms.key);
         // A restarting daemon cannot report its own success — it is gone by
         // then. Reconnecting is the success, so say so here.
+        if (s === "connected") void this.drainPending(ms.key);
         if (s === "connected" && ms.restarting) {
           ms.restarting = false;
           const at = ms.update?.state === "restarting" ? ms.update.toCommit : null;
@@ -797,11 +802,69 @@ export class Store {
 
   // ---- actions -------------------------------------------------------------
 
-  /** Clone a repository on a machine and record it as a project there. */
-  async createProject(machine: string, url: string, title?: string) {
-    this.notify(`clone of ${url} started on ${this.state.machines.get(machine)?.info?.name ?? machine}…`);
+  /**
+   * Clone a repository on a machine and record it as a project there. A
+   * machine that is not connected gets the request later: it goes on the
+   * pending list in the client's config, and `drainPending` sends it when
+   * the machine next answers. That is what lets an offline machine join a
+   * pool now.
+   */
+  async createProject(machine: string, url: string, title?: string): Promise<void> {
+    const m = this.state.machines.get(machine);
+    const name = m?.info?.name ?? m?.saved.name ?? machine;
+    if (m?.conn !== "connected") {
+      this.pendingProjects.push({ machine, url, ...(title ? { title } : {}) });
+      this.config.prefs.pendingProjects = this.pendingProjects;
+      this.persist();
+      this.notify(`${name} is not connected; it clones ${url} when it next answers`);
+      return;
+    }
+    this.notify(`clone of ${url} started on ${name}…`);
     const err = await this.threadCommand({ type: "project.create", url, ...(title ? { title } : {}) }, machine, CLONE_WAIT_MS);
-    if (err === null) this.notify("project added", "success");
+    if (err === null) this.notify(`project added on ${name}`, "success");
+  }
+
+  /** Clone a repository on every machine given: the pool of a new project. */
+  async createProjectOn(machines: string[], url: string, title?: string): Promise<void> {
+    await Promise.all(machines.map((mk) => this.createProject(mk, url, title)));
+  }
+
+  /** What a machine that was offline still owes: clones it was asked for. */
+  private pendingProjects: { machine: string; url: string; title?: string }[] = [];
+
+  /** Send a machine the clones it was asked for while it was away. */
+  private async drainPending(machine: string): Promise<void> {
+    const mine = this.pendingProjects.filter((p) => p.machine === machine);
+    if (mine.length === 0) return;
+    this.pendingProjects = this.pendingProjects.filter((p) => p.machine !== machine);
+    this.config.prefs.pendingProjects = this.pendingProjects;
+    this.persist();
+    for (const p of mine) {
+      const client = this.clients.get(machine);
+      if (!client) continue;
+      try {
+        await client.command({ type: "project.create", url: p.url, ...(p.title ? { title: p.title } : {}) }, CLONE_WAIT_MS);
+        this.notify(`${this.state.machines.get(machine)?.info?.name ?? machine} cloned ${p.url}`, "success");
+      } catch (e: any) {
+        // A project that is already there is the request done. Anything
+        // else is kept, so the next connection tries again.
+        if (e?.code === "exists" || /already has/.test(String(e?.message))) continue;
+        this.pendingProjects.push(p);
+        this.config.prefs.pendingProjects = this.pendingProjects;
+        this.persist();
+        this.notify(`${this.state.machines.get(machine)?.info?.name ?? machine} could not clone ${p.url}: ${e?.message ?? e}`, "error");
+      }
+    }
+  }
+
+  /** The machines a repository is still to be cloned on, by machine key. */
+  pendingFor(url: string): string[] {
+    return this.pendingProjects.filter((p) => p.url === url).map((p) => p.machine);
+  }
+
+  /** Take a machine out of a project's pool: the project and its threads go from that machine. */
+  async removeFromPool(machine: string, projectId: string): Promise<void> {
+    await this.threadCommand({ type: "project.delete", projectId }, machine);
   }
 
   async createThread(machine: string, projectId: string) {
@@ -1099,33 +1162,6 @@ export class Store {
     } catch (e: any) {
       put({ entries: [], loading: false, truncated: false, error: e.message });
     }
-  }
-
-  async browse(machine: string, path: string, onPick: (p: string) => void) {
-    const client = this.clients.get(machine);
-    if (!client) return;
-    this.setOverlay({ kind: "browse", machine, path, entries: [], onPick, loading: true });
-    try {
-      const r = await client.rpc("fs.listDir", { path });
-      this.setOverlay({ kind: "browse", machine, path: r.path, entries: r.entries, onPick });
-    } catch (e: any) { this.notify(e.message, "error"); this.setOverlay(null); }
-  }
-
-  /**
-   * Make a folder while browsing, so a project can be started somewhere that
-   * does not exist yet. On success the browser steps *into* the new folder —
-   * the place the project would go — rather than picking it, so nested folders
-   * can be made in turn. A refused name leaves the overlay where it was, so the
-   * error is read without losing the directory that was being browsed.
-   */
-  async mkdir(machine: string, parent: string, name: string, onPick: (p: string) => void) {
-    const client = this.clients.get(machine);
-    if (!client) return;
-    try {
-      const r = await client.rpc("fs.mkdir", { path: parent, name });
-      await this.browse(machine, r.path, onPick);
-      this.notify(`created ${r.path}`, "success");
-    } catch (e: any) { this.notify(e.message, "error"); }
   }
 
   // ---- runs ----------------------------------------------------------------
@@ -1566,43 +1602,6 @@ export function nextStateForPr(state: RunMemberState, pr: { state: string } | nu
   return state === "dispatched" || state === "working" ? "review" : state;
 }
 
-/**
- * A row in the directory browser. `..` and "new folder" are rows like any
- * other, so the cursor, the painter and the key handler count one list — the
- * same reason the sidebar builds its lines in a single place.
- */
-export type BrowseRow =
-  | { kind: "up" }
-  | { kind: "dir"; name: string; isRepo: boolean }
-  /** `name` is the filter text when that could name a folder, else "" — then
-   *  choosing the row asks for a name instead of creating one. */
-  | { kind: "new"; name: string };
-
-/**
- * The browser's rows for a listing and a filter. "New folder" comes last so
- * that typing to narrow and pressing enter still opens a directory; it is only
- * what the cursor starts on once the filter matches nothing.
- */
-export function browseRows(entries: DirEntry[], filter: string): BrowseRow[] {
-  const f = filter.trim().toLowerCase();
-  const rows: BrowseRow[] = [];
-  if (!f || "..".includes(f)) rows.push({ kind: "up" });
-  for (const e of entries) if (!f || e.name.toLowerCase().includes(f)) rows.push({ kind: "dir", name: e.name, isRepo: e.isRepo });
-  rows.push({ kind: "new", name: isFolderName(filter.trim()) ? filter.trim() : "" });
-  return rows;
-}
-
-/** Mirrors the daemon's rule for `fs.mkdir`, so the row only offers to create
- *  what the daemon would accept. The daemon still checks; this is for the UI. */
-export function isFolderName(s: string): boolean {
-  return s.length > 0 && !s.split(/[\\/]/).some((seg) => seg === "" || seg === "." || seg === "..");
-}
-
-/** The parent of a browsed directory, or the directory itself at the root. */
-export function parentPath(path: string): string {
-  return path.replace(/[\\/][^\\/]+[\\/]?$/, "") || "/";
-}
-
 /** True for a machine URL that points at this very machine. */
 export function isLoopbackUrl(url: string): boolean {
   try {
@@ -1623,6 +1622,51 @@ export function permissionModeLabel(mode: PermissionMode | null | undefined): st
 }
 
 /** Threads a user expects to see: no archive, no tombstones of moved threads. */
+/** One machine's copy of a pooled project. */
+export interface PoolMember { machine: string; projectId: string; project: Project }
+
+/**
+ * A repository as the sidebar shows it: one row, however many machines hold
+ * it. Projects with the same normalised remote are one group; a project with
+ * no remote is a group of its own, keyed by machine and id, so it never merges
+ * with another machine's directory of the same name.
+ */
+export interface ProjectGroup {
+  /** The repository identity, or `<machine>:<project id>` for a project with none. */
+  key: string;
+  title: string;
+  members: PoolMember[];
+}
+
+/** The fold key of a project row. The same string a project with no remote
+ *  always had, so a fold survives the change to pooled rows. */
+export function projectFoldKey(group: { key: string }): string { return group.key; }
+
+/**
+ * The projects of every machine, grouped by repository, in title order. The
+ * machines within a group keep the sidebar's machine order, so "the first
+ * machine of the pool" is a stable choice.
+ */
+export function projectGroups(s: AppState): ProjectGroup[] {
+  const groups = new Map<string, ProjectGroup>();
+  for (const key of s.order) {
+    const m = s.machines.get(key);
+    if (!m) continue;
+    for (const p of m.projects.values()) {
+      const gk = p.repositoryIdentity ?? `${key}:${p.id}`;
+      const g = groups.get(gk) ?? { key: gk, title: p.title, members: [] };
+      g.members.push({ machine: key, projectId: p.id, project: p });
+      groups.set(gk, g);
+    }
+  }
+  return [...groups.values()].sort((a, b) => a.title.localeCompare(b.title));
+}
+
+/** The group a project on a machine belongs to, or null when it is not there. */
+export function groupOfProject(s: AppState, machine: string, projectId: string): ProjectGroup | null {
+  return projectGroups(s).find((g) => g.members.some((x) => x.machine === machine && x.projectId === projectId)) ?? null;
+}
+
 export function liveThreads(m: MachineState, projectId?: string): Thread[] {
   return [...m.threads.values()].filter((t) => !t.archivedAt && !t.movedTo && (projectId === undefined || t.projectId === projectId));
 }
@@ -1667,11 +1711,31 @@ export function tallyThreads(threads: Iterable<Thread>): ThreadTally {
 
 export interface SidebarRow {
   key: string;
-  kind: "machine" | "project" | "thread" | "empty" | "archived" | "run" | "member";
+  /**
+   * `project` heads a repository, pooled across every machine that has it;
+   * `machines` heads the fleet, below the projects; `machine` is one row of
+   * that section. The rest sit under a project.
+   */
+  kind: "project" | "thread" | "empty" | "archived" | "run" | "member" | "machines" | "machine";
+  /**
+   * The machine a row acts on. For a project row, the first machine of its
+   * pool; a thread, run or member names the machine it lives on. Empty on the
+   * `machines` header, which is nobody's.
+   */
   machine: string;
   projectId?: string;
   thread?: Thread;
   project?: Project;
+  /** Set on a project row: every machine that holds this repository. */
+  pool?: PoolMember[];
+  /** The project group a row belongs to (`ProjectGroup.key`): the fold key
+   *  of the project, and of its archived folder. */
+  groupKey?: string;
+  /**
+   * Set on a thread row when its project spans more than one machine, so the
+   * row can say which one the thread is on.
+   */
+  tag?: string;
   /** Set on the archived folder and on every thread row inside it. */
   archived?: boolean;
   /** How many threads the archived folder holds. */
@@ -1689,7 +1753,8 @@ export interface SidebarRow {
 }
 
 /** `expanded` key for a project's archived folder. Furled unless toggled. */
-export function archiveKey(machine: string, projectId: string): string { return `${machine}:${projectId}:archived`; }
+/** The fold key of a project group's archived folder. */
+export function archiveKey(group: string): string { return `${group}:archived`; }
 
 /** `expanded` key for a run's members. Open unless furled. */
 export function runKey(machine: string, runId: string): string { return `${machine}:run:${runId}`; }
@@ -1851,163 +1916,200 @@ export function sidebarRows(s: AppState): SidebarRow[] {
       }
     }
   }
+  const pushRun = (machine: string, run: Run, depth: number, projectId?: string, groupKey?: string) => {
+    const open = s.expanded[runKey(machine, run.id)] ?? true;
+    // Furled, a run holds its members the way a thread group holds its
+    // children — and lets through the ones that need a person.
+    const shown = open ? run.members : run.members.filter((x) => memberNeedsPerson(s, x));
+    const at = { ...(projectId ? { projectId } : {}), ...(groupKey ? { groupKey } : {}) };
+    // No `hidden` count: a run row's meta already says how many members it
+    // has, which is what that count exists to tell a thread row.
+    rows.push({ key: `r:${machine}:${run.id}`, kind: "run", machine, ...at, run, depth });
+    for (const member of shown) {
+      rows.push({ key: `rm:${machine}:${run.id}:${member.id}`, kind: "member", machine, ...at, run, member, depth: depth + 1 });
+    }
+  };
+  // Where each run sits: `<machine>:<project id>` for a run whose project can
+  // be named, and nothing for one that cannot. A run is not free-floating
+  // machinery: its members work in one project, and the operator reads the
+  // tree by project. So a run goes inside the project its members work in, and
+  // under the thread that asked for it when there is one.
+  //
+  // A run whose project cannot be named — no members placed yet, members in
+  // two projects, members dispatched to another machine — sits above the
+  // projects. Being one level too high is a run the operator can still find;
+  // being filed under a project it does not work in is a lie.
+  const runsOf = new Map<string, { machine: string; run: Run }[]>();
+  const homeless: { machine: string; run: Run }[] = [];
   for (const key of s.order) {
     const m = s.machines.get(key)!;
-    rows.push({ key: `m:${key}`, kind: "machine", machine: key, depth: 0 });
-    // Closed runs stay, so the record of what a run did does not vanish the
-    // moment it finishes.
-    const runs = [...m.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    const pushRun = (run: Run, depth: number, projectId?: string) => {
-      const open = s.expanded[runKey(key, run.id)] ?? true;
-      // Furled, a run holds its members the way a thread group holds its
-      // children — and lets through the ones that need a person.
-      const shown = open ? run.members : run.members.filter((x) => memberNeedsPerson(s, x));
-      const at = projectId ? { projectId } : {};
-      // No `hidden` count: a run row's meta already says how many members it
-      // has, which is what that count exists to tell a thread row.
-      rows.push({ key: `r:${key}:${run.id}`, kind: "run", machine: key, ...at, run, depth });
-      for (const member of shown) {
-        rows.push({ key: `rm:${key}:${run.id}:${member.id}`, kind: "member", machine: key, ...at, run, member, depth: depth + 1 });
-      }
-    };
-    // Where each run sits. A run is not free-floating machinery: its members
-    // work in one project, and the operator reads the tree by project. So a run
-    // goes inside the project its members work in, and under the thread that
-    // asked for it when there is one — the same place a thread that thread
-    // started would go.
-    //
-    // A run whose project cannot be named — no members placed yet, members in
-    // two projects, members dispatched to another machine — stays where every
-    // run used to be: under the machine, above the projects. Being one level
-    // too high is a run the operator can still find; being filed under a
-    // project it does not work in is a lie.
-    const home = new Map<string, string>();
-    for (const run of runs) { const p = runProject(m, run); if (p) home.set(run.id, p); }
-    for (const run of runs) if (!home.has(run.id)) pushRun(run, 1);
-    const projects = [...m.projects.values()].sort((a, b) => a.title.localeCompare(b.title));
-    if (projects.length === 0 && m.conn === "connected") rows.push({ key: `e:${key}`, kind: "empty", machine: key, depth: 1 });
-    for (const p of projects) {
-      const pk = `${key}:${p.id}`;
-      rows.push({ key: `p:${pk}`, kind: "project", machine: key, projectId: p.id, project: p, depth: 1 });
-      if (!(s.expanded[pk] ?? true)) continue;
-      const threads = liveThreads(m, p.id).filter((t) => !inRun.has(`${key}:${t.id}`)).sort(byRecency);
-      // A thread a program started sits under the thread that started it.
-      // `origin.parentThreadId` is the only record of that (#49); a parent that
-      // is not in this list — archived, deleted, or on another machine — leaves
-      // the child a top-level row, because a thread must never be lost behind a
-      // link that leads nowhere.
-      const here = new Map(threads.map((t) => [t.id, t]));
-      const parentOf = (t: Thread) => {
-        const id = t.origin?.parentThreadId;
-        return id && id !== t.id && here.has(id) ? id : null;
-      };
-      const kids = new Map<string, Thread[]>();
-      for (const t of threads) {
-        const parent = parentOf(t);
-        if (parent) kids.set(parent, [...(kids.get(parent) ?? []), t]);
-      }
-      // Which threads are top-level rows. A thread whose parent is here belongs
-      // under it — but two threads naming each other have no parent outside the
-      // pair, so neither would ever be a root and both would vanish. Claiming
-      // from the roots first says which threads a root can reach; whatever is
-      // left is a cycle, and its first thread becomes a root of its own.
-      //
-      // This is settled before anything paints, because a furled group paints
-      // none of its children, and "not painted" must not be mistaken for
-      // "nobody owns it".
-      const claimed = new Set<string>();
-      const claim = (t: Thread) => {
-        if (claimed.has(t.id)) return;
-        claimed.add(t.id);
-        for (const c of kids.get(t.id) ?? []) claim(c);
-      };
-      const roots: Thread[] = [];
-      for (const t of threads) if (!parentOf(t)) { roots.push(t); claim(t); }
-      for (const t of threads) if (!claimed.has(t.id)) { roots.push(t); claim(t); }
-
-      // The runs of this project, split the way its threads are: a run whose
-      // parent thread has a row here sits under it, and the rest sit under the
-      // project. `here` already leaves out the threads the runs themselves
-      // claim, so a run can never be filed under one of its own members.
-      const ownRuns = new Map<string, Run[]>();
-      const projectRuns: Run[] = [];
-      for (const run of runs) {
-        if (home.get(run.id) !== p.id) continue;
-        const parent = run.parentThreadId;
-        if (parent && here.has(parent)) ownRuns.set(parent, [...(ownRuns.get(parent) ?? []), run]);
-        else projectRuns.push(run);
-      }
-
-      // A fold must never bury the thing that needs a person. `needsPerson`
-      // says it of one thread; this says it of everything a thread is holding,
-      // because a group hides its children whole. A thread that is quietly
-      // working, with a blocked run under it or a failed thread under that,
-      // would otherwise stay inside its own parent's fold and take the
-      // approval with it — the deadlock of #69, one level further out, and
-      // invisible rather than merely furled.
-      //
-      // Each level filters by the same rule, so letting a thread through also
-      // lets through the path below it to whatever raised the need.
-      const wants = new Map<string, boolean>();
-      const wantsPerson = (t: Thread, seen: Set<string> = new Set()): boolean => {
-        const memo = wants.get(t.id);
-        if (memo !== undefined) return memo;
-        // A cycle answers for itself: whatever is in it is reached by the
-        // walk that is already running.
-        if (seen.has(t.id)) return false;
-        seen.add(t.id);
-        const v = needsPerson(t)
-          || (ownRuns.get(t.id) ?? []).some((r) => runNeedsPerson(s, r))
-          || (kids.get(t.id) ?? []).some((c) => wantsPerson(c, seen));
-        wants.set(t.id, v);
-        return v;
-      };
-
-      const painted = new Set<string>();
-      const pushThread = (t: Thread, depth: number) => {
-        // A cycle reached through an unfurled group would otherwise paint for
-        // ever. Whichever thread the walk reaches first keeps the row.
-        if (painted.has(t.id)) return;
-        painted.add(t.id);
-        // What this thread holds: the runs it asked for, then the threads it
-        // started. A run first, because it is the larger piece of work and it
-        // names itself; the loose children follow it.
-        const mine = ownRuns.get(t.id) ?? [];
-        const children = kids.get(t.id) ?? [];
-        const held = mine.length + children.length;
-        const open = held > 0 && (s.expanded[threadGroupKey(key, t.id)] ?? false);
-        // Furled hides the children that are working. It never hides one that
-        // has failed, is blocked on a person, or is holding something that is
-        // — see `wantsPerson` and `runNeedsPerson`.
-        const shownRuns = open ? mine : mine.filter((r) => runNeedsPerson(s, r));
-        const shown = open ? children : children.filter((c) => wantsPerson(c));
-        rows.push({
-          key: `t:${key}:${t.id}`, kind: "thread", machine: key, projectId: p.id, thread: t, depth,
-          ...(t.origin?.by === "agent" ? { agent: true } : {}),
-          ...(held > 0 ? { group: true, hidden: held - shownRuns.length - shown.length } : {}),
-        });
-        for (const r of shownRuns) pushRun(r, depth + 1, p.id);
-        for (const c of shown) pushThread(c, depth + 1);
-      };
-      // A run above the threads, for the reason it always was: a run is why the
-      // work under it exists, and it is what the operator watches.
-      for (const run of projectRuns) pushRun(run, 2, p.id);
-      for (const t of roots) pushThread(t, 2);
-      // The project's own archived folder, below its live threads and inside
-      // its fold: the old threads of this project, most recently archived
-      // first. Moved threads are tombstones, not archive — they stay hidden.
-      const archived = [...m.threads.values()]
-        .filter((t) => t.projectId === p.id && t.archivedAt && !t.movedTo)
-        .sort((a, b) => b.archivedAt!.localeCompare(a.archivedAt!));
-      if (archived.length === 0) continue;
-      const ak = archiveKey(key, p.id);
-      rows.push({ key: `a:${ak}`, kind: "archived", machine: key, projectId: p.id, archived: true, count: archived.length, depth: 2 });
-      if (!(s.expanded[ak] ?? false)) continue;
-      for (const t of archived) rows.push({ key: `t:${key}:${t.id}`, kind: "thread", machine: key, projectId: p.id, thread: t, archived: true, depth: 3 });
+    for (const run of [...m.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      const p = runProject(m, run);
+      if (!p) { homeless.push({ machine: key, run }); continue; }
+      const hk = `${key}:${p}`;
+      runsOf.set(hk, [...(runsOf.get(hk) ?? []), { machine: key, run }]);
     }
+  }
+  for (const { machine, run } of homeless) pushRun(machine, run, 0);
+
+  const groups = projectGroups(s);
+  const anyConnected = s.order.some((k) => s.machines.get(k)?.conn === "connected");
+  if (groups.length === 0 && anyConnected) rows.push({ key: "e:", kind: "empty", machine: s.order.find((k) => s.machines.get(k)?.conn === "connected") ?? "", depth: 0 });
+  for (const g of groups) {
+    const first = g.members[0]!;
+    const pooled = g.members.length > 1;
+    rows.push({ key: `p:${g.key}`, kind: "project", machine: first.machine, projectId: first.projectId, project: first.project, pool: g.members, groupKey: g.key, depth: 0 });
+    if (!(s.expanded[projectFoldKey(g)] ?? true)) continue;
+    // Every machine's threads of this repository, in one list by recency. A
+    // thread's row keeps the machine it lives on; the tag says which when the
+    // pool has more than one.
+    const tagOf = (machine: string) => pooled ? (s.machines.get(machine)?.info?.name ?? s.machines.get(machine)?.saved.name ?? machine) : undefined;
+    const owned: { machine: string; projectId: string; t: Thread }[] = [];
+    for (const x of g.members) {
+      const m = s.machines.get(x.machine)!;
+      for (const t of liveThreads(m, x.projectId)) if (!inRun.has(`${x.machine}:${t.id}`)) owned.push({ machine: x.machine, projectId: x.projectId, t });
+    }
+    owned.sort((a, b) => byRecency(a.t, b.t));
+    const threads = owned.map((o) => o.t);
+    const placeOf = new Map(owned.map((o) => [o.t.id, o]));
+    // A thread a program started sits under the thread that started it.
+    // `origin.parentThreadId` is the only record of that (#49); a parent that
+    // is not in this list — archived, deleted, or on another machine — leaves
+    // the child a top-level row, because a thread must never be lost behind a
+    // link that leads nowhere.
+    const here = new Map(threads.map((t) => [t.id, t]));
+    const parentOf = (t: Thread) => {
+      const id = t.origin?.parentThreadId;
+      return id && id !== t.id && here.has(id) ? id : null;
+    };
+    const kids = new Map<string, Thread[]>();
+    for (const t of threads) {
+      const parent = parentOf(t);
+      if (parent) kids.set(parent, [...(kids.get(parent) ?? []), t]);
+    }
+    // Which threads are top-level rows. A thread whose parent is here belongs
+    // under it — but two threads naming each other have no parent outside the
+    // pair, so neither would ever be a root and both would vanish. Claiming
+    // from the roots first says which threads a root can reach; whatever is
+    // left is a cycle, and its first thread becomes a root of its own.
+    //
+    // This is settled before anything paints, because a furled group paints
+    // none of its children, and "not painted" must not be mistaken for
+    // "nobody owns it".
+    const claimed = new Set<string>();
+    const claim = (t: Thread) => {
+      if (claimed.has(t.id)) return;
+      claimed.add(t.id);
+      for (const c of kids.get(t.id) ?? []) claim(c);
+    };
+    const roots: Thread[] = [];
+    for (const t of threads) if (!parentOf(t)) { roots.push(t); claim(t); }
+    for (const t of threads) if (!claimed.has(t.id)) { roots.push(t); claim(t); }
+
+    // The runs of this project, from every machine in the pool, split the way
+    // its threads are: a run whose parent thread has a row here sits under
+    // it, and the rest sit under the project. `here` already leaves out the
+    // threads the runs themselves claim, so a run can never be filed under
+    // one of its own members.
+    const ownRuns = new Map<string, { machine: string; run: Run }[]>();
+    const projectRunRows: { machine: string; run: Run }[] = [];
+    for (const x of g.members) {
+      for (const r of runsOf.get(`${x.machine}:${x.projectId}`) ?? []) {
+        const parent = r.run.parentThreadId;
+        if (parent && here.has(parent)) ownRuns.set(parent, [...(ownRuns.get(parent) ?? []), r]);
+        else projectRunRows.push(r);
+      }
+    }
+
+    // A fold must never bury the thing that needs a person. `needsPerson`
+    // says it of one thread; this says it of everything a thread is holding,
+    // because a group hides its children whole. A thread that is quietly
+    // working, with a blocked run under it or a failed thread under that,
+    // would otherwise stay inside its own parent's fold and take the
+    // approval with it — the deadlock of #69, one level further out, and
+    // invisible rather than merely furled.
+    //
+    // Each level filters by the same rule, so letting a thread through also
+    // lets through the path below it to whatever raised the need.
+    const wants = new Map<string, boolean>();
+    const wantsPerson = (t: Thread, seen: Set<string> = new Set()): boolean => {
+      const memo = wants.get(t.id);
+      if (memo !== undefined) return memo;
+      // A cycle answers for itself: whatever is in it is reached by the
+      // walk that is already running.
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      const v = needsPerson(t)
+        || (ownRuns.get(t.id) ?? []).some((r) => runNeedsPerson(s, r.run))
+        || (kids.get(t.id) ?? []).some((c) => wantsPerson(c, seen));
+      wants.set(t.id, v);
+      return v;
+    };
+
+    const painted = new Set<string>();
+    const pushThread = (t: Thread, depth: number) => {
+      // A cycle reached through an unfurled group would otherwise paint for
+      // ever. Whichever thread the walk reaches first keeps the row.
+      if (painted.has(t.id)) return;
+      painted.add(t.id);
+      const at = placeOf.get(t.id)!;
+      // What this thread holds: the runs it asked for, then the threads it
+      // started. A run first, because it is the larger piece of work and it
+      // names itself; the loose children follow it.
+      const mine = ownRuns.get(t.id) ?? [];
+      const children = kids.get(t.id) ?? [];
+      const held = mine.length + children.length;
+      const open = held > 0 && (s.expanded[threadGroupKey(at.machine, t.id)] ?? false);
+      // Furled hides the children that are working. It never hides one that
+      // has failed, is blocked on a person, or is holding something that is
+      // — see `wantsPerson` and `runNeedsPerson`.
+      const shownRuns = open ? mine : mine.filter((r) => runNeedsPerson(s, r.run));
+      const shown = open ? children : children.filter((c) => wantsPerson(c));
+      const tag = tagOf(at.machine);
+      rows.push({
+        key: `t:${at.machine}:${t.id}`, kind: "thread", machine: at.machine, projectId: at.projectId, thread: t, depth, groupKey: g.key,
+        ...(tag ? { tag } : {}),
+        ...(t.origin?.by === "agent" ? { agent: true } : {}),
+        ...(held > 0 ? { group: true, hidden: held - shownRuns.length - shown.length } : {}),
+      });
+      for (const r of shownRuns) pushRun(r.machine, r.run, depth + 1, at.projectId, g.key);
+      for (const c of shown) pushThread(c, depth + 1);
+    };
+    // A run above the threads, for the reason it always was: a run is why the
+    // work under it exists, and it is what the operator watches.
+    for (const r of projectRunRows) pushRun(r.machine, r.run, 1, g.members.find((x) => x.machine === r.machine)?.projectId, g.key);
+    for (const t of roots) pushThread(t, 1);
+    // The project's own archived folder, below its live threads and inside
+    // its fold: the old threads of this project on every machine, most
+    // recently archived first. Moved threads are tombstones, not archive —
+    // they stay hidden.
+    const archived: { machine: string; projectId: string; t: Thread }[] = [];
+    for (const x of g.members) {
+      const m = s.machines.get(x.machine)!;
+      for (const t of m.threads.values()) if (t.projectId === x.projectId && t.archivedAt && !t.movedTo) archived.push({ machine: x.machine, projectId: x.projectId, t });
+    }
+    if (archived.length === 0) continue;
+    archived.sort((a, b) => b.t.archivedAt!.localeCompare(a.t.archivedAt!));
+    const ak = archiveKey(g.key);
+    rows.push({ key: `a:${ak}`, kind: "archived", machine: first.machine, projectId: first.projectId, groupKey: g.key, archived: true, count: archived.length, depth: 1 });
+    if (!(s.expanded[ak] ?? false)) continue;
+    for (const x of archived) {
+      const tag = tagOf(x.machine);
+      rows.push({ key: `t:${x.machine}:${x.t.id}`, kind: "thread", machine: x.machine, projectId: x.projectId, groupKey: g.key, thread: x.t, archived: true, depth: 2, ...(tag ? { tag } : {}) });
+    }
+  }
+  // The fleet, below the work. A machine row still opens the control panel,
+  // and an offline one still says what to press; the section is furled by
+  // default because the machines are where the work runs, not what it is.
+  rows.push({ key: "machines", kind: "machines", machine: "", depth: 0 });
+  if (s.expanded[MACHINES_KEY] ?? false) {
+    for (const key of s.order) rows.push({ key: `m:${key}`, kind: "machine", machine: key, depth: 1 });
   }
   return rows;
 }
+
+/** The fold key of the machines section. */
+export const MACHINES_KEY = "machines";
 
 // ---------------------------------------------------------------------------
 // Usage windows and totals

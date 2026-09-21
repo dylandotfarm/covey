@@ -3,9 +3,9 @@ import type { SidebarRow } from "./store.js";
 /**
  * The sidebar list, line by line.
  *
- * Rows and screen lines are not the same thing: every machine header is
- * preceded by a blank line, and a long tree is a window over the rows rather
- * than all of them. Both facts have to be known in exactly one place, because
+ * Rows and screen lines are not the same thing: every top-level row after the
+ * first is preceded by a blank line, and a long tree is a window over the rows
+ * rather than all of them. Both facts have to be known in exactly one place, because
  * rendering and clicking have to agree on which row sits on which line —
  * the same reason the transcript's lines are built in App and handed to both
  * the painter and the hit test.
@@ -21,7 +21,10 @@ export function sidebarCells(rows: SidebarRow[], cursor: number, height: number)
   if (height <= 0) return [];
   const all: SidebarCell[] = [];
   for (let i = 0; i < rows.length; i++) {
-    if (rows[i]!.kind === "machine") all.push({ kind: "blank" });
+    // A blank line above every top-level row but the first: the projects
+    // stand apart from each other, and the machines section from the last
+    // project.
+    if (i > 0 && rows[i]!.depth === 0) all.push({ kind: "blank" });
     all.push({ kind: "row", index: i });
   }
   if (all.length <= height) return all;

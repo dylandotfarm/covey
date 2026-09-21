@@ -1,7 +1,4 @@
 import { createServer, type IncomingMessage } from "node:http";
-import { readdirSync, statSync, existsSync, mkdirSync } from "node:fs";
-import { join, resolve, isAbsolute, sep } from "node:path";
-import { homedir } from "node:os";
 import { WebSocketServer, WebSocket } from "ws";
 import { PROTOCOL_VERSION, KNOWN_MODELS, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon } from "@covey/protocol";
 import { Engine, EngineError } from "./engine.js";
@@ -173,35 +170,6 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
       case "thread.markMoved":
         engine.markMoved(p.threadId, p.machineId, p.newThreadId);
         return null;
-      case "fs.listDir": {
-        const path = resolve(p.path?.replace(/^~/, homedir()) || homedir());
-        if (!existsSync(path)) throw new EngineError("bad_path", `${path} does not exist`);
-        const entries = readdirSync(path, { withFileTypes: true })
-          .filter((d) => !d.name.startsWith(".") || d.name === ".git")
-          .map((d) => ({ name: d.name, isDir: d.isDirectory(), isRepo: d.isDirectory() && existsSync(join(path, d.name, ".git")) }))
-          .filter((d) => d.isDir)
-          .sort((a, b) => a.name.localeCompare(b.name));
-        return { path, entries };
-      }
-      case "fs.mkdir": {
-        const parent = resolve(p.path?.replace(/^~/, homedir()) || homedir());
-        if (!existsSync(parent)) throw new EngineError("bad_path", `${parent} does not exist`);
-        const name: string = String(p.name ?? "").trim().replace(/[\\/]+$/, "");
-        // The client picks the parent by browsing; the name is free text, so it
-        // is the only part that has to be checked. Anything that could climb
-        // out of the directory on screen is refused rather than normalised.
-        if (!name) throw new EngineError("bad_name", "name a folder to create");
-        if (isAbsolute(name) || name.split(/[\\/]/).some((seg) => seg === "" || seg === "." || seg === ".."))
-          throw new EngineError("bad_name", `${p.name} is not a folder name`);
-        const target = resolve(parent, name);
-        if (target !== parent && !target.startsWith(parent + sep)) throw new EngineError("bad_name", `${p.name} is not a folder name`);
-        try {
-          mkdirSync(target, { recursive: true });
-        } catch (e: any) {
-          throw new EngineError("mkdir_failed", `could not create ${target}: ${e.code ?? e.message}`);
-        }
-        return { path: target };
-      }
       case "models.list":
         return KNOWN_MODELS;
       case "thread.listDir":

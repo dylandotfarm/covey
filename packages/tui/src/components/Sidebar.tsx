@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { archiveKey, liveThreads, pendingTasks, projectRuns, runIsBusy, runKey, runNeedsPerson, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { MACHINES_KEY, archiveKey, liveThreads, pendingTasks, projectGroups, projectRuns, runIsBusy, runKey, runNeedsPerson, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -21,7 +21,7 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
             place the reader always looks says so. */}
         {state.clientStale
           ? <Text color={T.warning}>  ⚠ newer build on disk</Text>
-          : <Text color={T.subtle}>  {state.order.length} machine{state.order.length === 1 ? "" : "s"}</Text>}
+          : <Text color={T.subtle}>  {headerCount(state)}</Text>}
       </Box>
       {/* Painted from `cells`, not from `rows`: the blank lines above machine
           headers and the scroll window have to be identical to what App uses
@@ -36,6 +36,13 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
       </Box>
     </Box>
   );
+}
+
+/** "3 projects · 2 machines": what the tree holds, at a glance. */
+function headerCount(state: AppState): string {
+  const p = projectGroups(state).length;
+  const m = state.order.length;
+  return `${p} project${p === 1 ? "" : "s"} · ${m} machine${m === 1 ? "" : "s"}`;
 }
 
 /**
@@ -56,11 +63,12 @@ export const AGENT_MARK = "◇";
  * same depth, which is what makes the indent read as "under" rather than as a
  * second kind of list.
  *
- * A run under the machine — one the client cannot place in a project — keeps
- * the two columns it always had, beside the projects it sits among.
+ * A project is a top-level row, so a thread directly under one is at depth 1.
+ * A run the client cannot place in a project sits at depth 0, beside the
+ * projects, and keeps the one column they have.
  */
-export function threadIndent(depth: number): number { return Math.max(1, 1 + 2 * (depth - 2)); }
-export function runIndent(depth: number): number { return depth <= 1 ? 2 : threadIndent(depth) + 2; }
+export function threadIndent(depth: number): number { return Math.max(1, 1 + 2 * (depth - 1)); }
+export function runIndent(depth: number): number { return depth <= 0 ? 1 : threadIndent(depth) + 2; }
 export function memberIndent(depth: number): number { return runIndent(depth - 1) + 2; }
 
 function isActive(s: AppState, r: SidebarRow) {
@@ -86,9 +94,9 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // unless they ask, which is what "enter to retry" says.
       const meta = m.conn === "offline" ? "offline · enter" : m.conn !== "connected" ? m.conn : behind ? "⚠ old build" : (m.info?.os ?? "");
       return (
-        <Box paddingX={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={3} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={dotColor}>{dot} </Text>
-          <Text color={T.text} bold>{truncate(name.toUpperCase(), width - 6 - meta.length)}</Text>
+          <Text color={T.text} bold>{truncate(name.toUpperCase(), width - 8 - meta.length)}</Text>
           {/* The words that say what to press are held to the same bar as the
               mark. Every other row's meta keeps `T.subtle`, which the sidebar
               has always used and which this change does not widen. */}
@@ -96,22 +104,41 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
         </Box>
       );
     }
+    case "machines": {
+      const open = state.expanded[MACHINES_KEY] ?? false;
+      const offline = state.order.filter((k) => state.machines.get(k)?.conn === "offline").length;
+      const behind = state.order.filter((k) => { const x = state.machines.get(k); return x?.conn === "connected" && buildSkew(state.clientBuild, x.info?.build) === "behind"; }).length;
+      // Furled, the section still says what needs a person: a machine nobody
+      // is dialling, or one on an old build.
+      const meta = offline ? `${offline} offline` : behind ? `${behind} old build` : String(state.order.length);
+      return (
+        <Box paddingX={1} height={1} backgroundColor={bg}>
+          <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>
+          <Text color={T.text} bold> {truncate("MACHINES", width - 5 - meta.length)}</Text>
+          <Text color={offline ? connColor("offline") : behind ? T.warning : T.faint}>  {meta}</Text>
+        </Box>
+      );
+    }
     case "empty":
-      return <Box paddingLeft={3} height={1} backgroundColor={bg}><Text color={T.subtle} italic>no projects — press a</Text></Box>;
+      return <Box paddingLeft={1} height={1} backgroundColor={bg}><Text color={T.subtle} italic>no projects — press a</Text></Box>;
     case "project": {
-      const open = state.expanded[`${row.machine}:${row.projectId}`] ?? true;
-      const threads = liveThreads(m, row.projectId);
-      // The project's runs answer all three questions with it, now that they
-      // fold away with it: a fold may never hide that something inside it is
-      // working, that something is waiting on a person, or how much there is.
-      // A member the operator or the tracker called `blocked` has no thread
-      // status to read, and a task that is planned has no thread at all.
-      const runs = projectRuns(m, row.projectId!);
-      const busy = threads.some((t) => t.status === "running" || t.status === "starting") || runs.some(runIsBusy);
-      const waiting = threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0)
-        || runs.some((r) => runNeedsPerson(state, r));
-      // Threads, and the tasks that are not threads yet.
-      const count = threads.length + pendingTasks(m, row.projectId!);
+      const open = state.expanded[row.groupKey!] ?? true;
+      // Every machine in the pool answers the three questions: a fold may
+      // never hide that something inside it is working, that something is
+      // waiting on a person, or how much there is. A member the operator or
+      // the tracker called `blocked` has no thread status to read, and a task
+      // that is planned has no thread at all.
+      let busy = false, waiting = false, count = 0;
+      for (const x of row.pool ?? []) {
+        const pm = state.machines.get(x.machine);
+        if (!pm) continue;
+        const threads = liveThreads(pm, x.projectId);
+        const runs = projectRuns(pm, x.projectId);
+        busy ||= threads.some((t) => t.status === "running" || t.status === "starting") || runs.some(runIsBusy);
+        waiting ||= threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0) || runs.some((r) => runNeedsPerson(state, r));
+        // Threads, and the tasks that are not threads yet.
+        count += threads.length + pendingTasks(pm, x.projectId);
+      }
       const agg = !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
       // The last row whose width was a constant rather than a sum of the cells
       // it paints: the indent, the caret or the dot, the space before the
@@ -123,16 +150,20 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // and could not even show that it was furled. The number is as long as
       // the work in the project, so the title takes what is left.
       const num = count ? String(count) : "";
+      // A pool of more than one machine says so, because the threads under it
+      // then carry a machine each.
+      const pool = (row.pool?.length ?? 1) > 1 ? ` ${row.pool!.length}⧉` : "";
       return (
-        <Box paddingLeft={2} paddingRight={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={1} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
-          <Text color={T.text}> {truncate(row.project!.title, width - 6 - num.length)}</Text>
+          <Text color={T.text} bold> {truncate(row.project!.title, width - 5 - num.length - pool.length)}</Text>
+          <Text color={T.subtle}>{pool}</Text>
           <Text color={T.faint}> {num}</Text>
         </Box>
       );
     }
     case "archived": {
-      const open = state.expanded[archiveKey(row.machine, row.projectId!)] ?? false;
+      const open = state.expanded[archiveKey(row.groupKey!)] ?? false;
       // A sibling of the project's threads, so it folds away with the project:
       // the caret lands under the first letter of the thread titles above it.
       //
@@ -140,10 +171,11 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // though this one cannot be beaten: the title is the literal "Archived",
       // so the row is 16 columns and the digits of the count. It would take a
       // project of a quadrillion archived threads to fill a pane.
+      const indent = threadIndent(row.depth) + 3;
       return (
-        <Box paddingLeft={4} paddingRight={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={T.faint}>{open ? "▾" : "▸"}</Text>
-          <Text color={T.subtle}> {truncate("Archived", width - 8 - String(row.count).length)}</Text>
+          <Text color={T.subtle}> {truncate("Archived", width - indent - 4 - String(row.count).length)}</Text>
           <Text color={T.faint}> {row.count}</Text>
         </Box>
       );
@@ -235,15 +267,19 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const caret = row.group ? (open ? "▾ " : "▸ ") : row.agent ? `${AGENT_MARK} ` : "  ";
       // What a furled group is holding back, so the way in is visible.
       const held = row.group && !open && row.hidden ? ` ${row.hidden}` : "";
+      // Which machine, when the project is on more than one. Short, because
+      // the title is what the row is for.
+      const tag = row.tag ? ` ${truncate(row.tag, 6)}` : "";
       // The same sum for a thread row: the gutter, the status dot and its
       // space, the space before the time, and the padding on the right.
-      const titleW = Math.max(4, width - indent - 6 - time.length - held.length);
+      const titleW = Math.max(4, width - indent - 6 - time.length - held.length - tag.length);
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={row.group ? T.subtle : T.awaiting}>{caret}</Text>
           <Text color={attention === "done" ? T.success : attention === "error" ? T.danger : statusColor(st, pulse)}>{showDot ? (attention === "done" ? "✓" : attention === "error" ? "✗" : "●") : t.pinnedAt ? "⋆" : " "} </Text>
           <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{truncate(t.title, titleW).padEnd(titleW)}</Text>
           <Text color={T.subtle}>{held}</Text>
+          <Text color={T.faint}>{tag}</Text>
           <Text color={T.faint}> {time}</Text>
         </Box>
       );

@@ -35,14 +35,14 @@ test("archived threads leave their project's list for a furled folder inside it"
     ],
   );
   const rows = sidebarRows(s);
-  assert.deepEqual(rows.map((r) => r.kind), ["machine", "project", "thread", "archived", "project", "archived"]);
+  assert.deepEqual(rows.map((r) => r.kind), ["project", "thread", "archived", "project", "archived", "machines"]);
   // a's folder sits below a's live threads and holds only a's archive
-  assert.equal(rows[2]!.thread!.id, "live-a");
-  assert.equal(rows[3]!.projectId, "a");
-  assert.equal(rows[3]!.count, 1);
-  assert.ok(rows[3]!.archived);
-  assert.equal(rows[5]!.projectId, "b");
-  assert.equal(rows[5]!.count, 1);
+  assert.equal(rows[1]!.thread!.id, "live-a");
+  assert.equal(rows[2]!.projectId, "a");
+  assert.equal(rows[2]!.count, 1);
+  assert.ok(rows[2]!.archived);
+  assert.equal(rows[4]!.projectId, "b");
+  assert.equal(rows[4]!.count, 1);
 });
 
 test("folding a project takes its archived folder with it", () => {
@@ -51,7 +51,7 @@ test("folding a project takes its archived folder with it", () => {
     [thread("live-a", "a"), thread("old-a", "a", { archivedAt: "2026-02-01T00:00:00Z" })],
     { "pi:a": false },
   );
-  assert.deepEqual(sidebarRows(s).map((r) => r.kind), ["machine", "project"]);
+  assert.deepEqual(sidebarRows(s).map((r) => r.kind), ["project", "machines"]);
 });
 
 test("unfurling the folder lists that project's archived threads, newest archive first", () => {
@@ -62,7 +62,7 @@ test("unfurling the folder lists that project's archived threads, newest archive
       thread("old-a2", "a", { archivedAt: "2026-03-01T00:00:00Z" }),
       thread("old-b", "b", { archivedAt: "2026-04-01T00:00:00Z" }),
     ],
-    { [archiveKey("pi", "a")]: true },
+    { [archiveKey("pi:a")]: true },
   );
   const rows = sidebarRows(s).filter((r) => r.kind === "thread");
   // b's folder stays furled, so only a's archive is listed
@@ -81,30 +81,30 @@ test("moved threads are tombstones, not archive — they stay out of both lists"
   const rows = sidebarRows(appState(
     [project("a")],
     [thread("gone", "a", { archivedAt: "2026-02-01T00:00:00Z", movedTo: { machineId: "mac", threadId: "x" } })],
-    { [archiveKey("pi", "a")]: true },
+    { [archiveKey("pi:a")]: true },
   ));
-  assert.deepEqual(rows.map((r) => r.kind), ["machine", "project"]);
+  assert.deepEqual(rows.map((r) => r.kind), ["project", "machines"]);
 });
 
-const row = (kind: SidebarRow["kind"], key: string): SidebarRow => ({ key, kind, machine: "ws://m", depth: 0 });
+const row = (kind: SidebarRow["kind"], key: string, depth = 1): SidebarRow => ({ key, kind, machine: "ws://m", depth });
 
-/** One machine, one project, three threads: the shape the sidebar always has. */
+/** One project with three threads, then the machines section: the shape the sidebar always has. */
 const tree = (): SidebarRow[] => [
-  row("machine", "m"),
-  row("project", "p"),
+  row("project", "p", 0),
   row("thread", "t0"),
   row("thread", "t1"),
   row("thread", "t2"),
+  row("machines", "machines", 0),
 ];
 
-test("a machine header is preceded by a blank line, so rows and lines differ", () => {
+test("a top-level row after the first is preceded by a blank line, so rows and lines differ", () => {
   const cells = sidebarCells(tree(), 0, 20);
   assert.deepEqual(cells, [
-    { kind: "blank" },
     { kind: "row", index: 0 },
     { kind: "row", index: 1 },
     { kind: "row", index: 2 },
     { kind: "row", index: 3 },
+    { kind: "blank" },
     { kind: "row", index: 4 },
   ]);
 });
@@ -115,26 +115,27 @@ test("the whole list is painted when it fits", () => {
 });
 
 test("a list taller than the pane scrolls to keep the cursor on screen", () => {
-  const rows = [row("machine", "m"), ...Array.from({ length: 40 }, (_, i) => row("thread", `t${i}`))];
+  const rows = [row("project", "p", 0), ...Array.from({ length: 40 }, (_, i) => row("thread", `t${i}`))];
   const cells = sidebarCells(rows, 30, 10);
   assert.equal(cells.length, 10);
   assert.ok(cells.some((c) => c.kind === "row" && c.index === 30), "cursor row is visible");
 });
 
 test("scrolling stops at the ends rather than running past them", () => {
-  const rows = [row("machine", "m"), ...Array.from({ length: 40 }, (_, i) => row("thread", `t${i}`))];
+  const rows = [row("project", "p", 0), ...Array.from({ length: 40 }, (_, i) => row("thread", `t${i}`)), row("machines", "machines", 0)];
   const top = sidebarCells(rows, 0, 10);
-  assert.deepEqual(top[0], { kind: "blank" });
-  const bottom = sidebarCells(rows, 40, 10);
-  assert.deepEqual(bottom[bottom.length - 1], { kind: "row", index: 40 });
+  assert.deepEqual(top[0], { kind: "row", index: 0 });
+  const bottom = sidebarCells(rows, 41, 10);
+  assert.deepEqual(bottom[bottom.length - 1], { kind: "row", index: 41 });
+  assert.deepEqual(bottom[bottom.length - 2], { kind: "blank" }, "the blank above the machines section is painted with it");
 });
 
 test("a click lands on the row that is painted there, not on the nth row", () => {
-  // Line 2 is the blank above the machine; the machine itself is on line 3.
+  // The project is on line 2, its threads on 3 to 5, a blank on 6, the machines on 7.
   const cells = sidebarCells(tree(), 0, 20);
-  assert.equal(rowAtScreenRow(cells, 2, 2), null);
-  assert.equal(rowAtScreenRow(cells, 3, 2), 0);
-  assert.equal(rowAtScreenRow(cells, 4, 2), 1);
+  assert.equal(rowAtScreenRow(cells, 2, 2), 0);
+  assert.equal(rowAtScreenRow(cells, 3, 2), 1);
+  assert.equal(rowAtScreenRow(cells, 6, 2), null, "a blank line reaches nothing");
   assert.equal(rowAtScreenRow(cells, 7, 2), 4);
   assert.equal(rowAtScreenRow(cells, 40, 2), null, "below the list");
 });
@@ -161,13 +162,13 @@ test("the cursor holds its thread when another thread's message re-sorts the lis
 });
 
 test("a cursor whose row has gone falls back to the row that took its place", () => {
-  assert.equal(cursorIndex(tree(), "t1", 0), 3, "the key wins over the remembered index");
-  // t1 is archived away, so t2 moves up into row 3.
-  const gone = [row("machine", "m"), row("project", "p"), row("thread", "t0"), row("thread", "t2")];
-  assert.equal(cursorIndex(gone, "t1", 3), 3);
-  assert.equal(gone[cursorIndex(gone, "t1", 3)]!.key, "t2");
+  assert.equal(cursorIndex(tree(), "t1", 0), 2, "the key wins over the remembered index");
+  // t1 is archived away, so t2 moves up into row 2.
+  const gone = [row("project", "p", 0), row("thread", "t0"), row("thread", "t2")];
+  assert.equal(cursorIndex(gone, "t1", 2), 2);
+  assert.equal(gone[cursorIndex(gone, "t1", 2)]!.key, "t2");
   // Nothing below it left: the cursor stops on the last row rather than running off.
-  assert.equal(cursorIndex([row("machine", "m")], "t1", 3), 0);
+  assert.equal(cursorIndex([row("project", "p", 0)], "t1", 3), 0);
   assert.equal(cursorIndex([], "t1", 3), 0, "an empty tree has no row to point at");
 });
 

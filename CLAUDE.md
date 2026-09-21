@@ -38,8 +38,8 @@
   And don't lay out two hundred timeline items to follow one of them changing
   (`ItemLines` in `lines.ts`, keyed on item identity — sound only while the daemon keeps
   re-sending items whole).
-- Screen rows are not row indices: the sidebar puts a blank line above each machine
-  and windows a long tree. `sidebar.ts` builds the painted line list and `App.tsx` gives
+- Screen rows are not row indices: the sidebar puts a blank line above each top-level
+  row after the first and windows a long tree. `sidebar.ts` builds the painted line list and `App.tsx` gives
   the same array to the renderer and to the mouse hit test — change both or neither.
 - The daemon can be exercised without the TUI: run `node packages/daemon/dist/main.js
   --bind loopback --port 3799` with `COVEY_HOME=/tmp/x`, then speak JSON over ws (see
