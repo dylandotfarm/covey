@@ -123,6 +123,9 @@ export class Engine {
     this.sweepTimer.unref?.();
   }
 
+  /** Where this daemon keeps its clones: what the machine reports, else the default. */
+  get projectsDir(): string { return this.machine.projectsDir ?? projectsDir(); }
+
   private now(): number {
     return this.opts.now ? this.opts.now() : Date.now();
   }
@@ -257,7 +260,7 @@ export class Engine {
         const identity = normaliseRemote(url);
         const dup = this.db.listProjects().find((p) => p.repositoryIdentity === identity);
         if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}`);
-        const root = join(this.machine.projectsDir ?? projectsDir(), projectSlug(identity), "repo.git");
+        const root = join(this.projectsDir, projectSlug(identity), "repo.git");
         const cloned = await this.cloneOnce(url, root);
         if ("error" in cloned) throw new EngineError("git", `could not clone ${url}: ${cloned.error}`);
         // Two creates for one repository may have waited on the same clone.

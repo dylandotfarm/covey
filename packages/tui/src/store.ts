@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { RpcMethodName, RpcMethods, BuildInfo, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { isFinalMemberState } from "@covey/protocol";
 import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
@@ -289,6 +289,12 @@ type Listener = () => void;
  * for a clone, plus a little for the answer to cross the network.
  */
 const CLONE_WAIT_MS = 10 * 60_000 + 10_000;
+
+/** The daemon gives the repository list fifty seconds; the client waits a little longer. */
+const REPO_LIST_WAIT_MS = 60_000;
+
+/** How long a repository list stays good. */
+const REPO_CACHE_MS = 60_000;
 
 export class Store {
   state: AppState;
@@ -1278,12 +1284,55 @@ export class Store {
   /** What each machine carries in run members, by machine id. */
   machineLoad(): Map<string, number> { return this.membersPerMachine(); }
 
+  /**
+   * The machines to ask about repositories: the connected ones whose daemon
+   * found `gh`, in sidebar order. The token lives on the machine, so the
+   * client cannot ask GitHub itself. A `gh` on the path is not a `gh` that is
+   * logged in, so the caller tries them in turn.
+   */
+  ghMachines(): string[] {
+    return this.state.order.filter((k) => {
+      const m = this.state.machines.get(k);
+      return m?.conn === "connected" && m.info?.resources?.tools.some((t) => t.name === "gh");
+    });
+  }
+
+  /** One request to a machine, with a machine that cannot answer read as `fallback` and the reason in the notice or the result. */
+  private async ask<M extends RpcMethodName, R>(machine: string, method: M, params: RpcMethods[M]["params"], onError: (message: string) => R, timeoutMs?: number): Promise<RpcMethods[M]["result"] | R> {
+    const client = this.clients.get(machine);
+    if (!client) return onError("not connected");
+    try { return await client.rpc(method, params, timeoutMs); }
+    catch (e: any) { return onError(this.machineError(machine, e)); }
+  }
+
+  /**
+   * The repositories the user can reach, read through `gh` on the first
+   * machine that answers. The answer is kept for a minute: the pick opens
+   * more than once a session, and the list changes on the order of days.
+   */
+  async listRepos(): Promise<{ repos: RepoInfo[]; error: string | null; machine: string | null }> {
+    if (this.repoCache && Date.now() - this.repoCache.at < REPO_CACHE_MS) return this.repoCache.value;
+    let last: { repos: RepoInfo[]; error: string | null; machine: string | null } = { repos: [], error: "no connected machine has gh", machine: null };
+    for (const machine of this.ghMachines()) {
+      const r = await this.ask(machine, "repos.list", {}, (error) => ({ repos: [], error }), REPO_LIST_WAIT_MS);
+      last = { ...r, machine };
+      if (!r.error) break;
+    }
+    if (!last.error) this.repoCache = { at: Date.now(), value: last };
+    return last;
+  }
+
+  private repoCache: { at: number; value: { repos: RepoInfo[]; error: string | null; machine: string | null } } | null = null;
+
+  /** Make a repository on GitHub through `gh` on `machine`; null, with a notice, when it could not. */
+  async createRepo(machine: string, o: { name: string; visibility: "private" | "public"; description?: string }): Promise<{ nameWithOwner: string; cloneUrl: string } | null> {
+    this.repoCache = null;
+    return this.ask(machine, "repos.create", o, (message) => { this.notify(message, "error"); return null; });
+  }
+
   /** Read the issues a task list names, with `gh` in that machine's checkout. */
   async runIssues(machine: string, projectId: string, numbers: number[]): Promise<{ issues: RunIssue[]; error: string | null }> {
-    const client = this.clients.get(machine);
-    if (!client) return { issues: [], error: "not connected" };
-    try { return await client.rpc("run.issues", { projectId, numbers }); }
-    catch (e: any) { return { issues: [], error: this.machineError(machine, e) }; }
+    return this.ask(machine, "run.issues", { projectId, numbers }, (error) => ({ issues: [], error }));
   }
 
   /**

@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { repoOptions } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
@@ -334,12 +335,19 @@ export function App({ store }: { store: Store }) {
   const shortOfScreen = transcriptOnScreen && !!state.view && !state.view.loading && !state.view.loadingOlder && state.view.hasMore && layout.lines.length < transcriptH;
   useEffect(() => { if (shortOfScreen) void store.loadOlder(previewPage(transcriptH)); }, [shortOfScreen, transcriptH, store]);
 
-  /** A row per saved machine for a pool pick: name, state, and where the clone goes. */
-  const machineOptions = (except: string[] = []): PickOption[] => state.order.filter((k) => !except.includes(k)).map((k) => {
-    const m = state.machines.get(k)!;
-    const hint = m.conn === "connected" ? (m.info?.projectsDir ?? m.info?.os ?? "") : m.conn === "offline" ? "offline · clones when it answers" : m.conn;
-    return { id: k, label: machineLabel(state, k), hint };
-  });
+  /**
+   * A row per saved machine for a pool pick: name, state, and where the clone
+   * goes. Read from the store, not from this render's `state`: the pick
+   * opens after a network wait, and a machine may have connected meanwhile.
+   */
+  const machineOptions = (except: string[] = []): PickOption[] => {
+    const live = store.getState();
+    return live.order.filter((k) => !except.includes(k)).map((k) => {
+      const m = live.machines.get(k)!;
+      const hint = m.conn === "connected" ? (m.info?.projectsDir ?? m.info?.os ?? "") : m.conn === "offline" ? "offline · clones when it answers" : m.conn;
+      return { id: k, label: machineLabel(live, k), hint };
+    });
+  };
 
   /**
    * New project: the repository, then the machines that hold it. The pick
@@ -347,18 +355,77 @@ export function App({ store }: { store: Store }) {
    * next answers. The connected ones start marked, because a pool is usually
    * the whole fleet.
    */
+  /** The last step of a new project: which machines clone `url`. */
+  const chooseMachines = (url: string) => {
+    const live = store.getState();
+    const connected = live.order.filter((k) => live.machines.get(k)?.conn === "connected");
+    openPickMany(`Clone ${url} on which machines?`, machineOptions(), connected, (ids) => {
+      store.setOverlay(null);
+      if (ids.length === 0) { store.notify("no machine picked; nothing cloned", "error"); return; }
+      void store.createProjectOn(ids, url);
+    });
+  };
+
+  /** A repository by URL, for one `gh` cannot list: another host, or no `gh`. */
+  const askUrl = () => openInput("Repository to clone", (v) => {
+    const url = v.trim();
+    if (!url) { store.setOverlay(null); return; }
+    chooseMachines(url);
+  }, "", "git@github.com:org/repo.git or https://…");
+
+  /**
+   * A new repository on GitHub: its name, then private or public. `gh` on
+   * `asker` makes it, and the clone goes to the machines picked next.
+   */
+  const newRepo = (asker: string) => openInput("New repository: name, or owner/name", (name) => {
+    const n = name.trim();
+    if (!n) { store.setOverlay(null); return; }
+    openPick(`Make ${n}`, [
+      { id: "private", label: "Private", hint: "only you and those you invite" },
+      { id: "public", label: "Public", hint: "anyone can read it" },
+    ], (vis) => {
+      store.setOverlay(null);
+      store.notify(`covey makes ${n} on GitHub through ${machineLabel(state, asker)}…`);
+      void store.createRepo(asker, { name: n, visibility: vis === "public" ? "public" : "private" }).then((made) => {
+        if (!made) return;
+        store.notify(`made ${made.nameWithOwner}`, "success");
+        chooseMachines(made.cloneUrl);
+      });
+    });
+  }, "", "my-repo, or acme/my-repo");
+
+  /**
+   * New project. The pick opens at once with its two fixed rows, and the
+   * repositories the user can reach join it when the first machine with a
+   * logged-in `gh` answers, newest push first. The reader filters the list by
+   * what they type. The two fixed rows make a new repository, or take a URL
+   * for one `gh` cannot list. Without a `gh` to ask, the URL is the whole of it.
+   *
+   * The pick is open for the whole wait, so no key falls through to the
+   * sidebar, and an answer that arrives after the reader left the pick is
+   * dropped rather than painted over whatever they opened next.
+   */
   const addProject = () => {
     if (state.order.length === 0) { store.notify("add a machine first", "error"); return; }
-    openInput("Repository to clone", (v) => {
-      const url = v.trim();
-      if (!url) { store.setOverlay(null); return; }
-      const connected = state.order.filter((k) => state.machines.get(k)?.conn === "connected");
-      openPickMany(`Clone ${url} on which machines?`, machineOptions(), connected, (ids) => {
-        store.setOverlay(null);
-        if (ids.length === 0) { store.notify("no machine picked; nothing cloned", "error"); return; }
-        void store.createProjectOn(ids, url);
-      });
-    }, "", "git@github.com:org/repo.git or https://…");
+    if (store.ghMachines().length === 0) { askUrl(); return; }
+    const fixed: PickOption[] = [
+      { id: "new", label: "New repository…", hint: "gh repo create" },
+      { id: "url", label: "A URL…", hint: "any host" },
+    ];
+    // A clone URL always has a `:` or a `/`, so it can never read as a fixed row's id.
+    const onPick = (id: string, asker: string | null) => {
+      if (id === "new") return asker ? newRepo(asker) : askUrl();
+      if (id === "url") return askUrl();
+      chooseMachines(id);
+    };
+    openPick("Repository", [...fixed, { id: "wait", label: "reading your repositories…", hint: "" }], (id) => onPick(id === "wait" ? "url" : id, null));
+    const opened = store.getState().overlay;
+    void store.listRepos().then(({ repos, error, machine }) => {
+      if (store.getState().overlay !== opened) return;
+      if (error) store.notify(error, "error");
+      const rows = [...fixed, ...repoOptions(repos)];
+      store.setOverlay({ kind: "pick", title: "Repository", options: rows, onPick: (id) => onPick(id, machine) });
+    });
   };
 
   /**
@@ -771,7 +838,7 @@ export function App({ store }: { store: Store }) {
       opts.push({ id: "stop", label: "Stop session process" });
     }
     opts.push({ id: "new", label: "New thread — in its own worktree", hint: "n" });
-    opts.push({ id: "addproject", label: "Add project — clone a repository on the machines you pick", hint: "a" });
+    opts.push({ id: "addproject", label: "Add project — pick a repository, make one, or give a URL; then the machines", hint: "a" });
     if (contextProject) opts.push({ id: "pooladd", label: "Add a machine to this project — clone it there too" });
     opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });

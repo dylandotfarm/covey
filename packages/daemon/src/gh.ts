@@ -13,18 +13,29 @@ const run = promisify(execFile);
  * there: that daemon has the `PATH`, the git remote and the login. A client on
  * another machine has none of the three.
  */
-async function gh(cwd: string, args: string[]): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
+export async function gh(cwd: string, args: string[], timeout = 20_000): Promise<{ ok: true; out: string } | { ok: false; error: string }> {
   // This helper reads. The guard makes that a rule rather than an intention:
   // a mutating command throws here instead of reaching the process table.
   assertReadOnly(args);
   try {
-    const { stdout } = await run("gh", args, { cwd, timeout: 20_000, maxBuffer: 8 << 20 });
+    const { stdout } = await run("gh", args, { cwd, timeout, maxBuffer: 8 << 20 });
     return { ok: true, out: stdout };
-  } catch (e: any) {
-    const text = String(e?.stderr ?? e?.message ?? e).trim().split("\n")[0] ?? "";
-    if (e?.code === "ENOENT") return { ok: false, error: "gh is not installed on this machine" };
-    return { ok: false, error: text || "gh failed" };
+  } catch (e) {
+    return { ok: false, error: ghError(e) };
   }
+}
+
+/**
+ * What went wrong with a `gh` call, in words the user can act on. One
+ * mapping for every caller, so a logged-out machine reads the same in a run's
+ * issue list and in the repository pick.
+ */
+export function ghError(e: unknown): string {
+  const err = e as { code?: string; stderr?: string; message?: string };
+  if (err?.code === "ENOENT") return "gh is not installed on this machine";
+  const text = String(err?.stderr ?? err?.message ?? e).trim();
+  if (/auth login|not logged in|authentication/i.test(text)) return "gh is not logged in on this machine: run `gh auth login` there";
+  return text.split("\n").filter(Boolean)[0] ?? "gh failed";
 }
 
 /**
