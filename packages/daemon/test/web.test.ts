@@ -80,3 +80,23 @@ test("the web client is off until the control panel turns it on, and stops when 
   const again = await rpc(d.port, "hello", { protocolVersion: 1, client: "covey-tui" });
   assert.equal(again.result.settings.webEnabled, null);
 });
+
+test("the fleet the TUI hands over comes back to the page in machine.access, whole and without extras", async () => {
+  const d = await startDaemon({ name: "fleet", env: { COVEY_WEB: "1" } });
+  const before = await rpc(d.port, "machine.access", {});
+  assert.deepEqual(before.result.fleet, [], "nothing until the TUI sends a list");
+  const sent = await rpc(d.port, "command", { commandId: "f1", type: "machine.fleet", machines: [
+    { name: "box", url: "ws://box.tail.ts.net:3790", machineId: "box-id", extra: "dropped" },
+    { name: "lan", url: "ws://10.0.0.9:3790", token: "tok" },
+    { name: "bad" },
+  ] });
+  assert.equal(sent.ok, true, JSON.stringify(sent));
+  const after = await rpc(d.port, "machine.access", {});
+  assert.deepEqual(after.result.fleet, [
+    { name: "box", url: "ws://box.tail.ts.net:3790", machineId: "box-id" },
+    { name: "lan", url: "ws://10.0.0.9:3790", token: "tok" },
+  ]);
+  // The whole list, every time: an empty one clears it.
+  await rpc(d.port, "command", { commandId: "f2", type: "machine.fleet", machines: [] });
+  assert.deepEqual((await rpc(d.port, "machine.access", {})).result.fleet, []);
+});

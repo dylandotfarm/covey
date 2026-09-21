@@ -2,11 +2,15 @@
  * What the page knows, and how a daemon's events change it.
  *
  * This file has no DOM in it, so node can test it. The fold is the same one
- * the TUI store does: a project, a thread, a run and a timeline item each
- * arrive whole under a stable id, and the newest copy replaces the old one.
- * There is no delta channel, and that is what makes a reconnect free — the
- * subscription replays what the phone slept through, and the replay folds in
- * exactly as a live event would.
+ * the TUI store does: a project, a thread and a timeline item each arrive
+ * whole under a stable id, and the newest copy replaces the old one. There is
+ * no delta channel, and that is what makes a reconnect free — the subscription
+ * replays what the phone slept through, and the replay folds in exactly as a
+ * live event would.
+ *
+ * The page dials more than one daemon. The one that served the page is the
+ * primary; it names the others in `machine.access`. Each daemon has a slot,
+ * and a thread on screen is named by its machine and its id.
  */
 import {
   threadIsBusy,
@@ -15,7 +19,21 @@ import {
 } from "@covey/protocol";
 import type { ConnState } from "@covey/client";
 
+export interface MachineSlot {
+  /** The `ws://` URL the page dials. */
+  key: string;
+  name: string;
+  conn: ConnState;
+  connError: string | null;
+  info: MachineInfo | null;
+  projects: Map<string, Project>;
+  threads: Map<string, Thread>;
+  /** The daemon that served the page. Its fleet list names the others. */
+  primary: boolean;
+}
+
 export interface View {
+  machine: string;
   threadId: string;
   thread: Thread | null;
   items: Map<string, TimelineItem>;
@@ -28,44 +46,54 @@ export interface View {
 }
 
 export interface State {
-  conn: ConnState;
-  connError: string | null;
-  info: MachineInfo | null;
-  projects: Map<string, Project>;
-  threads: Map<string, Thread>;
-  /** Projects the reader folded shut, by id. */
+  machines: Map<string, MachineSlot>;
+  /** Project groups the reader folded shut, by group key. */
   folded: Set<string>;
   /** The thread on screen, or null for the list. */
   view: View | null;
-  /** Draft text per thread, kept while the reader browses. */
+  /** Draft text per `machine:thread`, kept while the reader browses. */
   drafts: Map<string, string>;
-  /** The token and the other addresses of this daemon, once asked for. */
+  /** The token and the other addresses of the primary daemon, once asked for. */
   access: MachineAccess | null;
-  /** The addresses panel is open over the list. */
+  /** The settings panel is open over the list. */
   showAddresses: boolean;
+  /** A project group the reader is picking a machine for, to start a thread. */
+  choosing: string | null;
 }
 
 export function emptyState(): State {
-  return { conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), folded: new Set(), view: null, drafts: new Map(), access: null, showAddresses: false };
+  return { machines: new Map(), folded: new Set(), view: null, drafts: new Map(), access: null, showAddresses: false, choosing: null };
 }
 
-export function applyShellSnapshot(s: State, snap: ShellSnapshot): void {
-  s.info = snap.machine;
-  s.projects = new Map(snap.projects.map((p) => [p.id, p]));
-  s.threads = new Map(snap.threads.map((t) => [t.id, t]));
+export function addMachine(s: State, key: string, name: string, primary = false): MachineSlot {
+  const slot: MachineSlot = { key, name, conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), primary };
+  s.machines.set(key, slot);
+  return slot;
 }
 
-export function applyShellEvent(s: State, ev: ShellEvent): void {
+export function primaryMachine(s: State): MachineSlot | undefined {
+  for (const m of s.machines.values()) if (m.primary) return m;
+  return undefined;
+}
+
+export function applyShellSnapshot(m: MachineSlot, snap: ShellSnapshot): void {
+  m.info = snap.machine;
+  m.name = snap.machine.name;
+  m.projects = new Map(snap.projects.map((p) => [p.id, p]));
+  m.threads = new Map(snap.threads.map((t) => [t.id, t]));
+}
+
+export function applyShellEvent(s: State, m: MachineSlot, ev: ShellEvent): void {
   switch (ev.kind) {
-    case "machine.updated": s.info = ev.machine; break;
-    case "project.upserted": s.projects.set(ev.project.id, ev.project); break;
-    case "project.removed": s.projects.delete(ev.projectId); break;
+    case "machine.updated": m.info = ev.machine; m.name = ev.machine.name; break;
+    case "project.upserted": m.projects.set(ev.project.id, ev.project); break;
+    case "project.removed": m.projects.delete(ev.projectId); break;
     case "thread.upserted":
-      s.threads.set(ev.thread.id, ev.thread);
-      if (s.view?.threadId === ev.thread.id) s.view.thread = ev.thread;
+      m.threads.set(ev.thread.id, ev.thread);
+      if (s.view?.machine === m.key && s.view.threadId === ev.thread.id) s.view.thread = ev.thread;
       break;
     case "thread.removed":
-      s.threads.delete(ev.threadId);
+      m.threads.delete(ev.threadId);
       break;
     // Runs are not on the phone yet. Their members are threads, and those
     // arrive on their own.
@@ -73,8 +101,8 @@ export function applyShellEvent(s: State, ev: ShellEvent): void {
   }
 }
 
-export function openView(s: State, threadId: string): View {
-  const v: View = { threadId, thread: s.threads.get(threadId) ?? null, items: new Map(), seq: 0, hasMore: false, loading: true, error: null, commands: null };
+export function openView(s: State, machine: string, threadId: string): View {
+  const v: View = { machine, threadId, thread: s.machines.get(machine)?.threads.get(threadId) ?? null, items: new Map(), seq: 0, hasMore: false, loading: true, error: null, commands: null };
   s.view = v;
   return v;
 }
@@ -89,14 +117,14 @@ export function applyThreadSnapshot(v: View, snap: ThreadSnapshot): void {
   v.error = null;
 }
 
-/** Fold one event into the open view. An event for another thread is dropped. */
-export function applyThreadEvent(s: State, threadId: string, ev: ThreadEvent): boolean {
+/** Fold one event into the open view. An event for another thread, or another machine, is dropped. */
+export function applyThreadEvent(s: State, machine: string, threadId: string, ev: ThreadEvent): boolean {
   const v = s.view;
-  if (!v || v.threadId !== threadId) return false;
+  if (!v || v.machine !== machine || v.threadId !== threadId) return false;
   switch (ev.kind) {
     case "item.upserted": v.items.set(ev.item.id, ev.item); break;
     case "item.removed": v.items.delete(ev.itemId); break;
-    case "thread.updated": v.thread = ev.thread; s.threads.set(ev.thread.id, ev.thread); break;
+    case "thread.updated": v.thread = ev.thread; s.machines.get(machine)?.threads.set(ev.thread.id, ev.thread); break;
     case "commands.updated": v.commands = ev.commands; break;
   }
   // A resent snapshot carries each item's own seq, older than the
@@ -122,43 +150,104 @@ export function threadTone(t: Thread): Tone {
   return "idle";
 }
 
-export interface ProjectRow {
+/** A project on one machine. */
+export interface ProjectHome {
+  machine: string;
+  machineName: string;
+  conn: ConnState;
   project: Project;
-  threads: Thread[];
+}
+
+export interface ThreadRef {
+  machine: string;
+  machineName: string;
+  thread: Thread;
+}
+
+/**
+ * One row of the list: a repository, wherever it is checked out. Two machines
+ * that hold the same repository are one row, the way the TUI's sidebar shows
+ * one project with a pool of machines. A project with no remote is its own
+ * row, keyed by its machine and id, because nothing says it is the same
+ * as any other.
+ */
+export interface ProjectRow {
+  key: string;
+  title: string;
+  homes: ProjectHome[];
+  threads: ThreadRef[];
   /** How many of its threads are at work or wait on the reader. */
   active: number;
   waiting: number;
 }
 
+export function projectKey(machine: string, p: Project): string {
+  return p.repositoryIdentity ? `repo:${p.repositoryIdentity.toLowerCase()}` : `local:${machine}:${p.id}`;
+}
+
 /**
  * The list screen: every project with its live threads, newest first, pinned
  * ones at the top. Archived threads and tombstones of moved ones stay out —
- * the phone is for what is going on, not for the record.
+ * the phone is for what is going on, not for the record. A thread whose
+ * project the machine does not list is kept under a row of its own, so
+ * nothing the daemon sent is silently dropped.
  */
 export function projectRows(s: State): ProjectRow[] {
-  const byProject = new Map<string, Thread[]>();
-  for (const t of s.threads.values()) {
-    if (t.archivedAt || t.movedTo) continue;
-    const list = byProject.get(t.projectId) ?? [];
-    list.push(t);
-    byProject.set(t.projectId, list);
+  const rows = new Map<string, ProjectRow>();
+  const row = (key: string, title: string) => {
+    let r = rows.get(key);
+    if (!r) { r = { key, title, homes: [], threads: [], active: 0, waiting: 0 }; rows.set(key, r); }
+    return r;
+  };
+  for (const m of s.machines.values()) {
+    for (const p of m.projects.values()) {
+      const r = row(projectKey(m.key, p), p.title);
+      r.homes.push({ machine: m.key, machineName: m.name, conn: m.conn, project: p });
+    }
+    for (const t of m.threads.values()) {
+      if (t.archivedAt || t.movedTo) continue;
+      const p = m.projects.get(t.projectId);
+      const r = p ? row(projectKey(m.key, p), p.title) : row(`orphan:${m.key}:${t.projectId}`, "(project not listed)");
+      r.threads.push({ machine: m.key, machineName: m.name, thread: t });
+    }
   }
-  const rows: ProjectRow[] = [];
-  for (const project of [...s.projects.values()].sort((a, b) => a.title.localeCompare(b.title))) {
-    const threads = (byProject.get(project.id) ?? []).sort(byRecency);
-    rows.push({
-      project,
-      threads,
-      active: threads.filter(threadIsBusy).length,
-      waiting: threads.filter((t) => threadTone(t) === "waiting").length,
-    });
+  const out = [...rows.values()].sort((a, b) => a.title.localeCompare(b.title));
+  for (const r of out) {
+    r.threads.sort((a, b) => byRecency(a.thread, b.thread));
+    r.active = r.threads.filter((x) => threadIsBusy(x.thread)).length;
+    r.waiting = r.threads.filter((x) => threadTone(x.thread) === "waiting").length;
   }
-  return rows;
+  return out;
 }
 
 function byRecency(a: Thread, b: Thread): number {
   if (!!a.pinnedAt !== !!b.pinnedAt) return a.pinnedAt ? -1 : 1;
   return (b.lastMessageAt ?? b.updatedAt).localeCompare(a.lastMessageAt ?? a.updatedAt);
+}
+
+/** The homes of a row a new thread can go to: connected machines only. */
+export function openHomes(r: ProjectRow): ProjectHome[] {
+  return r.homes.filter((h) => h.conn === "connected");
+}
+
+/**
+ * What the banner says about the fleet. The primary daemon is the page's own
+ * connection, so its state comes first; a machine among the others that is
+ * not connected is named, because its threads are the ones missing from the
+ * list.
+ */
+export function connectionSummary(s: State): { state: ConnState; text: string } {
+  const p = primaryMachine(s);
+  if (!p) return { state: "connecting", text: "connecting…" };
+  if (p.conn !== "connected") {
+    const why = p.connError ? ` · ${p.connError}` : "";
+    return { state: p.conn, text: p.conn === "offline" ? `offline${why} · tap to retry` : p.conn === "error" ? `error${why}` : "connecting…" };
+  }
+  const down = [...s.machines.values()].filter((m) => !m.primary && m.conn !== "connected");
+  if (down.length === 0) return { state: "connected", text: "" };
+  const still = down.filter((m) => m.conn === "connecting" || m.conn === "disconnected");
+  if (still.length === down.length) return { state: "connecting", text: `${still.map((m) => m.name).join(", ")}: connecting…` };
+  return { state: "offline", text: `${down.map((m) => `${m.name} ${m.conn}`).join(", ")} · tap to retry` };
 }
 
 /**

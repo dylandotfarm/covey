@@ -234,6 +234,24 @@ export interface WebAddress {
 export interface MachineAccess {
   token: string;
   addresses: WebAddress[];
+  /**
+   * The other machines the page should dial, so one address on a phone shows
+   * the whole fleet. The TUI hands the list to the machine that serves the
+   * page (`machine.fleet`), with each URL as the phone can reach it: a
+   * tailnet name or address, never loopback. Absent on a daemon that has not
+   * been given one, which reads as an empty list.
+   */
+  fleet?: FleetMember[];
+}
+
+/** One machine of the fleet, as a phone dials it. */
+export interface FleetMember {
+  name: string;
+  /** `ws://host:port`, reachable from the phone. */
+  url: string;
+  /** The token for a machine the phone cannot reach through the tailnet. */
+  token?: string;
+  machineId?: MachineId;
 }
 
 export interface MachineSource {
@@ -1276,6 +1294,12 @@ export type Command =
       /** Serve the web client from this machine, or stop. */
       webEnabled?: boolean | null;
     }
+  /**
+   * The other machines the web client this daemon serves should dial. The
+   * whole list, every time; the daemon keeps it and hands it to the page in
+   * `machine.access`. Only the TUI knows the fleet, so only the TUI sends it.
+   */
+  | { type: "machine.fleet"; machines: FleetMember[] }
   | {
       type: "thread.create";
       projectId: ProjectId;
