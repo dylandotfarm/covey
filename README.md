@@ -38,20 +38,19 @@ pnpm run setup --add-to-path             # appends to ~/.zshrc, ~/.bashrc or con
 pnpm run setup --bin-dir ~/bin           # or choose the directory yourself
 ```
 
-It also links the `/covey` skill (`skills/covey`) into `~/.claude/skills`, so an agent inside
-a covey thread knows how to take an issue to a merged pull request with `covey issue take`
-and `covey pr open`. A brief is then one line: `/covey take issue 94 to completion, automerge
-when done`.
-
-The launcher and the skill always run from the checkout they were linked from, so `git pull`
-is enough to update both, and the daemon makes the skill link again on every start. Run the
-setup again only if you move the checkout. To install without it, run the entry
+The launcher always runs the checkout it was linked from, so `git pull` is enough to update
+it. Run the setup again only if you move the checkout. To install without it, run the entry
 point directly:
 
 ```bash
 pnpm install && pnpm run build
 node packages/cli/dist/index.js
 ```
+
+Every session the daemon starts gets the `/covey` skill, from `plugin/` in the same checkout:
+an agent inside a covey thread knows how to take an issue to a merged pull request with
+`covey issue take` and `covey pr open`. A brief is then one line: `/covey take issue 94 to
+completion, automerge when done`.
 
 After that first build you never have to quit to update: `ctrl+k → "Update covey"` pulls,
 rebuilds, restarts the local daemon and relaunches the client in place. `covey update` does
@@ -160,8 +159,8 @@ packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart
                     and `covey issue …` / `covey pr …` for an agent inside a thread
 bin/covey           launcher that setup links onto your PATH; runs its own checkout,
                     waits for it, and puts the terminal back however it died
-skills/covey        the /covey skill: how an agent takes an issue to a merged pull request
-scripts/setup.mjs   one command from a clone: install, build, link the launcher and the skill
+plugin/             the covey plugin: the /covey skill, handed to every session the daemon starts
+scripts/setup.mjs   one command from a clone: install, build, link the launcher
 docs/DESIGN.md      architecture and the reasoning behind it
 ```
 

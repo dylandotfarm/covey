@@ -87,6 +87,32 @@ test("the session tells the agent which thread and project it is working in", as
   assert.equal(options.env.PATH, process.env.PATH, "and the environment it had before, which the SDK would otherwise replace");
 });
 
+/**
+ * The `/covey` skill reaches the process as a plugin, one `--plugin-dir` per
+ * path. A personal skill would not do: a resumed session reads a temporary
+ * config directory the SDK builds, and that directory holds no skills.
+ */
+test("the session takes the covey plugin, and asks for none when there is none", async () => {
+  const sink: SessionSink = {
+    now: () => "2026-01-01T00:00:00Z",
+    upsertItem: () => {}, getItemByToolUse: () => null,
+    onStatus: () => {}, onTurnComplete: () => {}, onSessionInit: () => {}, onModelUsed: () => {},
+    onCommands: () => {},
+  };
+  const store = { append: () => {}, load: () => null, listSessions: () => [] } as unknown as SessionStore;
+  const start = (plugins?: string[]) => {
+    let options: any = null;
+    new ClaudeSession(
+      { threadId: "t-42", sessionId: "s1", projectId: "p-9", cwd: "/tmp", model: null, permissionMode: "default", permissionModeExplicit: false, streaming: false, resume: false, sessionStore: store, ...(plugins ? { plugins } : {}) },
+      sink,
+      (args) => { options = args.options; return fakeQuery([]).q; },
+    ).start();
+    return options;
+  };
+  assert.deepEqual(start(["/srv/covey/plugin"]).plugins, [{ type: "local", path: "/srv/covey/plugin" }]);
+  assert.equal(start().plugins, undefined, "no plugin, no option: the SDK must not be handed an empty list");
+});
+
 test("the `/` menu is read off the session as soon as it starts", async () => {
   const r = await run([INIT], [{ name: "compact", description: "Compact the conversation", argumentHint: "" }]);
   assert.equal(r.supportedCommandsCalls, 1, "the session never asked the SDK which commands it supports");

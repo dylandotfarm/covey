@@ -40,6 +40,10 @@ export interface SessionParams {
   streaming: boolean;
   sessionStore: SessionStore;
   additionalDirectories?: string[];
+  /** Plugin directories for the session: the covey plugin, which carries the
+   *  `/covey` skill. A plugin reaches a resumed session; a personal skill does
+   *  not (see `plugin.ts`). */
+  plugins?: string[];
   /** The project the thread works in. It goes into the session's environment
    *  as `COVEY_PROJECT_ID`, for an agent that creates a thread to put it in
    *  the project it is working in. Nothing in covey reads it back. */
@@ -174,6 +178,7 @@ export class ClaudeSession {
       },
       ...(this.params.model ? { model: this.params.model } : {}),
       ...(this.params.additionalDirectories ? { additionalDirectories: this.params.additionalDirectories } : {}),
+      ...(this.params.plugins?.length ? { plugins: this.params.plugins.map((path) => ({ type: "local" as const, path })) } : {}),
       ...(this.params.resume ? { resume: this.params.sessionId } : { sessionId: this.params.sessionId }),
       stderr: (d) => {
         if (process.env.COVEY_DEBUG) process.stderr.write(`[claude ${this.params.threadId.slice(0, 8)}] ${d}`);
