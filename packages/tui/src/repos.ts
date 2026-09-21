@@ -5,7 +5,7 @@ import { relTime } from "./lines.js";
 /**
  * The rows of the repository pick: newest push first, as `gh` lists them,
  * with what a reader picks by beside the name. The description is the label's
- * tail, so typing a word of it finds the repository too.
+ * tail, so a word of it typed into the filter finds the repository too.
  */
 export function repoOptions(repos: RepoInfo[]): PickOption[] {
   return repos.map((r) => ({

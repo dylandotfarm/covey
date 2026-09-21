@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION, KNOWN_MODELS, type RpcRequest, type RpcResponse, type
 import { Engine, EngineError } from "./engine.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
-import { projectsDir, type DaemonConfig } from "./config.js";
+import type { DaemonConfig } from "./config.js";
 import { listRepos, createRepo } from "./repos.js";
 
 const STARTED_AT = new Date().toISOString();
@@ -188,9 +188,9 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
       case "run.issues":
         return engine.runIssues(String(p.projectId), Array.isArray(p.numbers) ? p.numbers.map(Number) : []);
       case "repos.list":
-        return listRepos(engine.machine.projectsDir ?? projectsDir());
+        return listRepos();
       case "repos.create":
-        return createRepo(engine.machine.projectsDir ?? projectsDir(), { name: String(p.name ?? ""), visibility: p.visibility === "public" ? "public" : "private", description: p.description ? String(p.description) : undefined });
+        return createRepo({ name: String(p.name ?? ""), visibility: p.visibility === "public" ? "public" : "private", description: p.description ? String(p.description) : undefined });
       case "run.pullRequest":
         return engine.runPullRequest(String(p.threadId));
       case "run.gate":
