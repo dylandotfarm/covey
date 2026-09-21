@@ -103,6 +103,10 @@ export class Db {
     `);
     const cols = (this.sql.prepare("PRAGMA table_info(turn_checkpoints)").all() as any[]).map((c) => c.name);
     if (!cols.includes("user_message_uuid")) this.sql.exec("ALTER TABLE turn_checkpoints ADD COLUMN user_message_uuid TEXT");
+    // `updated_at` says which list is the newest, for a thread that borrows one.
+    // A row from before the column has no time and sorts last.
+    const commandCols = (this.sql.prepare("PRAGMA table_info(thread_commands)").all() as any[]).map((c) => c.name);
+    if (!commandCols.includes("updated_at")) this.sql.exec("ALTER TABLE thread_commands ADD COLUMN updated_at TEXT");
   }
 
   private txDepth = 0;
@@ -175,8 +179,24 @@ export class Db {
     return r ? JSON.parse(r.json) : null;
   }
   putThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
-    this.sql.prepare("INSERT OR REPLACE INTO thread_commands(thread_id,json) VALUES(?,?)")
-      .run(threadId, JSON.stringify(commands));
+    this.sql.prepare("INSERT OR REPLACE INTO thread_commands(thread_id,json,updated_at) VALUES(?,?,?)")
+      .run(threadId, JSON.stringify(commands), new Date().toISOString());
+  }
+  /**
+   * The list to lend a thread that has none of its own: the newest one that
+   * a session reported for a thread of the same project, else the newest on
+   * the machine. The lists differ by a project skill at most, because the
+   * user's skills, the plugins and the built-in commands are the same for
+   * every session this daemon starts. `null` when no session has ever
+   * reported one.
+   */
+  lentCommands(projectId: string): SlashCommandInfo[] | null {
+    const r: any = this.sql.prepare(
+      "SELECT c.json FROM thread_commands c JOIN threads t ON t.id = c.thread_id " +
+      // A replaced row gets a new rowid, which breaks a tie in the same millisecond.
+      "ORDER BY (t.project_id = ?) DESC, c.updated_at DESC, c.rowid DESC LIMIT 1",
+    ).get(projectId);
+    return r ? JSON.parse(r.json) : null;
   }
 
   // ---- runs ---------------------------------------------------------------

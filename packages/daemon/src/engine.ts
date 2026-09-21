@@ -185,7 +185,18 @@ export class Engine {
       const idx = items.findIndex((i) => i.id === s.latest.id);
       if (idx >= 0) items[idx] = s.latest; else items.push(s.latest);
     }
-    return { seq: this.db.threadSeq(threadId), thread, items, hasMore, commands: this.db.threadCommands(threadId) };
+    return { seq: this.db.threadSeq(threadId), thread, items, hasMore, commands: this.commandsFor(thread) };
+  }
+
+  /**
+   * The `/` menu for a thread: its own list once a session reported one, else
+   * the list lent from a sibling thread (`Db.lentCommands`). A thread that has
+   * never run gets a menu this way, and the first message is the one that
+   * most often names a skill. `null` only while no session on the machine has
+   * ever reported a list.
+   */
+  private commandsFor(thread: Thread): SlashCommandInfo[] | null {
+    return this.db.threadCommands(thread.id) ?? this.db.lentCommands(thread.projectId);
   }
 
   // ---- emit helpers ---------------------------------------------------------
@@ -1673,13 +1684,18 @@ export class Engine {
    * on every session start and a thread event costs a seq.
    *
    * The list is stored, so a thread that has run before still has a menu after
-   * the daemon restarts. A thread that has never run keeps `null` — "not known
-   * yet" — until a session answers for it.
+   * the daemon restarts. A thread that has never run shows a list lent from a
+   * sibling (`commandsFor`) until a session answers for it. The first report
+   * is always stored, so the thread stops borrowing; it is sent only when it
+   * differs from the lent list the clients already hold.
    */
   setThreadCommands(threadId: string, commands: SlashCommandInfo[]) {
-    const before = this.db.threadCommands(threadId);
-    if (before && sameCommands(before, commands)) return;
+    const own = this.db.threadCommands(threadId);
+    if (own && sameCommands(own, commands)) return;
+    const thread = this.db.getThread(threadId);
+    const shown = own ?? (thread ? this.db.lentCommands(thread.projectId) : null);
     this.db.putThreadCommands(threadId, commands);
+    if (shown && sameCommands(shown, commands)) return;
     this.emitThread(threadId, { kind: "commands.updated", commands });
   }
 

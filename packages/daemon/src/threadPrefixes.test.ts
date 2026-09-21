@@ -82,6 +82,68 @@ test("a longer list replaces the old one whole, the way the SDK pushes it", asyn
   assert.equal(s.events.filter((e) => e.kind === "commands.updated").length, 2);
 });
 
+/** A second thread that has never run, in `projectId`. */
+function otherThread(db: Db, id: string, projectId: string): void {
+  db.putThread({ ...THREAD, id, projectId });
+}
+
+test("a thread that has never run borrows the list of a sibling in its project", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  otherThread(s.db, "t2", "p1");
+  s.engine.setThreadCommands("t1", [COMPACT]);
+  await settle();
+  assert.deepEqual(s.engine.threadSnapshot("t2").commands, [COMPACT]);
+});
+
+test("its own project's list wins over a newer one from another project", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  otherThread(s.db, "t2", "p2");
+  otherThread(s.db, "t3", "p1");
+  s.engine.setThreadCommands("t1", [COMPACT]);
+  s.engine.setThreadCommands("t2", [COMPACT, USAGE]);
+  await settle();
+  assert.deepEqual(s.engine.threadSnapshot("t3").commands, [COMPACT]);
+  // A project nobody has run in borrows from the machine.
+  otherThread(s.db, "t4", "p3");
+  assert.deepEqual(s.engine.threadSnapshot("t4").commands, [COMPACT, USAGE]);
+});
+
+test("the newest list of the project is the one lent", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  otherThread(s.db, "t2", "p1");
+  otherThread(s.db, "t3", "p1");
+  s.engine.setThreadCommands("t1", [COMPACT]);
+  s.db.putThreadCommands("t2", [COMPACT, USAGE]);
+  await settle();
+  assert.deepEqual(s.engine.threadSnapshot("t3").commands, [COMPACT, USAGE]);
+});
+
+test("the first report of its own session ends the borrowing, and is sent only when it differs", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  otherThread(s.db, "t2", "p1");
+  s.engine.setThreadCommands("t1", [COMPACT]);
+  await settle();
+  const before = s.events.length;
+  // The same list the thread was shown: stored, so a later change on t1 no
+  // longer reaches t2, but not sent, because the clients hold it already.
+  s.engine.setThreadCommands("t2", [{ ...COMPACT }]);
+  await settle();
+  assert.equal(s.events.length, before);
+  assert.deepEqual(s.db.threadCommands("t2"), [COMPACT]);
+  s.engine.setThreadCommands("t1", [COMPACT, USAGE]);
+  await settle();
+  assert.deepEqual(s.engine.threadSnapshot("t2").commands, [COMPACT]);
+  // A different list is sent.
+  s.engine.setThreadCommands("t2", [USAGE]);
+  await settle();
+  const last = s.events[s.events.length - 1]!;
+  assert.deepEqual(last.kind === "commands.updated" ? last.commands : null, [USAGE]);
+});
+
 test("a thread that has run keeps its menu when the daemon restarts", async (t) => {
   const s = setup();
   t.after(s.cleanup);
