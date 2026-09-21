@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
@@ -224,15 +224,18 @@ export function App({ store }: { store: Store }) {
   // `cursorIndex` has already fallen back to the nearest surviving one; write
   // that row's key back, or the cursor is an index again until the next move.
   //
-  // Not into the machines section while no project has arrived: at start the
-  // tree is that section alone until the first snapshot lands, and a cursor
-  // written there would sit below the projects once they came. An empty key
-  // falls to row 0, which is the first project as soon as there is one.
+  // An empty key names no row, so it is never written back: it falls to row
+  // 0, which is the first project as soon as there is one. And a key from
+  // above the machines section is not written onto that section: at start,
+  // and whenever the projects go with their machine, the section is all
+  // there is, and a cursor seated there would sit below the projects once
+  // they came back. It goes back to empty instead, and falls to row 0.
   useEffect(() => {
-    if (rows.length > 0 && !rows.some((r) => r.key === cursorKey)) {
-      if (cursorKey === "" && !rows.some((r) => r.kind === "project" || r.kind === "empty")) return;
-      setCursorKey(rows[cursor]!.key);
-    }
+    if (cursorKey === "" || rows.length === 0 || rows.some((r) => r.key === cursorKey)) return;
+    const to = rows[cursor]!;
+    const fleet = (k: string) => k === "machines" || k.startsWith("m:");
+    if (fleet(to.key) && !fleet(cursorKey)) { setCursorKey(""); return; }
+    setCursorKey(to.key);
   }, [rows, cursorKey, cursor]);
   // Reset the answer buffer when a different request comes up, so a stale
   // half-typed answer never carries into the next question.
@@ -254,9 +257,9 @@ export function App({ store }: { store: Store }) {
   // fetched. `loadDir` reads each one once.
   useEffect(() => { if (mentionDirPath !== null) void store.loadDir(mentionDirPath); }, [mentionDirPath, threadKey, store]);
 
-  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string, onCancel?: () => void) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle, onCancel }); };
+  const openPick = (title: string, options: PickOption[], onPick: (id: string, checked: boolean) => void, toggle?: string, onCancel?: () => void, many?: { marked: Set<string>; onMany: (ids: string[]) => void }) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick, toggle, onCancel, many }); };
   /** A pick of many: space marks, enter hands over the marked ids. */
-  const openPickMany = (title: string, options: PickOption[], marked: string[], onMany: (ids: string[]) => void) => { setOvCursor(0); setOvFilter(""); setOvToggle(false); store.setOverlay({ kind: "pick", title, options, onPick: () => {}, many: { marked: new Set(marked), onMany } }); };
+  const openPickMany = (title: string, options: PickOption[], marked: string[], onMany: (ids: string[]) => void) => openPick(title, options, () => {}, undefined, undefined, { marked: new Set(marked), onMany });
   const openInput = (title: string, onSubmit: (v: string) => void, initial = "", placeholder?: string, onCancel?: () => void) => { setOvFilter(initial); store.setOverlay({ kind: "input", title, onSubmit, initial, placeholder, onCancel }); };
 
   // ---- actions ----------------------------------------------------------------
@@ -274,10 +277,22 @@ export function App({ store }: { store: Store }) {
   });
   /** Put the cursor on a row the mouse found, by index. */
   const pointCursor = (index: number) => { const r = rows[index]; if (r) setCursorKey(r.key); };
-  // `||`, not `??`: the machines header names no machine, and its empty
-  // string must fall through to the first machine.
-  const contextMachine = state.selected?.machine || currentRow?.machine || state.order[0];
-  const contextProject = state.view?.thread?.projectId ?? currentRow?.projectId;
+  // The machine and project an action on the current row acts on. A project
+  // row stands for a pool, and the row's own `machine` is the pool's first
+  // member in sidebar order, which may be offline; the action goes to a
+  // connected member instead. A run started here, the issues it reads, and
+  // the machine panel all follow this. `||`, not `??`: the machines header
+  // names no machine, and its empty string must fall through.
+  const rowContext = (row?: SidebarRow): { machine?: string; projectId?: string } => {
+    if (row?.kind === "project" && row.pool) {
+      const live = row.pool.find((x) => state.machines.get(x.machine)?.conn === "connected") ?? row.pool[0]!;
+      return { machine: live.machine, projectId: live.projectId };
+    }
+    return { machine: row?.machine || undefined, projectId: row?.projectId };
+  };
+  const rowCtx = rowContext(currentRow);
+  const contextMachine = state.selected?.machine || rowCtx.machine || state.order[0];
+  const contextProject = state.view?.thread?.projectId ?? rowCtx.projectId;
 
   /**
    * Moving the sidebar cursor shows what it is pointing at: a thread opens in
@@ -323,14 +338,14 @@ export function App({ store }: { store: Store }) {
   const machineOptions = (except: string[] = []): PickOption[] => state.order.filter((k) => !except.includes(k)).map((k) => {
     const m = state.machines.get(k)!;
     const hint = m.conn === "connected" ? (m.info?.projectsDir ?? m.info?.os ?? "") : m.conn === "offline" ? "offline · clones when it answers" : m.conn;
-    return { id: k, label: m.info?.name ?? m.saved.name, hint };
+    return { id: k, label: machineLabel(state, k), hint };
   });
 
   /**
-   * New project: the repository, then the machines that hold it. Every
-   * machine is offered, connected or not — an offline one is asked when it
-   * next answers — and the connected ones start marked, because a pool is
-   * usually the whole fleet.
+   * New project: the repository, then the machines that hold it. The pick
+   * offers every machine, connected or not. An offline machine clones when it
+   * next answers. The connected ones start marked, because a pool is usually
+   * the whole fleet.
    */
   const addProject = () => {
     if (state.order.length === 0) { store.notify("add a machine first", "error"); return; }
@@ -346,12 +361,18 @@ export function App({ store }: { store: Store }) {
     }, "", "git@github.com:org/repo.git or https://…");
   };
 
-  /** Add a machine to a project's pool: clone the repository there. */
-  const addToPool = (machine = contextMachine, projectId = contextProject) => {
-    const g = machine && projectId ? groupOfProject(state, machine, projectId) : null;
+  /**
+   * Add a machine to a project's pool: clone the repository there. The
+   * project under the cursor when the cursor is on one, since that is the
+   * project the summary beside it names; else the open thread's.
+   */
+  const addToPool = () => {
+    const at = currentRow?.kind === "project" ? rowCtx : { machine: contextMachine, projectId: contextProject };
+    const g = at.machine && at.projectId ? groupOfProject(state, at.machine, at.projectId) : null;
     const url = g?.members.map((x) => x.project.remoteUrl).find(Boolean);
-    if (!g || !url) { store.notify("select a project that was cloned from a URL", "error"); return; }
-    const inPool = g.members.map((x) => x.machine);
+    if (!g || !url) { store.notify("select a project that covey cloned from a URL", "error"); return; }
+    // Machines that hold it, and machines that will once they answer.
+    const inPool = [...g.members.map((x) => x.machine), ...store.pendingFor(url)];
     const options = machineOptions(inPool);
     if (options.length === 0) { store.notify("every machine already has this project"); return; }
     openPickMany(`Add ${g.title} to which machines?`, options, [], (ids) => {
@@ -371,20 +392,25 @@ export function App({ store }: { store: Store }) {
    */
   const newThread = async (machine = contextMachine, projectId = contextProject) => {
     if (!machine || !projectId) { store.notify("select a project first", "error"); return; }
-    const g = groupOfProject(state, machine, projectId);
-    const ready = (g?.members ?? []).filter((x) => state.machines.get(x.machine)?.conn === "connected");
+    const identity = project(machine, projectId)?.repositoryIdentity ?? null;
+    // A project with no remote is on one machine only; a pooled one is ranked
+    // the way a run's tasks are placed, fastest with room first.
+    if (!identity) {
+      if (state.machines.get(machine)?.conn !== "connected") { store.notify("that machine is not connected", "error"); return; }
+      await store.createThread(machine, projectId);
+      return;
+    }
+    const ready = store.rankedPool(identity).filter((m) => m.projectId !== null);
     if (ready.length === 0) { store.notify("no connected machine has this project", "error"); return; }
-    if (ready.length === 1) { await store.createThread(ready[0]!.machine, ready[0]!.projectId); return; }
-    const room = new Map(store.placementMachines(g!.members[0]!.project.repositoryIdentity).map((m) => [m.key, m.concurrency - runningTurns(m.key)]));
-    const sorted = [...ready].sort((a, b) => (room.get(b.machine) ?? 0) - (room.get(a.machine) ?? 0));
-    openPick("New thread on which machine?", sorted.map((x) => {
-      const m = state.machines.get(x.machine)!;
-      const free = room.get(x.machine);
-      return { id: x.machine, label: m.info?.name ?? m.saved.name, hint: free === undefined ? "" : `${Math.max(0, free)} free · ${m.info?.os ?? ""}` };
+    if (ready.length === 1) { await store.createThread(ready[0]!.key, ready[0]!.projectId!); return; }
+    const load = store.machineLoad();
+    openPick("New thread on which machine?", ready.map((m) => {
+      const free = Math.max(0, m.concurrency - (load.get(m.machineId) ?? 0));
+      return { id: m.key, label: machineLabel(state, m.key), hint: `${free} free · ${m.os}` };
     }), (mk) => {
       store.setOverlay(null);
-      const x = ready.find((y) => y.machine === mk)!;
-      void store.createThread(x.machine, x.projectId);
+      const m = ready.find((y) => y.key === mk)!;
+      void store.createThread(m.key, m.projectId!);
     });
   };
 
@@ -1402,22 +1428,27 @@ export function App({ store }: { store: Store }) {
     if (input === "d" && state.view) return void store.toggleDiff();
     if (input === "m" && row.kind === "thread") return moveThread();
     if (input === "r" && row.kind === "thread") return openInput("Rename thread", (v) => { store.setOverlay(null); void store.threadCommand({ type: "thread.rename", threadId: row.thread!.id, title: v }, row.machine); }, row.thread!.title);
+    // A project's name starts as the repository's and is the reader's to
+    // change. Each machine of the pool holds its own row, so the name goes to
+    // every one of them.
+    if (input === "r" && row.kind === "project") return openInput("Rename project", (v) => { store.setOverlay(null); if (v.trim()) void store.renameProject(row.pool ?? [], v.trim()); }, row.project!.title);
     if (input === "x" && row.kind === "thread") return void store.threadCommand({ type: "thread.archive", threadId: row.thread!.id, archived: !row.thread!.archivedAt }, row.machine);
     if (input === "D" && row.kind === "thread") return openPick(`Delete "${row.thread!.title}"?`, [{ id: "no", label: "Cancel" }, { id: "yes", label: "Delete thread and its transcript" }], (id) => { store.setOverlay(null); if (id === "yes") void store.threadCommand({ type: "thread.delete", threadId: row.thread!.id }, row.machine); });
     if (input === "D" && row.kind === "project") {
       // From one machine of the pool, or from all of them. The clone stays on
       // disk either way; the rows and the threads go.
       const pool = row.pool ?? [];
-      const name = (k: string) => state.machines.get(k)?.info?.name ?? state.machines.get(k)?.saved.name ?? k;
+      const name = (k: string) => machineLabel(state, k);
+      // A machine key is a URL, so it can never read as `no` or `all`.
       const opts: PickOption[] = [
         { id: "no", label: "Cancel" },
         ...(pool.length > 1 ? [{ id: "all", label: `Remove from every machine (${pool.length}) and delete its threads` }] : []),
-        ...pool.map((x) => ({ id: `m:${x.machine}`, label: pool.length > 1 ? `Remove from ${name(x.machine)} and delete its threads there` : "Remove project and all its threads", hint: name(x.machine) })),
+        ...pool.map((x) => ({ id: x.machine, label: pool.length > 1 ? `Remove from ${name(x.machine)} and delete its threads there` : "Remove project and all its threads", hint: name(x.machine) })),
       ];
       return openPick(`Remove project "${row.project!.title}"?`, opts, (id) => {
         store.setOverlay(null);
         if (id === "no") return;
-        const targets = id === "all" ? pool : pool.filter((x) => `m:${x.machine}` === id);
+        const targets = id === "all" ? pool : pool.filter((x) => x.machine === id);
         for (const x of targets) void store.removeFromPool(x.machine, x.projectId);
       });
     }
@@ -1627,10 +1658,9 @@ export function App({ store }: { store: Store }) {
   // The title bar follows the pane: naming the open thread over a project
   // summary would describe something that is not on screen.
   const summaryMachine = summaryRow ? state.machines.get(summaryRow.machine) : undefined;
-  const nameOfMachine = (k: string) => state.machines.get(k)?.info?.name ?? state.machines.get(k)?.saved.name ?? k;
   const summaryTitle = summaryRow && (summaryRow.kind === "project" ? summaryRow.project!.title : summaryRow.kind === "machines" ? "machines" : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
   // A project's subtitle names its pool; a machine's says what it is.
-  const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => nameOfMachine(x.machine)).join(" · ") : summaryRow.kind === "machines" ? `${state.order.length}` : "machine");
+  const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => machineLabel(state, x.machine)).join(" · ") : summaryRow.kind === "machines" ? `${state.order.length}` : "machine");
   return (
     /* One invariant holds this screen together: nothing covey paints may be
        wider than the terminal it is painted into. Ink's incremental renderer

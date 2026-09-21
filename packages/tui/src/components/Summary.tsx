@@ -2,8 +2,8 @@ import React from "react";
 import { Box, Text } from "ink";
 import { KNOWN_MODELS, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
 import type { AppState, MachineState, PoolMember, SidebarRow, ThreadTally } from "../store.js";
-import { liveThreads, byRecency, tallyThreads, permissionModeLabel, projectGroups } from "../store.js";
-import { T, connColor, statusColor } from "../theme.js";
+import { liveThreads, byRecency, tallyThreads, permissionModeLabel, projectGroups, machineLabel } from "../store.js";
+import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { buildLine, buildSkew } from "../build.js";
 
@@ -37,13 +37,21 @@ export function Summary({ state, row, width, height }: { state: AppState; row: S
 function ProjectSummary({ state, pool, width, height, tick }: { state: AppState; pool: PoolMember[]; width: number; height: number; tick: number }) {
   const p = pool[0]?.project;
   if (!p) return <Text color={T.subtle} italic>this project is no longer there</Text>;
+  // One pass over each machine's threads: the live ones into the list, the
+  // archived and moved ones counted, and a tally per machine for its line.
   const threads: Thread[] = [];
+  const perMachine = new Map<string, Thread[]>();
   let hidden = 0;
   for (const x of pool) {
     const m = state.machines.get(x.machine);
     if (!m) continue;
-    threads.push(...liveThreads(m, x.projectId));
-    hidden += [...m.threads.values()].filter((t) => t.projectId === x.projectId && (t.archivedAt || t.movedTo)).length;
+    const mine: Thread[] = [];
+    for (const t of m.threads.values()) {
+      if (t.projectId !== x.projectId) continue;
+      if (t.archivedAt || t.movedTo) hidden++; else mine.push(t);
+    }
+    perMachine.set(x.machine, mine);
+    threads.push(...mine);
   }
   threads.sort(byRecency);
   const tally = tallyThreads(threads);
@@ -62,7 +70,7 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
         {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel)}</Text>}
       </Text>
       <Box height={1} />
-      {pool.map((x) => <PoolLine key={x.machine} state={state} x={x} width={width} />)}
+      {pool.map((x) => <PoolLine key={x.machine} state={state} x={x} tally={tallyThreads(perMachine.get(x.machine) ?? [])} width={width} />)}
       <Box height={1} />
       {shown.map((t) => <ThreadLine key={t.id} t={t} width={width} tick={tick} />)}
       {threads.length === 0 && <Text color={T.subtle} italic>no threads yet — press n to start one</Text>}
@@ -73,23 +81,27 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
   );
 }
 
-/** One machine of a pool: its state, its copy of the project, and what runs there. */
-function PoolLine({ state, x, width }: { state: AppState; x: PoolMember; width: number }) {
+/**
+ * One machine of a pool: its state, what runs there, and where its copy of
+ * the project is. The path takes whatever room the counts leave, because it
+ * is the one fact about a clone that nothing else on screen shows.
+ */
+function PoolLine({ state, x, tally, width }: { state: AppState; x: PoolMember; tally: ThreadTally; width: number }) {
   const m = state.machines.get(x.machine);
   if (!m) return null;
-  const tally = tallyThreads(liveThreads(m, x.projectId));
-  const name = (m.info?.name ?? m.saved.name).padEnd(12);
-  const dot = m.conn === "connected" ? "●" : m.conn === "offline" ? "✗" : "○";
+  const name = machineLabel(state, x.machine).padEnd(12);
   const count = (tally.total ? `${tally.total} thread${tally.total === 1 ? "" : "s"}` : "no threads").padEnd(12);
   const busy = (tally.running ? `${tally.running} running  ` : "") + (tally.waiting ? `${tally.waiting} waiting` : "");
-  const rest = width - 2 - name.length - count.length - 18;
+  const busyW = busy ? 18 : 0;
+  const rest = width - 2 - name.length - count.length - busyW;
+  const where = x.project.kind === "clone" ? x.project.workspaceRoot : `${x.project.workspaceRoot} (a checkout of your own)`;
   return (
     <Text wrap="truncate">
-      <Text color={connColor(m.conn)}>{dot} </Text>
+      <Text color={connColor(m.conn)}>{connDot(m.conn)} </Text>
       <Text color={T.text}>{name}</Text>
       <Text color={T.subtle}>{count}</Text>
-      <Text color={tally.waiting ? T.awaiting : T.working}>{busy.padEnd(18)}</Text>
-      {rest > 12 && <Text color={T.faint}>{truncate(x.project.kind === "clone" ? x.project.workspaceRoot : `${x.project.workspaceRoot} (a checkout of your own)`, rest)}</Text>}
+      {busy && <Text color={tally.waiting ? T.awaiting : T.working}>{busy.padEnd(busyW)}</Text>}
+      {rest > 8 && <Text color={T.faint}>{truncate(where, rest)}</Text>}
     </Text>
   );
 }
@@ -105,11 +117,11 @@ function MachinesSummary({ state, height }: { state: AppState; height: number })
       <Box height={1} />
       {shown.map((k) => {
         const m = state.machines.get(k)!;
-        const name = (m.info?.name ?? m.saved.name).padEnd(12);
+        const name = machineLabel(state, k).padEnd(12);
         const meta = m.conn === "connected" ? [m.info?.os ?? "", m.info?.daemonVersion ? `daemon ${m.info.daemonVersion}` : ""].filter(Boolean).join("  ·  ") : m.conn === "offline" ? (m.error ?? "offline") : m.conn;
         return (
           <Text key={k} wrap="truncate">
-            <Text color={connColor(m.conn)}>{m.conn === "connected" ? "● " : m.conn === "offline" ? "✗ " : "○ "}</Text>
+            <Text color={connColor(m.conn)}>{connDot(m.conn)} </Text>
             <Text color={T.text}>{name}</Text>
             <Text color={T.subtle}>{`${m.projects.size} project${m.projects.size === 1 ? "" : "s"}`.padEnd(12)}</Text>
             <Text color={m.conn === "offline" ? connColor(m.conn) : T.subtle}>{meta}</Text>
@@ -209,7 +221,7 @@ const DIFF_W = 12;
 const TIME_W = 5;
 
 function ThreadLine({ t, width, tick }: { t: Thread; width: number; tick: number }) {
-  const st = t.pendingApprovals > 0 ? "waiting" : (t.status ?? "idle");
+  const st = t.pendingApprovals > 0 ? "waiting" : t.status;
   const label = st === "idle" ? "" : st === "starting" ? "running" : st;
   const d = t.latestTurn?.diff;
   const diff = d && !d.unavailable && d.files.length > 0 ? `+${d.additions} −${d.deletions}` : "";

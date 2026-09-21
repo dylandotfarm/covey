@@ -1,8 +1,8 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { MACHINES_KEY, archiveKey, liveThreads, pendingTasks, projectGroups, projectRuns, runIsBusy, runKey, runNeedsPerson, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { MACHINES_KEY, archiveKey, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
-import { T, connColor, statusColor } from "../theme.js";
+import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { runMemberStateLabel, runState, tallyRun } from "@covey/protocol";
 import { buildSkew } from "../build.js";
@@ -21,10 +21,10 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
             place the reader always looks says so. */}
         {state.clientStale
           ? <Text color={T.warning}>  ⚠ newer build on disk</Text>
-          : <Text color={T.subtle}>  {headerCount(state)}</Text>}
+          : <Text color={T.subtle}>  {truncate(headerCount(rows, state), width - 9)}</Text>}
       </Box>
-      {/* Painted from `cells`, not from `rows`: the blank lines above machine
-          headers and the scroll window have to be identical to what App uses
+      {/* Painted from `cells`, not from `rows`: the blank lines above the
+          projects and the scroll window have to be identical to what App uses
           to work out which row a click landed on. */}
       <Box flexDirection="column" flexGrow={1} overflow="hidden">
         {cells.map((c, i) => c.kind === "blank"
@@ -38,9 +38,11 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
   );
 }
 
-/** "3 projects · 2 machines": what the tree holds, at a glance. */
-function headerCount(state: AppState): string {
-  const p = projectGroups(state).length;
+/** "3 projects · 2 machines": what the tree holds, at a glance. Read off the
+ *  rows, which already hold one project row per group. */
+function headerCount(rows: SidebarRow[], state: AppState): string {
+  let p = 0;
+  for (const r of rows) if (r.kind === "project") p++;
   const m = state.order.length;
   return `${p} project${p === 1 ? "" : "s"} · ${m} machine${m === 1 ? "" : "s"}`;
 }
@@ -83,7 +85,7 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // An offline machine gets its own mark. It used to share "○" with every
       // other kind of silence, so a machine nobody was dialling any more looked
       // exactly like one about to answer (issue #68).
-      const dot = m.conn === "connected" ? "●" : m.conn === "connecting" ? "◌" : m.conn === "offline" ? "✗" : "○";
+      const dot = connDot(m.conn);
       const dotColor = connColor(m.conn);
       const name = m.info?.name ?? m.saved.name;
       // A machine behind the client is worth more than its os here: the os
@@ -92,7 +94,9 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // Room here is a dozen characters, so the reason lives in the summary
       // pane; what the row owes the reader is that nothing more will happen
       // unless they ask, which is what "enter to retry" says.
-      const meta = m.conn === "offline" ? "offline · enter" : m.conn !== "connected" ? m.conn : behind ? "⚠ old build" : (m.info?.os ?? "");
+      // A connected machine with nothing on it says so, and what to press:
+      // its emptiness has no row of its own now that projects lead the tree.
+      const meta = m.conn === "offline" ? "offline · enter" : m.conn !== "connected" ? m.conn : behind ? "⚠ old build" : m.projects.size === 0 ? "no projects · a" : (m.info?.os ?? "");
       return (
         <Box paddingLeft={3} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={dotColor}>{dot} </Text>
@@ -108,13 +112,14 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const open = state.expanded[MACHINES_KEY] ?? false;
       const offline = state.order.filter((k) => state.machines.get(k)?.conn === "offline").length;
       const behind = state.order.filter((k) => { const x = state.machines.get(k); return x?.conn === "connected" && buildSkew(state.clientBuild, x.info?.build) === "behind"; }).length;
-      // Furled, the section still says what needs a person: a machine nobody
-      // is dialling, or one on an old build.
+      // Furled, the section still says what needs a person: a machine the
+      // client no longer dials, or one on an old build.
       const meta = offline ? `${offline} offline` : behind ? `${behind} old build` : String(state.order.length);
+      // The padding on both sides, the caret, its space, and the two before the meta.
       return (
         <Box paddingX={1} height={1} backgroundColor={bg}>
           <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>
-          <Text color={T.text} bold> {truncate("MACHINES", width - 5 - meta.length)}</Text>
+          <Text color={T.text} bold> {truncate("MACHINES", width - 6 - meta.length)}</Text>
           <Text color={offline ? connColor("offline") : behind ? T.warning : T.faint}>  {meta}</Text>
         </Box>
       );
@@ -125,20 +130,10 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const open = state.expanded[row.groupKey!] ?? true;
       // Every machine in the pool answers the three questions: a fold may
       // never hide that something inside it is working, that something is
-      // waiting on a person, or how much there is. A member the operator or
-      // the tracker called `blocked` has no thread status to read, and a task
-      // that is planned has no thread at all.
-      let busy = false, waiting = false, count = 0;
-      for (const x of row.pool ?? []) {
-        const pm = state.machines.get(x.machine);
-        if (!pm) continue;
-        const threads = liveThreads(pm, x.projectId);
-        const runs = projectRuns(pm, x.projectId);
-        busy ||= threads.some((t) => t.status === "running" || t.status === "starting") || runs.some(runIsBusy);
-        waiting ||= threads.some((t) => t.status === "waiting" || t.pendingApprovals > 0) || runs.some((r) => runNeedsPerson(state, r));
-        // Threads, and the tasks that are not threads yet.
-        count += threads.length + pendingTasks(pm, x.projectId);
-      }
+      // waiting on a person, or how much there is. `sidebarRows` summed them
+      // once, over the walk that found the threads, so a paint reads three
+      // fields and scans nothing.
+      const { busy = false, waiting = false, count = 0 } = row;
       const agg = !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
       // The last row whose width was a constant rather than a sum of the cells
       // it paints: the indent, the caret or the dot, the space before the

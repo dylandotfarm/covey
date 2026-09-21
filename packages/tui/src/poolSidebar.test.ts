@@ -2,12 +2,12 @@
  * Projects at the top of the sidebar, pooled across machines (#89).
  *
  * A repository is one row however many machines hold it. The threads of every
- * machine sit under it, each row tagged with its machine when the pool has
- * more than one, and the machines themselves sit in a section of their own,
- * below the projects and furled by default.
+ * machine sit under it. Each row carries its machine's name when the pool has
+ * more than one. The machines sit in a section of their own, below the
+ * projects, furled by default.
  *
- * A machine that is not connected can still join a pool: the clone it was
- * asked for waits in the client's config and is sent when it next answers.
+ * A machine that is not connected can still join a pool. The clone waits in
+ * the client's config, and the store sends it when the machine next answers.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,6 +18,7 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-pool-"));
 
 import type { Command, Project, Thread } from "@covey/protocol";
 import { Store, MACHINES_KEY, archiveKey, projectGroups, sidebarRows, type AppState, type MachineState } from "./store.js";
+import { rankMachines, type PlacementMachine } from "./run.js";
 import { loadConfig } from "./config.js";
 
 const project = (id: string, title: string, identity: string | null, over: Partial<Project> = {}): Project => ({
@@ -70,6 +71,19 @@ test("one repository on two machines is one project row, with the threads of bot
   // The archived folder gathers both machines' archives under the one fold key.
   assert.equal(rows[3]!.groupKey, "github.com/dylandotfarm/covey");
   assert.equal(rows[3]!.count, 1);
+  // The row's own count and dot are summed over the pool, once, in the rows.
+  assert.equal(covey.count, 2, "two live threads across two machines");
+  assert.equal(covey.busy, false);
+  assert.equal(covey.waiting, false);
+});
+
+test("a project row's dot reads every machine of the pool", () => {
+  const s = fleet();
+  s.machines.get(MAC)!.threads.get("on-mac")!.status = "running";
+  const covey = sidebarRows(s)[0]!;
+  assert.equal(covey.busy, true, "a thread working on the second machine lights the one row");
+  s.machines.get(PI)!.threads.get("on-pi")!.pendingApprovals = 1;
+  assert.equal(sidebarRows(s)[0]!.waiting, true);
 });
 
 test("a project with no remote is a group of its own, keyed by machine and id, and its threads carry no tag", () => {
@@ -169,4 +183,48 @@ test("a clone the machine refuses stays pending, unless the machine already has 
   assert.deepEqual(store.pendingFor("git@github.com:acme/api.git"), []);
   assert.deepEqual(store.pendingFor("git@github.com:acme/web.git"), []);
   assert.equal(mac.commands.length, 4, "every pending clone was sent each time");
+});
+
+test("a clone is queued once per machine, and a machine that is removed owes nothing", async () => {
+  const { store, clients } = storeWith([machine(MAC, "mac", "offline", [], [])]);
+  const url = "git@github.com:acme/api.git";
+  await store.createProject(MAC, url);
+  await store.createProject(MAC, url);
+  assert.deepEqual(store.pendingFor(url), [MAC], "asked twice, queued once");
+  store.removeMachine(MAC);
+  assert.deepEqual(store.pendingFor(url), [], "the request went with the machine");
+  assert.deepEqual(loadConfig().prefs.pendingProjects, []);
+  assert.equal(clients.get(MAC)!.commands.length, 0);
+});
+
+test("a fold made under a project's old key is carried to its group key when the snapshot arrives", () => {
+  const { store } = storeWith([machine(PI, "pi", "connected", [], [])]);
+  store.state.expanded[`${PI}:p-covey`] = false;
+  store.state.expanded[`${PI}:p-covey:archived`] = true;
+  store.state.expanded[`${PI}:p-plain`] = false;
+  (store as any).adoptFolds(PI, [
+    project("p-covey", "covey", "github.com/dylandotfarm/covey"),
+    project("p-plain", "plain", null),
+  ]);
+  assert.equal(store.state.expanded["github.com/dylandotfarm/covey"], false, "the fold followed the project to its repository");
+  assert.equal(store.state.expanded[archiveKey("github.com/dylandotfarm/covey")], true);
+  assert.equal(`${PI}:p-covey` in store.state.expanded, false, "and the old key is gone");
+  assert.equal(store.state.expanded[`${PI}:p-plain`], false, "a project with no remote keeps the key it always had");
+  assert.equal(loadConfig().prefs.expanded?.["github.com/dylandotfarm/covey"], false, "written to the config");
+});
+
+test("a rename goes to every machine of the pool", async () => {
+  const { store, clients } = storeWith([machine(PI, "pi", "connected", [], []), machine(MAC, "mac", "connected", [], [])]);
+  await store.renameProject([{ machine: PI, projectId: "p-covey" }, { machine: MAC, projectId: "m-covey" }], "the bird");
+  assert.deepEqual(clients.get(PI)!.commands, [{ type: "project.update", projectId: "p-covey", title: "the bird" }]);
+  assert.deepEqual(clients.get(MAC)!.commands, [{ type: "project.update", projectId: "m-covey", title: "the bird" }]);
+});
+
+test("rankMachines puts the machines with room first, fastest among them, the way a run places", () => {
+  const m = (name: string, cpuCount: number, concurrency: number): PlacementMachine =>
+    ({ key: name, machineId: name, name, os: "linux", arch: "x64", tools: [], cpuCount, concurrency, tmpDir: "/tmp", projectId: "p" }) as PlacementMachine;
+  const mac = m("mac", 16, 8), pi = m("pi", 4, 2), box = m("box", 32, 20);
+  assert.deepEqual(rankMachines([pi, mac, box]).map((x) => x.name), ["box", "mac", "pi"], "fastest first when all have room");
+  const full = new Map([["box", 20], ["mac", 3]]);
+  assert.deepEqual(rankMachines([pi, mac, box], full).map((x) => x.name), ["mac", "pi", "box"], "a machine at its limit goes last, whatever its size");
 });

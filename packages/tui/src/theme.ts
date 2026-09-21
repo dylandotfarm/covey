@@ -106,6 +106,18 @@ export const SIDEBAR_ROW_SURFACES = ["#000000", T.selection] as const;
  * Takes a `string` rather than `ConnState` for the same reason `statusColor`
  * does: the palette stays free of the rest of the program.
  */
+/** The mark for a connection state, beside `connColor`: one glyph for every
+ *  pane that paints a machine, so a connecting machine reads the same in the
+ *  sidebar and in a summary. */
+export function connDot(conn: string): string {
+  switch (conn) {
+    case "connected": return "●";
+    case "connecting": return "◌";
+    case "offline": return "✗";
+    default: return "○";
+  }
+}
+
 export function connColor(conn: string): string {
   switch (conn) {
     case "connected": return T.success;

@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { isFinalMemberState } from "@covey/protocol";
 import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
-import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
+import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
@@ -98,9 +98,9 @@ export type Overlay =
       /** Label for a checkbox row under the list, flipped with tab. */
       toggle?: string;
       /**
-       * A pick of many: space marks a row, enter hands the marked ids to
-       * `onMany`, and `onPick` is not called. `marked` starts as given, so a
-       * pick can open with the usual answer already chosen.
+       * A pick of many: space marks a row, and enter hands the marked ids to
+       * `onMany` in place of a call to `onPick`. `marked` starts as given, so
+       * a pick can open with the usual answer already chosen.
        */
       many?: { marked: Set<string>; onMany: (ids: string[]) => void };
       /**
@@ -150,7 +150,10 @@ export interface AppState {
   view: ThreadView | null;
   focus: Focus;
   sidebarCollapsed: boolean;
-  expanded: Record<string, boolean>; // project key `${machine}:${projectId}` → expanded
+  /** Fold keys → open. A project folds by its group key (`ProjectGroup.key`),
+   *  a run by `runKey`, a thread group by `threadGroupKey`, the machines
+   *  section by `MACHINES_KEY`. */
+  expanded: Record<string, boolean>;
   expandedItems: Set<string>;
   /** ctrl+o: show every tool call, overriding the per-turn folds. */
   toolsExpanded: boolean;
@@ -327,7 +330,6 @@ export class Store {
       selection: null, relaunch: null,
       clientBuild: opts.build ?? null, clientStale: false,
     };
-    this.pendingProjects = this.config.prefs.pendingProjects ?? [];
     this.frames = new Frames(() => { for (const l of this.listeners) l(); }, opts.frames);
     this.clockMs = opts.clockMs ?? CLOCK_MS;
     for (const m of machines) this.addMachine(m, false);
@@ -460,6 +462,7 @@ export class Store {
       shellSnapshot: (snap) => {
         ms.info = snap.machine;
         ms.projects = new Map(snap.projects.map((p) => [p.id, p]));
+        this.adoptFolds(ms.key, snap.projects);
         ms.threads = new Map(snap.threads.map((t) => [t.id, t]));
         ms.runs = new Map((snap.runs ?? []).map((r) => [r.id, r]));
         if (saved.machineId !== snap.machine.machineId) { saved.machineId = snap.machine.machineId; this.persist(); }
@@ -492,6 +495,8 @@ export class Store {
     this.state.machines.delete(key);
     this.state.order = this.state.order.filter((k) => k !== key);
     this.config.machines = this.config.machines.filter((m) => m.url !== key);
+    // A clone owed by a machine that is gone is owed by nobody.
+    this.config.prefs.pendingProjects = this.pending.filter((p) => p.machine !== key);
     this.persist();
     if (this.state.selected?.machine === key) this.select(null);
     this.viewCache.dropMachine(key);
@@ -810,12 +815,12 @@ export class Store {
    * pool now.
    */
   async createProject(machine: string, url: string, title?: string): Promise<void> {
-    const m = this.state.machines.get(machine);
-    const name = m?.info?.name ?? m?.saved.name ?? machine;
-    if (m?.conn !== "connected") {
-      this.pendingProjects.push({ machine, url, ...(title ? { title } : {}) });
-      this.config.prefs.pendingProjects = this.pendingProjects;
-      this.persist();
+    const name = machineLabel(this.state, machine);
+    if (this.state.machines.get(machine)?.conn !== "connected") {
+      if (!this.pending.some((p) => p.machine === machine && p.url === url)) {
+        this.pending.push({ machine, url, ...(title ? { title } : {}) });
+        this.persist();
+      }
       this.notify(`${name} is not connected; it clones ${url} when it next answers`);
       return;
     }
@@ -829,37 +834,76 @@ export class Store {
     await Promise.all(machines.map((mk) => this.createProject(mk, url, title)));
   }
 
-  /** What a machine that was offline still owes: clones it was asked for. */
-  private pendingProjects: { machine: string; url: string; title?: string }[] = [];
+  /**
+   * What machines that were away still owe: clones they were asked for. The
+   * list lives in the config, and nowhere else, so what `pendingFor` reports
+   * and what `persist` writes are one thing.
+   */
+  private get pending(): { machine: string; url: string; title?: string }[] {
+    return this.config.prefs.pendingProjects ??= [];
+  }
 
-  /** Send a machine the clones it was asked for while it was away. */
+  /**
+   * Send a machine the clones it was asked for while it was away, all at
+   * once: the daemon runs clones of different repositories side by side. An
+   * entry leaves the list when the machine has the project, and not before,
+   * so a client that stops mid-clone still owes it on the next start.
+   */
   private async drainPending(machine: string): Promise<void> {
-    const mine = this.pendingProjects.filter((p) => p.machine === machine);
-    if (mine.length === 0) return;
-    this.pendingProjects = this.pendingProjects.filter((p) => p.machine !== machine);
-    this.config.prefs.pendingProjects = this.pendingProjects;
-    this.persist();
-    for (const p of mine) {
-      const client = this.clients.get(machine);
-      if (!client) continue;
+    const mine = this.pending.filter((p) => p.machine === machine);
+    const client = this.clients.get(machine);
+    if (mine.length === 0 || !client) return;
+    const name = machineLabel(this.state, machine);
+    const done = new Set<typeof mine[number]>();
+    await Promise.all(mine.map(async (p) => {
       try {
         await client.command({ type: "project.create", url: p.url, ...(p.title ? { title: p.title } : {}) }, CLONE_WAIT_MS);
-        this.notify(`${this.state.machines.get(machine)?.info?.name ?? machine} cloned ${p.url}`, "success");
+        this.notify(`${name} cloned ${p.url}`, "success");
+        done.add(p);
       } catch (e: any) {
         // A project that is already there is the request done. Anything
-        // else is kept, so the next connection tries again.
-        if (e?.code === "exists" || /already has/.test(String(e?.message))) continue;
-        this.pendingProjects.push(p);
-        this.config.prefs.pendingProjects = this.pendingProjects;
-        this.persist();
-        this.notify(`${this.state.machines.get(machine)?.info?.name ?? machine} could not clone ${p.url}: ${e?.message ?? e}`, "error");
+        // else stays on the list, and the next connection tries again.
+        if (e?.code === "exists") { done.add(p); return; }
+        this.notify(`${name} could not clone ${p.url}: ${e?.message ?? e}`, "error");
       }
-    }
+    }));
+    if (done.size === 0) return;
+    this.config.prefs.pendingProjects = this.pending.filter((p) => !done.has(p));
+    this.persist();
   }
 
   /** The machines a repository is still to be cloned on, by machine key. */
   pendingFor(url: string): string[] {
-    return this.pendingProjects.filter((p) => p.url === url).map((p) => p.machine);
+    return this.pending.filter((p) => p.url === url).map((p) => p.machine);
+  }
+
+  /**
+   * Rename a project on every machine of its pool. Each daemon holds its own
+   * row, so the name goes to each; the sidebar reads the first machine's,
+   * and after this they agree.
+   */
+  async renameProject(pool: { machine: string; projectId: string }[], title: string): Promise<void> {
+    await Promise.all(pool.map((x) => this.threadCommand({ type: "project.update", projectId: x.projectId, title }, x.machine)));
+  }
+
+  /**
+   * Move the folds a project had under its old key, `<machine>:<project id>`,
+   * to the group key it has now, its repository identity. A fold the reader
+   * made before projects were pooled would otherwise open without a word,
+   * and the old key would sit in the config for ever.
+   */
+  private adoptFolds(machine: string, projects: Project[]): void {
+    let moved = false;
+    for (const p of projects) {
+      if (!p.repositoryIdentity) continue;
+      for (const [from, to] of [[`${machine}:${p.id}`, p.repositoryIdentity], [`${machine}:${p.id}:archived`, archiveKey(p.repositoryIdentity)]] as const) {
+        if (!(from in this.state.expanded)) continue;
+        if (!(to in this.state.expanded)) this.state.expanded[to] = this.state.expanded[from]!;
+        delete this.state.expanded[from];
+        moved = true;
+      }
+    }
+    if (moved) { this.config.prefs.expanded = this.state.expanded; this.persist(); }
   }
 
   /** Take a machine out of a project's pool: the project and its threads go from that machine. */
@@ -1220,6 +1264,19 @@ export class Store {
     }
     return out;
   }
+
+  /**
+   * The connected machines of a repository's pool, in the order a run would
+   * place on them: the fastest with room first. A new thread goes to the
+   * first one unless the reader says otherwise, so a thread and a run land
+   * by one rule.
+   */
+  rankedPool(repositoryIdentity: string | null): PlacementMachine[] {
+    return rankMachines(this.placementMachines(repositoryIdentity), this.membersPerMachine());
+  }
+
+  /** What each machine carries in run members, by machine id. */
+  machineLoad(): Map<string, number> { return this.membersPerMachine(); }
 
   /** Read the issues a task list names, with `gh` in that machine's checkout. */
   async runIssues(machine: string, projectId: string, numbers: number[]): Promise<{ issues: RunIssue[]; error: string | null }> {
@@ -1625,22 +1682,29 @@ export function permissionModeLabel(mode: PermissionMode | null | undefined): st
 /** One machine's copy of a pooled project. */
 export interface PoolMember { machine: string; projectId: string; project: Project }
 
+/** How a machine is named in the sidebar: what it calls itself, else the
+ *  name it was saved under, else its key. */
+export function machineLabel(s: AppState, key: string): string {
+  const m = s.machines.get(key);
+  return m?.info?.name ?? m?.saved.name ?? key;
+}
+
 /**
  * A repository as the sidebar shows it: one row, however many machines hold
- * it. Projects with the same normalised remote are one group; a project with
- * no remote is a group of its own, keyed by machine and id, so it never merges
- * with another machine's directory of the same name.
+ * it. Projects with the same normalised remote are one group. A project with
+ * no remote is a group of its own, keyed by machine and id, so it never
+ * merges with another machine's directory of the same name.
  */
 export interface ProjectGroup {
-  /** The repository identity, or `<machine>:<project id>` for a project with none. */
+  /**
+   * The fold key of the project and of its archived folder: the repository
+   * identity, or `<machine>:<project id>` for a project with none, which is
+   * the key a project fold always had.
+   */
   key: string;
   title: string;
   members: PoolMember[];
 }
-
-/** The fold key of a project row. The same string a project with no remote
- *  always had, so a fold survives the change to pooled rows. */
-export function projectFoldKey(group: { key: string }): string { return group.key; }
 
 /**
  * The projects of every machine, grouped by repository, in title order. The
@@ -1664,7 +1728,20 @@ export function projectGroups(s: AppState): ProjectGroup[] {
 
 /** The group a project on a machine belongs to, or null when it is not there. */
 export function groupOfProject(s: AppState, machine: string, projectId: string): ProjectGroup | null {
-  return projectGroups(s).find((g) => g.members.some((x) => x.machine === machine && x.projectId === projectId)) ?? null;
+  const p = s.machines.get(machine)?.projects.get(projectId);
+  if (!p) return null;
+  if (!p.repositoryIdentity) return { key: `${machine}:${projectId}`, title: p.title, members: [{ machine, projectId, project: p }] };
+  const members: PoolMember[] = [];
+  for (const key of s.order) {
+    for (const q of s.machines.get(key)?.projects.values() ?? []) if (q.repositoryIdentity === p.repositoryIdentity) members.push({ machine: key, projectId: q.id, project: q });
+  }
+  return { key: p.repositoryIdentity, title: members[0]!.project.title, members };
+}
+
+/** Add `value` to the list at `key`, making the list on the first add. */
+function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list) list.push(value); else map.set(key, [value]);
 }
 
 export function liveThreads(m: MachineState, projectId?: string): Thread[] {
@@ -1738,8 +1815,12 @@ export interface SidebarRow {
   tag?: string;
   /** Set on the archived folder and on every thread row inside it. */
   archived?: boolean;
-  /** How many threads the archived folder holds. */
+  /** How many threads the archived folder holds; on a project row, its
+   *  threads and the run tasks that are not threads yet, over the pool. */
   count?: number;
+  /** Set on a project row: something in it is working, or waits on a person. */
+  busy?: boolean;
+  waiting?: boolean;
   /** Set on a run row and on every member row inside it. */
   run?: Run;
   member?: RunMember;
@@ -1946,8 +2027,7 @@ export function sidebarRows(s: AppState): SidebarRow[] {
     for (const run of [...m.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       const p = runProject(m, run);
       if (!p) { homeless.push({ machine: key, run }); continue; }
-      const hk = `${key}:${p}`;
-      runsOf.set(hk, [...(runsOf.get(hk) ?? []), { machine: key, run }]);
+      append(runsOf, `${key}:${p}`, { machine: key, run });
     }
   }
   for (const { machine, run } of homeless) pushRun(machine, run, 0);
@@ -1959,33 +2039,45 @@ export function sidebarRows(s: AppState): SidebarRow[] {
     const first = g.members[0]!;
     const pooled = g.members.length > 1;
     rows.push({ key: `p:${g.key}`, kind: "project", machine: first.machine, projectId: first.projectId, project: first.project, pool: g.members, groupKey: g.key, depth: 0 });
-    if (!(s.expanded[projectFoldKey(g)] ?? true)) continue;
     // Every machine's threads of this repository, in one list by recency. A
     // thread's row keeps the machine it lives on; the tag says which when the
-    // pool has more than one.
-    const tagOf = (machine: string) => pooled ? (s.machines.get(machine)?.info?.name ?? s.machines.get(machine)?.saved.name ?? machine) : undefined;
+    // pool has more than one. The row's dot and count are summed here, once
+    // per rebuild, over the same walk that finds the threads.
+    const tagOf = (machine: string) => pooled ? machineLabel(s, machine) : undefined;
     const owned: { machine: string; projectId: string; t: Thread }[] = [];
+    let busy = false, waiting = false, count = 0;
     for (const x of g.members) {
       const m = s.machines.get(x.machine)!;
-      for (const t of liveThreads(m, x.projectId)) if (!inRun.has(`${x.machine}:${t.id}`)) owned.push({ machine: x.machine, projectId: x.projectId, t });
+      const runs = (runsOf.get(`${x.machine}:${x.projectId}`) ?? []).map((r) => r.run);
+      busy ||= runs.some(runIsBusy);
+      waiting ||= runs.some((r) => runNeedsPerson(s, r));
+      for (const run of runs) for (const mem of run.members) if (!mem.threadId && !isFinalMemberState(mem.state)) count++;
+      for (const t of liveThreads(m, x.projectId)) {
+        count++;
+        busy ||= t.status === "running" || t.status === "starting";
+        waiting ||= t.status === "waiting" || t.pendingApprovals > 0;
+        if (!inRun.has(`${x.machine}:${t.id}`)) owned.push({ machine: x.machine, projectId: x.projectId, t });
+      }
     }
+    Object.assign(rows[rows.length - 1]!, { busy, waiting, count });
+    if (!(s.expanded[g.key] ?? true)) continue;
     owned.sort((a, b) => byRecency(a.t, b.t));
     const threads = owned.map((o) => o.t);
+    // One map serves both "is this thread here?" and "where does it live?".
     const placeOf = new Map(owned.map((o) => [o.t.id, o]));
     // A thread a program started sits under the thread that started it.
     // `origin.parentThreadId` is the only record of that (#49); a parent that
     // is not in this list — archived, deleted, or on another machine — leaves
     // the child a top-level row, because a thread must never be lost behind a
     // link that leads nowhere.
-    const here = new Map(threads.map((t) => [t.id, t]));
     const parentOf = (t: Thread) => {
       const id = t.origin?.parentThreadId;
-      return id && id !== t.id && here.has(id) ? id : null;
+      return id && id !== t.id && placeOf.has(id) ? id : null;
     };
     const kids = new Map<string, Thread[]>();
     for (const t of threads) {
       const parent = parentOf(t);
-      if (parent) kids.set(parent, [...(kids.get(parent) ?? []), t]);
+      if (parent) append(kids, parent, t);
     }
     // Which threads are top-level rows. A thread whose parent is here belongs
     // under it — but two threads naming each other have no parent outside the
@@ -2008,15 +2100,15 @@ export function sidebarRows(s: AppState): SidebarRow[] {
 
     // The runs of this project, from every machine in the pool, split the way
     // its threads are: a run whose parent thread has a row here sits under
-    // it, and the rest sit under the project. `here` already leaves out the
-    // threads the runs themselves claim, so a run can never be filed under
-    // one of its own members.
+    // it, and the rest sit under the project. `placeOf` already leaves out
+    // the threads the runs themselves claim, so a run can never be filed
+    // under one of its own members.
     const ownRuns = new Map<string, { machine: string; run: Run }[]>();
     const projectRunRows: { machine: string; run: Run }[] = [];
     for (const x of g.members) {
       for (const r of runsOf.get(`${x.machine}:${x.projectId}`) ?? []) {
         const parent = r.run.parentThreadId;
-        if (parent && here.has(parent)) ownRuns.set(parent, [...(ownRuns.get(parent) ?? []), r]);
+        if (parent && placeOf.has(parent)) append(ownRuns, parent, r);
         else projectRunRows.push(r);
       }
     }

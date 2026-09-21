@@ -382,24 +382,30 @@ the `PATH` and the `gh` login.
 ## Browsing the sidebar
 
 The tree is **projects first**. A project is a repository, and one row stands for it however
-many machines hold a clone: the client groups every machine's projects by their normalised
-remote (`projectGroups` in `store.ts`), and the threads of every machine in the pool sit under
-the one row, by recency, each tagged with its machine when the pool has more than one. A
-project with no remote is a group of its own, keyed by machine and id, so two machines'
-directories of the same name never merge. The machines sit in a section of their own below
-the projects, furled by default: they are where the work runs, not what it is. The machine
-row still opens the control panel, and an offline one still says what to press.
+many machines hold a clone. The client groups every machine's projects by their normalised
+remote (`projectGroups` in `store.ts`). The threads of every machine in the pool sit under
+the one row, by recency. Each thread row names its machine when the pool has more than one.
+A project with no remote is a group of its own, keyed by machine and id, so two machines'
+directories of the same name never merge. The fold key of a project is its group key. A fold
+made under the old key, `<machine>:<project id>`, moves to the group key when the machine's
+snapshot arrives, so a fold from before pooled rows still holds. The machines sit in a
+section of their own below the projects, furled by default: they are where the work runs,
+not what it is. The machine row still opens the control panel, and an offline one still says
+what to press.
 
-A new thread goes to a machine of the pool. One connected machine needs no question; more
-than one asks, with the machine that has the most room first, which is the rule a run places
-by. A new project asks for the URL, then for the machines: every saved machine is offered,
-connected or not, with the connected ones marked. A machine that is not connected is asked
-when it next answers: the request waits in `TuiConfig.prefs.pendingProjects`, and the store
-sends it on the next connection and takes it off the list once the machine has the project.
-That is what lets an offline machine join a pool now, and it needs no channel between
-daemons. A machine can be added to a pool later from the palette, and taken out of one with
-`D` on the project, which removes the rows and the threads from that machine and leaves the
-clone on disk.
+A new thread goes to a machine of the pool. One connected machine needs no question. More
+than one asks, and the pick lists the machines the way `rankMachines` orders them for a run:
+the fastest with room first. The project's name starts as the repository's, and `r` on the
+row renames it on every machine of the pool, because each daemon holds its own row.
+
+A new project asks for the URL, then for the machines. The pick offers every saved machine,
+connected or not, with the connected ones marked. A machine that is not connected clones when
+it next answers. The request waits in `TuiConfig.prefs.pendingProjects`, and the store sends
+it on the next connection. The entry leaves the list once the machine has the project, and
+not before, so a client that stops mid-clone still owes it on the next start. This lets an
+offline machine join a pool now, and it needs no channel between daemons. The palette adds a
+machine to a pool later. `D` on the project takes a machine out of one: the rows and the
+threads go from that machine, and the clone stays on disk.
 
 Moving the sidebar cursor shows what it is pointing at, so the tree can be read
 without committing to anything:

@@ -35,7 +35,7 @@ const project = (id: string, title: string): Project => ({
 
 const thread = (id: string, projectId: string, title: string): Thread => ({
   id, projectId, title, provider: "claude", sessionId: id, model: null, permissionMode: "default",
-  modeChosen: false, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:10Z",
+  modeChosen: false, status: "idle", pendingApprovals: 0, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:10Z",
   archivedAt: null, movedTo: null,
 } as unknown as Thread);
 
