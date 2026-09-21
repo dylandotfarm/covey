@@ -8,8 +8,9 @@
  * Two rules hold here:
  *  - `read` refuses a command that can change state. The allow-list below is
  *    the whole of it, and `assertReadOnly` proves the refusal.
- *  - `mergePullRequest` is the only method that changes anything. It sits
- *    alone so a reader can see every mutation in one place.
+ *  - `mergePullRequest` and `createPullRequest` are the only methods that
+ *    change anything. They sit together at the end, so a reader can see every
+ *    mutation in one place, and a host has neither unless it was built with it.
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -39,9 +40,12 @@ export interface RollupEntry {
   targetUrl?: string;
 }
 
-/** Everything the gate and the queue read about one pull request. */
+/** Everything the gate, the queue and the watch read about one pull request. */
 export interface PullRequestFacts {
   number: number;
+  url: string;
+  /** The login that opened it, or null when `gh` did not say. */
+  author: string | null;
   headRefName: string;
   baseRefName: string;
   headRefOid: string;
@@ -49,10 +53,59 @@ export interface PullRequestFacts {
   isDraft: boolean;
   mergeable: MemberDiff["mergeable"];
   mergeStateStatus: string;
+  /** `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty when no rule asks for a review. */
+  reviewDecision: string;
   additions: number;
   deletions: number;
   files: string[];
   checks: RollupEntry[];
+  /** Every review submitted on it, as `gh pr view --json reviews` lists them. */
+  reviews: ReviewEntry[];
+  /** The conversation comments, as `gh pr view --json comments` lists them. */
+  comments: CommentEntry[];
+}
+
+/** One review on a pull request. */
+export interface ReviewEntry {
+  id: string;
+  author: string;
+  /** `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`. */
+  state: string;
+  body: string;
+  submittedAt: string | null;
+  url: string | null;
+}
+
+/**
+ * One comment on a pull request: a conversation comment, or a line comment
+ * from a review. A line comment names its file and line; the other kind
+ * leaves both null.
+ */
+export interface CommentEntry {
+  id: string;
+  author: string;
+  body: string;
+  createdAt: string | null;
+  url: string | null;
+  path: string | null;
+  line: number | null;
+}
+
+/** What the watch reads about the issue a thread takes. */
+export interface IssueFacts {
+  number: number;
+  title: string;
+  url: string;
+  state: string;
+}
+
+/** What `createPullRequest` needs. The branch is pushed first. */
+export interface PullRequestDraft {
+  branch: string;
+  base: string;
+  title: string;
+  body: string;
+  draft: boolean;
 }
 
 /** One commit that a branch holds and the base branch does not. */
@@ -68,12 +121,20 @@ export interface BranchCommit {
 export interface GhHost {
   /** The pull request on `branch`, or null when the member opened none. */
   pullRequest(branch: string): Promise<PullRequestFacts | null>;
+  /** The pull request with this number, or null when there is none. */
+  pullRequestByNumber(number: number): Promise<PullRequestFacts | null>;
+  /** The line comments of every review on a pull request. */
+  reviewComments(number: number): Promise<CommentEntry[]>;
+  /** One issue, or null when `gh` cannot read it. */
+  issue(number: number): Promise<IssueFacts | null>;
   /** The tip of the base branch, which the staleness test compares against. */
   baseHead(base: string): Promise<BaseHead | null>;
   /** `git rev-list origin/<base>..origin/<branch>`, newest first. */
   revList(base: string, branch: string): Promise<BranchCommit[]>;
-  /** Merge a pull request. The only call that changes anything. */
+  /** Merge a pull request. One of the two calls that change anything. */
   mergePullRequest?(number: number, method: "merge" | "squash" | "rebase"): Promise<void>;
+  /** Push a branch and open a pull request for it. The other call that changes anything. */
+  createPullRequest?(draft: PullRequestDraft): Promise<{ number: number; url: string }>;
 }
 
 // ---- the read-only guard ----------------------------------------------------
@@ -141,9 +202,51 @@ async function gh(cwd: string, args: string[]): Promise<string> {
 }
 
 const PR_FIELDS = [
-  "number", "headRefName", "baseRefName", "headRefOid", "state", "isDraft",
-  "mergeable", "mergeStateStatus", "additions", "deletions", "files", "statusCheckRollup",
+  "number", "url", "author", "headRefName", "baseRefName", "headRefOid", "state", "isDraft",
+  "mergeable", "mergeStateStatus", "reviewDecision", "additions", "deletions", "files", "statusCheckRollup",
+  "reviews", "comments",
 ].join(",");
+
+/** The line comments of a pull request, one JSON row each, as the watch reads them. */
+const LINE_COMMENTS_JQ = "[.[] | {id: (.id | tostring), author: (.user.login // \"\"), body: (.body // \"\"), createdAt: .created_at, url: .html_url, path: .path, line: (.line // .original_line)}]";
+
+/** The shape `gh pr view --json` prints, as `PullRequestFacts`. Pure, so a test can feed it real output. */
+export function parsePullRequest(j: any): PullRequestFacts {
+  return {
+    number: j.number,
+    url: String(j.url ?? ""),
+    author: j.author?.login ? String(j.author.login) : null,
+    headRefName: j.headRefName,
+    baseRefName: j.baseRefName,
+    headRefOid: j.headRefOid,
+    state: j.state,
+    isDraft: !!j.isDraft,
+    mergeable: j.mergeable ?? "UNKNOWN",
+    mergeStateStatus: j.mergeStateStatus ?? "UNKNOWN",
+    reviewDecision: String(j.reviewDecision ?? ""),
+    additions: j.additions ?? 0,
+    deletions: j.deletions ?? 0,
+    files: (j.files ?? []).map((f: { path: string }) => f.path),
+    checks: j.statusCheckRollup ?? [],
+    reviews: (j.reviews ?? []).map((r: any): ReviewEntry => ({
+      id: String(r.id ?? ""),
+      author: String(r.author?.login ?? ""),
+      state: String(r.state ?? ""),
+      body: String(r.body ?? ""),
+      submittedAt: r.submittedAt ?? null,
+      url: r.url ?? null,
+    })),
+    comments: (j.comments ?? []).map((c: any): CommentEntry => ({
+      id: String(c.id ?? ""),
+      author: String(c.author?.login ?? ""),
+      body: String(c.body ?? ""),
+      createdAt: c.createdAt ?? null,
+      url: c.url ?? null,
+      path: null,
+      line: null,
+    })),
+  };
+}
 
 export interface RealHostOptions {
   /** A checkout of the repository. Every call runs there. */
@@ -153,6 +256,8 @@ export interface RealHostOptions {
    * run has no way to change anything.
    */
   allowMerge?: boolean;
+  /** Let this host push a branch and open a pull request. Off by default, as above. */
+  allowCreate?: boolean;
 }
 
 export function realGhHost(options: RealHostOptions): GhHost {
@@ -165,29 +270,42 @@ export function realGhHost(options: RealHostOptions): GhHost {
   const fetchOnce = () => (fetched ??= run("git", ["fetch", "--quiet", "origin"], { cwd, timeout: CALL_TIMEOUT_MS })
     .then(() => undefined, () => undefined));
 
+  // `gh pr view` takes a branch name or a number. Either way, no pull request
+  // is a null and not an error, because "none yet" is an ordinary answer.
+  const view = async (ref: string): Promise<PullRequestFacts | null> => {
+    let out: string;
+    try {
+      out = await gh(cwd, ["pr", "view", ref, "--json", PR_FIELDS]);
+    } catch {
+      return null;
+    }
+    return parsePullRequest(JSON.parse(out));
+  };
+
   const host: GhHost = {
-    async pullRequest(branch) {
-      let out: string;
+    pullRequest: (branch) => view(branch),
+    pullRequestByNumber: (number) => view(String(number)),
+
+    async reviewComments(number) {
       try {
-        out = await gh(cwd, ["pr", "view", branch, "--json", PR_FIELDS]);
+        const out = await gh(cwd, ["api", `repos/{owner}/{repo}/pulls/${number}/comments`, "--paginate", "--jq", LINE_COMMENTS_JQ]);
+        // `--paginate` prints one array per page; the pages are concatenated.
+        const rows: CommentEntry[] = [];
+        for (const page of out.split("\n").filter((l) => l.trim())) rows.push(...(JSON.parse(page) as CommentEntry[]));
+        return rows.map((c) => ({ ...c, line: typeof c.line === "number" ? c.line : null }));
       } catch {
-        return null; // no pull request on that branch
+        return [];
       }
-      const j = JSON.parse(out);
-      return {
-        number: j.number,
-        headRefName: j.headRefName,
-        baseRefName: j.baseRefName,
-        headRefOid: j.headRefOid,
-        state: j.state,
-        isDraft: !!j.isDraft,
-        mergeable: j.mergeable ?? "UNKNOWN",
-        mergeStateStatus: j.mergeStateStatus ?? "UNKNOWN",
-        additions: j.additions ?? 0,
-        deletions: j.deletions ?? 0,
-        files: (j.files ?? []).map((f: { path: string }) => f.path),
-        checks: j.statusCheckRollup ?? [],
-      };
+    },
+
+    async issue(number) {
+      try {
+        const out = await gh(cwd, ["issue", "view", String(number), "--json", "number,title,url,state"]);
+        const j = JSON.parse(out);
+        return { number: Number(j.number), title: String(j.title ?? ""), url: String(j.url ?? ""), state: String(j.state ?? "") };
+      } catch {
+        return null;
+      }
     },
 
     async baseHead(base) {
@@ -215,14 +333,37 @@ export function realGhHost(options: RealHostOptions): GhHost {
     },
   };
 
+  // ---- the writes. Nothing above this line can change a repository. -------
+
   if (options.allowMerge) {
     host.mergePullRequest = async (number, method) => {
-      // The only mutation in this half of the run. Everything above refuses
-      // before it gets here; this call trusts that and does the merge.
+      // Everything above refuses before it gets here; this call trusts that
+      // and does the merge.
       await run("gh", ["pr", "merge", String(number), `--${method}`], { cwd, timeout: CALL_TIMEOUT_MS });
     };
   }
+  if (options.allowCreate) {
+    host.createPullRequest = async (draft) => {
+      // The branch goes up first: `gh pr create` needs it on the remote, and
+      // asks a question nobody can answer when it is not.
+      await run("git", ["push", "--set-upstream", "origin", draft.branch], { cwd, timeout: CALL_TIMEOUT_MS });
+      const args = ["pr", "create", "--head", draft.branch, "--base", draft.base, "--title", draft.title, "--body", draft.body, ...(draft.draft ? ["--draft"] : [])];
+      const { stdout } = await run("gh", args, { cwd, timeout: CALL_TIMEOUT_MS });
+      const url = parsePullRequestUrl(stdout);
+      if (!url) throw new Error(`gh opened the pull request but did not print its URL: ${stdout.trim()}`);
+      return url;
+    };
+  }
   return host;
+}
+
+/** The URL `gh pr create` prints, and the number in it. Pure, for the test. */
+export function parsePullRequestUrl(stdout: string): { number: number; url: string } | null {
+  for (const line of stdout.split("\n").reverse()) {
+    const m = line.trim().match(/^(https?:\/\/\S+\/pull\/(\d+))\/?$/);
+    if (m) return { number: Number(m[2]), url: m[1]! };
+  }
+  return null;
 }
 
 /** Split `<sha>\t<subject>` lines. Kept pure so a test can feed it real output. */

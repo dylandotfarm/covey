@@ -396,8 +396,109 @@ export interface Thread {
   pinnedAt: string | null;
   /** Set when the thread has been moved elsewhere; kept as a tombstone. */
   movedTo: { machineId: MachineId; threadId: ThreadId } | null;
+  /**
+   * The loop of issue #94: the issue this thread took, the pull request it
+   * opened, and the watch that turns what GitHub says about it into turns.
+   * All three travel with the thread, so a restart or a move keeps the link.
+   * Absent on a thread that took no issue and opened no pull request.
+   */
+  issue?: ThreadIssue | null;
+  pullRequest?: ThreadPullRequest | null;
+  watch?: PullRequestWatch | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/** The issue a thread took. The number is the link; the rest is for the reader. */
+export interface ThreadIssue {
+  number: number;
+  title: string | null;
+  url: string | null;
+  takenAt: string;
+}
+
+/** The pull request a thread opened through covey, or handed to covey to watch. */
+export interface ThreadPullRequest {
+  number: number;
+  url: string;
+  /** The branch the pull request merges from: the thread's own. */
+  branch: string;
+  /** The branch it merges into. */
+  base: string;
+  openedAt: string;
+}
+
+/**
+ * Where a watch stands.
+ *  - `watching` — the daemon polls the pull request.
+ *  - `merged`, `closed` — the pull request reached that state; the loop is over.
+ *  - `blocked` — the loop could not finish, and a person has to look. The
+ *    reason says why: the rounds ran out, or the watch ran too long.
+ *  - `dropped` — the thread was archived, deleted, moved, or asked to stop.
+ */
+export type WatchState = "watching" | "merged" | "closed" | "blocked" | "dropped";
+
+/**
+ * The daemon's record of one pull request watch.
+ *
+ * Every field here is what a restart needs: the cursor says what the thread
+ * has heard, the counts say how much budget is left, and the times drive the
+ * back-off. The daemon that holds the branch polls; nothing else does.
+ */
+/**
+ * Who merges when the pull request is ready.
+ *  - `manual` — a person merges, on GitHub or through the run panel, and the
+ *    watch reports it. The default: green is not an acceptance.
+ *  - `auto` — the daemon merges once the checks pass against the current
+ *    base head, the branch is mergeable, and no review asks for changes.
+ *    Never under a running turn. For "fix this, then merge when you're done".
+ */
+export type MergePolicy = "manual" | "auto";
+export type MergeMethod = "merge" | "squash" | "rebase";
+
+export interface PullRequestWatch {
+  number: number;
+  state: WatchState;
+  /** Why the watch ended, in one sentence. Null while it runs. */
+  reason: string | null;
+  merge: MergePolicy;
+  mergeMethod: MergeMethod;
+  /**
+   * Turns this watch sent that asked for more work: a failing check, a merge
+   * conflict, or a review that asked for changes. A turn that only reports
+   * news costs no round.
+   */
+  rounds: number;
+  maxRounds: number;
+  /** Polls in a row that found nothing new. The back-off grows with it. */
+  quiet: number;
+  cursor: WatchCursor;
+  startedAt: string;
+  polledAt: string | null;
+  endedAt: string | null;
+  /** What the last poll could not read. Cleared by the next poll that can. */
+  error: string | null;
+}
+
+/**
+ * What a watch has already delivered, so that nothing arrives twice. A retry,
+ * a reconnect or a restart reads the cursor and goes on from it.
+ */
+export interface WatchCursor {
+  /** The head commit the watch last saw, and when it first saw it. */
+  head: { sha: string; seenAt: string } | null;
+  /** The checks verdict last delivered, and the head it was for. `stale` is
+   *  only read under the `auto` policy, where it stands between the thread
+   *  and its merge. */
+  checks: { head: string; ci: "passing" | "failing" | "absent" | "stale" } | null;
+  /** The head a merge conflict was last reported for. */
+  conflict: string | null;
+  /** The head the daemon last tried, and failed, to merge. One try per head. */
+  mergeTried: string | null;
+  /** Review ids already delivered. */
+  reviews: string[];
+  /** Comment ids already delivered, conversation and line comments alike. */
+  comments: string[];
 }
 
 export interface LatestTurn {
@@ -1127,8 +1228,28 @@ export type Command =
        * Omitted = the daemon reads the name the connection gave at `hello`.
        */
       origin?: ThreadOrigin;
+      /** The issue this thread takes, recorded as `thread.takeIssue` would. */
+      issue?: number;
     }
   | { type: "thread.rename"; threadId: ThreadId; title: string }
+  /**
+   * Record the issue this thread owns, or clear it with `null`. Refused, with
+   * code `taken`, when another live thread of the same project on this
+   * machine holds the number: two agents must not take one issue.
+   */
+  | { type: "thread.takeIssue"; threadId: ThreadId; issue: number | null }
+  /**
+   * Watch a pull request the thread did not open through covey, by number, or
+   * stop the watch with `null`. `thread.openPullRequest` starts a watch on its
+   * own; this is for a pull request opened by hand.
+   */
+  | { type: "thread.watch"; threadId: ThreadId; number: number | null; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }
+  /**
+   * Change who merges, on a thread whose watch runs. A person who has looked
+   * at the change and wants it landed switches the thread to `auto`; the
+   * daemon merges on the next poll that finds it ready.
+   */
+  | { type: "thread.setMerge"; threadId: ThreadId; merge: MergePolicy; mergeMethod?: MergeMethod }
   | { type: "thread.archive"; threadId: ThreadId; archived: boolean }
   | { type: "thread.pin"; threadId: ThreadId; pinned: boolean }
   | { type: "thread.delete"; threadId: ThreadId }
@@ -1372,6 +1493,26 @@ export interface RpcMethods {
    * what order, is issue #45.
    */
   "run.pullRequest": { params: { threadId: ThreadId }; result: RunPullRequest | null };
+  /**
+   * Open a pull request for a thread's branch, on the daemon that holds the
+   * branch: it pushes the branch, runs `gh pr create`, records the number on
+   * the thread and starts the watch. When the thread took an issue and the
+   * body does not name it, `Closes #N` is added to the body.
+   *
+   * The one `gh` write beside a run's merge and `repos.create`. `maxRounds`
+   * bounds the loop: how many turns the watch may send that ask for more
+   * work before it ends in `blocked`.
+   */
+  "thread.openPullRequest": {
+    params: {
+      threadId: ThreadId; title: string; body?: string; draft?: boolean; maxRounds?: number;
+      /** Who merges. Omitted = `manual`. */
+      merge?: MergePolicy;
+      /** How the daemon merges under `auto`. Omitted = `merge`. */
+      mergeMethod?: MergeMethod;
+    };
+    result: { number: number; url: string };
+  };
   /**
    * The gate for one member, read on the machine that holds its branch.
    *

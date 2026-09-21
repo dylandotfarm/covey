@@ -269,11 +269,14 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // The same sum for a thread row: the gutter, the status dot and its
       // space, the space before the time, and the padding on the right.
       const titleW = Math.max(4, width - indent - 6 - time.length - held.length - tag.length);
+      // The issue the thread took goes before the title, the way a run member
+      // row leads with its task key: the number is the link a reader follows.
+      const title = t.issue ? `#${t.issue.number} ${t.title}` : t.title;
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={row.group ? T.subtle : T.awaiting}>{caret}</Text>
           <Text color={attention === "done" ? T.success : attention === "error" ? T.danger : statusColor(st, pulse)}>{showDot ? (attention === "done" ? "✓" : attention === "error" ? "✗" : "●") : t.pinnedAt ? "⋆" : " "} </Text>
-          <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{truncate(t.title, titleW).padEnd(titleW)}</Text>
+          <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{truncate(title, titleW).padEnd(titleW)}</Text>
           <Text color={T.subtle}>{held}</Text>
           <Text color={T.faint}>{tag}</Text>
           <Text color={T.faint}> {time}</Text>

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertReadOnly, realGhHost } from "./gh.js";
+import { assertReadOnly, realGhHost, parsePullRequestUrl, parsePullRequest } from "./gh.js";
 
 test("the read path allows the commands it reads with", () => {
   for (const args of [
@@ -58,4 +58,31 @@ test("a host built without the merge capability has no way to merge", () => {
   assert.equal(readOnly.mergePullRequest, undefined, "nothing can call what is not there");
   const integrator = realGhHost({ cwd: process.cwd(), allowMerge: true });
   assert.equal(typeof integrator.mergePullRequest, "function");
+});
+
+test("a host built without the create capability has no way to open a pull request", () => {
+  const readOnly = realGhHost({ cwd: process.cwd() });
+  assert.equal(readOnly.createPullRequest, undefined, "nothing can call what is not there");
+  const opener = realGhHost({ cwd: process.cwd(), allowCreate: true });
+  assert.equal(typeof opener.createPullRequest, "function");
+});
+
+test("the number of a new pull request is read from the URL gh prints, and nothing else", () => {
+  assert.deepEqual(parsePullRequestUrl("Creating pull request for covey/abc into main in o/r\n\nhttps://github.com/o/r/pull/95\n"), { number: 95, url: "https://github.com/o/r/pull/95" });
+  assert.equal(parsePullRequestUrl("Warning: 1 uncommitted change\n"), null);
+});
+
+test("gh pr view output becomes the facts the watch reads", () => {
+  const facts = parsePullRequest({
+    number: 7, url: "https://github.com/o/r/pull/7", author: { login: "agent" },
+    headRefName: "covey/abc", baseRefName: "main", headRefOid: "abc", state: "OPEN", isDraft: false,
+    mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED", additions: 1, deletions: 0, files: [{ path: "a.ts" }],
+    statusCheckRollup: [{ name: "test", status: "COMPLETED", conclusion: "FAILURE" }],
+    reviews: [{ id: "PRR_1", author: { login: "dylan" }, state: "CHANGES_REQUESTED", body: "no", submittedAt: "2026-09-21T10:00:00Z" }],
+    comments: [{ id: "IC_1", author: { login: "dylan" }, body: "hi", createdAt: "2026-09-21T10:00:00Z", url: "https://github.com/o/r/pull/7#issuecomment-1" }],
+  });
+  assert.equal(facts.author, "agent");
+  assert.deepEqual(facts.reviews, [{ id: "PRR_1", author: "dylan", state: "CHANGES_REQUESTED", body: "no", submittedAt: "2026-09-21T10:00:00Z", url: null }]);
+  assert.deepEqual(facts.comments, [{ id: "IC_1", author: "dylan", body: "hi", createdAt: "2026-09-21T10:00:00Z", url: "https://github.com/o/r/pull/7#issuecomment-1", path: null, line: null }]);
+  assert.deepEqual(facts.files, ["a.ts"]);
 });
