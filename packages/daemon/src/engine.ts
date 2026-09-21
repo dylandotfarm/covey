@@ -15,13 +15,14 @@ import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
-import type { Attachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
-import { realGhHost, type GhHost } from "./integrate/gh.js";
+import { realGhHost, type GhHost, type RealHostOptions } from "./integrate/gh.js";
 import { gateMember } from "./integrate/gate.js";
 import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
+import { news, emptyCursor, describeNews, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -54,10 +55,17 @@ type ThreadListener = (threadId: string, ev: ThreadEvent) => void;
 /** How often the daemon looks for sessions nobody needs. */
 const SWEEP_INTERVAL_MS = 30_000;
 
+/** How often the daemon looks for a pull request watch that is due a poll. */
+const WATCH_TICK_MS = 15_000;
+
 export interface EngineOptions {
   /** How a session reaches the SDK. A test hands in a stand-in, so nothing
    *  spawns a Claude subprocess. */
   spawn?: QueryFactory;
+  /** How the engine reaches `gh` and `git` for a run and for a watch. A test
+   *  hands in a fake, so nothing reaches GitHub and nothing opens a pull
+   *  request. */
+  ghHost?: (options: RealHostOptions) => GhHost;
   /** The clock the idle sweep reads, in milliseconds. A test moves it by hand. */
   now?: () => number;
   /** Where the daemon writes its own lines. */
@@ -103,6 +111,10 @@ export class Engine {
   private retryTimers = new Map<string, NodeJS.Timeout>();
   /** What the credential store looked like when we last read it. */
   private credStamp: string | null = null;
+  private watchTimer: NodeJS.Timeout | null = null;
+  /** Threads whose watch is being polled right now, so a slow `gh` is not
+   *  asked twice. */
+  private polling = new Set<string>();
   private sessionStore;
 
   constructor(readonly db: Db, readonly machine: MachineInfo, private opts: EngineOptions = {}) {
@@ -121,6 +133,10 @@ export class Engine {
     // left must still exit, and a test must not wait on this timer.
     this.sweepTimer = setInterval(() => { this.sweepSessions(); void this.checkCredentials(); }, SWEEP_INTERVAL_MS);
     this.sweepTimer.unref?.();
+    // The watches live in the thread rows, so a restart resumes every one of
+    // them from its cursor: the tick reads the rows, and nothing is re-armed.
+    this.watchTimer = setInterval(() => { void this.pollWatches(); }, WATCH_TICK_MS);
+    this.watchTimer.unref?.();
   }
 
   /** Where this daemon keeps its clones: what the machine reports, else the default. */
@@ -300,6 +316,9 @@ export class Engine {
         const p = this.db.getProject(cmd.projectId);
         if (!p) throw new EngineError("not_found", "project not found");
         if (this.db.getThread(cmd.threadId)) return this.db.shellSeq();
+        // A taken issue is refused here, before a worktree exists for a thread
+        // that will not be made.
+        if (cmd.issue !== undefined) this.assertIssueFree(p.id, cmd.issue, cmd.threadId);
         // Every thread in a repository gets its own worktree, branched from the
         // remote's default branch after a fetch. There is no other place to
         // work: a clone is bare, and parallel threads in one checkout change
@@ -326,9 +345,46 @@ export class Engine {
         };
         this.db.putThread(t);
         if (cleanStart) this.note(t.id, ...cleanStartNote(cleanStart));
-        return this.emitShell({ kind: "thread.upserted", thread: t });
+        if (cmd.issue !== undefined) await this.takeIssue(t, cmd.issue, p);
+        return this.emitShell({ kind: "thread.upserted", thread: this.db.getThread(t.id) ?? t });
       }
       case "thread.rename": return this.mutateThread(cmd.threadId, (t) => { t.title = cmd.title; t.titleAuto = false; });
+      case "thread.takeIssue": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        const p = this.db.getProject(t.projectId);
+        if (!p) throw new EngineError("not_found", "project not found");
+        await this.takeIssue(t, cmd.issue, p);
+        return this.putThreadAndEmit(this.db.getThread(t.id) ?? t);
+      }
+      case "thread.watch": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
+        if (cmd.number === null) {
+          if (t.watch?.state === "watching") this.endWatch(t, "dropped", "The watch was stopped by request.");
+          return this.putThreadAndEmit(t);
+        }
+        const p = this.db.getProject(t.projectId);
+        if (!p) throw new EngineError("not_found", "project not found");
+        const host = this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot });
+        const facts = await host.pullRequestByNumber(cmd.number);
+        if (!facts) throw new EngineError("not_found", `pull request #${cmd.number} was not found; gh may be logged out, or the number is wrong`);
+        t.pullRequest = { number: facts.number, url: facts.url, branch: facts.headRefName, base: facts.baseRefName, openedAt: now };
+        this.startWatch(t, facts.number, { maxRounds: cmd.maxRounds, merge: cmd.merge, mergeMethod: cmd.mergeMethod });
+        return this.putThreadAndEmit(t);
+      }
+      case "thread.setMerge": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        if (!t.watch || t.watch.state !== "watching") throw new EngineError("no_watch", "this thread has no pull request under watch");
+        if (cmd.merge !== "auto" && cmd.merge !== "manual") throw new EngineError("bad_policy", `${cmd.merge} is not a merge policy; use auto or manual`);
+        t.watch = { ...t.watch, merge: cmd.merge, mergeMethod: mergeMethodOf(cmd.mergeMethod, t.watch.mergeMethod) };
+        this.note(t.id, "info", cmd.merge === "auto"
+          ? `Merge policy set to auto: covey merges pull request #${t.watch.number} (${t.watch.mergeMethod}) once the checks pass against the current base and no review asks for changes.`
+          : `Merge policy set to manual: a person merges pull request #${t.watch.number}.`);
+        return this.putThreadAndEmit(t);
+      }
       case "thread.archive": {
         const t = this.db.getThread(cmd.threadId);
         if (!t) throw new EngineError("not_found", "thread not found");
@@ -340,6 +396,10 @@ export class Engine {
           if (t.latestTurn?.state === "running") throw new EngineError("busy", "interrupt the running turn before archiving");
           this.dropSession(t.id);
           await this.releaseWorktree(t);
+          // A watch on an archived thread would wake it with a turn, and
+          // "I am done here" says otherwise. The record stays for the reader.
+          const fresh = this.db.getThread(t.id);
+          if (fresh?.watch?.state === "watching") { this.endWatch(fresh, "dropped", "The thread was archived, so the watch stopped."); this.db.putThread(fresh); }
         }
         return this.mutateThread(cmd.threadId, (x) => { x.archivedAt = cmd.archived ? now : null; });
       }
@@ -663,10 +723,237 @@ export class Engine {
       turnRunning: t.status === "running" || t.status === "starting" || (t.latestTurn?.state === "running"),
       state,
     };
-    // The base is the ref a worktree branches from, with the remote stripped:
-    // `origin/main` and `main` name the same branch to `git rev-list`.
-    const base = ((await defaultBranchRef(cwd)) ?? "main").replace(/^origin\//, "");
-    return { ref, host: realGhHost({ cwd, allowMerge }), base };
+    const base = await this.baseBranch(cwd);
+    return { ref, host: this.hostFor({ cwd, allowMerge }), base };
+  }
+
+  /** The base is the ref a worktree branches from, with the remote stripped:
+   *  `origin/main` and `main` name the same branch to `git rev-list`. */
+  private async baseBranch(cwd: string): Promise<string> {
+    return ((await defaultBranchRef(cwd)) ?? "main").replace(/^origin\//, "");
+  }
+
+  /** `gh` and `git` in a checkout: the real pair, or the fake a test handed in. */
+  private hostFor(options: RealHostOptions): GhHost {
+    return (this.opts.ghHost ?? realGhHost)(options);
+  }
+
+  // ---- the loop: an issue, a pull request, and the answer (#94) -----------
+  //
+  // A thread takes an issue, opens a pull request through the daemon that
+  // holds its branch, and the daemon watches the pull request. Each answer
+  // GitHub gives — a checks verdict, a review, a comment, a merge — reaches
+  // the thread as a turn, which resumes a session the engine released. The
+  // record of all three lives on the thread row, so it survives a restart
+  // and travels with a move.
+
+  /**
+   * Record the issue a thread owns, with its title when `gh` can read it.
+   * Two agents must not take one issue: another live thread of the same
+   * project on this machine that holds the number is a refusal. Two machines
+   * cannot see each other, so the claim is per machine; see DESIGN.md.
+   */
+  private async takeIssue(t: Thread, issue: number | null, p: Project): Promise<void> {
+    if (issue === null) { t.issue = null; this.db.putThread(t); return; }
+    this.assertIssueFree(t.projectId, issue, t.id);
+    const facts = await this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot }).issue(issue);
+    t.issue = { number: issue, title: facts?.title ?? null, url: facts?.url ?? null, takenAt: new Date().toISOString() };
+    this.db.putThread(t);
+    this.note(t.id, "info", `Took issue #${issue}${facts?.title ? ` (${facts.title})` : ""}.`);
+  }
+
+  /** Refuse an issue number that is not one, or that another live thread of the project holds. */
+  private assertIssueFree(projectId: string, issue: number, self: string): void {
+    if (!Number.isInteger(issue) || issue <= 0) throw new EngineError("bad_issue", `${issue} is not an issue number`);
+    const holder = this.db.listThreads().find((x) => x.id !== self && x.projectId === projectId && !x.archivedAt && !x.movedTo && x.issue?.number === issue);
+    if (holder) throw new EngineError("taken", `issue #${issue} is held by thread ${holder.id} (${holder.title})`);
+  }
+
+  /**
+   * Open a pull request for a thread's branch, record it, and start the watch.
+   * The daemon does it because the daemon has the branch, the `gh` login and
+   * the `PATH`; the agent only has to ask.
+   */
+  async openPullRequest(params: { threadId: string; title: string; body?: string; draft?: boolean; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }): Promise<{ number: number; url: string }> {
+    const t = this.db.getThread(params.threadId);
+    if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
+    if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
+    if (!t.branch) throw new EngineError("no_branch", `thread ${params.threadId} is not on a branch`);
+    if (t.pullRequest && t.watch?.state === "watching") throw new EngineError("exists", `this thread already has pull request #${t.pullRequest.number}; covey is watching it`);
+    const title = params.title.trim();
+    if (!title) throw new EngineError("bad_title", "a pull request needs a title");
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    const cwd = t.worktreePath ?? p.workspaceRoot;
+    const host = this.hostFor({ cwd, allowCreate: true });
+    if (!host.createPullRequest) throw new EngineError("unsupported", "this host cannot open a pull request");
+    const base = await this.baseBranch(cwd);
+    let body = (params.body ?? "").trim();
+    // The issue is the durable place to report, and `Closes #N` closes the
+    // loop when the change lands. A body that names the issue is left alone.
+    if (t.issue && !new RegExp(`#${t.issue.number}\\b`).test(body)) body = body ? `${body}\n\nCloses #${t.issue.number}` : `Closes #${t.issue.number}`;
+    let opened: { number: number; url: string };
+    try {
+      opened = await host.createPullRequest({ branch: t.branch, base, title, body, draft: !!params.draft });
+    } catch (e: any) {
+      throw new EngineError("gh", `could not open the pull request: ${(e?.stderr ?? e?.message ?? String(e)).toString().trim().split("\n")[0]}`);
+    }
+    // Read the row again: the create took a while, and the thread may have moved on.
+    const fresh = this.db.getThread(t.id) ?? t;
+    fresh.pullRequest = { number: opened.number, url: opened.url, branch: t.branch, base, openedAt: new Date().toISOString() };
+    this.startWatch(fresh, opened.number, { maxRounds: params.maxRounds, merge: params.merge, mergeMethod: params.mergeMethod });
+    this.putThreadAndEmit(fresh);
+    return opened;
+  }
+
+  /** Begin, or begin again, the watch on a pull request. A note says so. */
+  private startWatch(t: Thread, number: number, o: { maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }): void {
+    const now = new Date(this.now()).toISOString();
+    const rounds = o.maxRounds !== undefined && Number.isFinite(o.maxRounds) ? Math.max(1, Math.floor(o.maxRounds)) : DEFAULT_MAX_ROUNDS;
+    // Manual unless said otherwise: green is not an acceptance, and a merge
+    // is the one act in the loop that a person cannot take back.
+    const merge: MergePolicy = o.merge === "auto" ? "auto" : "manual";
+    const mergeMethod = mergeMethodOf(o.mergeMethod, "merge");
+    t.watch = {
+      number, state: "watching", reason: null, merge, mergeMethod, rounds: 0, maxRounds: rounds, quiet: 0,
+      cursor: emptyCursor(), startedAt: now, polledAt: null, endedAt: null, error: null,
+    };
+    const who = merge === "auto"
+      ? `Merge policy: auto. Covey merges (${mergeMethod}) once the checks pass against the current base and no review asks for changes, never under a running turn.`
+      : "Merge policy: manual. A person merges, or switches this thread to auto.";
+    this.note(t.id, "info", `Watching pull request #${number}${t.pullRequest?.url ? ` (${t.pullRequest.url})` : ""}. Each checks verdict, review, comment and merge arrives here as a turn. ${who} The watch sends at most ${rounds} turn${rounds === 1 ? "" : "s"} that ask for more work, then hands the thread to a person.`);
+  }
+
+  /** End a watch, with the reason in the row and in the transcript. The caller stores the row. */
+  private endWatch(t: Thread, state: Exclude<WatchState, "watching">, reason: string): void {
+    if (!t.watch) return;
+    t.watch = { ...t.watch, state, reason, endedAt: new Date(this.now()).toISOString() };
+    const word = state === "blocked" ? "warning" : "info";
+    this.note(t.id, word, `${state === "blocked" ? "Blocked" : "Stopped watching"} pull request #${t.watch.number}: ${reason}`);
+    this.opts.log?.(`watch ended thread=${t.id.slice(0, 8)} pr=#${t.watch.number} state=${state}`);
+  }
+
+  /**
+   * Poll every watch that is due. The tick calls this; a test calls it by
+   * hand and moves the clock between calls.
+   *
+   * @returns the threads it polled.
+   */
+  async pollWatches(): Promise<string[]> {
+    const now = this.now();
+    const due: Thread[] = [];
+    for (const t of this.db.listThreads()) {
+      const w = t.watch;
+      if (!w || w.state !== "watching" || t.movedTo || t.archivedAt) continue;
+      if (this.polling.has(t.id)) continue;
+      const wait = w.polledAt === null ? 0 : pollDelayMs(w.quiet);
+      if (w.polledAt !== null && now - Date.parse(w.polledAt) < wait) continue;
+      due.push(t);
+    }
+    await Promise.all(due.map((t) => this.pollWatch(t)));
+    return due.map((t) => t.id);
+  }
+
+  /** One poll: read the pull request, work out the news, deliver it once. */
+  private async pollWatch(t: Thread): Promise<void> {
+    const w = t.watch!;
+    const p = this.db.getProject(t.projectId);
+    if (!p) return;
+    this.polling.add(t.id);
+    try {
+      const nowMs = this.now();
+      const nowIso = new Date(nowMs).toISOString();
+      if (nowMs - Date.parse(w.startedAt) >= WATCH_MAX_MS) {
+        const hours = Math.round(WATCH_MAX_MS / 3_600_000);
+        this.endWatch(t, "blocked", `The watch ran for ${hours} hours without a merge or a close. A person has to look at the pull request.`);
+        this.putThreadAndEmit(t);
+        return;
+      }
+      const host = this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot });
+      let facts: Awaited<ReturnType<GhHost["pullRequestByNumber"]>>;
+      let lineComments: Awaited<ReturnType<GhHost["reviewComments"]>>;
+      try {
+        facts = await host.pullRequestByNumber(w.number);
+        lineComments = facts ? await host.reviewComments(w.number) : [];
+      } catch (e: any) {
+        this.recordPoll(t.id, w.number, (x) => { x.error = String(e?.message ?? e); x.quiet++; }, nowIso);
+        return;
+      }
+      if (!facts) {
+        this.recordPoll(t.id, w.number, (x) => { x.error = `pull request #${w.number} could not be read; gh may be logged out on this machine`; x.quiet++; }, nowIso);
+        return;
+      }
+      // The read took a while. The watch may have ended, or been replaced,
+      // while it ran, and a stale answer must not be delivered on top.
+      const fresh = this.db.getThread(t.id);
+      const live = fresh?.watch;
+      if (!fresh || !live || live.state !== "watching" || live.number !== w.number) return;
+      // The base head is read only under `auto`, where staleness stands
+      // between the thread and its merge. Under `manual` it is the person's
+      // question, and one `gh` call fewer per poll.
+      const base = live.merge === "auto" && facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
+      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base });
+      live.cursor = cursor;
+      live.polledAt = nowIso;
+      live.error = null;
+      live.quiet = events.length ? 0 : live.quiet + 1;
+
+      // The merge, under `auto`. Nothing in this batch may ask for work, the
+      // pull request must be ready by every fact GitHub reports, and the
+      // thread must be idle: #45 established that a merge under a running
+      // turn hides the commits it is about to push. One try per head, so a
+      // refusal is not a loop.
+      if (live.merge === "auto" && facts.state === "OPEN" && !events.some(asksForWork) && cursor.mergeTried !== facts.headRefOid) {
+        const ready = mergeReadiness(facts, base);
+        const running = fresh.latestTurn?.state === "running" || fresh.status === "running" || fresh.status === "starting";
+        if (ready.ready && !running) {
+          const merger = this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot, allowMerge: true });
+          try {
+            await merger.mergePullRequest!(live.number, live.mergeMethod);
+            events.push({ kind: "merged", by: "covey", method: live.mergeMethod } satisfies WatchEvent);
+            this.opts.log?.(`watch merged thread=${fresh.id.slice(0, 8)} pr=#${live.number} method=${live.mergeMethod}`);
+          } catch (e: any) {
+            live.cursor = { ...live.cursor, mergeTried: facts.headRefOid };
+            events.push({ kind: "mergeFailed", error: String(e?.stderr ?? e?.message ?? e).trim().split("\n")[0] ?? "gh failed" } satisfies WatchEvent);
+          }
+        } else if (ready.ready && running) {
+          this.opts.log?.(`watch holds the merge thread=${fresh.id.slice(0, 8)} pr=#${live.number}: a turn is running`);
+        }
+      }
+      if (events.length === 0) { this.db.putThread(fresh); return; }
+
+      const work = events.some(asksForWork);
+      const end = events.find(endsWatch);
+      if (work && live.rounds >= live.maxRounds) {
+        // The budget is spent. The news goes in the transcript for the
+        // reader, and the thread stops here rather than working for ever.
+        const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge });
+        this.note(fresh.id, "warning", text);
+        this.endWatch(fresh, "blocked", `The watch sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work, and the pull request still needs work. A person has to look at it.`);
+        this.putThreadAndEmit(fresh);
+        return;
+      }
+      if (work) live.rounds++;
+      const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge });
+      if (end) this.endWatch(fresh, end.kind, end.kind === "closed" ? "The pull request was closed without a merge." : end.by === "covey" ? `Covey merged the pull request (${end.method}) under the auto policy.` : "The pull request was merged.");
+      this.putThreadAndEmit(fresh);
+      this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
+      // A turn, not a note: a note is read by a person, and a turn resumes a
+      // session the engine released. This is the whole reason the watch exists.
+      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text })
+        .catch((e: any) => this.note(fresh.id, "warning", `Could not deliver the news on pull request #${w.number} as a turn: ${e?.message ?? String(e)}`));
+    } finally {
+      this.polling.delete(t.id);
+    }
+  }
+
+  /** Store what a poll found out about itself, on the row as it is now. */
+  private recordPoll(threadId: string, number: number, fn: (w: PullRequestWatch) => void, nowIso: string): void {
+    const fresh = this.db.getThread(threadId);
+    if (!fresh?.watch || fresh.watch.state !== "watching" || fresh.watch.number !== number) return;
+    fn(fresh.watch);
+    fresh.watch.polledAt = nowIso;
+    this.putThreadAndEmit(fresh);
   }
 
   /** The gate for one member: CI, staleness, conflicts, the turn, the evidence. */
@@ -1450,6 +1737,9 @@ export class Engine {
     const t = this.db.getThread(threadId);
     if (!t) return;
     this.dropSession(threadId);
+    // The export carried the watch whole, so the other machine's daemon
+    // polls it from the same cursor. This one must not poll it too.
+    if (t.watch?.state === "watching") this.endWatch(t, "dropped", "The thread was moved to another machine, which watches from here on.");
     t.movedTo = { machineId, threadId: newThreadId };
     t.status = "idle";
     t.archivedAt = t.archivedAt ?? new Date().toISOString();
@@ -1461,6 +1751,7 @@ export class Engine {
 
   shutdown() {
     if (this.sweepTimer) { clearInterval(this.sweepTimer); this.sweepTimer = null; }
+    if (this.watchTimer) { clearInterval(this.watchTimer); this.watchTimer = null; }
     for (const s of this.sessions.values()) s.stop();
     this.sessions.clear();
     this.touchedAt.clear();
@@ -1531,6 +1822,11 @@ function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): R
 }
 
 export type { PermissionMode };
+
+/** A merge method a client named, or the fallback. Nonsense is the fallback. */
+function mergeMethodOf(v: unknown, fallback: MergeMethod): MergeMethod {
+  return v === "merge" || v === "squash" || v === "rebase" ? v : fallback;
+}
 
 /** Two menus are the same when they hold the same commands in the same order. */
 function sameCommands(a: SlashCommandInfo[], b: SlashCommandInfo[]): boolean {

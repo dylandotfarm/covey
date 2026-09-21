@@ -11,6 +11,9 @@ import { Updater } from "./update.js";
 import { clearPidFile, writePidFile } from "./pidfile.js";
 import { machineResources } from "./resources.js";
 import { webAddresses } from "./addresses.js";
+import { sourceRoot } from "./update.js";
+import { linkSkill, describeSkillLink } from "./skill.js";
+import { homedir } from "node:os";
 
 export interface RunDaemonOptions {
   port?: number;
@@ -72,6 +75,18 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   void machineResources()
     .then((r) => { engine.setResources(r); log(`resources: ${r.cpuCount} cores, ${Math.round(r.totalMemoryBytes / 1e9)} GB, up to ${r.concurrency} run members, tools ${r.tools.map((t) => t.name).join(" ") || "none"}`); })
     .catch((e) => log(`could not read machine resources: ${e.message}`));
+
+  // The `/covey` skill, linked into the user's Claude Code skills from this
+  // checkout. Every start does it, so the internal update — pull, build,
+  // restart — puts a new skill in place on every machine, and nobody has to
+  // run the setup again. A throwaway instance (`COVEY_HOME` set: a test
+  // daemon, or a scratch clone on another port) must not take the link away
+  // from the real checkout, so it links nothing unless `COVEY_SKILL_HOME`
+  // names a home for it.
+  const skillHome = process.env.COVEY_SKILL_HOME ?? (process.env.COVEY_HOME ? null : homedir());
+  try {
+    log(skillHome ? describeSkillLink(linkSkill(sourceRoot(), skillHome)) : "skill: not linked, COVEY_HOME is set (a throwaway instance)");
+  } catch (e: any) { log(`skill: could not link it: ${e?.message ?? e}`); }
 
   // The pid file lets `covey stop --port N` name one daemon. Write it only
   // after the listener binds, so a failed start leaves no false record.

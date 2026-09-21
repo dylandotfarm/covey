@@ -6,6 +6,7 @@ import { DEFAULT_PORT } from "@covey/protocol";
 import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } from "@covey/tui";
 import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, webAddresses, withToken, tailscaleSelf, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive, buildInfo, buildDirs, newestBuildMtime, buildIsNewerThan } from "@covey/daemon";
 import { daemonArgs } from "./daemonArgs.js";
+import { parseLoopArgs, runLoop, LOOP_USAGE } from "./loop.js";
 import { childEnv, releaseNodeEnv } from "./nodeEnv.js";
 
 const argv = process.argv.slice(2);
@@ -90,6 +91,16 @@ async function main() {
       console.log(`\nOn a phone (a tailnet address needs no token; the others carry it one time and the page keeps it):\n${lines.join("\n") || "  no address: tailscale is not running and the machine has no LAN interface"}`);
       return;
     }
+    case "issue":
+    case "pr": {
+      // The loop of #94, from an agent's shell. The daemon does the work; this
+      // asks, prints the answer, and exits, so a tool call sees one result.
+      const parsed = parseLoopArgs(argv);
+      if ("error" in parsed) { console.error(`covey: ${parsed.error}\n\n${LOOP_USAGE}`); process.exit(2); }
+      const out = await runLoop(parsed.request, { threadId: flag("--thread") ?? process.env.COVEY_THREAD_ID, port: flag("--port") ? portFlag() : localPort() });
+      (out.ok ? console.log : console.error)(out.lines.join("\n"));
+      process.exit(out.ok ? 0 : 1);
+    }
     case "restart":
       process.exit((await restartLocalDaemon()) ? 0 : 1);
     case "stop":
@@ -117,6 +128,9 @@ function usage(code = 0) {
   covey update               pull, rebuild and restart the local daemon. Inside the
                              TUI, ctrl+k → "Update covey" does this and relaunches
   covey info                 show this machine's daemon id, port, token, and pairing hint
+
+Inside a covey thread (the /covey skill runs these):
+${LOOP_USAGE}
 
 One machine, from a fresh clone: \`pnpm run setup\` builds covey and puts this
 command on your PATH. Run it again after you move the checkout.`);

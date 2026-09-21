@@ -210,6 +210,16 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return createRepo({ name: String(p.name ?? ""), visibility: p.visibility === "public" ? "public" : "private", description: p.description ? String(p.description) : undefined });
       case "run.pullRequest":
         return engine.runPullRequest(String(p.threadId));
+      case "thread.openPullRequest":
+        return engine.openPullRequest({
+          threadId: String(p.threadId),
+          title: String(p.title ?? ""),
+          body: p.body === undefined ? undefined : String(p.body),
+          draft: !!p.draft,
+          maxRounds: typeof p.maxRounds === "number" ? p.maxRounds : undefined,
+          merge: p.merge === "auto" ? "auto" : p.merge === "manual" ? "manual" : undefined,
+          mergeMethod: p.mergeMethod,
+        });
       case "run.gate":
         return engine.runGate(String(p.threadId), String(p.label ?? ""), p.state, p.evidence ?? null);
       case "run.memberDiff":

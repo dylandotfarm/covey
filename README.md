@@ -38,8 +38,14 @@ pnpm run setup --add-to-path             # appends to ~/.zshrc, ~/.bashrc or con
 pnpm run setup --bin-dir ~/bin           # or choose the directory yourself
 ```
 
-The launcher always runs the checkout it was linked from, so `git pull` is enough to update
-it. Run the setup again only if you move the checkout. To install without it, run the entry
+It also links the `/covey` skill (`skills/covey`) into `~/.claude/skills`, so an agent inside
+a covey thread knows how to take an issue to a merged pull request with `covey issue take`
+and `covey pr open`. A brief is then one line: `/covey take issue 94 to completion, automerge
+when done`.
+
+The launcher and the skill always run from the checkout they were linked from, so `git pull`
+is enough to update both, and the daemon makes the skill link again on every start. Run the
+setup again only if you move the checkout. To install without it, run the entry
 point directly:
 
 ```bash
@@ -147,10 +153,12 @@ source of truth.
 packages/protocol   wire types shared by daemon and TUI
 packages/daemon     per-machine daemon: SQLite, Claude SDK sessions, WebSocket server, tailscale auth
 packages/tui        Ink (React) terminal client
-packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart | stop
+packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart | stop,
+                    and `covey issue …` / `covey pr …` for an agent inside a thread
 bin/covey           launcher that setup links onto your PATH; runs its own checkout,
                     waits for it, and puts the terminal back however it died
-scripts/setup.mjs   one command from a clone: install, build, link the launcher
+skills/covey        the /covey skill: how an agent takes an issue to a merged pull request
+scripts/setup.mjs   one command from a clone: install, build, link the launcher and the skill
 docs/DESIGN.md      architecture and the reasoning behind it
 ```
 
