@@ -44,7 +44,7 @@ const PROSE = "The quick brown fox jumps over the lazy dog, again and again, for
 
 const project: Project = {
   id: "p", title: "covey", workspaceRoot: "/src/covey", repositoryIdentity: null,
-  defaultModel: null, defaultWorkspaceMode: null, createdAt: AT, updatedAt: AT,
+  defaultModel: null, createdAt: AT, updatedAt: AT,
 };
 
 const info: MachineInfo = {
