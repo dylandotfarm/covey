@@ -338,6 +338,13 @@ export interface Project {
   kind?: "clone" | "checkout";
   /** The URL covey cloned. Set on a `clone`; absent on a `checkout`. */
   remoteUrl?: string;
+  /**
+   * The branch the project works from. Every new thread branches from
+   * `origin/<baseBranch>`, and every pull request a thread opens targets it.
+   * Absent, the remote's default branch is the base. Set it to work on one
+   * feature branch over many threads instead of on `main`.
+   */
+  baseBranch?: string;
   defaultModel: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1242,6 +1249,16 @@ export interface RepoInfo {
   description: string;
 }
 
+/** The branches a remote has, for the base-branch pick of a new project. */
+export interface RemoteBranches {
+  /** Every branch on the remote, sorted; the default branch first. */
+  branches: string[];
+  /** The branch the remote's `HEAD` names, when it names one. */
+  defaultBranch: string | null;
+  /** Why the remote could not be read; null when it was. */
+  error: string | null;
+}
+
 /** One GitHub issue, as `gh` reports it for a run's task list. */
 export interface RunIssue {
   number: number;
@@ -1293,14 +1310,20 @@ export type Command =
    * Refused, with code `exists`, when this machine already has a project for
    * the same repository. The clone can take minutes on a large repository;
    * the command answers when it is done, so the caller must wait as long as
-   * the daemon does (ten minutes).
+   * the daemon does (ten minutes). `baseBranch` names the branch the threads
+   * work from; refused, with code `no_branch`, when the remote has no such
+   * branch. Without it the remote's default branch is the base.
    */
-  | { type: "project.create"; url: string; title?: string }
+  | { type: "project.create"; url: string; title?: string; baseBranch?: string }
+  /** `baseBranch: null` returns the project to the remote's default branch.
+   *  A thread that exists keeps its worktree; the next thread starts from the
+   *  new base, and the next pull request targets it. */
   | {
       type: "project.update";
       projectId: ProjectId;
       title?: string;
       defaultModel?: string | null;
+      baseBranch?: string | null;
     }
   | { type: "project.delete"; projectId: ProjectId }
   /** Machine-wide defaults. Omitted fields are left alone; `null` clears one. */
@@ -1492,7 +1515,7 @@ export interface ThreadExport {
   exportedAt: string;
   sourceMachineId: MachineId;
   sourceMachineName: string;
-  project: Pick<Project, "title" | "workspaceRoot" | "repositoryIdentity"> & {
+  project: Pick<Project, "title" | "workspaceRoot" | "repositoryIdentity" | "baseBranch"> & {
     /** The `origin` URL of the source project, so the destination can clone it. */
     remoteUrl?: string | null;
   };
@@ -1593,6 +1616,13 @@ export interface RpcMethods {
    * what could be read, which may be nothing.
    */
   "repos.list": { params: Record<string, never>; result: { repos: RepoInfo[]; error: string | null } };
+  /**
+   * The branches of a repository at `url`, read with `git ls-remote` on this
+   * machine, so the credentials are the ones a clone would use. `defaultBranch`
+   * is the branch the remote's `HEAD` names. `error` names a remote that
+   * could not be read; the list is then empty.
+   */
+  "repos.branches": { params: { url: string }; result: RemoteBranches };
   /**
    * Make a repository on GitHub with `gh repo create`, and answer with the URL
    * to clone it from. The one write `gh` does outside a run's merge. `name`

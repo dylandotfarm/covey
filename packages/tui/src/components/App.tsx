@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { repoOptions } from "../repos.js";
+import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
@@ -369,13 +369,31 @@ export function App({ store }: { store: Store }) {
    * the whole fleet.
    */
   /** The last step of a new project: which machines clone `url`. */
-  const chooseMachines = (url: string) => {
+  const chooseMachines = (url: string, baseBranch?: string) => {
     const live = store.getState();
     const connected = live.order.filter((k) => live.machines.get(k)?.conn === "connected");
-    openPickMany(`Clone ${url} on which machines?`, machineOptions(), connected, (ids) => {
+    const from = baseBranch ? ` from ${baseBranch}` : "";
+    openPickMany(`Clone ${url}${from} on which machines?`, machineOptions(), connected, (ids) => {
       store.setOverlay(null);
       if (ids.length === 0) { store.notify("no machine picked; nothing cloned", "error"); return; }
-      void store.createProjectOn(ids, url);
+      void store.createProjectOn(ids, url, undefined, baseBranch);
+    });
+  };
+
+  /**
+   * The branch a new project works from: the remote's default branch, or one
+   * of its others. Every thread then branches from it, and every pull request
+   * targets it, so a feature branch can be built over many threads. The pick
+   * stays open while `git ls-remote` runs on `asker`; a remote that cannot be
+   * read goes straight to the machines with the default branch as the base.
+   */
+  const chooseBranch = (url: string, asker: string | null) => {
+    openPick(`Base branch of ${url}`, [{ id: "wait", label: "reading its branches…", hint: "" }], (id) => { if (id === "wait") chooseMachines(url); });
+    const opened = store.getState().overlay;
+    void store.listBranches(url, asker).then((r) => {
+      if (store.getState().overlay !== opened) return;
+      if (r.error) { store.notify(r.error, "error"); chooseMachines(url); return; }
+      openPick(`Base branch of ${url}`, branchOptions(r), (id) => chooseMachines(url, id === DEFAULT_BASE ? undefined : id));
     });
   };
 
@@ -383,7 +401,7 @@ export function App({ store }: { store: Store }) {
   const askUrl = () => openInput("Repository to clone", (v) => {
     const url = v.trim();
     if (!url) { store.setOverlay(null); return; }
-    chooseMachines(url);
+    chooseBranch(url, null);
   }, "", "git@github.com:org/repo.git or https://…");
 
   /**
@@ -429,7 +447,7 @@ export function App({ store }: { store: Store }) {
     const onPick = (id: string, asker: string | null) => {
       if (id === "new") return asker ? newRepo(asker) : askUrl();
       if (id === "url") return askUrl();
-      chooseMachines(id);
+      chooseBranch(id, asker);
     };
     openPick("Repository", [...fixed, { id: "wait", label: "reading your repositories…", hint: "" }], (id) => onPick(id === "wait" ? "url" : id, null));
     const opened = store.getState().overlay;
@@ -457,9 +475,36 @@ export function App({ store }: { store: Store }) {
     const inPool = [...g.members.filter((x) => x.project.kind === "clone").map((x) => x.machine), ...store.pendingFor(url)];
     const options = machineOptions(inPool);
     if (options.length === 0) { store.notify("every machine already has this project"); return; }
+    // The new clone works from the branch the pool does, so the pool agrees.
+    const baseBranch = g.members.map((x) => x.project.baseBranch).find(Boolean);
     openPickMany(`Add ${g.title} to which machines?`, options, [], (ids) => {
       store.setOverlay(null);
-      if (ids.length) void store.createProjectOn(ids, url, g.title);
+      if (ids.length) void store.createProjectOn(ids, url, g.title, baseBranch);
+    });
+  };
+
+  /**
+   * Change the branch a project works from. The branches come from the
+   * remote, read on the first machine of the pool that is connected, and
+   * the pick marks the base the project has now.
+   */
+  const changeBase = (row: SidebarRow) => {
+    const pool = row.pool ?? [];
+    const url = pool.map((x) => x.project.remoteUrl).find(Boolean);
+    if (!url) { store.notify("select a project that covey cloned from a URL", "error"); return; }
+    const current = pool.map((x) => x.project.baseBranch).find(Boolean) ?? null;
+    const live = store.getState();
+    const asker = pool.map((x) => x.machine).find((k) => live.machines.get(k)?.conn === "connected") ?? null;
+    openPick(`Base branch of ${row.project!.title}`, [{ id: "wait", label: "reading its branches…", hint: "" }], () => {});
+    const opened = store.getState().overlay;
+    void store.listBranches(url, asker).then((r) => {
+      if (store.getState().overlay !== opened) return;
+      if (r.error) { store.notify(r.error, "error"); store.setOverlay(null); return; }
+      openPick(`Base branch of ${row.project!.title}`, branchOptions(r, current), (id) => {
+        store.setOverlay(null);
+        const next = id === DEFAULT_BASE ? null : id;
+        if (next !== current) void store.setProjectBase(pool, next);
+      });
     });
   };
 
@@ -1533,6 +1578,8 @@ export function App({ store }: { store: Store }) {
     // change. Each machine of the pool holds its own row, so the name goes to
     // every one of them.
     if (input === "r" && row.kind === "project") return openInput("Rename project", (v) => { store.setOverlay(null); if (v.trim()) void store.renameProject(row.pool ?? [], v.trim()); }, row.project!.title);
+    // The branch the project's threads start from and its pull requests target.
+    if (input === "b" && row.kind === "project") return changeBase(row);
     if (input === "x" && row.kind === "thread") return void store.threadCommand({ type: "thread.archive", threadId: row.thread!.id, archived: !row.thread!.archivedAt }, row.machine);
     // Flip who merges the thread's pull request. A person who has looked at
     // the change and wants it landed presses this once.

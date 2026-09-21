@@ -53,6 +53,11 @@ export async function scratchRemote(prefix = "covey-remote-"): Promise<ScratchRe
     return sha;
   };
   const pushBranch = async (branch: string, msg: string) => {
+    // A branch the remote has is extended from its own tip; a new one starts
+    // from `main`, where the seed sits between pushes.
+    await git(seed, "fetch", "-q", "origin");
+    const tip = await git(seed, "rev-parse", "--verify", "--quiet", `origin/${branch}`).catch(() => "");
+    if (tip) await git(seed, "reset", "-q", "--hard", `origin/${branch}`);
     const sha = await commit(msg);
     await git(seed, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
     // The seed's `main` goes back to what origin has, so a later `push`

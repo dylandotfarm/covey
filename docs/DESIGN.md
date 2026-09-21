@@ -591,7 +591,11 @@ the one write beside a run's merge, and it sits alone in `repos.ts`. This versio
 local repository, where one machine holds the bare repository for the others: the others
 would have to pull from it, and daemons do not talk to each other.
 
-After the repository, the machines. The pick offers every saved machine,Then the machines. The pick offers every saved machine,
+After the repository, the branch it works from: `repos.branches` reads the remote with
+`git ls-remote` on a machine, and the pick lists the default branch first, as the row that
+leaves the base unset, then the others (see *A project on a branch of its own*). A remote
+that cannot be read goes straight on with the default branch. A repository just made has one
+branch, so that pick is skipped. Then the machines. The pick offers every saved machine,
 connected or not, with the connected ones marked. A machine that is not connected clones when
 it next answers. The request waits in `TuiConfig.prefs.pendingProjects`, and the store sends
 it on the next connection. The entry leaves the list once the machine has the project, and
@@ -930,11 +934,34 @@ done.
 stays on disk, because its branches may hold commits nobody pushed. A later create for the
 same repository finds the clone and fetches rather than cloning again.
 
+### A project on a branch of its own
+
+A reader who builds one feature branch over many threads does not want each thread to start
+from `main` and each pull request to target it. `project.create` takes `baseBranch`, and the
+row keeps it as `Project.baseBranch`. Every thread of that project branches from
+`origin/<baseBranch>`, and every pull request the thread opens targets `<baseBranch>`, on
+GitHub and in `Thread.pullRequest.base`. A run's brief names it too (`{{base}}`). Absent,
+nothing changes: the remote's default branch is the base, and the row reads as it did before
+the field existed.
+
+The TUI asks for the branch between the repository and the machines: `repos.branches` runs
+`git ls-remote --symref <url>` on a machine, with the credentials a clone would use, and the
+pick lists the default branch first (the row that leaves the base unset), the other branches
+by name, and the `covey/` branches of threads last. `b` on a project row changes the base
+later, on every machine of the pool, through `project.update { baseBranch }`; `null` returns
+the project to the default branch. A create or an update that names a branch the remote does
+not have is refused with code `no_branch`, and a name git would read as an option or a range
+(`--x`, `a..b`) is refused before any fetch. The threads that exist keep their worktrees; the
+next thread starts from the new base.
+
+A clone is one per repository per machine, whatever branch it names. The bare repository and
+the worktree directory are shared by identity, and the sidebar groups by identity too.
+
 ## Where a new thread works
 
 Every thread gets its own worktree, `git worktree add --no-track -b covey/<id> … <base>`,
-where the base is `origin/HEAD` (else `origin/main`, `origin/master`), and only a local
-`main`/`master` in a repo with no remote. Parallel threads in one checkout change the same
+where the base is `origin/<baseBranch>` for a project that names one, else `origin/HEAD`
+(else `origin/main`, `origin/master`), and only a local branch in a repo with no remote. Parallel threads in one checkout change the same
 files, and a clone has no checkout to offer, so there is no choice to make and nothing to
 ask.
 
@@ -945,9 +972,11 @@ checkout they only ever branch from. Before this (#76) a worktree branched from 
 `main`, which on the macOS host was 46 commits behind `origin/main`, so every agent started
 two days back and spent a round merging before its work could land.
 
-The fetch takes one branch, not the whole remote, and is bounded at 20s (a healthy no-op
-fetch of this project measures 1.2s to 1.4s). One repository's fetch counts as fresh for a
-minute, so a dispatch of eight threads in one project pays for one round trip, not eight.
+The fetch takes one branch, the base, not the whole remote, and is bounded at 20s (a
+healthy no-op fetch of this project measures 1.2s to 1.4s). One repository's fetch counts as
+fresh for a minute, so a dispatch of eight threads in one project pays for one round trip,
+not eight. The record names the branch it took: a fetch of `main` is no answer for a project
+that works from `feature`.
 A fetch that *failed* is not remembered: the next thread tries again, because a blip of one
 second must not decide where the next seven agents start.
 **A fetch that fails never stops the worktree.** Offline, no credentials, a remote that is
