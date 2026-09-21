@@ -110,6 +110,8 @@
   `EngineOptions.ghHost` so no test reaches GitHub. A watch's merge policy is `manual` unless
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
   ready, and never under a running turn. An agent asks with `covey issue …` and `covey pr …`
-  (`packages/cli/src/loop.ts`), and the `/covey` skill in `skills/covey/SKILL.md` tells it
-  the loop; `pnpm run setup` links that directory into `~/.claude/skills`. Change the CLI and
-  the skill together.
+  (`packages/cli/src/loop.ts`), and the `/covey` skill in `plugin/skills/covey/SKILL.md`
+  tells it the loop. The daemon hands `plugin/` to every session as a local plugin
+  (`plugin.ts`); a personal skill in `~/.claude/skills` does not reach a resumed session,
+  because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
+  Change the CLI and the skill together.
