@@ -8,15 +8,17 @@
  * Two rules hold here:
  *  - `read` refuses a command that can change state. The allow-list below is
  *    the whole of it, and `assertReadOnly` proves the refusal.
- *  - `mergePullRequest`, `createPullRequest`, `commentPullRequest` and
- *    `uploadAttachment` are the only methods that change anything. They sit
+ *  - `mergePullRequest`, `createPullRequest`, `commentPullRequest`,
+ *    `uploadAttachment`, `reviewPullRequest`, `commentIssue`, `closeItem` and
+ *    `reopenItem` are the only methods that change anything. They sit
  *    together at the end, so a reader can see every mutation in one place,
  *    and a host has none of them unless it was built with it.
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import type { BaseHead, MemberDiff } from "@covey/protocol";
+import type { BaseHead, GitHubComment, GitHubIssue, GitHubPullRequest, GitHubReview, MemberDiff } from "@covey/protocol";
 import type { OwnerPlan } from "./attach.js";
+import { summariseCheck } from "./checks.js";
 
 const run = promisify(execFile);
 
@@ -163,7 +165,30 @@ export interface GhHost {
   uploadAttachment?(file: AttachmentUpload): Promise<{ url: string }>;
   /** Leave a comment on a pull request. The fourth write. */
   commentPullRequest?(number: number, body: string): Promise<{ url: string }>;
+
+  // ---- the item view (#108): what the client shows for one number ----
+
+  /**
+   * Whether a number names an issue or a pull request, or nothing. GitHub
+   * numbers the two in one space, and the issues endpoint answers for both.
+   */
+  itemKind(number: number): Promise<ItemKind | null>;
+  /** One issue, whole, as the client shows it. Null when `gh` cannot read it. */
+  issueItem(number: number): Promise<GitHubIssue | null>;
+  /** One pull request, whole, as the client shows it. Null when `gh` cannot read it. */
+  pullRequestItem(number: number): Promise<GitHubPullRequest | null>;
+  /** Submit a review on a pull request. The fifth write. */
+  reviewPullRequest?(number: number, event: ReviewEvent, body: string): Promise<void>;
+  /** Leave a comment on an issue. The sixth write, under the same flag as `commentPullRequest`. */
+  commentIssue?(number: number, body: string): Promise<{ url: string }>;
+  /** Close an issue or a pull request. The seventh write. */
+  closeItem?(number: number, kind: ItemKind): Promise<void>;
+  /** Reopen an issue or a pull request. The eighth write, under the same flag as `closeItem`. */
+  reopenItem?(number: number, kind: ItemKind): Promise<void>;
 }
+
+export type ItemKind = "issue" | "pull";
+export type ReviewEvent = "approve" | "request_changes" | "comment";
 
 /** What `uploadAttachment` throws when GitHub answers anything but 201. */
 export class UploadRefused extends Error {
@@ -287,6 +312,72 @@ export function parsePullRequest(j: any): PullRequestFacts {
   };
 }
 
+/** What a parser needs beside the JSON: who reads, and when. */
+export interface ItemContext {
+  viewer: string | null;
+  readAt: string;
+}
+
+const ISSUE_FIELDS = "number,title,body,state,author,url,createdAt,closedAt,labels,comments";
+const PR_ITEM_FIELDS = [
+  "number", "title", "body", "state", "isDraft", "author", "url", "createdAt", "closedAt", "mergedAt",
+  "headRefName", "baseRefName", "mergeable", "reviewDecision", "additions", "deletions", "files",
+  "statusCheckRollup", "reviews", "comments", "labels",
+].join(",");
+
+function itemBase(j: any, ctx: ItemContext) {
+  return {
+    number: Number(j.number),
+    title: String(j.title ?? ""),
+    url: String(j.url ?? ""),
+    author: j.author?.login ? String(j.author.login) : null,
+    body: String(j.body ?? ""),
+    createdAt: j.createdAt ?? null,
+    closedAt: j.closedAt ?? null,
+    labels: (j.labels ?? []).map((l: any) => String(l?.name ?? l ?? "")).filter(Boolean),
+    comments: (j.comments ?? []).map((c: any): GitHubComment => ({
+      author: String(c.author?.login ?? ""),
+      body: String(c.body ?? ""),
+      createdAt: c.createdAt ?? null,
+      url: c.url ?? null,
+    })),
+    viewer: ctx.viewer,
+    readAt: ctx.readAt,
+  };
+}
+
+/** The shape `gh issue view --json` prints, as the client shows it. Pure, so a test can feed it real output. */
+export function parseIssueItem(j: any, ctx: ItemContext): GitHubIssue {
+  return { kind: "issue", ...itemBase(j, ctx), state: String(j.state ?? "").toUpperCase() === "CLOSED" ? "CLOSED" : "OPEN" };
+}
+
+/** The shape `gh pr view --json` prints, as the client shows it. Pure, so a test can feed it real output. */
+export function parsePullRequestItem(j: any, ctx: ItemContext): GitHubPullRequest {
+  const state = String(j.state ?? "").toUpperCase();
+  return {
+    kind: "pull",
+    ...itemBase(j, ctx),
+    state: state === "MERGED" ? "MERGED" : state === "CLOSED" ? "CLOSED" : "OPEN",
+    isDraft: !!j.isDraft,
+    headRefName: String(j.headRefName ?? ""),
+    baseRefName: String(j.baseRefName ?? ""),
+    mergeable: String(j.mergeable ?? "UNKNOWN"),
+    reviewDecision: String(j.reviewDecision ?? ""),
+    additions: Number(j.additions ?? 0),
+    deletions: Number(j.deletions ?? 0),
+    files: (j.files ?? []).map((f: { path: string }) => f.path),
+    checks: ((j.statusCheckRollup ?? []) as RollupEntry[]).map(summariseCheck),
+    reviews: (j.reviews ?? []).map((r: any): GitHubReview => ({
+      author: String(r.author?.login ?? ""),
+      state: String(r.state ?? ""),
+      body: String(r.body ?? ""),
+      submittedAt: r.submittedAt ?? null,
+      url: r.url ?? null,
+    })),
+    mergedAt: j.mergedAt ?? null,
+  };
+}
+
 export interface RealHostOptions {
   /** A checkout of the repository. Every call runs there. */
   cwd: string;
@@ -299,8 +390,12 @@ export interface RealHostOptions {
   allowCreate?: boolean;
   /** Let this host upload a user attachment. Off by default, as above. */
   allowAttach?: boolean;
-  /** Let this host comment on a pull request. Off by default, as above. */
+  /** Let this host comment on a pull request or an issue. Off by default, as above. */
   allowComment?: boolean;
+  /** Let this host submit a review. Off by default, as above. */
+  allowReview?: boolean;
+  /** Let this host close and reopen an issue or a pull request. Off by default, as above. */
+  allowClose?: boolean;
   /** The network, for the upload. A test hands in a function that reaches nothing. */
   fetch?: typeof fetch;
 }
@@ -398,7 +493,39 @@ export function realGhHost(options: RealHostOptions): GhHost {
         return [];
       }
     },
+
+    async itemKind(number) {
+      try {
+        const out = await gh(cwd, ["api", `repos/{owner}/{repo}/issues/${number}`, "--jq", "{pull: (.pull_request != null)}"]);
+        return (JSON.parse(out) as { pull: boolean }).pull ? "pull" : "issue";
+      } catch {
+        return null;
+      }
+    },
+
+    async issueItem(number) {
+      try {
+        const [out, viewer] = await Promise.all([gh(cwd, ["issue", "view", String(number), "--json", ISSUE_FIELDS]), login()]);
+        return parseIssueItem(JSON.parse(out), { viewer, readAt: new Date().toISOString() });
+      } catch {
+        return null;
+      }
+    },
+
+    async pullRequestItem(number) {
+      try {
+        const [out, viewer] = await Promise.all([gh(cwd, ["pr", "view", String(number), "--json", PR_ITEM_FIELDS]), login()]);
+        return parsePullRequestItem(JSON.parse(out), { viewer, readAt: new Date().toISOString() });
+      } catch {
+        return null;
+      }
+    },
   };
+
+  // The login `gh` acts as, read once per host: the client shows it beside
+  // the actions, so a person knows whose name a review goes out under.
+  let viewer: Promise<string | null> | null = null;
+  const login = () => (viewer ??= gh(cwd, ["api", "user", "--jq", ".login"]).then((o) => o.trim() || null, () => null));
 
   // ---- the writes. Nothing above this line can change a repository. -------
 
@@ -442,6 +569,26 @@ export function realGhHost(options: RealHostOptions): GhHost {
     host.commentPullRequest = async (number, body) => {
       const { stdout } = await run("gh", ["pr", "comment", String(number), "--body", body], { cwd, timeout: CALL_TIMEOUT_MS });
       return { url: stdout.trim().split("\n").filter(Boolean).at(-1) ?? "" };
+    };
+    host.commentIssue = async (number, body) => {
+      const { stdout } = await run("gh", ["issue", "comment", String(number), "--body", body], { cwd, timeout: CALL_TIMEOUT_MS });
+      return { url: stdout.trim().split("\n").filter(Boolean).at(-1) ?? "" };
+    };
+  }
+  if (options.allowReview) {
+    host.reviewPullRequest = async (number, event, body) => {
+      const flag = event === "approve" ? "--approve" : event === "request_changes" ? "--request-changes" : "--comment";
+      // `gh` refuses a review that asks for changes, or only comments, with
+      // no body; the engine checks that first so the refusal is readable.
+      await run("gh", ["pr", "review", String(number), flag, ...(body ? ["--body", body] : [])], { cwd, timeout: CALL_TIMEOUT_MS });
+    };
+  }
+  if (options.allowClose) {
+    host.closeItem = async (number, kind) => {
+      await run("gh", [kind === "pull" ? "pr" : "issue", "close", String(number)], { cwd, timeout: CALL_TIMEOUT_MS });
+    };
+    host.reopenItem = async (number, kind) => {
+      await run("gh", [kind === "pull" ? "pr" : "issue", "reopen", String(number)], { cwd, timeout: CALL_TIMEOUT_MS });
     };
   }
   return host;

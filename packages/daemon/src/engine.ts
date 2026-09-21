@@ -15,7 +15,7 @@ import { materialiseAttachments, attachmentsDir, keepAttachmentFile } from "./at
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
-import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod } from "@covey/protocol";
+import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod, GitHubAction, GitHubItem } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { realGhHost, UploadRefused, type GhHost, type RealHostOptions } from "./integrate/gh.js";
 import { AttachError, describeUploadFailure, placeAttachments, planAttachments, type UploadedAttachment } from "./integrate/attach.js";
@@ -900,6 +900,103 @@ export class Engine {
     }
     this.note(t.id, "info", `Commented on pull request #${number}${left.url ? ` (${left.url})` : ""}.`);
     return { number, url: left.url };
+  }
+
+  // ---- the item view (#108): one number, read and acted on from a client ----
+
+  /**
+   * One issue or one pull request of a project, by number. The read runs
+   * with `gh` in the project's checkout, so the remote of the checkout is the
+   * repository, as it is for every other read here.
+   */
+  async githubItem(projectId: string, number: number): Promise<GitHubItem> {
+    const p = this.db.getProject(projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    if (!Number.isInteger(number) || number <= 0) throw new EngineError("bad_number", `${number} is not an issue or pull request number`);
+    return this.readItem(this.hostFor({ cwd: p.workspaceRoot }), number);
+  }
+
+  /** The item behind a number, whichever of the two kinds it is. */
+  private async readItem(host: GhHost, number: number): Promise<GitHubItem> {
+    const kind = await host.itemKind(number);
+    if (!kind) throw new EngineError("not_found", `#${number} is not an issue or a pull request of this project`);
+    const item = kind === "pull" ? await host.pullRequestItem(number) : await host.issueItem(number);
+    if (!item) throw new EngineError("gh", `could not read #${number} with gh`);
+    return item;
+  }
+
+  /**
+   * One act on an issue or a pull request, from a person at a client. The
+   * host is built for that one write and nothing else, and every check runs
+   * before it: a review on an issue, a merge of an issue, or a review that
+   * asks for changes with no body is a refusal before `gh` starts. A thread
+   * that holds the number gets a note, and its watch reports the rest as a
+   * turn on its next poll.
+   */
+  async githubAct(projectId: string, number: number, action: GitHubAction, by: string): Promise<GitHubItem> {
+    const p = this.db.getProject(projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    if (!Number.isInteger(number) || number <= 0) throw new EngineError("bad_number", `${number} is not an issue or pull request number`);
+    const cwd = p.workspaceRoot;
+    const kind = await this.hostFor({ cwd }).itemKind(number);
+    if (!kind) throw new EngineError("not_found", `#${number} is not an issue or a pull request of this project`);
+    const what = kind === "pull" ? "pull request" : "issue";
+    let did: string;
+    try {
+      switch (action?.kind) {
+        case "review": {
+          if (kind !== "pull") throw new EngineError("bad_action", `#${number} is an issue; a review needs a pull request`);
+          const body = (action.body ?? "").trim();
+          if (!["approve", "request_changes", "comment"].includes(action.event)) throw new EngineError("bad_action", `${action.event} is not a review event`);
+          if (action.event !== "approve" && !body) throw new EngineError("bad_body", "a review that asks for changes, or only comments, needs a body");
+          const host = this.hostFor({ cwd, allowReview: true });
+          if (!host.reviewPullRequest) throw new EngineError("unsupported", "this host cannot review a pull request");
+          await host.reviewPullRequest(number, action.event, body);
+          did = action.event === "approve" ? `Approved pull request #${number}` : action.event === "request_changes" ? `Requested changes on pull request #${number}` : `Reviewed pull request #${number} with a comment`;
+          break;
+        }
+        case "comment": {
+          const body = (action.body ?? "").trim();
+          if (!body) throw new EngineError("bad_body", "a comment needs a body");
+          const host = this.hostFor({ cwd, allowComment: true });
+          const leave = kind === "pull" ? host.commentPullRequest : host.commentIssue;
+          if (!leave) throw new EngineError("unsupported", `this host cannot comment on ${what === "issue" ? "an issue" : "a pull request"}`);
+          await leave(number, body);
+          did = `Commented on ${what} #${number}`;
+          break;
+        }
+        case "merge": {
+          if (kind !== "pull") throw new EngineError("bad_action", `#${number} is an issue; only a pull request merges`);
+          const method: MergeMethod = action.method === "squash" || action.method === "rebase" ? action.method : "merge";
+          const host = this.hostFor({ cwd, allowMerge: true });
+          if (!host.mergePullRequest) throw new EngineError("unsupported", "this host cannot merge a pull request");
+          await host.mergePullRequest(number, method);
+          did = `Merged pull request #${number} (${method})`;
+          break;
+        }
+        case "close":
+        case "reopen": {
+          const host = this.hostFor({ cwd, allowClose: true });
+          const change = action.kind === "close" ? host.closeItem : host.reopenItem;
+          if (!change) throw new EngineError("unsupported", `this host cannot ${action.kind} ${what === "issue" ? "an issue" : "a pull request"}`);
+          await change(number, kind);
+          did = `${action.kind === "close" ? "Closed" : "Reopened"} ${what} #${number}`;
+          break;
+        }
+        default:
+          throw new EngineError("bad_action", `${String((action as { kind?: unknown })?.kind)} is not an action`);
+      }
+    } catch (e: any) {
+      if (e instanceof EngineError) throw e;
+      throw new EngineError("gh", `gh refused: ${(e?.stderr ?? e?.message ?? String(e)).toString().trim().split("\n").filter(Boolean).at(-1) ?? "unknown"}`);
+    }
+    this.opts.log?.(`github act project=${p.id.slice(0, 8)} #${number} ${action.kind} by=${by}`);
+    // The thread that holds the number hears about it in its transcript. The
+    // watch delivers the review, the comment or the merge itself as a turn.
+    const holder = this.db.listThreads().find((t) => t.projectId === p.id && !t.archivedAt && !t.movedTo
+      && (t.pullRequest?.number === number || t.watch?.number === number || t.issue?.number === number));
+    if (holder) this.note(holder.id, "info", `${did} from ${by}.`);
+    return this.readItem(this.hostFor({ cwd }), number);
   }
 
   /**

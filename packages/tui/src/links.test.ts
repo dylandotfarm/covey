@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findTargets, hyperlinksEnabled, linkSpans, openCommand, osc8, safeUri, targetUri, toolLink, type LinkContext } from "./links.js";
+import { findTargets, hyperlinksEnabled, linkSpans, openCommand, osc8, repoUrlOf, safeUri, targetUri, toolLink, type LinkContext } from "./links.js";
 import { linkAt, markdownToLines, renderItem, wrapSpans, width } from "./lines.js";
 import type { TimelineItem } from "@covey/protocol";
 
@@ -171,4 +171,23 @@ test("linkSpans keeps a link the caller already set", () => {
 test("linkSpans returns the same array when it finds nothing", () => {
   const spans = [{ text: "nothing to see here" }];
   assert.equal(linkSpans(spans, local), spans, "identity, so React.memo can skip the row");
+});
+
+test("a #N links to the issue route of the project's repository, and stays text without one (#108)", () => {
+  const repo: LinkContext = { ...remote, repoUrl: "https://github.com/o/r" };
+  assert.deepEqual(findTargets("Took #94 and (#95).", repo).map((h) => [h.uri, h.start, h.end]), [["https://github.com/o/r/issues/94", 5, 8], ["https://github.com/o/r/issues/95", 14, 17]]);
+  assert.deepEqual(findTargets("Took #94.", remote), [], "no repository, no link");
+  assert.deepEqual(findTargets("colour #123456, item#7, #-1", repo), [], "a hex colour and a suffix are not references");
+  assert.deepEqual(findTargets("https://github.com/o/r/pull/12#issuecomment-1", repo).map((h) => h.uri), ["https://github.com/o/r/pull/12#issuecomment-1"], "the fragment of a URL is part of the URL");
+  const spans = linkSpans([{ text: "see #12 now" }], repo);
+  assert.deepEqual(spans.map((s) => [s.text, s.link ?? null]), [["see ", null], ["#12", "https://github.com/o/r/issues/12"], [" now", null]]);
+});
+
+test("repoUrlOf reads a GitHub identity and nothing else", () => {
+  assert.equal(repoUrlOf("github.com/dylandotfarm/covey"), "https://github.com/dylandotfarm/covey");
+  assert.equal(repoUrlOf("github.com/o/r.git"), "https://github.com/o/r");
+  assert.equal(repoUrlOf("GitHub.com/o/r/"), "https://github.com/o/r");
+  assert.equal(repoUrlOf("gitlab.com/o/r"), undefined);
+  assert.equal(repoUrlOf(null), undefined);
+  assert.equal(repoUrlOf("github.com/o"), undefined);
 });

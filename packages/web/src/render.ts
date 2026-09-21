@@ -9,11 +9,11 @@
  * item id and rebuilt only when the daemon re-sent that item.
  */
 import { acceptCommand, commandLabel } from "@covey/client";
-import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem } from "@covey/protocol";
+import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
-import { clear, h } from "./dom.js";
+import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, bindLabel, connectionSummary, isCurrentAddress, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadStatusLabel, threadTone, updateLabel, type MachineSlot, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
 
 export interface Actions {
   openThread(machine: string, threadId: string): void;
@@ -36,6 +36,13 @@ export interface Actions {
   setBind(machine: string, bind: string): void;
   /** Take a thread off the list. The TUI can bring it back. */
   archiveThread(machine: string, threadId: string): void;
+  /** Put an issue or a pull request on screen (#108). The URL names it. */
+  openItem(machine: string, projectId: string, number: number): void;
+  /** Read the item on screen again. */
+  refreshItem(): void;
+  /** One act on the item on screen: a review, a comment, a merge, a close or a reopen. */
+  actItem(action: GitHubAction): void;
+  setItemDraft(text: string): void;
 }
 
 /** How far a row slides to show the button under it, in CSS pixels. Matches `.swipe .archive` in app.css. */
@@ -76,6 +83,18 @@ export class Renderer {
   private swiped: string | null = null;
   /** A drag just ended, so the click that follows it is not a tap. */
   private suppressClick = false;
+  /** The issue or pull request screen (#108): a header, a scrolling body, and the bar of acts. */
+  private itemScreen: HTMLElement;
+  private itemHeader: HTMLElement;
+  private itemBody: HTMLElement;
+  private itemBar: HTMLElement;
+  private itemDraft: HTMLTextAreaElement;
+  /** The item the body was built from, so a paint that changed nothing keeps the scroll. */
+  private shownItem: { key: string; item: GitHubItem | null; error: string | null; loading: boolean } | null = null;
+  /** How the Merge button merges. A select beside it changes this. */
+  private mergeMethod: MergeMethod = "merge";
+  /** The item's act was in flight at the last paint, so the paint that ends it takes the draft the state holds. */
+  private itemWasBusy = false;
 
   constructor(private root: HTMLElement, private a: Actions) {
     this.banner = h("div", { class: "banner hidden", onclick: () => this.a.retry() });
@@ -89,7 +108,17 @@ export class Renderer {
     // A tap on a row must not take the focus, and with it the keyboard, off the composer.
     this.menuEl = h("div", { class: "cmd-menu hidden", role: "listbox", onmousedown: (ev) => ev.preventDefault() });
     this.threadScreen = h("main", { class: "thread hidden" }, this.header, this.timeline, h("div", { class: "composer-bar" }, this.menuEl, this.composer, this.stopBtn, this.sendBtn));
-    root.append(this.banner, this.list, this.threadScreen);
+    this.itemHeader = h("header", { class: "thread-header" });
+    this.itemBody = h("div", { class: "item-body" });
+    this.itemDraft = h("textarea", { class: "composer", rows: "2", placeholder: "Comment, or the text of a review" });
+    this.itemDraft.addEventListener("input", () => this.a.setItemDraft(this.itemDraft.value));
+    this.itemBar = h("div", { class: "item-bar" });
+    this.itemScreen = h("main", { class: "item hidden" }, this.itemHeader, this.itemBody, this.itemBar);
+    root.append(this.banner, this.list, this.threadScreen, this.itemScreen);
+    // A `#N` anywhere in the transcript, or in an item's own text, opens that
+    // item. One listener per surface; the anchor carries only the number.
+    this.timeline.addEventListener("click", (ev) => this.refClick(ev));
+    this.itemBody.addEventListener("click", (ev) => this.refClick(ev));
 
     this.timeline.addEventListener("scroll", () => {
       const t = this.timeline;
@@ -193,9 +222,31 @@ export class Renderer {
 
   paint(s: State) {
     this.paintBanner(s);
+    // The item sits over whatever it was opened from. The thread under it is
+    // not painted meanwhile; its rows are keyed, so the return folds in what
+    // arrived. A thread that is no longer on screen loses its skeleton, so a
+    // return to it starts clean.
+    this.itemScreen.classList.toggle("hidden", !s.item);
+    if (!s.view) { this.shownThread = null; this.commands = null; }
+    if (s.item) { this.list.classList.add("hidden"); this.threadScreen.classList.add("hidden"); this.paintItem(s, s.item); return; }
+    this.shownItem = null;
     if (s.view) { this.list.classList.add("hidden"); this.threadScreen.classList.remove("hidden"); this.paintThread(s, s.view); }
-    else { this.threadScreen.classList.add("hidden"); this.list.classList.remove("hidden"); this.shownThread = null; this.commands = null; this.paintList(s); }
+    else { this.threadScreen.classList.add("hidden"); this.list.classList.remove("hidden"); this.paintList(s); }
   }
+
+  /** A click on a `#N` anchor: open the item of the thread on screen, or of the item on screen. */
+  private refClick(ev: Event) {
+    const a = (ev.target as HTMLElement | null)?.closest?.("a.ref") as HTMLElement | null;
+    if (!a) return;
+    ev.preventDefault();
+    const number = Number(a.dataset.number);
+    if (!number) return;
+    const scope = this.refScope?.();
+    if (scope) this.a.openItem(scope.machine, scope.projectId, number);
+  }
+
+  /** Where a `#N` points: set by the paint of the surface that holds the anchor. */
+  private refScope: (() => { machine: string; projectId: string } | null) | null = null;
 
   private paintBanner(s: State) {
     const b = this.banner;
@@ -332,7 +383,7 @@ export class Renderer {
       h("span", { class: "dot" }),
       h("div", { class: "text" },
         h("div", { class: "title" }, t.pinnedAt ? "★ " : "", t.title),
-        h("div", { class: "sub" }, showMachine ? `${ref.machineName} · ` : "", threadStatusLabel(t), t.branch ? ` · ${t.branch}` : ""),
+        h("div", { class: "sub" }, showMachine ? `${ref.machineName} · ` : "", threadStatusLabel(t), t.branch ? ` · ${t.branch}` : "", this.refChips(ref.machine, t)),
       ),
       h("span", { class: "when" }, relTime(t.lastMessageAt ?? t.updatedAt)),
     );
@@ -342,6 +393,13 @@ export class Renderer {
     );
     this.attachSwipe(wrap, front, key);
     return wrap;
+  }
+
+  /** The issue a thread took and the pull request it opened, as chips that open the item (#108). */
+  private refChips(machine: string, t: Thread): HTMLElement | null {
+    const refs = threadRefs(t);
+    if (refs.length === 0) return null;
+    return h("span", { class: "refs" }, ...refs.map((r) => h("button", { type: "button", class: `ref ${r.kind}`, onclick: (ev) => { ev.stopPropagation(); this.a.openItem(machine, t.projectId, r.number); } }, r.label)));
   }
 
   private attachSwipe(wrap: HTMLElement, front: HTMLElement, key: string) {
@@ -399,9 +457,10 @@ export class Renderer {
       h("button", { class: "back", type: "button", "aria-label": "Back", onclick: () => this.a.back() }, "‹"),
       h("div", { class: "text" },
         h("div", { class: "title" }, t?.title ?? "…"),
-        h("div", { class: `sub tone-${t ? threadTone(t) : "idle"}` }, s.machines.size > 1 ? `${s.machines.get(v.machine)?.name ?? ""} · ` : "", v.loading ? "loading…" : v.error ? v.error : t ? threadStatusLabel(t) : ""),
+        h("div", { class: `sub tone-${t ? threadTone(t) : "idle"}` }, s.machines.size > 1 ? `${s.machines.get(v.machine)?.name ?? ""} · ` : "", v.loading ? "loading…" : v.error ? v.error : t ? threadStatusLabel(t) : "", t ? this.refChips(v.machine, t) : null),
       ),
     );
+    this.refScope = () => (t ? { machine: v.machine, projectId: t.projectId } : null);
     const busy = t ? threadIsBusy(t) : false;
     this.stopBtn.classList.toggle("hidden", !busy || (t?.pendingApprovals ?? 0) > 0);
     this.composer.placeholder = busy ? "Message (queues behind the turn)" : "Message";
@@ -444,6 +503,152 @@ export class Renderer {
     if (showActivity) this.timeline.append(this.activity);
     if (this.atBottom) this.timeline.scrollTop = this.timeline.scrollHeight;
   }
+
+  // ---- one issue or pull request (#108) --------------------------------
+
+  /**
+   * The item screen. The header and the bar are cheap and rebuilt on every
+   * paint, so a button follows `busy`. The body is rebuilt only when the
+   * item the daemon answered with changed, so a paint for a thread event
+   * elsewhere does not move the reader's scroll.
+   */
+  private paintItem(s: State, iv: ItemView) {
+    const item = iv.item;
+    const key = `${iv.machine}:${iv.projectId}:${iv.number}`;
+    this.refScope = () => ({ machine: iv.machine, projectId: iv.projectId });
+    clear(this.itemHeader);
+    const label = item ? itemStateLabel(item) : null;
+    this.itemHeader.append(
+      h("button", { class: "back", type: "button", "aria-label": "Back", onclick: () => this.a.back() }, "‹"),
+      h("div", { class: "text" },
+        h("div", { class: "title" }, item ? `#${item.number} ${item.title}` : `#${iv.number}`),
+        h("div", { class: "sub" },
+          item ? h("span", { class: `chip ${label}` }, label!) : null,
+          item ? ` ${item.kind === "pull" ? "pull request" : "issue"}` : iv.loading ? "loading…" : "",
+          item?.author ? ` · by ${item.author}` : "",
+          item?.createdAt ? ` · ${relTime(item.createdAt)}` : "",
+          s.machines.size > 1 ? ` · ${s.machines.get(iv.machine)?.name ?? ""}` : "",
+        ),
+      ),
+      h("button", { class: "refresh", type: "button", "aria-label": "Refresh", disabled: iv.loading || iv.busy, onclick: () => this.a.refreshItem() }, "↻"),
+    );
+    const shown = this.shownItem;
+    // An act that went through empties the box; one that failed keeps the
+    // text, so the reader can try again. The state says which.
+    if (this.itemWasBusy && !iv.busy) this.itemDraft.value = iv.draft;
+    this.itemWasBusy = iv.busy;
+    if (!shown || shown.key !== key || shown.item !== item || shown.error !== iv.error || shown.loading !== iv.loading) {
+      this.shownItem = { key, item, error: iv.error, loading: iv.loading };
+      clear(this.itemBody);
+      if (shown?.key !== key) { this.itemBody.scrollTop = 0; this.itemDraft.value = iv.draft; }
+      if (iv.error) this.itemBody.append(h("div", { class: "note error" }, iv.error));
+      if (item) this.itemBody.append(...this.itemSections(s, iv, item));
+      else if (iv.loading) this.itemBody.append(h("div", { class: "activity" }, h("span", { class: "spinner" }), " reading…"));
+    }
+    clear(this.itemBar);
+    if (!item) return;
+    const busy = iv.busy || iv.loading;
+    const acts = itemActions(item);
+    const buttons = h("div", { class: "buttons" });
+    for (const act of acts) {
+      const isMerge = act.action.kind === "merge";
+      buttons.append(h("button", { type: "button", class: act.tone, disabled: busy, onclick: () => this.act(s, iv, item, act) }, act.label));
+      if (isMerge) {
+        const sel = h("select", { "aria-label": "Merge method", disabled: busy });
+        for (const m of ["merge", "squash", "rebase"] as const) sel.append(h("option", { value: m, selected: m === this.mergeMethod }, m));
+        sel.addEventListener("change", () => { this.mergeMethod = sel.value as MergeMethod; });
+        buttons.append(sel);
+      }
+    }
+    this.itemBar.append(
+      this.itemDraft,
+      buttons,
+      h("div", { class: "who" }, iv.busy ? "working…" : item.viewer ? `as ${item.viewer}` : "gh is not logged in on that machine", " · ", h("a", { href: item.url, target: "_blank", rel: "noreferrer" }, "open on GitHub")),
+    );
+    this.itemDraft.disabled = busy;
+  }
+
+  /** One act from the bar. A merge and a close ask first; the rest are a review or a comment, which GitHub keeps and shows. */
+  private act(s: State, iv: ItemView, item: GitHubItem, act: ReturnType<typeof itemActions>[number]) {
+    const body = this.itemDraft.value.trim();
+    if (act.needsBody && !body) { this.itemDraft.focus(); this.itemDraft.placeholder = act.action.kind === "comment" ? "A comment needs text" : "Say what should change"; return; }
+    let action: GitHubAction = act.action;
+    if (action.kind === "review") action = { ...action, body: body || undefined };
+    if (action.kind === "comment") action = { kind: "comment", body };
+    if (action.kind === "merge") {
+      const holder = holderOf(s, iv.machine, iv.projectId, iv.number);
+      const running = holder && threadIsBusy(holder) ? ` The thread "${holder.title}" is still working on it and may push more.` : "";
+      if (item.kind === "pull" && !confirm(`Merge #${item.number} into ${item.baseRefName} (${this.mergeMethod})?${running}`)) return;
+      action = { kind: "merge", method: this.mergeMethod };
+    }
+    if (action.kind === "close" && !confirm(`Close #${item.number}?`)) return;
+    this.a.actItem(action);
+  }
+
+  /** The body of the item screen, top to bottom. */
+  private itemSections(s: State, iv: ItemView, item: GitHubItem): HTMLElement[] {
+    const out: HTMLElement[] = [];
+    if (item.kind === "pull") {
+      const checks = checksLabel(item);
+      const decision = item.reviewDecision === "APPROVED" ? "approved" : item.reviewDecision === "CHANGES_REQUESTED" ? "changes requested" : item.reviewDecision === "REVIEW_REQUIRED" ? "review required" : "";
+      out.push(h("div", { class: "meta" },
+        h("code", {}, item.headRefName), " → ", h("code", {}, item.baseRefName),
+        h("span", { class: "adds" }, `+${item.additions}`), h("span", { class: "dels" }, `−${item.deletions}`),
+        `${item.files.length} file${item.files.length === 1 ? "" : "s"}`,
+        item.mergeable === "CONFLICTING" ? h("span", { class: "chip closed" }, "conflicts") : null,
+        decision ? h("span", { class: `chip ${item.reviewDecision === "APPROVED" ? "open" : "closed"}` }, decision) : null,
+      ));
+      const box = h("div", { class: "checks" }, h("div", { class: `row head ${checks.state}` }, h("span", { class: `dot ${checks.state}` }), checks.text));
+      for (const c of item.checks) {
+        box.append(h("div", { class: "row" }, h("span", { class: `dot ${c.state}` }), c.url ? h("a", { href: c.url, target: "_blank", rel: "noreferrer" }, c.name) : c.name, c.workflow ? h("small", {}, ` ${c.workflow}`) : null));
+      }
+      out.push(box);
+    }
+    if (item.labels.length) out.push(h("div", { class: "meta" }, ...item.labels.map((l) => h("span", { class: "chip" }, l))));
+    const body = h("div", { class: "markdown" });
+    body.innerHTML = item.body.trim() ? markdownToHtml(item.body) : "<p class=\"empty-body\">no description</p>";
+    out.push(body);
+    const holder = holderOf(s, iv.machine, iv.projectId, iv.number);
+    if (holder) {
+      out.push(h("div", { class: "holder", onclick: () => this.a.openThread(iv.machine, holder.id) },
+        h("span", { class: `dot tone-${threadTone(holder)}` }), h("span", { class: "title" }, holder.title), h("span", { class: "sub" }, ` · ${threadStatusLabel(holder)}`),
+        holder.watch?.state === "watching" ? h("span", { class: "sub" }, ` · covey ${holder.watch.merge === "auto" ? "merges when green" : "watches; a person merges"}`) : null,
+      ));
+    }
+    if (item.kind === "pull" && item.reviews.length) {
+      out.push(h("h3", {}, "Reviews"));
+      for (const r of item.reviews) {
+        const word = r.state === "APPROVED" ? "approved" : r.state === "CHANGES_REQUESTED" ? "requested changes" : r.state === "DISMISSED" ? "dismissed" : "commented";
+        const entry = h("div", { class: `entry review ${r.state.toLowerCase()}` }, h("div", { class: "who" }, h("b", {}, r.author), ` ${word}`, r.submittedAt ? ` · ${relTime(r.submittedAt)}` : ""));
+        if (r.body.trim()) { const md = h("div", { class: "markdown" }); md.innerHTML = markdownToHtml(r.body); entry.append(md); }
+        out.push(entry);
+      }
+    }
+    if (item.comments.length) {
+      out.push(h("h3", {}, "Comments"));
+      for (const c of item.comments) {
+        const md = h("div", { class: "markdown" });
+        md.innerHTML = markdownToHtml(c.body);
+        out.push(h("div", { class: "entry" }, h("div", { class: "who" }, h("b", {}, c.author), c.createdAt ? ` · ${relTime(c.createdAt)}` : ""), md));
+      }
+    }
+    return out;
+  }
+}
+
+/** Plain text with each `#N` as an anchor the surface's click listener takes (#108). */
+function refNodes(text: string): Child[] {
+  const refs = findRefs(text);
+  if (refs.length === 0) return [text];
+  const out: Child[] = [];
+  let at = 0;
+  for (const r of refs) {
+    if (r.start > at) out.push(text.slice(at, r.start));
+    out.push(h("a", { class: "ref", href: "#", "data-number": String(r.number) }, text.slice(r.start, r.end)));
+    at = r.end;
+  }
+  if (at < text.length) out.push(text.slice(at));
+  return out;
 }
 
 /** `machine:thread` back into its two parts. The machine is a URL, so split at the last colon. */
@@ -455,7 +660,7 @@ function splitKey(key: string): [string, string] {
 function renderItem(item: TimelineItem, a: Actions): HTMLElement {
   switch (item.kind) {
     case "user":
-      return h("div", { class: `msg user${item.queued ? " queued" : ""}` }, h("div", { class: "body" }, item.text), item.queued ? h("span", { class: "tag" }, "queued") : null);
+      return h("div", { class: `msg user${item.queued ? " queued" : ""}` }, h("div", { class: "body" }, ...refNodes(item.text)), item.queued ? h("span", { class: "tag" }, "queued") : null);
     case "assistant": {
       const el = h("div", { class: `msg assistant${item.streaming ? " streaming" : ""}` });
       el.innerHTML = markdownToHtml(item.text);
@@ -470,7 +675,7 @@ function renderItem(item: TimelineItem, a: Actions): HTMLElement {
     case "question":
       return questionCard(item, a);
     case "note":
-      return h("div", { class: `note ${item.tone}` }, item.text);
+      return h("div", { class: `note ${item.tone}` }, ...refNodes(item.text));
     case "error":
       return h("div", { class: "note error" }, item.text);
   }

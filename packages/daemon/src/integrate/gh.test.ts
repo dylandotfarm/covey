@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertReadOnly, realGhHost, parsePullRequestUrl, parsePullRequest, parseUploadAnswer, uploadRequest, UPLOAD_URL } from "./gh.js";
+import { assertReadOnly, realGhHost, parsePullRequestUrl, parsePullRequest, parseIssueItem, parsePullRequestItem, parseUploadAnswer, uploadRequest, UPLOAD_URL } from "./gh.js";
 
 test("the read path allows the commands it reads with", () => {
   for (const args of [
@@ -29,6 +29,9 @@ test("the read path refuses every command that can change a repository", () => {
     ["pr", "edit", "60"],
     ["issue", "close", "45"],
     ["issue", "comment", "45", "--body", "x"],
+    ["pr", "review", "60", "--approve"],
+    ["pr", "reopen", "60"],
+    ["issue", "reopen", "45"],
     ["issue", "create"],
     ["release", "create", "v1"],
     ["repo", "delete", "o/r"],
@@ -111,4 +114,69 @@ test("the upload's answer is the URL it gives on 201, and anything else is null"
   assert.equal(parseUploadAnswer('{"url":"https://evil.example/x"}'), null, "only a user attachment renders inline");
   assert.equal(parseUploadAnswer("<html>"), null);
   assert.equal(parseUploadAnswer('{"message":"Forbidden"}'), null);
+});
+
+test("a host built without the review or the close capability has no way to review or close (#108)", () => {
+  const readOnly = realGhHost({ cwd: process.cwd() });
+  assert.equal(readOnly.reviewPullRequest, undefined);
+  assert.equal(readOnly.closeItem, undefined);
+  assert.equal(readOnly.reopenItem, undefined);
+  assert.equal(readOnly.commentIssue, undefined);
+  assert.equal(typeof readOnly.itemKind, "function", "the read is on every host");
+  const reviewer = realGhHost({ cwd: process.cwd(), allowReview: true });
+  assert.equal(typeof reviewer.reviewPullRequest, "function");
+  assert.equal(reviewer.closeItem, undefined, "one flag, one write");
+  const closer = realGhHost({ cwd: process.cwd(), allowClose: true });
+  assert.equal(typeof closer.closeItem, "function");
+  assert.equal(typeof closer.reopenItem, "function");
+  assert.equal(closer.reviewPullRequest, undefined);
+  const commenter = realGhHost({ cwd: process.cwd(), allowComment: true });
+  assert.equal(typeof commenter.commentIssue, "function");
+  assert.equal(typeof commenter.commentPullRequest, "function");
+});
+
+test("parsePullRequestItem reads what gh pr view prints, checks through the same fold as the gate (#108)", () => {
+  const item = parsePullRequestItem({
+    number: 107, title: "Let a project work from a branch", body: "## What changed\n\nA lot.", state: "MERGED", isDraft: false,
+    author: { login: "dylandotfarm", is_bot: false }, url: "https://github.com/o/r/pull/107", createdAt: "2026-09-21T18:51:03Z",
+    closedAt: "2026-09-21T18:57:52Z", mergedAt: "2026-09-21T18:57:52Z", headRefName: "covey/25cfe4a2", baseRefName: "main",
+    mergeable: "UNKNOWN", reviewDecision: "", additions: 548, deletions: 23, files: [{ path: "README.md", additions: 2, deletions: 1 }, { path: "docs/DESIGN.md" }],
+    statusCheckRollup: [
+      { __typename: "CheckRun", name: "close", workflowName: "no external prs", status: "COMPLETED", conclusion: "SKIPPED", detailsUrl: "https://ci/1", startedAt: "2026-09-21T18:51:08Z" },
+      { __typename: "CheckRun", name: "check", workflowName: "ci", status: "COMPLETED", conclusion: "SUCCESS", detailsUrl: "https://ci/2", startedAt: "2026-09-21T18:51:09Z" },
+      { __typename: "StatusContext", context: "lint", state: "PENDING", targetUrl: "https://ci/3" },
+    ],
+    reviews: [{ id: "R1", author: { login: "reviewer" }, state: "APPROVED", body: "ship it", submittedAt: "2026-09-21T18:55:00Z", url: "https://github.com/o/r/pull/107#pullrequestreview-1" }],
+    comments: [{ id: "C1", author: { login: "someone" }, body: "hi", createdAt: "2026-09-21T18:52:00Z", url: "https://github.com/o/r/pull/107#issuecomment-1" }],
+    labels: [{ name: "enhancement" }],
+  }, { viewer: "me", readAt: "2026-09-21T19:00:00Z" });
+  assert.equal(item.kind, "pull");
+  assert.equal(item.state, "MERGED");
+  assert.equal(item.author, "dylandotfarm");
+  assert.deepEqual(item.files, ["README.md", "docs/DESIGN.md"]);
+  assert.deepEqual(item.checks.map((c) => [c.name, c.state]), [["close", "neutral"], ["check", "success"], ["lint", "pending"]]);
+  assert.deepEqual(item.reviews, [{ author: "reviewer", state: "APPROVED", body: "ship it", submittedAt: "2026-09-21T18:55:00Z", url: "https://github.com/o/r/pull/107#pullrequestreview-1" }]);
+  assert.deepEqual(item.comments, [{ author: "someone", body: "hi", createdAt: "2026-09-21T18:52:00Z", url: "https://github.com/o/r/pull/107#issuecomment-1" }]);
+  assert.deepEqual(item.labels, ["enhancement"]);
+  assert.equal(item.viewer, "me");
+  assert.equal(item.readAt, "2026-09-21T19:00:00Z");
+  assert.equal(item.mergedAt, "2026-09-21T18:57:52Z");
+});
+
+test("parseIssueItem reads what gh issue view prints, and an empty answer is an open issue with nothing on it (#108)", () => {
+  const item = parseIssueItem({
+    number: 87, title: "The title bar collides", body: "## Summary", state: "OPEN", author: { login: "dylandotfarm" },
+    url: "https://github.com/o/r/issues/87", createdAt: "2026-09-19T04:49:38Z", closedAt: null, labels: [{ name: "bug" }],
+    comments: [{ author: { login: "a" }, body: "b", createdAt: "2026-09-19T05:00:00Z", url: null }],
+  }, { viewer: null, readAt: "2026-09-21T19:00:00Z" });
+  assert.equal(item.kind, "issue");
+  assert.equal(item.state, "OPEN");
+  assert.deepEqual(item.labels, ["bug"]);
+  assert.deepEqual(item.comments, [{ author: "a", body: "b", createdAt: "2026-09-19T05:00:00Z", url: null }]);
+  assert.equal(item.viewer, null);
+  const bare = parseIssueItem({ number: 1 }, { viewer: null, readAt: "t" });
+  assert.equal(bare.state, "OPEN");
+  assert.equal(bare.body, "");
+  assert.deepEqual(bare.comments, []);
+  assert.equal(parseIssueItem({ number: 1, state: "closed" }, { viewer: null, readAt: "t" }).state, "CLOSED");
 });

@@ -1137,6 +1137,85 @@ export interface RunPullRequest {
   readAt: string;
 }
 
+// ---------------------------------------------------------------------------
+// An issue or a pull request, as the client shows it (#108)
+// ---------------------------------------------------------------------------
+
+/** One review on a pull request. */
+export interface GitHubReview {
+  author: string;
+  /** `APPROVED`, `CHANGES_REQUESTED`, `COMMENTED`, `DISMISSED` or `PENDING`. */
+  state: string;
+  body: string;
+  submittedAt: string | null;
+  url: string | null;
+}
+
+/** One comment on an issue or a pull request, in the conversation. */
+export interface GitHubComment {
+  author: string;
+  body: string;
+  createdAt: string | null;
+  url: string | null;
+}
+
+/** What an issue and a pull request share. */
+export interface GitHubItemBase {
+  number: number;
+  title: string;
+  url: string;
+  /** The login that opened it, or null when `gh` did not say. */
+  author: string | null;
+  body: string;
+  createdAt: string | null;
+  closedAt: string | null;
+  labels: string[];
+  comments: GitHubComment[];
+  /** The login `gh` acts as on that machine, or null when it cannot say. */
+  viewer: string | null;
+  /** When the daemon read it. */
+  readAt: string;
+}
+
+export interface GitHubIssue extends GitHubItemBase {
+  kind: "issue";
+  state: "OPEN" | "CLOSED";
+}
+
+export interface GitHubPullRequest extends GitHubItemBase {
+  kind: "pull";
+  state: "OPEN" | "CLOSED" | "MERGED";
+  isDraft: boolean;
+  headRefName: string;
+  baseRefName: string;
+  /** `MERGEABLE`, `CONFLICTING` or `UNKNOWN`, as `gh` reports it. */
+  mergeable: string;
+  /** `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty when no rule asks for a review. */
+  reviewDecision: string;
+  additions: number;
+  deletions: number;
+  files: string[];
+  /** The check runs, one `CheckSummary` each, the same read the gate makes. Never `mergeStateStatus`. */
+  checks: CheckSummary[];
+  reviews: GitHubReview[];
+  mergedAt: string | null;
+}
+
+/** GitHub numbers issues and pull requests in one space, so one number is one of the two. */
+export type GitHubItem = GitHubIssue | GitHubPullRequest;
+
+/** What a person may do to an item from the client. Each one is a `gh` write. */
+export type GitHubAction =
+  /** A review on a pull request. `body` is the review text; `request_changes` needs one. */
+  | { kind: "review"; event: "approve" | "request_changes" | "comment"; body?: string }
+  /** A comment on an issue or a pull request. */
+  | { kind: "comment"; body: string }
+  /** Merge a pull request. Omitted, the method is `merge`. */
+  | { kind: "merge"; method?: MergeMethod }
+  /** Close or reopen an issue or a pull request. */
+  | { kind: "close" }
+  | { kind: "reopen" };
+
 /**
  * What a brief template may say. Every token is replaced per member, so the
  * brief an agent reads names its own port, its own directories and its own
@@ -1673,6 +1752,21 @@ export interface RpcMethods {
     params: { threadId: ThreadId; body?: string; attachments?: PullRequestAttachment[] };
     result: { number: number; url: string };
   };
+  /**
+   * One issue or one pull request of a project, by number, read with `gh` in
+   * the project's checkout on this machine (#108). The number decides which:
+   * GitHub numbers the two in one space. A number that names neither is
+   * `not_found`.
+   */
+  "github.item": { params: { projectId: ProjectId; number: number }; result: GitHubItem };
+  /**
+   * Do one thing to an issue or a pull request, as the person at the client
+   * (#108): review, comment, merge, close or reopen. Each is a `gh` write on a
+   * host built for that one write and nothing else. The daemon answers with
+   * the item read again after the act. A thread that opened or watches the
+   * pull request gets a note, and the watch reports the rest.
+   */
+  "github.act": { params: { projectId: ProjectId; number: number; action: GitHubAction }; result: GitHubItem };
   /**
    * The gate for one member, read on the machine that holds its branch.
    *

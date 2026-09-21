@@ -3,6 +3,8 @@
  * code, bold, and links. The same subset the TUI paints. Everything is
  * escaped first, so a reply cannot put markup on the page.
  */
+import { REF } from "./state.js";
+
 export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
@@ -17,6 +19,9 @@ export function inline(s: string): string {
     t = t.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (_, label, url) => `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`);
     t = t.replace(/(^|[\s(])(https?:\/\/[^\s<)]+)/g, (_, pre, url) => `${pre}<a href="${url}" target="_blank" rel="noreferrer">${url}</a>`);
     t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    // A `#N` opens the issue or the pull request in the page (#108). The
+    // renderer catches the click; the anchor carries only the number.
+    t = t.replace(REF, (_, pre, n) => `${pre}<a class="ref" href="#" data-number="${n}">#${n}</a>`);
     out += t;
   }
   return out;

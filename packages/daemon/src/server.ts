@@ -230,6 +230,10 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
           body: p.body === undefined ? undefined : String(p.body),
           attachments: readAttachmentParams(p.attachments),
         });
+      case "github.item":
+        return engine.githubItem(String(p.projectId), Number(p.number));
+      case "github.act":
+        return engine.githubAct(String(p.projectId), Number(p.number), p.action, clientName);
       case "run.gate":
         return engine.runGate(String(p.threadId), String(p.label ?? ""), p.state, p.evidence ?? null);
       case "run.memberDiff":

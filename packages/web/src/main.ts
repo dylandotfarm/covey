@@ -8,7 +8,7 @@
 import { MachineClient, uuid } from "@covey/client";
 import { WEB_CLIENT, type ApprovalItem, type FleetMember, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
-import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, emptyState, openView, primaryMachine, type MachineSlot } from "./state.js";
+import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, emptyState, itemHash, openView, primaryMachine, routeOf, threadHash, type MachineSlot, type Route } from "./state.js";
 
 const TOKEN_KEY = "covey.token";
 
@@ -29,20 +29,17 @@ const state = emptyState();
 const clients = new Map<string, MachineClient>();
 
 /**
- * The open thread is in the URL: `#/t/<machine>/<thread>`. The browser's
- * back control, a swipe from the edge, and a reload all read the same
- * thing, and the list is the page with no hash. A route for a machine the
- * page has not dialled yet waits until that machine's snapshot arrives.
+ * What is on screen is in the URL: a thread, `#/t/<machine>/<thread>`, or an
+ * issue or a pull request, `#/gh/<machine>/<project>/<number>`. The browser's
+ * back control, a swipe from the edge, and a reload all read the same thing,
+ * and the list is the page with no hash. A route for a machine the page has
+ * not dialled yet waits until that machine's snapshot arrives.
  */
-type Route = { machine: string; threadId: string } | null;
-const routeOf = (hash: string): Route => {
-  const m = /^#\/t\/([^/]+)\/([^/]+)$/.exec(hash);
-  return m ? { machine: decodeURIComponent(m[1]!), threadId: decodeURIComponent(m[2]!) } : null;
-};
-const hashFor = (r: NonNullable<Route>) => `#/t/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.threadId)}`;
 let pendingRoute: Route = routeOf(location.hash);
 /** The thread was entered from the list on this page, so back is a step back. */
 let enteredFromList = false;
+/** The item was opened from this page, so back is a step back to what it was opened over. */
+let enteredItem = false;
 let frame = 0;
 const paint = () => { frame = 0; renderer.paint(state); };
 /** One paint per frame, however many events arrived. */
@@ -58,7 +55,7 @@ function dial(slot: MachineSlot, token: string | undefined) {
     shellSnapshot: (snap) => {
       applyShellSnapshot(slot, snap);
       if (slot.primary) document.title = `covey · ${snap.machine.name}`;
-      if (pendingRoute?.machine === slot.key) { const r = pendingRoute; pendingRoute = null; showThread(r.machine, r.threadId); }
+      if (pendingRoute?.machine === slot.key) { const r = pendingRoute; pendingRoute = null; applyRoute(r); }
       schedule();
     },
     shellEvent: (ev) => { applyShellEvent(state, slot, ev); schedule(); },
@@ -123,19 +120,79 @@ function leaveThread() {
   schedule();
 }
 
+/**
+ * Put an issue or a pull request on screen (#108), over whatever is there.
+ * The thread under it keeps its subscription: the item is a look aside, and
+ * the return must cost nothing.
+ */
+function showItem(machine: string, projectId: string, number: number) {
+  const iv = state.item;
+  if (iv && iv.machine === machine && iv.projectId === projectId && iv.number === number) return;
+  state.item = { machine, projectId, number, item: null, loading: true, error: null, busy: false, draft: "" };
+  schedule();
+  loadItem();
+}
+
+/** Read the item on screen from its daemon. */
+function loadItem() {
+  const iv = state.item;
+  const client = iv && clients.get(iv.machine);
+  if (!iv || !client) return;
+  iv.loading = true;
+  schedule();
+  client.rpc("github.item", { projectId: iv.projectId, number: iv.number }).then((item) => {
+    if (state.item !== iv) return; // the reader moved on
+    iv.item = item; iv.loading = false; iv.error = null;
+    schedule();
+  }).catch((e: Error) => { if (state.item === iv) { iv.loading = false; iv.error = e.message; schedule(); } });
+}
+
+/** What the hash means, applied. */
+function applyRoute(r: Route) {
+  if (!r) { enteredFromList = false; enteredItem = false; state.item = null; leaveThread(); schedule(); return; }
+  if (!clients.has(r.machine)) { pendingRoute = r; return; }
+  if (r.kind === "thread") { state.item = null; showThread(r.machine, r.threadId); schedule(); return; }
+  showItem(r.machine, r.projectId, r.number);
+}
+
 const actions: Actions = {
   openThread(machine, threadId) {
-    const hash = hashFor({ machine, threadId });
+    const hash = threadHash(machine, threadId);
     enteredFromList = true;
-    if (location.hash === hash) showThread(machine, threadId); else location.hash = hash;
+    if (location.hash === hash) applyRoute(routeOf(hash)); else location.hash = hash;
   },
   back() {
+    // An item opened from this page is one step back in the history. One
+    // opened by its URL has nothing behind it, so the thread it belongs
+    // over, or the list, is put there instead of a step back out of the page.
+    if (state.item) {
+      if (enteredItem) history.back();
+      else location.replace(state.view ? threadHash(state.view.machine, state.view.threadId) : `${location.pathname}${location.search}`);
+      return;
+    }
     if (!state.view) return;
-    // A thread entered from the list is one step back in the history. One
-    // opened by its URL has no list behind it, so the list is put there
-    // instead of a step back out of the page.
+    // The same rule for a thread entered from the list.
     if (enteredFromList) history.back(); else location.replace(`${location.pathname}${location.search}`);
   },
+  openItem(machine, projectId, number) {
+    const hash = itemHash(machine, projectId, number);
+    enteredItem = true;
+    if (location.hash === hash) showItem(machine, projectId, number); else location.hash = hash;
+  },
+  refreshItem() { loadItem(); },
+  actItem(action) {
+    const iv = state.item;
+    const client = iv && clients.get(iv.machine);
+    if (!iv || !client || iv.busy) return;
+    iv.busy = true; iv.error = null;
+    schedule();
+    client.rpc("github.act", { projectId: iv.projectId, number: iv.number, action }).then((item) => {
+      if (state.item !== iv) return;
+      iv.item = item; iv.busy = false; iv.draft = "";
+      schedule();
+    }).catch((e: Error) => { if (state.item === iv) { iv.busy = false; iv.error = e.message; schedule(); } });
+  },
+  setItemDraft(text) { if (state.item) state.item.draft = text; },
   send(text) {
     const v = state.view;
     if (!v) return;
@@ -205,11 +262,7 @@ const renderer = new Renderer(document.getElementById("app")!, actions);
 
 // The browser's back control, a swipe from the edge, and the forward control
 // all change the hash; the hash says what is on screen.
-addEventListener("hashchange", () => {
-  const r = routeOf(location.hash);
-  if (!r) { enteredFromList = false; leaveThread(); return; }
-  if (clients.has(r.machine)) showThread(r.machine, r.threadId); else pendingRoute = r;
-});
+addEventListener("hashchange", () => applyRoute(routeOf(location.hash)));
 // A phone that slept dropped its sockets. Each client has a budget of dials
 // and may have spent it; the reader coming back is the reason to spend more.
 addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") actions.retry(); });

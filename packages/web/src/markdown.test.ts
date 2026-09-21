@@ -29,3 +29,11 @@ test("links open in a new tab and bare urls become links", () => {
 test("lines inside a paragraph keep their breaks", () => {
   assert.equal(markdownToHtml("one\ntwo"), "<p>one<br>two</p>");
 });
+
+test("a #N in prose is a link into the page, and a hex colour or a heading is not (#108)", () => {
+  assert.equal(inline("see #12 and (#345)."), 'see <a class="ref" href="#" data-number="12">#12</a> and (<a class="ref" href="#" data-number="345">#345</a>).');
+  assert.equal(inline("colour #123456 and item#7"), "colour #123456 and item#7");
+  assert.equal(inline("https://github.com/o/r/pull/12#issuecomment-1"), '<a href="https://github.com/o/r/pull/12#issuecomment-1" target="_blank" rel="noreferrer">https://github.com/o/r/pull/12#issuecomment-1</a>');
+  assert.equal(inline("`#12` in code"), "<code>#12</code> in code");
+  assert.equal(markdownToHtml("# Title\n\nCloses #108"), '<h1>Title</h1><p>Closes <a class="ref" href="#" data-number="108">#108</a></p>');
+});

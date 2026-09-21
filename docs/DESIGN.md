@@ -301,6 +301,17 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
   way the TUI does, one `MachineClient` per machine, and groups projects across machines by
   repository the way the sidebar does. A machine that is down is a line on the settings
   page, not a banner: the banner speaks for the page's own connection alone.
+- **An issue or a pull request is a screen (#108).** A thread row and the thread header
+  carry the issue the thread took and the pull request it opened as chips, and every `#N`
+  in the transcript is a link. A tap puts the item on screen over the thread or the list:
+  the state, the branch and the base, the checks as the gate folds them, the reviews, the
+  comments, the body, and the thread that holds it. The bar under it does the standard
+  acts: approve, request changes, comment, merge with a chosen method, close, reopen. The
+  URL names it, `#/gh/<machine>/<project>/<number>`, so back and reload work. The daemon
+  of that machine reads it with `github.item` and acts with `github.act`, each act on a
+  host built for that one write (see *The loop*). The TUI has no such screen: a `#N`
+  there is an OSC 8 hyperlink to GitHub, and the palette opens the issue or the pull
+  request in the browser.
 - **Not yet:** runs, moving threads, attachments, and push notifications. The last needs a service worker, which needs a secure context, which
   `http://100.x.y.z` is not; `tailscale serve` can front the daemon with HTTPS later.
 
@@ -328,7 +339,8 @@ responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Meth
 `shell.snapshot/subscribe`, `thread.snapshot/subscribe`, `unsubscribe`, `command`,
 `thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
-`run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`.
+`run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`,
+`thread.commentPullRequest`, `github.item/act`.
 
 ## Runs
 
@@ -540,6 +552,20 @@ covey's store by building a temporary config directory (`claude-resume-<id>`) an
 `.claude.json` and `settings.json` — nothing from `~/.claude/skills`. A thread's first
 session read the link; none after it did. A brief is then one line:
 `/covey take issue 94 to completion, automerge when done`.
+
+**Acting from a client (#108).** A person at the web client reads an item with
+`github.item` and acts with `github.act`: a review (`approve`, `request_changes`,
+`comment`), a comment, a merge with a method, a close or a reopen. The daemon of the
+project's machine runs each in the project's checkout on a host built for that one write:
+`allowReview` for `reviewPullRequest`, `allowComment` for `commentIssue` beside
+`commentPullRequest`, `allowClose` for `closeItem` and `reopenItem`, `allowMerge` for the
+merge; the read path still refuses `pr review`, `pr close`, `pr reopen`, `issue close` and
+`issue reopen`. The engine checks before `gh` starts: a review on an issue, a merge of an
+issue, a review that asks for changes with no body. The thread that holds the number gets
+a note that names the act and the client, and the watch delivers the review, the comment
+or the merge as a turn on its next poll, the same as one made on GitHub. A merge from the
+client is the person's decision, so it is not held under a running turn; the client warns
+when the thread is still working, because the daemon's own `auto` merge would wait.
 
 **Every watch has an end.** A merge or a close ends it. Archiving, deleting or moving the
 thread drops it, as does `thread.watch` with `null`. The two hand-rolled loops still asking

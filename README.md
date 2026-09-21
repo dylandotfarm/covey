@@ -126,6 +126,7 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `ctrl+k` → Revert | anywhere | restore files and conversation to before a chosen turn |
 | `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode |
 | `ctrl+k` → Update covey | anywhere | pull, rebuild and relaunch the client itself (and, if you want, restart the local daemon) |
+| `ctrl+k` → Open issue / pull request | in a thread | open the thread's issue or pull request in the browser; a `#N` in the transcript is a hyperlink too |
 | `esc` | composer | interrupt the running turn |
 | `y` `a` `n` | composer | allow / always allow / deny a pending tool approval |
 | `1..9` or text | composer | answer a question from Claude |

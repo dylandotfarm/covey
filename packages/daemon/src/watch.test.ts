@@ -635,8 +635,8 @@ test("a comment goes on the thread's pull request with its media, and a thread w
     await s.engine.commentPullRequest({ threadId: "t1", attachments: [{ name: "demo.mp4", path: media(s, "demo.mp4") }] });
   });
   assert.deepEqual(s.host.comments, [
-    { number: 101, body: `After the fix:\n\n![after.png](${s.host.uploads[0]!.url})` },
-    { number: 101, body: s.host.uploads[1]!.url },
+    { number: 101, body: `After the fix:\n\n![after.png](${s.host.uploads[0]!.url})`, kind: "pull" },
+    { number: 101, body: s.host.uploads[1]!.url, kind: "pull" },
   ]);
   assert.match(s.notes("t1").at(-1)!, /Commented on pull request #101/);
   // A pull request handed to covey by hand takes a comment the same way.
@@ -644,5 +644,5 @@ test("a comment goes on the thread's pull request with its media, and a thread w
   s.host.options.prs!["covey/t2"] = pr({ number: 7, headRefName: "covey/t2" });
   await s.command({ type: "thread.watch", threadId: "t2", number: 7 });
   await s.engine.commentPullRequest({ threadId: "t2", body: "Seen." });
-  assert.deepEqual(s.host.comments.at(-1), { number: 7, body: "Seen." });
+  assert.deepEqual(s.host.comments.at(-1), { number: 7, body: "Seen.", kind: "pull" });
 });

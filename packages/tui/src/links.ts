@@ -28,16 +28,40 @@ export interface LinkContext {
   localFiles: boolean;
   /** Home directory of the thread's machine, to expand a leading `~`. */
   homeDir?: string;
+  /**
+   * The repository on GitHub, `https://github.com/owner/repo`, so that a
+   * `#N` in the transcript links to its issue or pull request (#108).
+   * Absent, a `#N` stays text.
+   */
+  repoUrl?: string;
+}
+
+/** The web URL of a project's repository, from its normalised remote, or undefined when it is not on GitHub. */
+export function repoUrlOf(identity: string | null | undefined): string | undefined {
+  if (!identity) return undefined;
+  const m = /^github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?\/?$/i.exec(identity);
+  return m ? `https://github.com/${m[1]}/${m[2]}` : undefined;
 }
 
 /**
- * A web URL, or an absolute path.
+ * The link for `#N`: the issues route, which GitHub answers with the pull
+ * request when the number is one. Five digits at most, so a hex colour such
+ * as `#123456` stays text.
+ */
+export function refUri(hit: string, ctx: LinkContext): string | null {
+  const m = /^#(\d{1,5})$/.exec(hit);
+  return m && ctx.repoUrl ? `${ctx.repoUrl}/issues/${m[1]}` : null;
+}
+
+/**
+ * A web URL, an absolute path, or a `#N` reference.
  *
  * The URL branch comes first so that the path inside `https://host/a/b` never
- * matches on its own. The path branch allows a leading `~`; the callers below
- * reject a bare one-segment match such as the `/or` in `and/or`.
+ * matches on its own, and the `#issuecomment-1` in one never reads as a
+ * reference. The path branch allows a leading `~`; the callers below reject
+ * a bare one-segment match such as the `/or` in `and/or`.
  */
-const TARGET = /https?:\/\/[^\s<>"'`()[\]{}]+|~?(?:\/[A-Za-z0-9._+@%~-]+)+\/?/g;
+const TARGET = /https?:\/\/[^\s<>"'`()[\]{}]+|~?(?:\/[A-Za-z0-9._+@%~-]+)+\/?|#\d{1,5}(?![\w-])/g;
 
 /** Trailing punctuation belongs to the sentence, not to the target. */
 const TRAILING = /[.,;:!?'"`)\]}>]+$/;
@@ -75,6 +99,7 @@ export function findTargets(text: string, ctx: LinkContext): Target[] {
 /** The URI for one matched piece of text, or null when it is not a target. */
 export function targetUri(hit: string, ctx: LinkContext): string | null {
   if (/^https?:\/\//.test(hit)) return safeUri(hit);
+  if (hit.startsWith("#")) return refUri(hit, ctx);
   if (!ctx.localFiles) return null;
   let path = hit;
   if (path.startsWith("~")) {

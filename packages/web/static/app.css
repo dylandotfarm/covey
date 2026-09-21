@@ -144,6 +144,56 @@ details.tool[open] .summary { white-space: normal; overflow-wrap: anywhere; }
 .card .options button small { display: block; color: var(--subtle); font-size: 12px; }
 .card input[type=text] { width: 100%; margin-top: 8px; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
 .card .answer { color: var(--muted); }
+/* ---- the issue and the pull request of a thread, and a #N in prose (#108) ---- */
+.refs { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
+.refs button.ref { min-height: 20px; padding: 0 7px; font-size: 12px; line-height: 18px; border-radius: 6px; color: var(--accent); background: var(--surface-alt); border-color: var(--border); }
+.refs button.ref.pull { color: var(--awaiting); }
+a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
+.thread-header .sub .refs button.ref { pointer-events: auto; }
+
+/* ---- one issue or pull request ---- */
+.item { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.item .thread-header .refresh { background: none; border: none; font-size: 22px; color: var(--accent); padding: 0 8px; min-height: 0; }
+.item .thread-header .sub { white-space: normal; }
+.item-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 14px calc(10px + var(--sab)); display: flex; flex-direction: column; gap: 10px; overscroll-behavior: contain; }
+.item-body > * { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.item .meta { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; font-size: 13px; color: var(--subtle); }
+.item .meta .adds { color: var(--success); } .item .meta .dels { color: var(--danger); }
+.chip { display: inline-block; font-size: 12px; line-height: 16px; padding: 1px 8px; border-radius: 10px; border: 1px solid var(--border); color: var(--muted); text-transform: none; }
+.chip.open { border-color: var(--success); color: var(--success); }
+.chip.merged { border-color: var(--awaiting); color: var(--awaiting); }
+.chip.closed { border-color: var(--danger); color: var(--danger); }
+.chip.draft { border-color: var(--subtle); color: var(--subtle); }
+.checks { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--surface); font-size: 14px; }
+.checks .row { display: flex; gap: 8px; align-items: center; color: var(--muted); }
+.checks .row.head { color: var(--text); }
+.checks .row + .row { margin-top: 4px; }
+.checks .row small { color: var(--subtle); }
+.checks .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+.checks .dot.success { background: var(--success); }
+.checks .dot.failure { background: var(--danger); }
+.checks .dot.pending { background: var(--warning); animation: pulse 1.2s ease-in-out infinite; }
+.item .markdown p { margin: 0 0 8px; } .item .markdown p:last-child { margin-bottom: 0; }
+.item .markdown h1, .item .markdown h2, .item .markdown h3 { font-size: 15px; margin: 8px 0 4px; }
+.item .markdown ul, .item .markdown ol { margin: 0 0 8px; padding-left: 22px; }
+.item .markdown .empty-body { color: var(--faint); font-style: italic; }
+.item h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 6px 0 0; }
+.entry { border-left: 2px solid var(--border); padding: 2px 10px; }
+.entry.approved { border-left-color: var(--success); }
+.entry.changes_requested { border-left-color: var(--danger); }
+.entry .who { font-size: 13px; color: var(--subtle); margin-bottom: 2px; }
+.entry .who b { color: var(--muted); font-weight: 600; }
+.holder { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); font-size: 14px; cursor: pointer; }
+.holder .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
+.holder .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.holder .sub { color: var(--subtle); font-size: 13px; white-space: nowrap; }
+.item-bar { display: flex; flex-direction: column; gap: 8px; padding: 8px 10px calc(8px + var(--sab)); border-top: 1px solid var(--border); background: var(--bg); }
+.item-bar .composer { border-radius: 12px; }
+.item-bar .buttons { display: flex; flex-wrap: wrap; gap: 6px; }
+.item-bar .buttons button { flex: 1 1 auto; min-height: 36px; padding: 6px 10px; font-size: 14px; }
+.item-bar select { font: inherit; color: inherit; background: var(--surface-alt); border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; min-height: 36px; }
+.item-bar .who { font-size: 12px; color: var(--subtle); text-align: right; }
+
 .composer-bar { position: relative; display: flex; align-items: flex-end; gap: 8px; padding: 8px 10px calc(8px + var(--sab)); border-top: 1px solid var(--border); background: var(--bg); }
 /* The `/` popover: over the bottom of the timeline, never under it. Ink cannot do this; a browser can. */
 .cmd-menu { position: absolute; left: 10px; right: 10px; bottom: calc(100% + 2px); max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 -6px 24px rgba(0, 0, 0, .45); z-index: 2; }
