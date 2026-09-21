@@ -439,8 +439,12 @@ daemon over loopback for the thread in `COVEY_THREAD_ID`, with Node's own `WebSo
 they need nothing installed in the agent's shell. The `/covey` skill (`skills/covey/SKILL.md`)
 tells the agent the loop: take the issue, work, prove it, open through covey, stop the turn,
 and act on each `covey watch:` message; `--auto` only when the user said to merge on their
-behalf. `pnpm run setup` links the skill into `~/.claude/skills/covey`, back to the checkout,
-the way it links the launcher, so a pull updates both. A brief is then one line:
+behalf. The skill is linked into `~/.claude/skills/covey`, back to the checkout, the way the
+launcher is, so a pull updates both. The daemon makes the link on every start
+(`skill.ts`), which is what lets the internal update — pull, build, restart — put a new skill
+in place on every machine of the pool; `pnpm run setup` makes it too, for the first install.
+A daemon with `COVEY_HOME` set is a throwaway and links nothing, so a test daemon or a scratch
+clone never takes the link from the real checkout. A brief is then one line:
 `/covey take issue 94 to completion, automerge when done`.
 
 **Every watch has an end.** A merge or a close ends it. Archiving, deleting or moving the

@@ -94,6 +94,9 @@ if (!windows) chmodSync(target, 0o755);
 // merged pull request with `covey issue …` and `covey pr …`. Claude Code reads
 // skills from ~/.claude/skills/<name>/SKILL.md, so the directory is linked
 // there, back to this checkout, the way the launcher is: a pull updates both.
+// The daemon does the same on every start (`packages/daemon/src/skill.ts`),
+// so the internal update keeps it; this is for the first install, before a
+// daemon has run.
 const skillSrc = join(root, "skills", "covey");
 const skillDir = join(home, ".claude", "skills");
 const skillDest = join(skillDir, "covey");

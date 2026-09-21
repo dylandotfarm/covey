@@ -42,7 +42,8 @@ and `covey pr open`. A brief is then one line: `/covey take issue 94 to completi
 when done`.
 
 The launcher and the skill always run from the checkout they were linked from, so `git pull`
-is enough to update both. Run the setup again only if you move the checkout. To install without it, run the entry
+is enough to update both, and the daemon makes the skill link again on every start. Run the
+setup again only if you move the checkout. To install without it, run the entry
 point directly:
 
 ```bash
