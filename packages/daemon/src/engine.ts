@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { basename, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
@@ -10,12 +10,12 @@ import { USER_CLIENT } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
-import { repositoryIdentity, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
+import { normaliseRemote, remoteUrl, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
-import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES } from "./config.js";
+import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
-import type { Attachment, TurnDiff, ProjectGit, WorkspaceMode, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState } from "@covey/protocol";
+import type { Attachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { realGhHost, type GhHost } from "./integrate/gh.js";
 import { gateMember } from "./integrate/gate.js";
@@ -252,14 +252,21 @@ export class Engine {
         return this.emitShell({ kind: "machine.updated", machine: this.machine });
       }
       case "project.create": {
-        const root = cmd.workspaceRoot;
-        if (!existsSync(root) || !statSync(root).isDirectory()) throw new EngineError("bad_path", `${root} is not a directory`);
-        const dup = this.db.listProjects().find((p) => p.workspaceRoot === root);
+        const url = cmd.url.trim();
+        if (!url) throw new EngineError("bad_url", "a repository URL is needed");
+        const identity = normaliseRemote(url);
+        const dup = this.db.listProjects().find((p) => p.repositoryIdentity === identity);
         if (dup) return this.db.shellSeq();
+        const root = join(this.machine.projectsDir ?? projectsDir(), projectSlug(identity), "repo.git");
+        const cloned = await this.cloneOnce(url, root);
+        if ("error" in cloned) throw new EngineError("git", `could not clone ${url}: ${cloned.error}`);
+        // Two creates for one repository may have waited on the same clone.
+        const raced = this.db.listProjects().find((p) => p.repositoryIdentity === identity);
+        if (raced) return this.db.shellSeq();
         const p: Project = {
-          id: randomUUID(), title: cmd.title ?? basename(root), workspaceRoot: root,
-          repositoryIdentity: isGitRepo(root) ? await repositoryIdentity(root) : null,
-          defaultModel: null, defaultWorkspaceMode: null, createdAt: now, updatedAt: now,
+          id: randomUUID(), title: cmd.title ?? basename(identity), workspaceRoot: root,
+          repositoryIdentity: identity, kind: "clone", remoteUrl: url,
+          defaultModel: null, createdAt: now, updatedAt: now,
         };
         this.db.putProject(p);
         return this.emitShell({ kind: "project.upserted", project: p });
@@ -269,7 +276,6 @@ export class Engine {
         if (!p) throw new EngineError("not_found", "project not found");
         if (cmd.title !== undefined) p.title = cmd.title;
         if (cmd.defaultModel !== undefined) p.defaultModel = cmd.defaultModel;
-        if (cmd.defaultWorkspaceMode !== undefined) p.defaultWorkspaceMode = cmd.defaultWorkspaceMode;
         p.updatedAt = now;
         this.db.putProject(p);
         return this.emitShell({ kind: "project.upserted", project: p });
@@ -285,28 +291,13 @@ export class Engine {
         const p = this.db.getProject(cmd.projectId);
         if (!p) throw new EngineError("not_found", "project not found");
         if (this.db.getThread(cmd.threadId)) return this.db.shellSeq();
-        let worktreePath: string | null = null;
-        let branch = isGitRepo(p.workspaceRoot) ? await currentBranch(p.workspaceRoot) : null;
-        // An explicit choice wins; otherwise the project's remembered default.
-        const mode: WorkspaceMode = cmd.workspaceMode ?? p.defaultWorkspaceMode ?? "checkout";
-        // Set for `worktree-default` only, and written into the thread below:
-        // an agent that knows where it started can merge before it works
-        // rather than after it finishes.
-        let cleanStart: CleanStart | null = null;
-        if (mode !== "checkout") {
-          // A failed worktree is reported, never silently downgraded to the
-          // shared checkout: the whole point of asking was isolation.
-          if (!isGitRepo(p.workspaceRoot)) throw new EngineError("not_git", "project is not a git repository");
-          let base = "HEAD";
-          if (mode === "worktree-default") {
-            cleanStart = await cleanStartBase(p.workspaceRoot);
-            if (!cleanStart) throw new EngineError("git", "no default branch (origin/HEAD, main or master) to branch from");
-            base = cleanStart.ref;
-          }
-          const wt = await createWorktree(p.workspaceRoot, cmd.threadId.slice(0, 8), base);
-          if ("error" in wt) throw new EngineError("git", `could not create worktree from ${base}: ${wt.error}`);
-          worktreePath = wt.path; branch = wt.branch;
-        }
+        // Every thread in a repository gets its own worktree, branched from the
+        // remote's default branch after a fetch. There is no other place to
+        // work: a clone is bare, and parallel threads in one checkout fight
+        // over the same files. A `checkout` project that is not a repository
+        // is the one exception, and the thread works in the directory itself.
+        const tree = await this.newWorktree(p, cmd.threadId.slice(0, 8), null);
+        const { worktreePath, branch, cleanStart } = tree;
         const machineMode = this.machine.settings.defaultPermissionMode;
         // The command's parent wins over the connection's, and both are checked
         // against this database: a link to a thread nobody can paint loses the
@@ -318,7 +309,7 @@ export class Engine {
           sessionId: cmd.sessionId, model: cmd.model ?? p.defaultModel ?? this.machine.settings.defaultModel,
           // The command wins, then the machine's default; only when neither has
           // an opinion do we honour the user's own settings default.
-          permissionMode: cmd.permissionMode ?? machineMode ?? resolveDefaultPermissionMode(p.workspaceRoot),
+          permissionMode: cmd.permissionMode ?? machineMode ?? resolveDefaultPermissionMode(worktreePath ?? p.workspaceRoot),
           permissionModeExplicit: cmd.permissionMode !== undefined || machineMode !== null,
           streaming: cmd.streaming ?? this.machine.settings.defaultStreaming ?? false,
           branch, worktreePath, status: "idle", lastError: null, pendingApprovals: 0, queuedTurns: 0, latestTurn: null,
@@ -516,8 +507,6 @@ export class Engine {
         const existing = this.db.getRun(cmd.run.runId);
         // A retried create must not throw away a run that has been dispatched.
         if (existing) return this.emitShell({ kind: "run.upserted", run: existing });
-        if (cmd.run.workspaceMode === "checkout")
-          throw new EngineError("bad_workspace", "a run works in worktrees; parallel agents in one checkout is the defect");
         // The run's parent, by the same rule a thread's parent follows: the
         // command wins, then the thread the connection speaks for.
         const parent = this.knownThread(cmd.run.parentThreadId ?? caller);
@@ -528,7 +517,6 @@ export class Engine {
           ...(parent ? { parentThreadId: parent } : {}),
           goal: cmd.run.goal,
           briefTemplate: cmd.run.briefTemplate,
-          workspaceMode: cmd.run.workspaceMode,
           members: cmd.run.members.map((m) => newMember(m, now)),
           closedAt: null,
           createdAt: now,
@@ -910,6 +898,52 @@ export class Engine {
   }
 
   // ---- worktrees ------------------------------------------------------------
+
+  /** Clones in flight, by bare repository path. Two creates for one repository
+   *  that arrive together wait on one clone. */
+  private clones = new Map<string, Promise<{ ok: true } | { error: string }>>();
+
+  private cloneOnce(url: string, root: string): Promise<{ ok: true } | { error: string }> {
+    let p = this.clones.get(root);
+    if (!p) {
+      p = cloneBare(url, root).finally(() => this.clones.delete(root));
+      this.clones.set(root, p);
+    }
+    return p;
+  }
+
+  /**
+   * A worktree for a new thread in `p`, named by the thread's prefix.
+   *
+   * `carry` names a branch the thread had elsewhere. When `origin` has it the
+   * worktree opens on that branch, so a moved thread keeps its commits; when
+   * it does not, the thread starts from the default branch like any other, and
+   * `carried` says which happened.
+   *
+   * A `checkout` that is not a git repository has no worktree to give: the
+   * thread works in the directory, as every thread there always did. A clone
+   * without its repository is an error, because a bare repository is nowhere
+   * to work.
+   */
+  private async newWorktree(p: Project, name: string, carry: string | null): Promise<{ worktreePath: string | null; branch: string | null; cleanStart: CleanStart | null; carried: boolean }> {
+    if (!isGitRepo(p.workspaceRoot)) {
+      if (p.kind === "clone") throw new EngineError("git", `${p.workspaceRoot} is not a repository; the clone is gone`);
+      return { worktreePath: null, branch: null, cleanStart: null, carried: false };
+    }
+    const path = worktreePath(p, name);
+    if (carry && (await fetchBranch(p.workspaceRoot, carry))) {
+      const wt = await createWorktree(p.workspaceRoot, name, `origin/${carry}`, path, carry);
+      if ("error" in wt) throw new EngineError("git", `could not create worktree from origin/${carry}: ${wt.error}`);
+      return { worktreePath: wt.path, branch: wt.branch, cleanStart: null, carried: true };
+    }
+    const cleanStart = await cleanStartBase(p.workspaceRoot);
+    if (!cleanStart) throw new EngineError("git", "no default branch (origin/HEAD, main or master) to branch from");
+    // A failed worktree is reported, never silently downgraded to the shared
+    // checkout: the whole point of a worktree is isolation.
+    const wt = await createWorktree(p.workspaceRoot, name, cleanStart.ref, path);
+    if ("error" in wt) throw new EngineError("git", `could not create worktree from ${cleanStart.ref}: ${wt.error}`);
+    return { worktreePath: wt.path, branch: wt.branch, cleanStart, carried: false };
+  }
 
   /** Where a thread's git lives right now: its worktree while that exists (an
    *  archived thread's does not), else the project checkout — the same repo,
@@ -1318,7 +1352,7 @@ export class Engine {
 
   // ---- move between machines ----------------------------------------------
 
-  exportThread(threadId: string): ThreadExport {
+  async exportThread(threadId: string): Promise<ThreadExport> {
     const thread = this.db.getThread(threadId);
     if (!thread) throw new EngineError("not_found", "thread not found");
     if (thread.latestTurn?.state === "running") throw new EngineError("busy", "interrupt the running turn before moving");
@@ -1330,26 +1364,36 @@ export class Engine {
     return {
       version: 1, exportedAt: new Date().toISOString(),
       sourceMachineId: this.machine.machineId, sourceMachineName: this.machine.name,
-      project: { title: project.title, workspaceRoot: project.workspaceRoot, repositoryIdentity: project.repositoryIdentity },
+      project: {
+        title: project.title, workspaceRoot: project.workspaceRoot, repositoryIdentity: project.repositoryIdentity,
+        remoteUrl: isGitRepo(project.workspaceRoot) ? await remoteUrl(project.workspaceRoot) : null,
+        worktreeHome: dirname(worktreePath(project, "x")),
+      },
       thread, items: this.db.allItems(threadId), transcripts,
     };
   }
 
-  async importThread(exp: ThreadExport, opts: { projectId?: string; workspaceRoot?: string }): Promise<{ threadId: string; projectId: string }> {
+  async importThread(exp: ThreadExport, opts: { projectId?: string; url?: string }): Promise<{ threadId: string; projectId: string }> {
     let project = opts.projectId ? this.db.getProject(opts.projectId) : null;
-    if (!project && opts.workspaceRoot) {
-      await this.apply({ type: "project.create", workspaceRoot: opts.workspaceRoot, title: exp.project.title });
-      project = this.db.listProjects().find((p) => p.workspaceRoot === opts.workspaceRoot) ?? null;
-    }
     if (!project && exp.project.repositoryIdentity) {
       project = this.db.listProjects().find((p) => p.repositoryIdentity === exp.project.repositoryIdentity) ?? null;
     }
-    if (!project) throw new EngineError("no_project", "no destination project; pass projectId or workspaceRoot");
+    if (!project) {
+      const url = opts.url ?? exp.project.remoteUrl;
+      if (!url) throw new EngineError("no_project", "no project here for this repository, and no URL to clone it from");
+      await this.apply({ type: "project.create", url, title: exp.project.title });
+      project = this.db.listProjects().find((p) => p.repositoryIdentity === normaliseRemote(url)) ?? null;
+    }
+    if (!project) throw new EngineError("no_project", "no destination project; pass projectId or url");
     const threadId = randomUUID();
     const now = new Date().toISOString();
+    // The thread's own worktree, here. Its branch comes along when the source
+    // pushed it; otherwise the thread starts from the default branch and is
+    // told so, because the work on that branch is still on the other machine.
+    const tree = await this.newWorktree(project, threadId.slice(0, 8), exp.thread.branch);
     const t: Thread = {
       ...exp.thread, id: threadId, projectId: project.id, status: "idle", lastError: null,
-      worktreePath: null, movedTo: null, pendingApprovals: 0, queuedTurns: 0, updatedAt: now,
+      worktreePath: tree.worktreePath, branch: tree.branch, movedTo: null, pendingApprovals: 0, queuedTurns: 0, updatedAt: now,
       latestTurn: exp.thread.latestTurn && exp.thread.latestTurn.state === "running" ? { ...exp.thread.latestTurn, state: "interrupted" } : exp.thread.latestTurn,
     };
     this.db.transaction(() => {
@@ -1361,12 +1405,23 @@ export class Engine {
         this.db.putItem(moved);
       }
     });
+    // The transcript names the directory the session ran in. Both the old
+    // worktree and the old project directory are mapped, because a thread
+    // from before worktrees ran in the project directory itself.
+    const from = exp.thread.worktreePath ?? exp.project.workspaceRoot;
+    const to = t.worktreePath ?? project.workspaceRoot;
     for (const tr of exp.transcripts) {
-      const entries = tr.entries.map((e) => rewriteCwd(e, exp.project.workspaceRoot, project!.workspaceRoot));
+      const entries = tr.entries.map((e) => rewriteCwd(rewriteCwd(e, from, to), exp.project.workspaceRoot, project!.workspaceRoot));
       this.db.appendTranscript(threadId, t.sessionId, tr.subpath, entries);
     }
     const noteNow = new Date().toISOString();
-    this.persistItem({ id: `note:${randomUUID()}`, threadId, turnId: null, seq: 0, createdAt: noteNow, updatedAt: noteNow, kind: "note", tone: "info", text: `Moved here from ${exp.sourceMachineName} (${exp.project.workspaceRoot})` });
+    const where = t.worktreePath
+      ? tree.carried
+        ? ` Working in a worktree on ${t.branch}, fetched from origin.`
+        : ` Working in a new worktree on ${t.branch}` + (exp.thread.branch ? `; the branch ${exp.thread.branch} was not on origin, so its commits stayed behind.` : ".")
+      : "";
+    this.persistItem({ id: `note:${randomUUID()}`, threadId, turnId: null, seq: 0, createdAt: noteNow, updatedAt: noteNow, kind: "note", tone: "info", text: `Moved here from ${exp.sourceMachineName} (${from}).${where}` });
+    if (tree.cleanStart) this.note(threadId, ...cleanStartNote(tree.cleanStart));
     this.emitShell({ kind: "thread.upserted", thread: this.db.getThread(threadId)! });
     return { threadId, projectId: project.id };
   }
@@ -1445,6 +1500,17 @@ function titleIsAuto(t: Thread): boolean {
 }
 
 /** Rewrite the session's recorded cwd so the SDK resumes against the new path. */
+/**
+ * The directory under `projectsDir` for a repository: the last two segments of
+ * its identity, `github.com/dylandotfarm/covey` → `dylandotfarm/covey`, with
+ * anything a path must not hold replaced by `-`.
+ */
+export function projectSlug(identity: string): string {
+  const parts = identity.split("/").filter(Boolean).slice(-2);
+  const clean = parts.map((s) => s.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^\.+/, "_")).filter(Boolean);
+  return clean.length ? clean.join("/") : "repo";
+}
+
 function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): Record<string, unknown> {
   if (from === to) return entry;
   const e = { ...entry };

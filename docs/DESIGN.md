@@ -243,9 +243,10 @@ Comparable clients forbid this. With the SDK's pluggable session store it is a d
 
 1. TUI asks source daemon for `thread.export`: thread row, timeline items, and every
    transcript subpath (main + subagents). Refused while a turn is running.
-2. TUI hands the export to the destination daemon's `thread.import` with either an existing
-   project id or a directory to create a project from. Projects with the same normalised git
-   remote are offered first. Transcript `cwd` fields are rewritten to the new root.
+2. TUI hands the export to the destination daemon's `thread.import`, with a project id when
+   the operator picked one. Otherwise the daemon uses its project for the same repository,
+   and makes one — a clone — when it has none. Transcript `cwd` fields are rewritten to the
+   thread's new worktree.
 3. TUI calls `thread.markMoved` on the source; the old row becomes a tombstone pointing at the
    new machine + thread id and rejects further turns.
 4. The next turn on the destination resumes via `SessionStore.load()`. Verified: the resumed
@@ -666,56 +667,78 @@ project → machine, and a permission mode as command → machine → the user's
 `permissions.defaultMode`. The TUI omits its own last-used mode when a machine default is
 set, so the panel is not silently overridden by the client.
 
+## Projects: a repository, cloned by covey
+
+A project is a repository. The daemon clones it, and the clone is the daemon's:
+
+```
+~/.covey/projects/<owner>/<repo>/repo.git     the bare clone
+~/.covey/projects/<owner>/<repo>/<prefix>     one worktree per thread
+```
+
+`project.create` takes a URL. The daemon normalises it to the same identity every machine
+derives (`github.com/org/repo`), and a second create for a repository this machine already
+has returns the project it has, so a client may send one create to every machine in a pool.
+The directory is the last two segments of the identity; the root is `COVEY_PROJECTS`, else
+`<COVEY_HOME>/projects` when `COVEY_HOME` is set, else `~/.covey/projects`. A throwaway
+daemon on another port therefore clones into its own directory and never into the real one.
+`MachineInfo.projectsDir` says which.
+
+The clone is **bare** on purpose. There is no checkout to work from, so there is no "worktree
+from HEAD" and no "this checkout" for threads to share, and nothing on the machine is two
+days behind `origin` because nobody pulled it. `git clone --bare` writes no fetch refspec,
+which would leave `origin/main` unset for ever, so the daemon does `init --bare`, `remote add`
+and a fetch instead, then `remote set-head` for `origin/HEAD`. The bare repository's own
+`HEAD` names a copy of the default branch made at clone time: `git worktree add` refuses a
+`HEAD` that points outside `refs/heads`, and a `HEAD` that resolves is what lets the project
+read as one with history. Nothing checks that copy out.
+
+`Project.kind` tells a `clone` from a `checkout`: a directory the user pointed covey at,
+from before projects were clones. No new project is made that way. The rows that exist keep
+working, with their worktrees where they always were, under `<root>/.covey/worktrees` next
+to a self-ignoring `.gitignore`. A `checkout` that is not a repository is the one place a
+thread still works in the directory itself. `project.delete` removes the rows; the
+worktrees and the clone stay on disk, and a later create for the same repository finds the
+clone and fetches rather than cloning again.
+
 ## Where a new thread works
 
-Parallel threads in one checkout fight over the same files, so in a git repo the first new
-thread in a project asks where it should run, and offers to remember the answer:
+Every thread gets its own worktree, `git worktree add --no-track -b covey/<id> … <base>`,
+where the base is `origin/HEAD` (else `origin/main`, `origin/master`), and only a local
+`main`/`master` in a repo with no remote. Parallel threads in one checkout fight over the
+same files, and a clone has no checkout to offer, so there is no choice to make and nothing
+to ask.
 
-- **Worktree from `origin/<default branch>`** — `git worktree add --no-track -b covey/<id> …
-  <base>`, where the base is `origin/HEAD` (else `origin/main`, `origin/master`), and only a
-  local `main`/`master` in a repo with no remote. A clean start, unaffected by whatever is
-  checked out *and* by whatever this machine last pulled.
+covey **fetches `origin` first**. Work is pushed to `origin` and reviewed there, so `origin`
+is the truth about what the default branch is; the local branch of that name is one machine's
+opinion, and on a machine that dispatches agents it is a stale one, because nobody pulls a
+checkout they only ever branch from. Before this (#76) a worktree branched from the local
+`main`, which on the macOS host was 46 commits behind `origin/main`, so every agent started
+two days back and spent a round merging before its work could land.
 
-  covey **fetches `origin` first**. Work is pushed to `origin` and reviewed there, so `origin`
-  is the truth about what the default branch is; the local branch of that name is one
-  machine's opinion, and on a machine that dispatches agents it is a stale one, because nobody
-  pulls a checkout they only ever branch from. Before this (#76) a worktree branched from the
-  local `main`, which on the macOS host was 46 commits behind `origin/main`, so every agent
-  started two days back and spent a round merging before its work could land.
+The fetch takes one branch, not the whole remote, and is bounded at 20s (a healthy no-op
+fetch of this project measures 1.2s to 1.4s). One repository's fetch counts as fresh for a
+minute, so a dispatch of eight threads in one project pays for one round trip, not eight.
+A fetch that *failed* is not remembered: the next thread tries again, because a blip of one
+second must not decide where the next seven agents start.
+**A fetch that fails never stops the worktree.** Offline, no credentials, a remote that is
+down: the worktree is branched from the refs that are here and the thread gets a warning
+naming the ref and the commit it really got. An agent that starts stale and knows it can
+merge first; an agent that cannot start does nothing at all. Every thread gets that line,
+warning or not — "Branched from `origin/main` at `774c764`, fetched from origin just now."
 
-  The fetch takes one branch, not the whole remote, and is bounded at 20s (a healthy no-op
-  fetch of this project measures 1.2s to 1.4s). One repository's fetch counts as fresh for a
-  minute, so a dispatch of eight threads in one project pays for one round trip, not eight.
-  A fetch that *failed* is not remembered: the next thread tries again, because a blip of one
-  second must not decide where the next seven agents start.
-  **A fetch that fails never stops the worktree.** Offline, no credentials, a remote that is
-  down: the worktree is branched from the refs that are here and the thread gets a warning
-  naming the ref and the commit it really got. An agent that starts stale and knows it can
-  merge first; an agent that cannot start does nothing at all. Every clean-start thread gets
-  that line, warning or not — "Branched from `origin/main` at `774c764`, fetched from origin
-  just now."
+`--no-track` keeps `origin/main` from becoming the new branch's upstream, which would make
+`git push` under `push.default=simple` refuse it.
 
-  `--no-track` keeps `origin/main` from becoming the new branch's upstream, which would make
-  `git push` under `push.default=simple` refuse it.
-- **Worktree from HEAD** — the same worktree, branched from the current checkout, so work in
-  progress carries over. It means "branch from HEAD" on purpose: it neither fetches nor reads
-  `origin`, and `N` takes it without asking.
-- **This checkout** — the project directory itself, shared with every other thread. The
-  behaviour covey had before, and the only option in a non-git project.
+A worktree that cannot be created (no commits, no default branch, a name already taken)
+fails the command with an error the TUI shows. It is never silently downgraded to a shared
+directory — isolation was the whole point.
 
-Worktrees live in `<repo>/.covey/worktrees/<thread prefix>`, next to a self-ignoring
-`.covey/.gitignore` so they never appear in the main checkout's `git status` — or in turn
-checkpoints, which honour `.gitignore`.
-
-The choice is a property of the **project** (`Project.defaultWorkspaceMode`, set through
-`project.update`), not of the client, so it holds from any machine that connects. `null`
-means ask. The palette's "New threads here" entry changes or clears it; `N` always takes a
-worktree from HEAD without asking. A `thread.create` that omits `workspaceMode` falls back to
-the project's remembered choice, then to the checkout.
-
-A worktree that cannot be created (not a repo, no commits, no default branch, a name already
-taken) fails the command with an error the TUI shows. It is never silently downgraded to the
-shared checkout — isolation was the whole point of asking.
+A thread that **moves** to another machine gets a worktree there too. When `origin` has the
+thread's branch, the worktree opens on it, with the commits the source pushed; when it does
+not, the thread starts from the default branch and its transcript says the old branch's
+commits stayed behind. A machine with no project for the repository clones it first, from
+the URL the export carries.
 
 ## Thread titles
 

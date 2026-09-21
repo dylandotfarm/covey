@@ -6,7 +6,7 @@ import { sidebarCells, rowAtScreenRow, cursorIndex } from "./sidebar.js";
 
 const project = (id: string, title = id): Project => ({
   id, title, workspaceRoot: `/repos/${id}`, repositoryIdentity: null, defaultModel: null,
-  defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
 });
 
 const thread = (id: string, projectId: string, over: Partial<Thread> = {}): Thread => ({

@@ -18,7 +18,7 @@ import { execFile as execFileCb } from "node:child_process";
 import { createServer, type AddressInfo } from "node:net";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { MachineInfo, SystemNoteItem } from "@covey/protocol";
@@ -33,6 +33,9 @@ const head = (cwd: string) => git(cwd, "rev-parse", "--short", "HEAD");
 interface Clone {
   /** The working checkout, standing in for the operator's own. */
   repo: string;
+  /** The bare remote, as a URL a project can clone. */
+  remote: string;
+  dir: string;
   /** Add a commit to the remote's `main`, behind the checkout's back. */
   moveRemote: (msg: string) => Promise<string>;
   /** Point `origin` at somewhere that is not there, the way being offline looks. */
@@ -65,6 +68,8 @@ async function scratchClone(): Promise<Clone> {
   await git(repo, "config", "user.name", "covey test");
   return {
     repo,
+    remote,
+    dir,
     moveRemote,
     breakRemote: async () => { await git(repo, "remote", "set-url", "origin", join(dir, "gone.git")); },
     drop: () => rmSync(dir, { recursive: true, force: true }),
@@ -252,22 +257,28 @@ const MACHINE: MachineInfo = {
   settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
 };
 
-/** An engine over a throwaway database, with one project on `repo`. */
-function engineOn(repo: string) {
+/** An engine over a throwaway database and its own projects directory. */
+function engineOn() {
   const dir = mkdtempSync(join(tmpdir(), "covey-clean-db-"));
   const db = new Db(dir);
-  const engine = new Engine(db, { ...MACHINE });
+  const engine = new Engine(db, { ...MACHINE, projectsDir: join(dir, "projects") });
   const send = (cmd: any) => engine.dispatch({ ...cmd, commandId: randomUUID() });
-  return { engine, db, send, repo, drop: () => rmSync(dir, { recursive: true, force: true }) };
+  return { engine, db, send, drop: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-async function threadNotes(repo: string, mode: string): Promise<{ notes: string[]; tones: string[]; branchedAt: string | null }> {
-  const e = engineOn(repo);
+/**
+ * Clone `url` as a project, then make one thread in it. `beforeThread` runs
+ * between the two, on the clone, so a test can break its remote the way being
+ * offline looks.
+ */
+async function threadNotes(url: string, beforeThread: (clone: string) => Promise<void> = async () => {}): Promise<{ notes: string[]; tones: string[]; branchedAt: string | null; worktree: string | null; clone: string; bare: boolean; threadId: string }> {
+  const e = engineOn();
   try {
-    await e.send({ type: "project.create", workspaceRoot: repo });
-    const projectId = e.engine.shellSnapshot().projects[0]!.id;
+    await e.send({ type: "project.create", url });
+    const project = e.engine.shellSnapshot().projects[0]!;
+    await beforeThread(project.workspaceRoot);
     const threadId = randomUUID();
-    await e.send({ type: "thread.create", projectId, threadId, sessionId: randomUUID(), workspaceMode: mode });
+    await e.send({ type: "thread.create", projectId: project.id, threadId, sessionId: randomUUID() });
     const t = e.db.getThread(threadId)!;
     const items = e.db.listItems(threadId).items.filter((i): i is SystemNoteItem => i.kind === "note");
     const wt = t.worktreePath;
@@ -275,16 +286,23 @@ async function threadNotes(repo: string, mode: string): Promise<{ notes: string[
       notes: items.map((i) => i.text),
       tones: items.map((i) => i.tone),
       branchedAt: wt ? await head(wt) : null,
+      worktree: wt,
+      clone: project.workspaceRoot,
+      bare: (await git(project.workspaceRoot, "rev-parse", "--is-bare-repository")) === "true",
+      threadId,
     };
   } finally { e.drop(); }
 }
 
-test("a clean-start thread is told the ref and the commit it got", async (t) => {
+test("a project is a bare clone, and a thread gets a worktree beside it at origin/main", async (t) => {
   const c = await scratchClone();
   t.after(c.drop);
   const ahead = await c.moveRemote("two");
 
-  const { notes, tones, branchedAt } = await threadNotes(c.repo, "worktree-default");
+  const { notes, tones, branchedAt, worktree, clone, bare, threadId } = await threadNotes(c.remote);
+  assert.ok(clone.endsWith(join("remote", "repo.git")), `the clone is named after the repository: ${clone}`);
+  assert.ok(bare, "nothing is checked out in the project itself");
+  assert.equal(worktree, join(dirname(clone), threadId.slice(0, 8)), "the worktree sits beside the bare repository");
   assert.equal(branchedAt, ahead, "the thread's own worktree starts at origin/main");
   assert.equal(notes.length, 1, `expected one note, got ${JSON.stringify(notes)}`);
   assert.equal(tones[0], "info");
@@ -294,19 +312,13 @@ test("a clean-start thread is told the ref and the commit it got", async (t) => 
 test("a thread whose fetch failed is warned, in its own transcript, that it may be behind", async (t) => {
   const c = await scratchClone();
   t.after(c.drop);
-  const here = await git(c.repo, "rev-parse", "--short", "origin/main");
-  await c.breakRemote();
-
-  const { notes, tones, branchedAt } = await threadNotes(c.repo, "worktree-default");
+  let here = "";
+  const { notes, tones, branchedAt } = await threadNotes(c.remote, async (clone) => {
+    here = await git(clone, "rev-parse", "--short", "origin/main");
+    await git(clone, "remote", "set-url", "origin", join(c.dir, "gone.git"));
+  });
   assert.equal(branchedAt, here, "the thread started, which is the whole point");
   assert.equal(tones[0], "warning");
   assert.match(notes[0]!, new RegExp(`Branched from origin/main at ${here}`));
   assert.match(notes[0]!, /Merge main before you start/);
-});
-
-test("a worktree-head thread gets no clean-start note, because it made no such claim", async (t) => {
-  const c = await scratchClone();
-  t.after(c.drop);
-  const { notes } = await threadNotes(c.repo, "worktree-head");
-  assert.deepEqual(notes, []);
 });

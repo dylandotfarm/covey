@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync as mkdirp, writeFileSync as writeFile } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import type { ProjectGit } from "@covey/protocol";
 
 const run = promisify(execFile);
@@ -22,8 +22,14 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   return r.ok ? r.out : null;
 }
 
+/** True for a working checkout (`.git` inside) and for a bare repository. */
 export function isGitRepo(dir: string): boolean {
-  return existsSync(join(dir, ".git"));
+  return existsSync(join(dir, ".git")) || (existsSync(join(dir, "HEAD")) && existsSync(join(dir, "objects")));
+}
+
+/** True when `dir` is a bare repository: refs and objects, no working tree. */
+export async function isBareRepo(dir: string): Promise<boolean> {
+  return (await git(dir, ["rev-parse", "--is-bare-repository"])) === "true";
 }
 
 /** Normalise a git remote into a stable cross-machine identity:
@@ -36,8 +42,13 @@ export function normaliseRemote(url: string): string {
   return u.toLowerCase();
 }
 
+/** The URL of `origin`, as git has it. */
+export async function remoteUrl(cwd: string): Promise<string | null> {
+  return git(cwd, ["remote", "get-url", "origin"]);
+}
+
 export async function repositoryIdentity(cwd: string): Promise<string | null> {
-  const remote = await git(cwd, ["remote", "get-url", "origin"]);
+  const remote = await remoteUrl(cwd);
   if (!remote) return null;
   return normaliseRemote(remote);
 }
@@ -46,8 +57,67 @@ export async function currentBranch(cwd: string): Promise<string | null> {
   return git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 }
 
+/**
+ * The directory that git commands for this repository run in: the top of the
+ * working tree, or the bare repository itself when there is no working tree.
+ * A project covey cloned is bare, and every git call the engine makes on the
+ * project (fetch, worktree add, the checkpoint refs) is as happy there.
+ */
 export async function repoRoot(cwd: string): Promise<string | null> {
-  return git(cwd, ["rev-parse", "--show-toplevel"]);
+  const top = await git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (top) return top;
+  if (await isBareRepo(cwd)) return git(cwd, ["rev-parse", "--absolute-git-dir"]);
+  return null;
+}
+
+/** How long the first fetch of a repository may take. A large repository over
+ *  a slow link needs minutes; a clone that is cut off is a project that does
+ *  not exist, so the budget is generous. */
+const CLONE_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Make `dir` a bare repository that mirrors `origin`, or bring one that is
+ * already there up to date. Never a working tree: the threads' worktrees are
+ * the only checkouts, so there is no `HEAD` to work from and nothing for two
+ * threads to fight over.
+ *
+ * `git clone --bare` would write no fetch refspec, so `origin/main` would never
+ * appear and every fetch after the first would find nothing. `init` plus
+ * `remote add` writes the refspec, and `remote set-head` records which branch
+ * the remote calls its default.
+ */
+export async function cloneBare(url: string, dir: string): Promise<{ ok: true } | { error: string }> {
+  if (!existsSync(join(dir, "HEAD"))) {
+    mkdirp(dir, { recursive: true });
+    const init = await gitTry(dir, ["init", "--quiet", "--bare"]);
+    if (!init.ok) return { error: init.err };
+    const remote = await gitTry(dir, ["remote", "add", "origin", url]);
+    if (!remote.ok) return { error: remote.err };
+  }
+  const fetch = await gitTry(dir, ["fetch", "--no-tags", "--quiet", "origin"], CLONE_TIMEOUT_MS);
+  if (!fetch.ok) return { error: fetch.err };
+  const head = await gitTry(dir, ["remote", "set-head", "origin", "--auto"]);
+  if (!head.ok) return { error: head.err };
+  // The bare repository's own HEAD names a local branch that `init` never
+  // made. Make it, at the remote's default, so `HEAD` resolves to a commit and
+  // the repository reads as one with history. `worktree add` refuses a HEAD
+  // that points outside `refs/heads`, so the branch is a copy, not a symref
+  // to the remote's ref. Nothing checks it out: every checkout is a worktree
+  // on its own `covey/` branch.
+  const ref = await git(dir, ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  const name = ref?.replace(/^origin\//, "");
+  if (name) {
+    await gitTry(dir, ["update-ref", `refs/heads/${name}`, `refs/remotes/origin/${name}`]);
+    await gitTry(dir, ["symbolic-ref", "HEAD", `refs/heads/${name}`]);
+  }
+  return { ok: true };
+}
+
+/** Fetch one branch from `origin`, so it can be branched from. False when the
+ *  remote has no such branch, or cannot be reached. */
+export async function fetchBranch(root: string, branch: string): Promise<boolean> {
+  const r = await gitTry(root, ["fetch", "--no-tags", "--quiet", "origin", branch], FETCH_TIMEOUT_MS);
+  return r.ok;
 }
 
 /**
@@ -215,22 +285,35 @@ export async function gitInfo(dir: string): Promise<ProjectGit> {
   return { isRepo: true, root, currentBranch: branch || null, defaultBranch: def, hasCommits: !!head };
 }
 
-/** Create a worktree for a thread at `base`, under <repo>/.covey/worktrees/<name>. */
+/**
+ * Where a thread's worktree goes. A clone keeps them beside its bare
+ * repository: `<projectsDir>/<owner>/<repo>/<name>`. A checkout keeps them
+ * inside itself, under `.covey/worktrees`, next to a self-ignoring `.gitignore`
+ * so they never show in the checkout's status or in a turn checkpoint.
+ */
+export function worktreePath(project: { workspaceRoot: string; kind?: "clone" | "checkout" }, name: string): string {
+  if (project.kind === "clone") return join(dirname(project.workspaceRoot), name);
+  return join(project.workspaceRoot, ".covey", "worktrees", name);
+}
+
+/** Create a worktree at `path` on a new branch `covey/<name>` from `base`. */
 export async function createWorktree(
   repo: string,
   name: string,
   base: string,
+  path?: string,
+  branchName = `covey/${name}`,
 ): Promise<{ path: string; branch: string } | { error: string }> {
   const root = (await repoRoot(repo)) ?? repo;
-  const branch = `covey/${name}`;
-  const path = join(root, ".covey", "worktrees", name);
-  // A self-ignoring .gitignore, so worktrees never show up in the main repo's
-  // status — or in the turn checkpoints, which honour .gitignore.
-  try {
-    mkdirp(join(root, ".covey"), { recursive: true });
-    const ignore = join(root, ".covey", ".gitignore");
-    if (!existsSync(ignore)) writeFile(ignore, "*\n");
-  } catch { /* best effort; worktree creation is what matters */ }
+  const branch = branchName;
+  path ??= join(root, ".covey", "worktrees", name);
+  if (path.startsWith(join(root, ".covey"))) {
+    try {
+      mkdirp(join(root, ".covey"), { recursive: true });
+      const ignore = join(root, ".covey", ".gitignore");
+      if (!existsSync(ignore)) writeFile(ignore, "*\n");
+    } catch { /* best effort; worktree creation is what matters */ }
+  }
   // `--no-track`: branching from `origin/main` would otherwise make it the new
   // branch's upstream, and `git push` under push.default=simple refuses a
   // branch whose upstream has another name.
@@ -268,7 +351,6 @@ export async function restoreWorktree(repo: string, path: string, branch: string
 // never prunes it. Diff between two checkpoints = the turn's changes.
 
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 
 async function gitEnv(cwd: string, args: string[], env: Record<string, string>): Promise<string | null> {

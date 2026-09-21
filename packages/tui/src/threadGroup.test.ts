@@ -39,7 +39,7 @@ const PI = "ws://pi:3790";
 
 const project: Project = {
   id: "p", title: "covey", workspaceRoot: "/src/covey", repositoryIdentity: null,
-  defaultModel: null, defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
 };
 
 const info: MachineInfo = {
@@ -81,7 +81,7 @@ function run(id: string, states: RunMemberState[], parent?: string): Run {
     updatedAt: "2026-01-01T00:00:00Z", review: null,
   } as unknown as RunMember));
   return {
-    id, machineId: info.machineId, name: id, goal: "", briefTemplate: "", workspaceMode: "worktree-default",
+    id, machineId: info.machineId, name: id, goal: "", briefTemplate: "",
     members, closedAt: null, createdAt: "2026-01-02T00:00:00Z", updatedAt: "2026-01-02T00:00:00Z",
     ...(parent ? { parentThreadId: parent } : {}),
   };

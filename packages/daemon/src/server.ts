@@ -169,7 +169,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions) {
       case "thread.export":
         return engine.exportThread(p.threadId);
       case "thread.import":
-        return engine.importThread(p.export, { projectId: p.projectId, workspaceRoot: p.workspaceRoot });
+        return engine.importThread(p.export, { projectId: p.projectId, url: p.url });
       case "thread.markMoved":
         engine.markMoved(p.threadId, p.machineId, p.newThreadId);
         return null;

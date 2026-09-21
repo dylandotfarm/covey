@@ -46,7 +46,6 @@ function runInit(o: Partial<RunInit> = {}): RunInit {
     name: "covey issues",
     goal: "close the backlog",
     briefTemplate: "Work on {{issue}} on port {{port}}",
-    workspaceMode: "worktree-default",
     members: [member(44), member(45), member(46)],
     ...o,
   };
@@ -140,16 +139,6 @@ test("blocked is not an error and does not finish a run", async () => {
     const run = e.shellSnapshot().runs![0]!;
     assert.equal(runState(run), "running");
     assert.equal(tallyRun(run).blocked, 1);
-  } finally { close(); }
-});
-
-test("a run in a shared checkout is refused — parallel agents in one tree is the defect", async () => {
-  const { engine: e, close } = engine();
-  try {
-    await assert.rejects(
-      () => send(e, { type: "run.create", run: runInit({ workspaceMode: "checkout" }) }),
-      (err: unknown) => err instanceof EngineError && err.code === "bad_workspace",
-    );
   } finally { close(); }
 });
 

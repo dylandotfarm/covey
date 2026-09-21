@@ -67,7 +67,7 @@ class FakeClient {
       const now = new Date().toISOString();
       this.run = {
         id: cmd.run.runId, machineId: "mac", name: cmd.run.name, goal: cmd.run.goal,
-        briefTemplate: cmd.run.briefTemplate, workspaceMode: cmd.run.workspaceMode,
+        briefTemplate: cmd.run.briefTemplate,
         members: cmd.run.members.map((m) => ({
           ...m, threadId: null, branch: null, worktreePath: null, pullRequest: null,
           state: "planned" as const, note: m.note ?? null, brief: null, dispatchedAt: null, updatedAt: now, review: null,
@@ -103,7 +103,7 @@ function machine(key: string, o: { name: string; os: string; cores: number; tool
   };
   const project: Project = {
     id: `p-${o.name}`, title: "covey", workspaceRoot: `/src/${o.name}`, repositoryIdentity: "github.com/dylandotfarm/covey",
-    defaultModel: null, defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   };
   return {
     key, saved: { name: o.name, url: key }, conn: "connected", error: null, info,
@@ -211,7 +211,6 @@ test("dispatch makes one thread per member and sends it its own brief", async ()
   await store.dispatchRun(MAC, id);
   const created = mac.commands.filter((c) => c.type === "thread.create");
   assert.equal(created.length, 2, "one thread each");
-  assert.equal((created[0] as any).workspaceMode, "worktree-default", "never a shared checkout");
   const sends = mac.commands.filter((c) => c.type === "turn.send") as any[];
   assert.equal(sends.length, 2);
   const run = store.run(MAC, id)!;

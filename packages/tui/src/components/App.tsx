@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type WorkspaceMode, type UsageGroupBy } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, threadGroupKey, selectionBounds, workspaceOptions, workspaceModeLabel, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { Store, USAGE_WINDOWS, sidebarRows, archiveKey, runKey, threadGroupKey, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, browseRows, isFolderName, parentPath, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
@@ -310,9 +310,8 @@ export function App({ store }: { store: Store }) {
     if (!machine) return;
     const connected = state.order.filter((k) => state.machines.get(k)?.conn === "connected");
     const start = (mk: string) => {
-      const home = state.machines.get(mk)?.info?.homeDir ?? "~";
-      setOvCursor(0); setOvFilter("");
-      void store.browse(mk, home, (path) => { store.setOverlay(null); void store.threadCommand({ type: "project.create", workspaceRoot: path }, mk); });
+      const dir = state.machines.get(mk)?.info?.projectsDir;
+      openInput(`Repository to clone${dir ? ` into ${dir}` : ""}`, (v) => { store.setOverlay(null); if (v.trim()) void store.createProject(mk, v.trim()); }, "", "git@github.com:org/repo.git or https://…");
     };
     if (connected.length > 1 && !currentRow) openPick("Add project on which machine?", connected.map((k) => ({ id: k, label: state.machines.get(k)!.info!.name })), start);
     else start(machine);
@@ -337,38 +336,10 @@ export function App({ store }: { store: Store }) {
   const project = (machine?: string, projectId?: string) =>
     machine && projectId ? state.machines.get(machine)?.projects.get(projectId) : undefined;
 
-  /**
-   * New thread. In a git repo the first one in a project asks where it should
-   * work — a worktree keeps parallel threads from fighting over one checkout —
-   * and can remember the answer on the project. `mode` skips the question.
-   */
-  const newThread = async (machine = contextMachine, projectId = contextProject, mode?: WorkspaceMode) => {
+  /** New thread: its own worktree, branched from the remote's default branch. */
+  const newThread = async (machine = contextMachine, projectId = contextProject) => {
     if (!machine || !projectId) { store.notify("select a project first", "error"); return; }
-    const remembered = mode ?? project(machine, projectId)?.defaultWorkspaceMode ?? null;
-    if (remembered) { await store.createThread(machine, projectId, { workspaceMode: remembered }); return; }
-    const git = await store.projectGit(machine, projectId);
-    // Not a repo, or a repo with nothing to branch from yet: no choice to make.
-    if (!git?.isRepo || !git.hasCommits) { await store.createThread(machine, projectId, { workspaceMode: "checkout" }); return; }
-    openPick(`New thread in ${project(machine, projectId)?.title ?? "project"} — work where?`, workspaceOptions(git), (id, remember) => {
-      store.setOverlay(null);
-      const picked = id as WorkspaceMode;
-      if (remember) void store.setProjectWorkspaceMode(machine, projectId, picked);
-      void store.createThread(machine, projectId, { workspaceMode: picked });
-    }, "remember my choice for this project");
-  };
-
-  /** Change (or clear) the remembered answer without creating a thread. */
-  const chooseDefaultWorkspace = async (machine = contextMachine, projectId = contextProject) => {
-    if (!machine || !projectId) { store.notify("select a project first", "error"); return; }
-    const git = await store.projectGit(machine, projectId);
-    if (!git?.isRepo) { store.notify("not a git repository — threads run in the project directory"); return; }
-    const rows: PickOption[] = [{ id: "ask", label: "Ask every time", hint: "default" }, ...workspaceOptions(git)];
-    openPick(`New threads in ${project(machine, projectId)?.title ?? "project"}`, rows, (id) => {
-      store.setOverlay(null);
-      const mode = id === "ask" ? null : (id as WorkspaceMode);
-      void store.setProjectWorkspaceMode(machine, projectId, mode);
-      store.notify(`new threads: ${workspaceModeLabel(mode)}`);
-    });
+    await store.createThread(machine, projectId);
   };
 
   const moveThread = () => {
@@ -385,11 +356,11 @@ export function App({ store }: { store: Store }) {
       const opts: PickOption[] = [
         ...same.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: "same repo ✓" })),
         ...projects.filter((p) => !same.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: p.workspaceRoot })),
-        { id: "browse", label: "Browse for a directory…", hint: "" },
+        ...(same.length === 0 && srcProject?.repositoryIdentity ? [{ id: "clone", label: `Clone ${srcProject.repositoryIdentity} there`, hint: m.info?.projectsDir ?? "" }] : []),
       ];
       openPick(`Destination project on ${m.info!.name}`, opts, (pid) => {
         store.setOverlay(null);
-        if (pid === "browse") void store.browse(mk, m.info?.homeDir ?? "~", (path) => { store.setOverlay(null); void store.moveThread(sel, { machine: mk, workspaceRoot: path }); });
+        if (pid === "clone") void store.moveThread(sel, { machine: mk });
         else void store.moveThread(sel, { machine: mk, projectId: pid.slice(2) });
       });
     });
@@ -727,10 +698,8 @@ export function App({ store }: { store: Store }) {
       opts.push({ id: "archive", label: t.archivedAt ? "Unarchive thread" : "Archive thread", hint: "x" });
       opts.push({ id: "stop", label: "Stop session process" });
     }
-    opts.push({ id: "new", label: "New thread", hint: "n" });
-    opts.push({ id: "newwt", label: "New thread in git worktree", hint: "N" });
-    if (contextProject) opts.push({ id: "startmode", label: `New threads here: ${workspaceModeLabel(project(contextMachine, contextProject)?.defaultWorkspaceMode)}` });
-    opts.push({ id: "addproject", label: "Add project", hint: "a" });
+    opts.push({ id: "new", label: "New thread — in its own worktree", hint: "n" });
+    opts.push({ id: "addproject", label: "Add project — clone a repository", hint: "a" });
     opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults", hint: "enter on a machine" });
@@ -759,8 +728,6 @@ export function App({ store }: { store: Store }) {
         case "archive": return void store.threadCommand({ type: "thread.archive", threadId: t!.id, archived: !t!.archivedAt });
         case "stop": return void store.threadCommand({ type: "session.stop", threadId: t!.id });
         case "new": return void newThread();
-        case "newwt": return void newThread(contextMachine, contextProject, "worktree-head");
-        case "startmode": return void chooseDefaultWorkspace();
         case "addproject": return addProject();
         case "run": return startRun();
         case "usage": return void store.loadUsage(0, "thread");
@@ -1384,7 +1351,7 @@ export function App({ store }: { store: Store }) {
       if (row.projectId) { const k = `${row.machine}:${row.projectId}`; if (store.isExpanded(k)) store.toggleExpanded(k); }
       return;
     }
-    if (input === "n" || input === "N") { if (row.projectId) void newThread(row.machine, row.projectId, input === "N" ? "worktree-head" : undefined); return; }
+    if (input === "n") { if (row.projectId) void newThread(row.machine, row.projectId); return; }
     if (input === "a") return addProject(row.machine);
     if (input === "d" && state.view) return void store.toggleDiff();
     if (input === "m" && row.kind === "thread") return moveThread();

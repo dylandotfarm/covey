@@ -52,6 +52,12 @@ export interface MachineInfo {
   resources?: MachineResources;
   /** Machine-wide defaults, changed from the TUI's machine control panel. */
   settings: MachineSettings;
+  /**
+   * Where this daemon keeps the repositories it clones: `<COVEY_HOME>/projects`
+   * when `COVEY_HOME` is set, else `~/.covey/projects`. Absent on a daemon
+   * built before projects were clones.
+   */
+  projectsDir?: string;
 }
 
 /**
@@ -246,34 +252,32 @@ export interface MachineUpdate {
 export interface Project {
   id: ProjectId;
   title: string;
-  /** Absolute path on the owning machine. */
+  /**
+   * Absolute path on the owning machine. For a `clone` this is the bare
+   * repository, `<projectsDir>/<owner>/<repo>/repo.git`, and the threads'
+   * worktrees sit beside it. For a `checkout` it is the directory the user
+   * pointed covey at.
+   */
   workspaceRoot: string;
   /** Normalised git remote (e.g. github.com/org/repo) used to correlate the
    *  same repository across machines. */
   repositoryIdentity: string | null;
-  defaultModel: string | null;
   /**
-   * Remembered answer to "where should new threads in this project run?".
-   * `null` means ask on every new thread (the default for git repos).
+   * How the project came to be on this machine.
+   *  - `clone`: covey cloned `remoteUrl` into its projects directory. Every
+   *    thread works in a worktree branched from the remote's default branch.
+   *  - `checkout`: a directory the user pointed covey at, from before projects
+   *    were clones. No new project is made this way; the rows that exist keep
+   *    working, with worktrees under `<root>/.covey/worktrees`.
+   * Absent on a row written before this field existed, which reads as `checkout`.
    */
-  defaultWorkspaceMode: WorkspaceMode | null;
+  kind?: "clone" | "checkout";
+  /** The URL covey cloned. Set on a `clone`; absent on a `checkout`. */
+  remoteUrl?: string;
+  defaultModel: string | null;
   createdAt: string;
   updatedAt: string;
 }
-
-/**
- * Where a new thread does its work.
- *  - `worktree-default`: a fresh `git worktree` branched from `origin/<default
- *    branch>`, after a fetch — a clean start. Work is pushed to `origin` and
- *    reviewed there, so `origin` is the truth about what the default branch
- *    is, and the local branch of that name is one machine's stale opinion of
- *    it. A repo with no remote falls back to a local main/master; a fetch that
- *    fails branches from what is here and says so in the thread.
- *  - `worktree-head`: a fresh worktree branched from whatever is checked out
- *    now, so work in progress carries over (committed work, not the dirty tree).
- *  - `checkout`: the project directory itself, shared with every other thread.
- */
-export type WorkspaceMode = "worktree-default" | "worktree-head" | "checkout";
 
 /** Live git facts about a project, read on demand (branches move). */
 export interface ProjectGit {
@@ -777,11 +781,6 @@ export interface Run {
    * is the whole reason a run exists rather than a loop over `turn.send`.
    */
   briefTemplate: string;
-  /**
-   * Where a member's thread works. `checkout` is refused: parallel agents in
-   * one working tree is the defect, not the feature.
-   */
-  workspaceMode: WorkspaceMode;
   members: RunMember[];
   /** Set when the operator closes the run; the record stays. */
   closedAt: string | null;
@@ -993,7 +992,6 @@ export interface RunInit {
   name: string;
   goal: string;
   briefTemplate: string;
-  workspaceMode: WorkspaceMode;
   members: RunMemberInit[];
   /** The thread that asked for the run. Omitted = the daemon reads the thread
    *  the connection named at `hello`, and otherwise the run has no parent. */
@@ -1074,14 +1072,19 @@ export interface ThreadSnapshot {
 // ---------------------------------------------------------------------------
 
 export type Command =
-  | { type: "project.create"; workspaceRoot: string; title?: string }
+  /**
+   * Clone `url` into this machine's projects directory and record the project.
+   * A project that already exists here for the same repository is returned,
+   * not made twice, so a client may send this to every machine in a pool. The
+   * clone can take a while on a large repository; the command answers when it
+   * is done.
+   */
+  | { type: "project.create"; url: string; title?: string }
   | {
       type: "project.update";
       projectId: ProjectId;
       title?: string;
       defaultModel?: string | null;
-      /** `null` restores "ask on every new thread". */
-      defaultWorkspaceMode?: WorkspaceMode | null;
     }
   | { type: "project.delete"; projectId: ProjectId }
   /** Machine-wide defaults. Omitted fields are left alone; `null` clears one. */
@@ -1105,8 +1108,6 @@ export type Command =
       permissionMode?: PermissionMode;
       /** Omitted = the machine's `defaultStreaming`, else off. */
       streaming?: boolean;
-      /** Omitted = the project's `defaultWorkspaceMode`, else `checkout`. */
-      workspaceMode?: WorkspaceMode;
       /**
        * Who to record as the creator. A caller that knows better than its own
        * client name says so here — the TUI dispatches a run member, and that
@@ -1245,7 +1246,12 @@ export interface ThreadExport {
   exportedAt: string;
   sourceMachineId: MachineId;
   sourceMachineName: string;
-  project: Pick<Project, "title" | "workspaceRoot" | "repositoryIdentity">;
+  project: Pick<Project, "title" | "workspaceRoot" | "repositoryIdentity"> & {
+    /** The `origin` URL read at export time, so the destination can clone it. */
+    remoteUrl?: string | null;
+    /** Where the source kept the thread's worktree, so transcript paths can be rewritten. */
+    worktreeHome?: string;
+  };
   thread: Thread;
   items: TimelineItem[];
   /** SDK transcript, keyed by subpath ("" = main, else subagent id). */
@@ -1279,7 +1285,12 @@ export interface RpcMethods {
   "command": { params: CommandEnvelope; result: CommandAck };
   "thread.export": { params: { threadId: ThreadId }; result: ThreadExport };
   "thread.import": {
-    params: { export: ThreadExport; projectId?: ProjectId; workspaceRoot?: string };
+    /**
+     * The destination: a project here, else the project here with the same
+     * repository, else a clone of `url` made now. `url` falls back to the
+     * remote the export names.
+     */
+    params: { export: ThreadExport; projectId?: ProjectId; url?: string };
     result: { threadId: ThreadId; projectId: ProjectId };
   };
   "thread.markMoved": {
