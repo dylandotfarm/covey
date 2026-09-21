@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION, KNOWN_MODELS, type RpcRequest, type RpcResponse, type
 import { Engine, EngineError } from "./engine.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
-import type { DaemonConfig } from "./config.js";
+import { readFleet, type DaemonConfig } from "./config.js";
 import { listRepos, createRepo } from "./repos.js";
 import { findWebRoots, serveWeb } from "./web.js";
 import { webAddresses } from "./addresses.js";
@@ -199,7 +199,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
       case "machine.access":
         // Every connection here passed `authenticate`, so it may hold the
         // token: a tailnet peer is the owner, and the others already have it.
-        return { token: o.config.token, addresses: webAddresses({ port: o.config.port, bind: o.config.bind, tailnetName: tailnet?.dnsName, tailnetIps: tailnet?.ips }) };
+        return { token: o.config.token, addresses: webAddresses({ port: o.config.port, bind: o.config.bind, tailnetName: tailnet?.dnsName, tailnetIps: tailnet?.ips }), fleet: readFleet() };
       case "machine.update":
         return o.updater.start({ restart: p.restart });
       case "run.issues":

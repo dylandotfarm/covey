@@ -11,19 +11,21 @@
 import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type QuestionItem, type Thread, type TimelineItem, type ToolCallItem } from "@covey/protocol";
 import { clear, h } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, isCurrentAddress, orderedItems, projectRows, relTime, threadStatusLabel, threadTone, type State, type View } from "./state.js";
+import { addressLink, connectionSummary, isCurrentAddress, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadStatusLabel, threadTone, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
 
 export interface Actions {
-  openThread(threadId: string): void;
+  openThread(machine: string, threadId: string): void;
   back(): void;
   send(text: string): void;
   interrupt(): void;
   respondApproval(item: ApprovalItem, behavior: "allow" | "deny", always: boolean): void;
   respondQuestion(item: QuestionItem, answers: string[]): void;
-  newThread(projectId: string): void;
-  toggleFold(projectId: string): void;
+  newThread(machine: string, projectId: string): void;
+  /** A project on more than one machine: show the reader which, or hide it again. */
+  chooseMachine(rowKey: string): void;
+  toggleFold(rowKey: string): void;
   retry(): void;
-  setDraft(threadId: string, text: string): void;
+  setDraft(machine: string, threadId: string, text: string): void;
   toggleAddresses(): void;
 }
 
@@ -41,6 +43,7 @@ export class Renderer {
   private banner: HTMLElement;
   private rows = new Map<string, { item: TimelineItem; el: HTMLElement }>();
   private activity: HTMLElement;
+  /** `machine:thread` of the view the skeleton holds. */
   private shownThread: string | null = null;
   /** The reader is at the end, so a new row scrolls into view. */
   private atBottom = true;
@@ -63,7 +66,7 @@ export class Renderer {
     });
     this.composer.addEventListener("input", () => {
       this.grow();
-      if (this.shownThread) this.a.setDraft(this.shownThread, this.composer.value);
+      if (this.shownThread) { const [machine, threadId] = splitKey(this.shownThread); this.a.setDraft(machine, threadId, this.composer.value); }
     });
     this.composer.addEventListener("keydown", (ev) => {
       if (ev.key !== "Enter") return;
@@ -98,42 +101,58 @@ export class Renderer {
 
   private paintBanner(s: State) {
     const b = this.banner;
-    if (s.conn === "connected") { b.classList.add("hidden"); return; }
+    const c = connectionSummary(s);
+    if (c.state === "connected") { b.classList.add("hidden"); return; }
     b.classList.remove("hidden");
-    b.className = `banner ${s.conn}`;
-    const why = s.connError ? ` · ${s.connError}` : "";
-    b.textContent = s.conn === "offline" ? `offline${why} · tap to retry` : s.conn === "error" ? `error${why}` : `connecting…`;
+    b.className = `banner ${c.state}`;
+    b.textContent = c.text;
   }
 
   private paintList(s: State) {
     clear(this.list);
-    const name = s.info?.name ?? location.hostname;
+    const primary = primaryMachine(s);
+    const name = primary?.info?.name ?? location.hostname;
+    const others = s.machines.size - 1;
     this.list.append(h("header", { class: "list-header" },
       h("span", { class: "brand" }, "covey"),
-      h("span", { class: "machine" }, name),
+      h("span", { class: "machine" }, name, others > 0 ? ` +${others}` : ""),
       h("button", { class: "settings-btn", type: "button", "aria-label": "Settings", onclick: () => this.a.toggleAddresses() }, "⚙"),
     ));
     if (s.showAddresses) { this.list.append(this.settingsPanel(s)); return; }
     const rows = projectRows(s);
     if (rows.length === 0) {
-      this.list.append(h("p", { class: "empty" }, s.info ? "No projects on this machine yet. Add one from the TUI." : "Waiting for the machine…"));
+      this.list.append(h("p", { class: "empty" }, primary?.info ? "No projects on any machine yet. Add one from the TUI." : "Waiting for the machine…"));
       return;
     }
+    const showMachine = s.machines.size > 1;
     for (const row of rows) {
-      const folded = s.folded.has(row.project.id);
+      const folded = s.folded.has(row.key);
       const count = row.waiting > 0 ? h("span", { class: "count waiting" }, String(row.waiting)) : row.active > 0 ? h("span", { class: "count busy" }, String(row.active)) : null;
+      const homes = openHomes(row);
       this.list.append(h("div", { class: "project" },
-        h("div", { class: "project-row", onclick: () => this.a.toggleFold(row.project.id) },
+        h("div", { class: "project-row", onclick: () => this.a.toggleFold(row.key) },
           h("span", { class: "chevron" }, folded ? "›" : "⌄"),
-          h("span", { class: "title" }, row.project.title),
+          h("span", { class: "title" }, row.title, showMachine && row.homes.length ? h("small", { class: "homes" }, ` ${row.homes.map((x) => x.machineName).join(" · ")}`) : null),
           count,
-          h("button", { class: "new", type: "button", "aria-label": "New thread", onclick: (ev) => { ev.stopPropagation(); this.a.newThread(row.project.id); } }, "+"),
+          homes.length === 0 ? null : h("button", { class: "new", type: "button", "aria-label": "New thread", onclick: (ev) => {
+            ev.stopPropagation();
+            if (homes.length === 1) this.a.newThread(homes[0]!.machine, homes[0]!.project.id); else this.a.chooseMachine(row.key);
+          } }, "+"),
         ),
+        s.choosing === row.key ? this.chooser(row) : null,
         folded ? null : h("div", { class: "threads" },
-          ...(row.threads.length === 0 ? [h("div", { class: "none" }, "no threads")] : row.threads.map((t) => this.threadRow(t))),
+          ...(row.threads.length === 0 ? [h("div", { class: "none" }, "no threads")] : row.threads.map((t) => this.threadRow(t, showMachine))),
         ),
       ));
     }
+  }
+
+  /** Which machine a new thread on a shared project goes to. */
+  private chooser(row: ProjectRow): HTMLElement {
+    return h("div", { class: "chooser" },
+      h("span", { class: "label" }, "New thread on"),
+      ...openHomes(row).map((x) => h("button", { type: "button", onclick: () => this.a.newThread(x.machine, x.project.id) }, x.machineName)),
+    );
   }
 
   /**
@@ -143,8 +162,16 @@ export class Renderer {
    * from the tailnet page, and the LAN address keeps the token from then on.
    */
   private settingsPanel(s: State): HTMLElement {
-    const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"), h("h3", {}, "Get LAN address"));
-    if (!s.access) { panel.append(h("p", { class: "empty" }, s.conn === "connected" ? "asking the machine…" : "connect first")); return panel; }
+    const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"), h("h3", {}, "Machines"));
+    for (const m of s.machines.values()) {
+      panel.append(h("div", { class: `address machine-row conn-${m.conn}` },
+        h("span", { class: "kind" }, m.primary ? "this page" : "fleet"),
+        h("span", { class: "url" }, m.name, h("small", {}, ` · ${m.conn}${m.connError ? ` · ${m.connError}` : ""}`)),
+      ));
+    }
+    if (s.machines.size === 1) panel.append(h("p", { class: "hint" }, "Other machines appear here once the TUI starts the web server on this one; it hands over the list."));
+    panel.append(h("h3", {}, "Get LAN address"));
+    if (!s.access) { panel.append(h("p", { class: "empty" }, primaryMachine(s)?.conn === "connected" ? "asking the machine…" : "connect first")); return panel; }
     panel.append(h("p", { class: "hint" }, "A tailnet address needs no token. Open another address from here one time and it keeps the token."));
     const label = { tailnet: "tailnet", lan: "LAN", mdns: "LAN name" } as const;
     for (const a of s.access.addresses) {
@@ -160,13 +187,14 @@ export class Renderer {
     return panel;
   }
 
-  private threadRow(t: Thread): HTMLElement {
+  private threadRow(ref: ThreadRef, showMachine: boolean): HTMLElement {
+    const t = ref.thread;
     const tone = threadTone(t);
-    return h("div", { class: `thread-row tone-${tone}`, onclick: () => this.a.openThread(t.id) },
+    return h("div", { class: `thread-row tone-${tone}`, onclick: () => this.a.openThread(ref.machine, t.id) },
       h("span", { class: "dot" }),
       h("div", { class: "text" },
         h("div", { class: "title" }, t.pinnedAt ? "★ " : "", t.title),
-        h("div", { class: "sub" }, threadStatusLabel(t), t.branch ? ` · ${t.branch}` : ""),
+        h("div", { class: "sub" }, showMachine ? `${ref.machineName} · ` : "", threadStatusLabel(t), t.branch ? ` · ${t.branch}` : ""),
       ),
       h("span", { class: "when" }, relTime(t.lastMessageAt ?? t.updatedAt)),
     );
@@ -179,19 +207,20 @@ export class Renderer {
       h("button", { class: "back", type: "button", "aria-label": "Back", onclick: () => this.a.back() }, "‹"),
       h("div", { class: "text" },
         h("div", { class: "title" }, t?.title ?? "…"),
-        h("div", { class: `sub tone-${t ? threadTone(t) : "idle"}` }, v.loading ? "loading…" : v.error ? v.error : t ? threadStatusLabel(t) : ""),
+        h("div", { class: `sub tone-${t ? threadTone(t) : "idle"}` }, s.machines.size > 1 ? `${s.machines.get(v.machine)?.name ?? ""} · ` : "", v.loading ? "loading…" : v.error ? v.error : t ? threadStatusLabel(t) : ""),
       ),
     );
     const busy = t ? threadIsBusy(t) : false;
     this.stopBtn.classList.toggle("hidden", !busy || (t?.pendingApprovals ?? 0) > 0);
     this.composer.placeholder = busy ? "Message (queues behind the turn)" : "Message";
 
-    if (this.shownThread !== v.threadId) {
-      this.shownThread = v.threadId;
+    const key = `${v.machine}:${v.threadId}`;
+    if (this.shownThread !== key) {
+      this.shownThread = key;
       this.rows.clear();
       clear(this.timeline);
       this.atBottom = true;
-      this.composer.value = s.drafts.get(v.threadId) ?? "";
+      this.composer.value = s.drafts.get(key) ?? "";
       this.grow();
     }
     // Keyed rows: only an item the daemon re-sent is rebuilt.
@@ -219,6 +248,12 @@ export class Renderer {
     if (showActivity) this.timeline.append(this.activity);
     if (this.atBottom) this.timeline.scrollTop = this.timeline.scrollHeight;
   }
+}
+
+/** `machine:thread` back into its two parts. The machine is a URL, so split at the last colon. */
+function splitKey(key: string): [string, string] {
+  const i = key.lastIndexOf(":");
+  return [key.slice(0, i), key.slice(i + 1)];
 }
 
 function renderItem(item: TimelineItem, a: Actions): HTMLElement {

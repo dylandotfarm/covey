@@ -88,8 +88,11 @@ the LAN address. The link carries the token, and that address keeps it from then
 browser keeps a token per address, so this hand-off is the way one address learns it from
 another. Add the page to the home screen and it opens without the browser's bars.
 
-The phone shows the projects and threads on that machine, with the same status dots the
-TUI shows. Tap a thread to read it, follow a turn as it streams, send a message, stop a turn,
+The phone shows the projects and threads of every machine the TUI knows, with the same
+status dots the TUI shows. The machine that serves the page gets the list from the TUI when
+you start the web server there, and again whenever you add or remove a machine. A project
+checked out on two machines is one row, and `+` asks which machine the new thread goes to.
+On the tailnet the phone needs no token for any of them. Tap a thread to read it, follow a turn as it streams, send a message, stop a turn,
 and answer an approval or a question. Tap `+` on a project to start a thread. The phone does
 not dispatch runs, move threads, or update machines; the TUI does those.
 

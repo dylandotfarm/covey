@@ -280,8 +280,16 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
 - **A phone sleeps.** The socket drops, the client dials its budget out and goes offline. When
   the page becomes visible again it retries, and the subscriptions resume from the seq the
   page holds, so what it missed is replayed rather than refetched.
-- **Not yet:** more than one machine, runs, moving threads, attachments, and push
-  notifications. The last needs a service worker, which needs a secure context, which
+- **The page dials the fleet.** A daemon holds no list of the others; the TUI does. So
+  `store.fleetFor` builds the list for the machine that serves the page — every other
+  machine, with a URL the phone can reach (a loopback entry becomes the machine's tailnet
+  name), the server itself left out — and sends it as `machine.fleet` when the web server
+  starts there, when the machine list changes, and on every reconnect. The daemon keeps it
+  in `daemon.json` and hands it back in `machine.access`. The page dials each member the
+  way the TUI does, one `MachineClient` per machine, and groups projects across machines by
+  repository the way the sidebar does. A machine that is down is named in the banner,
+  because its threads are the ones missing from the list.
+- **Not yet:** runs, moving threads, attachments, and push notifications. The last needs a service worker, which needs a secure context, which
   `http://100.x.y.z` is not; `tailscale serve` can front the daemon with HTTPS later.
 
 ## Moving a thread between machines

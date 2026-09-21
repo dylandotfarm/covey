@@ -9,6 +9,8 @@
 - `packages/web` is the phone's client, served by the daemon at `/` (`packages/daemon/src/web.ts`)
   when `settings.webEnabled` is on — the machine control panel sets it, `COVEY_WEB=1` seeds
   it for a throwaway daemon, and the TUI keeps it to one machine (`store.setWebServer`).
+  The page dials every machine in the fleet; the TUI hands the serving daemon that list
+  (`store.fleetFor`, `machine.fleet`) and the page reads it from `machine.access`.
   No bundler: `tsc -b` writes browser ES modules and the import map in `static/index.html`
   names `@covey/protocol` and `@covey/client`. Nothing in `client` or `protocol` may import
   a node module, or the page stops loading. `web/src/state.ts` and `markdown.ts` hold no

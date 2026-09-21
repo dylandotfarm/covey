@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir, hostname, platform, arch, totalmem } from "node:os";
 import { join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
-import type { MachineSettings, PermissionMode } from "@covey/protocol";
+import type { FleetMember, MachineSettings, PermissionMode } from "@covey/protocol";
 
 /** Cross-platform app data dir: XDG on Linux, ~/Library/Application Support on
  *  macOS, %APPDATA% on Windows. Override with COVEY_HOME. */
@@ -71,6 +71,8 @@ export interface DaemonConfig {
   maxLiveSessions: number | null;
   /** Whether this daemon serves the web client; null = off. */
   webEnabled?: boolean | null;
+  /** The machines the web client dials besides this one. The TUI sets it. */
+  fleet?: FleetMember[];
 }
 
 /**
@@ -145,6 +147,20 @@ export function saveMachineSettings(patch: Partial<MachineSettings>): MachineSet
   mkdirSync(dataDir(), { recursive: true });
   writeFileSync(configFile(), JSON.stringify(next, null, 2) + "\n", { mode: 0o600 });
   return machineSettings(next as DaemonConfig);
+}
+
+/** Keep the fleet list the TUI sent, beside the settings. The whole list, every time. */
+export function saveFleet(fleet: FleetMember[]): FleetMember[] {
+  const cur = readConfigFile();
+  mkdirSync(dataDir(), { recursive: true });
+  writeFileSync(configFile(), JSON.stringify({ ...cur, fleet }, null, 2) + "\n", { mode: 0o600 });
+  return fleet;
+}
+
+/** The fleet list on disk, or none. Read on demand: a page asks for it seldom. */
+export function readFleet(): FleetMember[] {
+  const f = readConfigFile().fleet;
+  return Array.isArray(f) ? (f as FleetMember[]) : [];
 }
 
 export function loadDaemonConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {

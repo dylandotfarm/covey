@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { RpcMethodName, RpcMethods, BuildInfo, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { isFinalMemberState, threadIsBusy } from "@covey/protocol";
+import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import { DEFAULT_PORT, isFinalMemberState, threadIsBusy } from "@covey/protocol";
 import WebSocket from "ws";
 import { MachineClient, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
@@ -456,6 +456,9 @@ export class Store {
         // A restarting daemon cannot report its own success — it is gone by
         // then. Reconnecting is the success, so say so here.
         if (s === "connected") void this.drainPending(ms.key);
+        // The machine that serves the phone's page needs the fleet as this
+        // client knows it now, and it may have changed while it was away.
+        if (s === "connected" && client.info?.settings?.webEnabled) void this.syncFleet(ms.key);
         if (s === "connected" && ms.restarting) {
           ms.restarting = false;
           const at = ms.update?.state === "restarting" ? ms.update.toCommit : null;
@@ -490,7 +493,7 @@ export class Store {
     }, this.clientOpts);
     this.clients.set(saved.url, client);
     client.start();
-    if (persist) { this.config.machines.push(saved); this.persist(); }
+    if (persist) { this.config.machines.push(saved); this.persist(); void this.syncFleets(); }
     this.touch();
   }
 
@@ -506,6 +509,7 @@ export class Store {
     if (this.state.selected?.machine === key) this.select(null);
     this.viewCache.dropMachine(key);
     this.touch();
+    void this.syncFleets();
   }
 
   client(key: string): MachineClient | undefined { return this.clients.get(key); }
@@ -971,8 +975,49 @@ export class Store {
       }
     }
     await this.setMachineDefaults(machine, { webEnabled: on });
+    if (on) await this.syncFleet(machine);
     const at = this.state.machines.get(machine)?.info?.webAddresses?.find((a) => a.reachable)?.url;
     this.notify(on ? `${name(machine)}: web server on${at ? ` at ${at}` : ""}` : `${name(machine)}: web server off`, on ? "success" : "info");
+  }
+
+  /**
+   * The fleet as a phone can dial it, for the page that `serving` serves.
+   *
+   * Every other machine this client knows, with a URL the phone can reach.
+   * The client dials its own machine on loopback, and a phone that dialled
+   * loopback would reach itself; that entry is rewritten to the machine's
+   * tailnet name or address, taken from what the daemon said about itself.
+   * A loopback machine that has no tailnet is left out: there is no address
+   * to give. The serving machine itself is left out too; the page has it.
+   */
+  fleetFor(serving: string): FleetMember[] {
+    const self = this.state.machines.get(serving);
+    const out: FleetMember[] = [];
+    for (const [key, ms] of this.state.machines) {
+      if (key === serving) continue;
+      const id = ms.info?.machineId ?? ms.saved.machineId;
+      if (id && self?.info?.machineId && id === self.info.machineId) continue;
+      let url = ms.saved.url;
+      if (isLoopbackUrl(url)) {
+        const host = ms.info?.tailnetName ?? ms.info?.tailnetIps?.find((ip) => ip.includes("."));
+        if (!host) continue;
+        url = `ws://${host}:${new URL(ms.saved.url).port || DEFAULT_PORT}`;
+      }
+      out.push({ name: ms.info?.name ?? ms.saved.name, url, ...(ms.saved.token ? { token: ms.saved.token } : {}), ...(id ? { machineId: id } : {}) });
+    }
+    return out;
+  }
+
+  /** Hand `machine` the fleet, if it is connected. Quiet on failure: the page still works for that machine alone. */
+  async syncFleet(machine: string) {
+    const client = this.clients.get(machine);
+    if (!client || client.state !== "connected") return;
+    try { await client.command({ type: "machine.fleet", machines: this.fleetFor(machine) }); } catch { /* an older daemon does not know the command */ }
+  }
+
+  /** The list changed: every machine that serves the page gets the new one. */
+  private async syncFleets() {
+    for (const [key, ms] of this.state.machines) if (ms.conn === "connected" && ms.info?.settings?.webEnabled) await this.syncFleet(key);
   }
 
   /** What the daemon is running (checkout, branch, commit). Null if unreachable. */

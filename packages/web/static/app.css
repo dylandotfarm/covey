@@ -44,6 +44,13 @@ a { color: var(--accent); }
 .project-row { display: flex; align-items: center; gap: 8px; padding: 10px 12px 6px 16px; color: var(--muted); font-size: 14px; text-transform: uppercase; letter-spacing: .04em; }
 .project-row .chevron { width: 14px; color: var(--subtle); }
 .project-row .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-row .title .homes { color: var(--faint); text-transform: none; letter-spacing: 0; font-size: 12px; }
+.chooser { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 16px 10px 40px; }
+.chooser .label { color: var(--subtle); font-size: 13px; }
+.chooser button { min-height: 34px; padding: 4px 12px; }
+.address.machine-row .url { color: var(--text); }
+.address.conn-offline .url small, .address.conn-error .url small { color: var(--danger); }
+.address.conn-connected .url small { color: var(--success); }
 .project-row .count { font-size: 12px; padding: 1px 7px; border-radius: 10px; background: var(--surface-alt); }
 .project-row .count.busy { color: var(--working); }
 .project-row .count.waiting { color: var(--awaiting); }
