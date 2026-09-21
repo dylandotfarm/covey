@@ -1,0 +1,397 @@
+/**
+ * The loop of issue #94, driven through a whole engine: a thread takes an
+ * issue, opens a pull request, and hears what GitHub says about it as turns.
+ *
+ * The engine runs against two stand-ins. The `gh` host is `fakeHost`, so
+ * nothing reaches GitHub and no pull request is opened anywhere but in
+ * memory. The CLI is an auto-reply, so no Claude subprocess starts and every
+ * turn the watch sends is answered at once. The clock is a variable.
+ *
+ * The acceptance list of the issue is the test list here.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import type { Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type { MachineInfo, Project, Thread } from "@covey/protocol";
+import { Db } from "./db.js";
+import { Engine, EngineError } from "./engine.js";
+import type { QueryFactory } from "./claude.js";
+import { fakeHost, pr } from "./integrate/testHost.js";
+import { POLL_MAX_MS, WATCH_MAX_MS, pollDelayMs } from "./integrate/news.js";
+
+const MACHINE: MachineInfo = {
+  machineId: "m1", name: "test", os: "linux", arch: "arm64", homeDir: "/tmp", daemonVersion: "0",
+  protocolVersion: 1, capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
+  settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
+};
+
+const FAILED = [{ name: "test", workflowName: "ci", status: "COMPLETED", conclusion: "FAILURE", detailsUrl: "https://ci/run/1" }];
+const GREEN = [{ name: "test", workflowName: "ci", status: "COMPLETED", conclusion: "SUCCESS" }];
+
+function thread(id: string): Thread {
+  return {
+    id, projectId: "p1", title: id, provider: "claude", sessionId: `sess-${id}`, model: null,
+    permissionMode: "default", branch: `covey/${id}`, worktreePath: null, status: "idle", lastError: null,
+    pendingApprovals: 0, queuedTurns: 0, latestTurn: null, lastMessageAt: null, archivedAt: null,
+    pinnedAt: null, movedTo: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  };
+}
+
+/** A CLI that answers every message with "ok", so a turn the watch sends completes. */
+const autoReply: QueryFactory = ({ prompt, options }) => {
+  const out: unknown[] = [];
+  let wake: (() => void) | null = null;
+  let done = false;
+  const push = (m: unknown) => { out.push(m); wake?.(); wake = null; };
+  options.abortController?.signal.addEventListener("abort", () => { done = true; wake?.(); });
+  void (async () => {
+    for await (const _ of prompt as AsyncIterable<SDKUserMessage>) {
+      push({ type: "assistant", parent_tool_use_id: null, message: { id: `msg-${randomUUID()}`, model: "opus", content: [{ type: "text", text: "ok" }] } });
+      push({ type: "result", subtype: "success", is_error: false, result: "ok", modelUsage: {}, user_message_uuid: null });
+    }
+  })();
+  return {
+    async *[Symbol.asyncIterator]() {
+      for (;;) {
+        if (done) return;
+        if (out.length === 0) { await new Promise<void>((r) => (wake = r)); continue; }
+        yield out.shift() as never;
+      }
+    },
+    supportedCommands: async () => [],
+    interrupt: async () => {},
+    setPermissionMode: async () => {},
+    setModel: async () => {},
+    backgroundTasks: async () => true,
+  } as unknown as Query;
+};
+
+/** Let the engine's queued microtasks and the session's pump run. */
+const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0)); };
+
+function setup() {
+  const dir = mkdtempSync(join(tmpdir(), "covey-watch-"));
+  const db = new Db(dir);
+  db.putProject({
+    id: "p1", title: "p", workspaceRoot: dir, repositoryIdentity: "github.com/o/r",
+    defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  } as Project);
+  let clock = Date.parse("2026-09-21T10:00:00Z");
+  const host = fakeHost({
+    canCreate: true,
+    prs: {},
+    issues: { 94: { number: 94, title: "Let a thread take an issue", url: "https://github.com/o/r/issues/94", state: "OPEN" } },
+  });
+  const make = (database: Db) => new Engine(database, { ...MACHINE }, { now: () => clock, spawn: autoReply, ghHost: () => host });
+  const engines: Engine[] = [];
+  let engine = make(db);
+  engines.push(engine);
+  const s = {
+    db, dir, host,
+    get engine() { return engine; },
+    /** Move the clock on, in milliseconds. */
+    advance: (ms: number) => { clock += ms; },
+    newThread(id: string) { db.putThread(thread(id)); return id; },
+    async command(cmd: Record<string, unknown>) {
+      return engine.dispatch({ commandId: randomUUID(), ...cmd } as never);
+    },
+    async open(threadId: string, over: Record<string, unknown> = {}) {
+      return engine.openPullRequest({ threadId, title: "Take issue 94", body: "The change.", ...over });
+    },
+    /** One poll, with the clock moved past the longest back-off first. */
+    async poll() {
+      clock += POLL_MAX_MS;
+      const polled = await engine.pollWatches();
+      await settle();
+      return polled;
+    },
+    thread(id: string): Thread { return db.getThread(id)!; },
+    /** What the watch sent to the agent, in order. */
+    turns(threadId: string): string[] {
+      return engine.threadSnapshot(threadId).items.filter((i) => i.kind === "user").map((i) => (i as { text: string }).text);
+    },
+    notes(threadId: string): string[] {
+      return engine.threadSnapshot(threadId).items.filter((i) => i.kind === "note").map((i) => (i as { text: string }).text);
+    },
+    /** A second engine on the same database: what a daemon restart is. */
+    restart() { engine.shutdown(); engine = make(new Db(dir)); engines.push(engine); return engine; },
+    cleanup() { for (const e of engines) e.shutdown(); rmSync(dir, { recursive: true, force: true }); },
+  };
+  return s;
+}
+
+// ---- taking an issue --------------------------------------------------------
+
+test("a thread takes an issue, keeps it across a restart, and no second thread of the project may take it", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.newThread("t2");
+  await s.command({ type: "thread.takeIssue", threadId: "t1", issue: 94 });
+  assert.deepEqual(s.thread("t1").issue, { number: 94, title: "Let a thread take an issue", url: "https://github.com/o/r/issues/94", takenAt: s.thread("t1").issue!.takenAt });
+  assert.match(s.notes("t1")[0]!, /Took issue #94 \(Let a thread take an issue\)/);
+  await assert.rejects(
+    () => s.command({ type: "thread.takeIssue", threadId: "t2", issue: 94 }),
+    (e: unknown) => e instanceof EngineError && e.code === "taken",
+  );
+  // A number gh cannot read is still taken: the number is the link.
+  await s.command({ type: "thread.takeIssue", threadId: "t2", issue: 95 });
+  assert.equal(s.thread("t2").issue?.number, 95);
+  assert.equal(s.thread("t2").issue?.title, null);
+
+  s.restart();
+  assert.equal(s.thread("t1").issue?.number, 94, "the link survives a restart");
+  // An archived thread holds nothing, so the issue is free again.
+  await s.command({ type: "thread.archive", threadId: "t1", archived: true });
+  await s.command({ type: "thread.takeIssue", threadId: "t2", issue: 94 });
+  assert.equal(s.thread("t2").issue?.number, 94);
+});
+
+// ---- opening a pull request ---------------------------------------------------
+
+test("a thread opens a pull request through covey, and covey records the number and watches it", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.command({ type: "thread.takeIssue", threadId: "t1", issue: 94 });
+  const opened = await s.open("t1");
+  assert.deepEqual(opened, { number: 101, url: "https://github.com/o/r/pull/101" });
+  assert.equal(s.host.opened.length, 1, "one pull request, in memory");
+  assert.equal(s.host.opened[0]!.branch, "covey/t1");
+  assert.equal(s.host.opened[0]!.base, "main");
+  assert.equal(s.host.opened[0]!.body, "The change.\n\nCloses #94", "the issue closes when the change lands");
+  const row = s.thread("t1");
+  assert.equal(row.pullRequest?.number, 101);
+  assert.equal(row.pullRequest?.branch, "covey/t1");
+  assert.equal(row.watch?.state, "watching");
+  assert.equal(row.watch?.maxRounds, 3);
+  assert.match(s.notes("t1").at(-1)!, /Watching pull request #101/);
+  // A second open on a watched pull request is refused, not a duplicate.
+  await assert.rejects(() => s.open("t1"), (e: unknown) => e instanceof EngineError && e.code === "exists");
+  assert.equal(s.host.opened.length, 1);
+});
+
+test("a body that names the issue is left alone, and a thread with no issue gets no Closes line", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.command({ type: "thread.takeIssue", threadId: "t1", issue: 94 });
+  await s.open("t1", { body: "Fixes #94 by the direct route." });
+  assert.equal(s.host.opened[0]!.body, "Fixes #94 by the direct route.");
+  s.newThread("t2");
+  await s.open("t2", { body: "" });
+  assert.equal(s.host.opened[1]!.body, "");
+});
+
+// ---- the watch: every terminal state, once ----------------------------------
+
+test("a failed check reaches the thread as a turn, and the same failure is never sent twice", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = [{ name: "test", workflowName: "ci", status: "IN_PROGRESS" }];
+  assert.deepEqual(await s.poll(), ["t1"]);
+  assert.deepEqual(s.turns("t1"), [], "a pending check is not an answer");
+
+  facts.checks = FAILED;
+  facts.mergeStateStatus = "BLOCKED";
+  await s.poll();
+  const turns = s.turns("t1");
+  assert.equal(turns.length, 1, "the failure fired");
+  assert.match(turns[0]!, /covey watch: news on pull request #101/);
+  assert.match(turns[0]!, /The checks failed on deadbee: `ci \/ test` \(https:\/\/ci\/run\/1\)/);
+  assert.match(turns[0]!, /round 1 of 3/);
+  assert.equal(s.engine.sessionCensus().live, 1, "the turn started a session, which is what a turn is for");
+  assert.equal(s.thread("t1").watch?.rounds, 1);
+
+  await s.poll();
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1, "polled twice more, delivered once");
+});
+
+test("a fix the agent pushes leads to a second round without a person, and a pass ends the rounds", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = FAILED;
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1);
+  // The agent pushed: a new head, and the checks failed again.
+  facts.headRefOid = "1111111aaaa";
+  facts.checks = FAILED;
+  await s.poll();
+  assert.equal(s.turns("t1").length, 2, "a new head is a new verdict");
+  assert.match(s.turns("t1")[1]!, /round 2 of 3/);
+  // Then a push that passes.
+  facts.headRefOid = "2222222bbbb";
+  facts.checks = GREEN;
+  await s.poll();
+  assert.equal(s.turns("t1").length, 3);
+  assert.match(s.turns("t1")[2]!, /The checks passed on 2222222/);
+  assert.equal(s.thread("t1").watch?.rounds, 2, "a pass costs no round");
+  assert.equal(s.thread("t1").watch?.state, "watching", "green is not the end; a merge is");
+});
+
+test("a loop that cannot finish ends in blocked, with the reason in the transcript, and sends no more turns", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1", { maxRounds: 1 });
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = FAILED;
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1);
+  facts.headRefOid = "1111111aaaa";
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1, "the cap stops the work");
+  const w = s.thread("t1").watch!;
+  assert.equal(w.state, "blocked");
+  assert.match(w.reason!, /sent 1 turn that asked for more work/);
+  const notes = s.notes("t1");
+  assert.match(notes.at(-1)!, /^Blocked pull request #101: The watch sent 1 turn/);
+  assert.match(notes.at(-2)!, /The checks failed on 1111111/, "the news that stopped the loop is in the transcript for the reader");
+  assert.deepEqual(await s.poll(), [], "a blocked watch is not polled");
+});
+
+test("a review and its line comment arrive as one turn that carries the words", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = GREEN;
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1);
+  facts.reviews = [{ id: "r1", author: "dylan", state: "CHANGES_REQUESTED", body: "See the line note.", submittedAt: "2026-09-21T11:00:00Z", url: null }];
+  s.host.options.lineComments = { 101: [{ id: "c1", author: "dylan", body: "This should be a Set.", createdAt: "2026-09-21T11:00:00Z", url: null, path: "packages/x.ts", line: 12 }] };
+  await s.poll();
+  const turns = s.turns("t1");
+  assert.equal(turns.length, 2);
+  assert.match(turns[1]!, /Review by dylan: changes requested\.\n  > See the line note\./);
+  assert.match(turns[1]!, /Comment by dylan on packages\/x\.ts line 12:\n  > This should be a Set\./);
+  assert.equal(s.thread("t1").watch?.rounds, 1, "a request for changes costs a round");
+  await s.poll();
+  assert.equal(s.turns("t1").length, 2, "delivered once");
+});
+
+test("a merge ends the watch, and the thread hears it", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.state = "MERGED";
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.state, "merged");
+  assert.match(s.turns("t1")[0]!, /was merged\. The loop is done/);
+  assert.match(s.notes("t1").at(-1)!, /Stopped watching pull request #101: The pull request was merged/);
+  assert.deepEqual(await s.poll(), [], "nothing left to watch");
+});
+
+// ---- the watch is bounded, and it is dropped with the thread -----------------
+
+test("a quiet watch backs off, and a watch that runs too long is handed to a person", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  assert.deepEqual(await s.engine.pollWatches(), ["t1"], "the first poll is due at once");
+  assert.deepEqual(await s.engine.pollWatches(), [], "and the next one is not");
+  assert.equal(s.thread("t1").watch?.quiet, 1);
+  // One quiet poll: the next wait is the curve's second step, not its first.
+  s.advance(pollDelayMs(1) - 1);
+  assert.deepEqual(await s.engine.pollWatches(), []);
+  s.advance(1);
+  assert.deepEqual(await s.engine.pollWatches(), ["t1"]);
+  assert.equal(s.thread("t1").watch?.quiet, 2);
+  s.advance(pollDelayMs(1));
+  assert.deepEqual(await s.engine.pollWatches(), [], "the second quiet poll waits longer than the first");
+  s.advance(pollDelayMs(2) - pollDelayMs(1));
+  assert.deepEqual(await s.engine.pollWatches(), ["t1"]);
+  assert.equal(s.host.reads.pullRequest, 3);
+
+  s.advance(WATCH_MAX_MS);
+  await s.engine.pollWatches();
+  const w = s.thread("t1").watch!;
+  assert.equal(w.state, "blocked");
+  assert.match(w.reason!, /ran for 72 hours without a merge or a close/);
+  assert.equal(s.host.reads.pullRequest, 3, "a watch past its end reads nothing");
+});
+
+test("archiving a thread drops its watch, so nothing wakes a thread that said it was done", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  await s.command({ type: "thread.archive", threadId: "t1", archived: true });
+  assert.equal(s.thread("t1").watch?.state, "dropped");
+  assert.match(s.thread("t1").watch!.reason!, /archived/);
+  s.host.options.prs!["covey/t1"]!.checks = FAILED;
+  assert.deepEqual(await s.poll(), []);
+  assert.deepEqual(s.turns("t1"), []);
+});
+
+test("a watch stopped by request ends, and a pull request opened by hand can be handed to covey", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.host.options.prs!["covey/t1"] = pr({ number: 7, headRefName: "covey/t1", checks: FAILED });
+  await s.command({ type: "thread.watch", threadId: "t1", number: 7, maxRounds: 2 });
+  assert.equal(s.thread("t1").pullRequest?.number, 7);
+  assert.equal(s.thread("t1").watch?.maxRounds, 2);
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1);
+  await s.command({ type: "thread.watch", threadId: "t1", number: null });
+  assert.equal(s.thread("t1").watch?.state, "dropped");
+  await assert.rejects(
+    () => s.command({ type: "thread.watch", threadId: "t1", number: 8 }),
+    (e: unknown) => e instanceof EngineError && e.code === "not_found",
+  );
+});
+
+test("a gh that cannot answer is recorded on the watch and delivers nothing", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  s.host.options.prs!["covey/t1"]!.checks = FAILED;
+  s.host.options.fail = new Error("gh: not logged in");
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.error, "gh: not logged in");
+  assert.deepEqual(s.turns("t1"), []);
+  s.host.options.fail = null;
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.error, null, "the next good poll clears it");
+  assert.equal(s.turns("t1").length, 1, "and the failure still arrives, once");
+});
+
+// ---- the watch survives a restart ------------------------------------------------
+
+test("a restart resumes the watch from its cursor: nothing is sent twice, and the next answer still arrives", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = FAILED;
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1);
+
+  s.restart();
+  assert.equal(s.thread("t1").watch?.state, "watching", "the watch is in the row, not in memory");
+  await s.poll();
+  assert.equal(s.turns("t1").length, 1, "the cursor came back with the row");
+  facts.headRefOid = "1111111aaaa";
+  facts.checks = GREEN;
+  await s.poll();
+  assert.equal(s.turns("t1").length, 2);
+  assert.match(s.turns("t1")[1]!, /The checks passed on 1111111/);
+});

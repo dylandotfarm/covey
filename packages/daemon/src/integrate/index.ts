@@ -9,3 +9,4 @@ export * from "./gate.js";
 export * from "./queue.js";
 export * from "./audit.js";
 export * from "./merge.js";
+export * from "./news.js";

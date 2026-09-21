@@ -261,7 +261,7 @@ responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Meth
 `shell.snapshot/subscribe`, `thread.snapshot/subscribe`, `unsubscribe`, `command`,
 `thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
-`run.gate/memberDiff/queue/merge/audit`.
+`run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`.
 
 ## Runs
 
@@ -378,6 +378,68 @@ verdict from a minute ago. Members never get push rights to the base branch.
 The RPCs are `run.gate`, `run.memberDiff`, `run.queue`, `run.merge` and `run.audit`. Each is
 answered by the daemon that holds the member's branch, because that daemon has the checkout,
 the `PATH` and the `gh` login.
+
+## The loop: an issue, a pull request, and the answer
+
+A run dispatches work (#44) and a run lands work (#45). Issue #94 is the part between the
+two: a thread takes an issue, opens a pull request, and hears what GitHub says about it. An
+agent ran that loop by hand on 2026-09-21 and got it wrong three ways, which is what the
+rules below come from.
+
+**The record is on the thread.** `Thread.issue`, `Thread.pullRequest` and `Thread.watch` sit
+on the thread row, so a restart reads them back and a move carries them (an export copies the
+thread whole). The sidebar puts the issue number before the title.
+
+**Taking an issue** is `thread.takeIssue`, or `issue` on `thread.create`, which is what a run
+member gets from its task. The daemon refuses, with `taken`, when another live thread of the
+same project on the same machine holds the number. Two machines cannot see each other, so
+the claim is per machine; a claim every machine can see is a known gap below.
+
+**Opening a pull request** is `thread.openPullRequest`. The daemon that holds the branch
+pushes it, runs `gh pr create`, records the number and starts the watch. When the thread took
+an issue and the body does not name it, the daemon adds `Closes #N`. `createPullRequest` is
+the second write on `GhHost`, beside `mergePullRequest`; a host has neither unless it was
+built with it, and `assertReadOnly` still refuses `pr create` on the read path. A pull request
+opened by hand is handed to covey with `thread.watch`.
+
+**The daemon that holds the branch watches.** A poll runs on a timer, thirty seconds after
+the last one and half as long again after every quiet poll, up to five minutes. It reads the
+pull request and its line comments through `GhHost`, so a test hands in `fakeHost` and
+reaches nothing. `integrate/news.ts` is pure: it takes the facts and the cursor of what the
+thread has heard, and answers with the events the thread has not seen. Three rules live
+there, and each has a test:
+
+- **Every terminal state is news.** A failed check fires exactly as a passed one does. The
+  hand loop left when the merge state stopped being `BLOCKED`, and a failure never fired for
+  95 minutes.
+- **The checks are read from the check runs, never from the merge state.** GitHub answers
+  `BLOCKED` both while the checks run and after they fail. A head with no check at all is an
+  answer too, after two minutes of grace.
+- **An answer is delivered once.** A checks verdict is keyed by the head it was for, a
+  conflict by its head, and every review and comment by its id. The cursor is in the row, so a
+  retry, a reconnect or a restart sends nothing twice.
+
+**An event reaches the thread as a turn.** This is the primitive the rest exists for. A note
+in a transcript is read by a person; a `turn.send` resumes a session the engine released,
+and the agent reads the failure, fixes it, and pushes. The turn names the checks that failed
+with their URLs, the review with its words, the comment with its file and line, and which
+round this is.
+
+**The loop is bounded.** An event that asks for work — a failing check, a conflict, a review
+that asks for changes — costs a round; a pass, a comment or an approval costs none. A watch
+sends at most `maxRounds` (default three) such turns; the next one ends the watch in
+`blocked`, with the news in the transcript as a note and the reason on the row. A watch that
+runs 72 hours without a merge or a close ends in `blocked` too. The TUI reads a run member's
+thread and moves the member to `blocked` with that reason, which is the run's own word for
+"a person has to look".
+
+**Every watch has an end.** A merge or a close ends it. Archiving, deleting or moving the
+thread drops it, as does `thread.watch` with `null`. The two hand-rolled loops still asking
+GitHub every fifteen seconds an hour after their timeout are the reason.
+
+**Who accepts the work.** Green is not the gate (#45), so a passing check ends nothing: the
+watch goes on until a person or the run's merge party merges the pull request. The merge is
+the acceptance.
 
 ## Browsing the sidebar
 
@@ -948,3 +1010,9 @@ streaming, queueing, and diff capture.
 - **A control for the session limits**: `sessionIdleMinutes` and `maxLiveSessions` are in
   `MachineSettings`, and the machine control panel does not offer them yet. Until it does,
   `daemon.json` or the two environment variables set them.
+- **An issue claim every machine can see**: `thread.takeIssue` refuses a number another
+  live thread holds on the same machine, and no further. Daemons do not talk to each other,
+  so a claim across the pool needs a record on GitHub (an assignee, or a comment), which
+  nothing writes yet.
+- **A webhook for the watch**: a daemon on a tailnet has no public address, so the watch
+  polls. A webhook needs an ingress, and would only make the poll rarer.

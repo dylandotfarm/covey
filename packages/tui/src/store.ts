@@ -1514,6 +1514,9 @@ export class Store {
         // thread. No parent — a member is grouped under its run row already,
         // and a thread must not be painted in two groups at once.
         origin: { by: "agent" },
+        // The thread takes the task's issue, so `thread.openPullRequest` can
+        // write `Closes #N` and the sidebar can show which issue it holds.
+        ...(m.task.issue ? { issue: m.task.issue } : {}),
       });
       // Write the thread onto the member the moment it exists, before the brief
       // is even composed. A failure after this point leaves a thread and a
@@ -1640,9 +1643,15 @@ export class Store {
       if (!client) continue;
       try {
         const pr = await client.rpc("run.pullRequest", { threadId: m.threadId });
-        const state = nextStateForPr(m.state, pr);
+        // The member's thread holds the watch of #94. A watch that ended in
+        // `blocked` is the loop handing the work to a person, and the member
+        // says so in the run panel with the reason the watch gave.
+        const watch = threadOnMachineId(this.state, m.machineId, m.threadId)?.watch;
+        const blocked = watch?.state === "blocked" && !isFinalMemberState(m.state) && m.state !== "withdrawn";
+        const state = blocked ? "blocked" : nextStateForPr(m.state, pr);
+        const note = blocked && m.state !== "blocked" ? watch!.reason : undefined;
         if (pr?.url !== m.pullRequest?.url || pr?.state !== m.pullRequest?.state || state !== m.state)
-          await this.patchMember(machine, runId, m.id, { pullRequest: pr, state });
+          await this.patchMember(machine, runId, m.id, { pullRequest: pr, state, ...(note !== undefined ? { note } : {}) });
       } catch (e: any) { errors.push(`${m.task.key}: ${e.message}`); }
     }
     this.setRunBusy(machine, runId, null);

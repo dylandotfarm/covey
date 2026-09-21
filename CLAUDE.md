@@ -97,5 +97,14 @@
   scripts are blocked (`onlyBuiltDependencies: []`); never use npm in this repo.
 - `packages/daemon/src/integrate/` reaches `gh` and `git` through one `GhHost`
   (`integrate/gh.ts`); everything else there is pure. Tests use `fakeHost`, so nothing
-  merges during `pnpm test`. The read path calls `assertReadOnly` first, which throws on a
-  `gh` command that can change a repository.
+  merges and nothing opens a pull request during `pnpm test`. The read path calls
+  `assertReadOnly` first, which throws on a `gh` command that can change a repository. The
+  two writes, `mergePullRequest` and `createPullRequest`, exist on a host only when it was
+  built with `allowMerge` or `allowCreate`.
+- A thread can take an issue (`thread.takeIssue`), open a pull request
+  (`thread.openPullRequest`) and be watched (`Thread.watch`): the daemon that holds the
+  branch polls the pull request and sends every checks verdict, review, comment and merge to
+  the thread as a turn (`integrate/news.ts` decides what is news; `Engine.pollWatches` polls).
+  Read the checks from the check runs, never from `mergeStateStatus`, and give every watch an
+  end — `watch.test.ts` and `news.test.ts` hold the rules. An engine test passes
+  `EngineOptions.ghHost` so no test reaches GitHub.
