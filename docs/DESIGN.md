@@ -285,6 +285,13 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
 - **A phone sleeps.** The socket drops, the client dials its budget out and goes offline. When
   the page becomes visible again it retries, and the subscriptions resume from the seq the
   page holds, so what it missed is replayed rather than refetched.
+- **Where a daemon listens is a setting, not only a flag.** `machine.settings { bind }`
+  moves the listeners while the daemon runs: `main.ts` closes them and opens new ones
+  through `EngineOptions.rebind`, and a bind that fails brings the old ones back before
+  the error reaches the caller. The socket that asked stays open, because an upgraded
+  connection is no longer the http server's to close; the daemon test proves both. A
+  `--bind` flag still wins at start and is never written, so what the machine reports is
+  where it listens, not what the file says.
 - **The page dials the fleet.** A daemon holds no list of the others; the TUI does. So
   `store.fleetFor` builds the list for the machine that serves the page — every other
   machine, with a URL the phone can reach (a loopback entry becomes the machine's tailnet

@@ -126,6 +126,13 @@ export interface MachineSettings {
    * the machine's control panel turns it on and off.
    */
   webEnabled?: boolean | null;
+  /**
+   * Which addresses the daemon listens on: `loopback`, `tailnet` (plus
+   * loopback), `all`, or one address. Changed while the daemon runs: it
+   * closes its listeners and opens new ones, and the connections already
+   * open stay open. Absent on a daemon built before it could be changed.
+   */
+  bind?: string;
 }
 
 export interface MachineCapabilities {
@@ -1293,6 +1300,8 @@ export type Command =
       maxLiveSessions?: number | null;
       /** Serve the web client from this machine, or stop. */
       webEnabled?: boolean | null;
+      /** Listen on these addresses from now on: `loopback`, `tailnet`, `all`, or one address. */
+      bind?: string;
     }
   /**
    * The other machines the web client this daemon serves should dial. The

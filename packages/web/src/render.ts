@@ -13,7 +13,7 @@ import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type Qu
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, connectionSummary, isCurrentAddress, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadStatusLabel, threadTone, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, bindLabel, connectionSummary, isCurrentAddress, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadStatusLabel, threadTone, updateLabel, type MachineSlot, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
 
 export interface Actions {
   openThread(machine: string, threadId: string): void;
@@ -29,6 +29,11 @@ export interface Actions {
   retry(): void;
   setDraft(machine: string, threadId: string, text: string): void;
   toggleAddresses(): void;
+  /** Pull, rebuild and restart the daemon on `machine`. Asks first. */
+  updateMachine(machine: string): void;
+  restartMachine(machine: string): void;
+  /** Where `machine` listens from now on: `tailnet`, `all`, or `loopback`. */
+  setBind(machine: string, bind: string): void;
 }
 
 /** Whether a tap is the reader's pointer. Enter sends on a keyboard and breaks a line on a phone. */
@@ -243,12 +248,7 @@ export class Renderer {
    */
   private settingsPanel(s: State): HTMLElement {
     const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"), h("h3", {}, "Machines"));
-    for (const m of s.machines.values()) {
-      panel.append(h("div", { class: `address machine-row conn-${m.conn}` },
-        h("span", { class: "kind" }, m.primary ? "this page" : "fleet"),
-        h("span", { class: "url" }, m.name, h("small", {}, ` · ${m.conn}${m.connError ? ` · ${m.connError}` : ""}`)),
-      ));
-    }
+    for (const m of s.machines.values()) panel.append(this.machineCard(m));
     if (s.machines.size === 1) panel.append(h("p", { class: "hint" }, "Other machines appear here once the TUI starts the web server on this one; it hands over the list."));
     panel.append(h("h3", {}, "Get LAN address"));
     if (!s.access) { panel.append(h("p", { class: "empty" }, primaryMachine(s)?.conn === "connected" ? "asking the machine…" : "connect first")); return panel; }
@@ -265,6 +265,37 @@ export class Renderer {
     }
     if (s.access.addresses.length === 0) panel.append(h("p", { class: "empty" }, "This machine has no tailnet and no LAN address."));
     return panel;
+  }
+
+  /**
+   * One machine on the settings page: what it runs, where it listens, and
+   * the two things a person at a desk does from the control panel — update
+   * it from git, and restart it. Both interrupt the turns it runs, so both
+   * ask first.
+   */
+  private machineCard(m: MachineSlot): HTMLElement {
+    const connected = m.conn === "connected";
+    const bind = m.info?.settings?.bind;
+    const web = m.info?.settings?.webEnabled ? "web server on" : "web server off";
+    const progress = updateLabel(m.update);
+    return h("div", { class: `machine-card conn-${m.conn}` },
+      h("div", { class: "head" },
+        h("span", { class: "name" }, m.name),
+        h("span", { class: "kind" }, m.primary ? "this page" : "fleet"),
+        h("span", { class: `conn` }, m.conn),
+      ),
+      h("div", { class: "meta" }, m.info ? `${m.info.os}/${m.info.arch} · build ${m.info.daemonVersion} · ${web}` : m.connError ?? m.key),
+      progress ? h("div", { class: `progress ${m.update?.state ?? ""}` }, progress) : null,
+      bind !== undefined ? h("div", { class: "bind" },
+        h("span", { class: "label" }, "Reachable on"),
+        ...(["tailnet", "all", "loopback"] as const).map((b) => h("button", { type: "button", class: b === bind ? "chosen" : "", disabled: !connected, onclick: () => this.a.setBind(m.key, b) }, bindLabel(b))),
+        ["tailnet", "all", "loopback"].includes(bind) ? null : h("small", {}, `now: ${bind}`),
+      ) : null,
+      h("div", { class: "buttons" },
+        h("button", { type: "button", disabled: !connected, onclick: () => this.a.updateMachine(m.key) }, "Update and restart"),
+        h("button", { type: "button", disabled: !connected, onclick: () => this.a.restartMachine(m.key) }, "Restart"),
+      ),
+    );
   }
 
   private threadRow(ref: ThreadRef, showMachine: boolean): HTMLElement {

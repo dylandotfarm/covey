@@ -48,9 +48,23 @@ a { color: var(--accent); }
 .chooser { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 16px 10px 40px; }
 .chooser .label { color: var(--subtle); font-size: 13px; }
 .chooser button { min-height: 34px; padding: 4px 12px; }
-.address.machine-row .url { color: var(--text); }
-.address.conn-offline .url small, .address.conn-error .url small { color: var(--danger); }
-.address.conn-connected .url small { color: var(--success); }
+.machine-card { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; margin-bottom: 10px; background: var(--surface); }
+.machine-card .head { display: flex; align-items: baseline; gap: 8px; }
+.machine-card .name { font-weight: 600; flex: 1; }
+.machine-card .kind { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--subtle); }
+.machine-card .conn { font-size: 12px; color: var(--subtle); }
+.machine-card.conn-connected .conn { color: var(--success); }
+.machine-card.conn-offline .conn, .machine-card.conn-error .conn { color: var(--danger); }
+.machine-card .meta { font-size: 13px; color: var(--subtle); margin: 2px 0 6px; overflow-wrap: anywhere; }
+.machine-card .progress { font-size: 13px; color: var(--working); margin-bottom: 6px; }
+.machine-card .progress.failed { color: var(--danger); }
+.machine-card .progress.succeeded { color: var(--success); }
+.machine-card .bind { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.machine-card .bind .label { font-size: 12px; color: var(--subtle); width: 100%; }
+.machine-card .bind button { min-height: 32px; padding: 4px 10px; font-size: 14px; }
+.machine-card .buttons { display: flex; gap: 8px; }
+.machine-card .buttons button { flex: 1; }
+button[disabled] { opacity: .45; }
 .project-row .count { font-size: 12px; padding: 1px 7px; border-radius: 10px; background: var(--surface-alt); }
 .project-row .count.busy { color: var(--working); }
 .project-row .count.waiting { color: var(--awaiting); }
@@ -79,7 +93,11 @@ a { color: var(--accent); }
 .thread-header .sub.tone-busy { color: var(--working); }
 .thread-header .sub.tone-waiting { color: var(--awaiting); }
 .thread-header .sub.tone-error { color: var(--danger); }
-.timeline { flex: 1; overflow-y: auto; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; overscroll-behavior: contain; }
+.timeline { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; overscroll-behavior: contain; }
+/* Nothing in the timeline may be wider than the phone. A long command or a
+   URL has no space to break at, so it breaks anywhere. */
+.timeline > * { max-width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.timeline pre { max-width: 100%; }
 .msg.user { align-self: flex-end; max-width: 88%; background: var(--user-bg); border: 1px solid var(--border); border-radius: 14px 14px 4px 14px; padding: 8px 12px; white-space: pre-wrap; word-break: break-word; }
 .msg.user.queued { opacity: .6; }
 .msg.user .tag { display: block; font-size: 11px; color: var(--subtle); text-align: right; }
@@ -94,12 +112,12 @@ details.thinking .body { white-space: pre-wrap; color: var(--subtle); padding: 4
 details.tool summary { display: flex; gap: 6px; align-items: baseline; list-style: none; cursor: pointer; }
 details.tool summary::-webkit-details-marker { display: none; }
 details.tool .glyph { color: var(--subtle); font-family: ui-monospace, monospace; }
-details.tool .summary { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+details.tool .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 details.tool .meta { color: var(--subtle); font-size: 12px; flex: none; }
 details.tool.running .glyph { color: var(--working); }
 details.tool.error .glyph, details.tool.denied .glyph { color: var(--danger); }
 details.tool.bg-running .glyph { color: var(--info); }
-details.tool[open] .summary { white-space: normal; }
+details.tool[open] .summary { white-space: normal; overflow-wrap: anywhere; }
 .note { font-size: 13px; color: var(--subtle); text-align: center; padding: 4px 0; }
 .note.warning { color: var(--warning); }
 .note.error { color: var(--danger); text-align: left; white-space: pre-wrap; }

@@ -76,6 +76,13 @@ export interface EngineOptions {
   /** The fingerprint of the credential store. A test hands in a stand-in, so
    *  a rotation is a variable rather than a login. */
   credentialStamp?: () => Promise<string | null>;
+  /**
+   * Listen on other addresses from now on. `main.ts` owns the listeners, so
+   * it hands this in; the engine calls it when `machine.settings` changes
+   * `bind`. It throws when the new addresses cannot be bound, and then the
+   * old ones are listening again.
+   */
+  rebind?: (bind: string) => Promise<void>;
 }
 
 /**
@@ -259,9 +266,19 @@ export class Engine {
     if (about) this.touch(about);
     switch (cmd.type) {
       case "machine.settings": {
+        // The listeners move first, because a bind that cannot be bound must
+        // not be written down: the next start would fail on it too.
+        const liveBind = this.machine.settings.bind;
+        const rebind = typeof cmd.bind === "string" && cmd.bind.trim() !== "" && cmd.bind !== liveBind ? cmd.bind.trim() : undefined;
+        if (rebind) {
+          if (!this.opts.rebind) throw new EngineError("unsupported", "this daemon cannot change where it listens");
+          await this.opts.rebind(rebind);
+          this.opts.log?.(`listening on ${rebind} from now on (was ${liveBind ?? "unknown"})`);
+        }
         // Mutated in place: `machine` is the same object the server hands to
         // every `hello`, so a client connecting next sees the new defaults.
         this.machine.settings = saveMachineSettings({
+          ...(rebind ? { bind: rebind } : {}),
           ...(cmd.defaultModel !== undefined ? { defaultModel: cmd.defaultModel } : {}),
           ...(cmd.defaultPermissionMode !== undefined ? { defaultPermissionMode: cmd.defaultPermissionMode } : {}),
           ...(cmd.defaultStreaming !== undefined ? { defaultStreaming: cmd.defaultStreaming } : {}),
@@ -269,6 +286,10 @@ export class Engine {
           ...(cmd.maxLiveSessions !== undefined ? { maxLiveSessions: clampSetting(cmd.maxLiveSessions, 1) } : {}),
           ...(cmd.webEnabled !== undefined ? { webEnabled: cmd.webEnabled === true ? true : null } : {}),
         });
+        // The file may say a bind this daemon was not started with (`--bind`
+        // wins at start and is never written). What the machine reports is
+        // where it listens, not what the file says.
+        this.machine.settings.bind = rebind ?? liveBind;
         // A lower limit applies to the sessions already live, not only to the
         // next one: the user asked for less memory now.
         this.sweepSessions();
