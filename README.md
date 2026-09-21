@@ -93,6 +93,9 @@ The gear on the page lists every machine with its build, where it listens, and t
 buttons: update from git and restart, or restart alone. Both ask first, because both end
 the turns that machine runs.
 
+Swipe a thread row to the left to show its Archive button; the TUI can bring an archived
+thread back.
+
 The phone shows the projects and threads of every machine the TUI knows, with the same
 status dots the TUI shows. The machine that serves the page gets the list from the TUI when
 you start the web server there, and again whenever you add or remove a machine. A project

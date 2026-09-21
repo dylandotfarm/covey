@@ -107,17 +107,15 @@ test("a re-sent item replaces its row, an event for another thread or machine is
   assert.equal(v.items.size, 2);
 });
 
-test("the banner speaks for the primary first, then names the fleet machines that are down", () => {
+test("the banner speaks for the primary alone; a fleet machine that is down is the settings page's business", () => {
   const s = emptyState();
   assert.equal(connectionSummary(s).state, "connecting");
   const pi = addMachine(s, "ws://pi:3790", "pi", true);
   const box = addMachine(s, "ws://box:3790", "box");
   pi.conn = "offline"; pi.connError = "no answer after 3 tries";
   assert.deepEqual(connectionSummary(s), { state: "offline", text: "offline · no answer after 3 tries · tap to retry" });
-  pi.conn = "connected"; box.conn = "connecting";
-  assert.deepEqual(connectionSummary(s), { state: "connecting", text: "box: connecting…" });
-  box.conn = "offline";
-  assert.deepEqual(connectionSummary(s), { state: "offline", text: "box offline · tap to retry" });
+  pi.conn = "connected"; box.conn = "offline";
+  assert.deepEqual(connectionSummary(s), { state: "connected", text: "" });
   box.conn = "connected";
   assert.deepEqual(connectionSummary(s), { state: "connected", text: "" });
 });

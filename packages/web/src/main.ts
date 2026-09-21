@@ -27,6 +27,22 @@ function readToken(): string | undefined {
 
 const state = emptyState();
 const clients = new Map<string, MachineClient>();
+
+/**
+ * The open thread is in the URL: `#/t/<machine>/<thread>`. The browser's
+ * back control, a swipe from the edge, and a reload all read the same
+ * thing, and the list is the page with no hash. A route for a machine the
+ * page has not dialled yet waits until that machine's snapshot arrives.
+ */
+type Route = { machine: string; threadId: string } | null;
+const routeOf = (hash: string): Route => {
+  const m = /^#\/t\/([^/]+)\/([^/]+)$/.exec(hash);
+  return m ? { machine: decodeURIComponent(m[1]!), threadId: decodeURIComponent(m[2]!) } : null;
+};
+const hashFor = (r: NonNullable<Route>) => `#/t/${encodeURIComponent(r.machine)}/${encodeURIComponent(r.threadId)}`;
+let pendingRoute: Route = routeOf(location.hash);
+/** The thread was entered from the list on this page, so back is a step back. */
+let enteredFromList = false;
 let frame = 0;
 const paint = () => { frame = 0; renderer.paint(state); };
 /** One paint per frame, however many events arrived. */
@@ -39,7 +55,12 @@ function dial(slot: MachineSlot, token: string | undefined) {
       slot.conn = s; slot.connError = err ?? null; schedule();
       if (s === "connected" && slot.primary) askAccess(client);
     },
-    shellSnapshot: (snap) => { applyShellSnapshot(slot, snap); if (slot.primary) document.title = `covey · ${snap.machine.name}`; schedule(); },
+    shellSnapshot: (snap) => {
+      applyShellSnapshot(slot, snap);
+      if (slot.primary) document.title = `covey · ${snap.machine.name}`;
+      if (pendingRoute?.machine === slot.key) { const r = pendingRoute; pendingRoute = null; showThread(r.machine, r.threadId); }
+      schedule();
+    },
     shellEvent: (ev) => { applyShellEvent(state, slot, ev); schedule(); },
     shellSynchronized: () => schedule(),
     threadEvent: (threadId, ev) => { if (applyThreadEvent(state, slot.key, threadId, ev)) schedule(); },
@@ -79,24 +100,41 @@ function dialMember(m: FleetMember) {
   dial(addMachine(state, key, m.name), m.token);
 }
 
+/** Put a thread on screen. The URL already names it; this is what the URL means. */
+function showThread(machine: string, threadId: string) {
+  const client = clients.get(machine);
+  if (!client) return;
+  if (state.view?.machine === machine && state.view.threadId === threadId) return;
+  if (state.view) void clients.get(state.view.machine)?.unwatchThread();
+  const v = openView(state, machine, threadId);
+  schedule();
+  client.watchThread(threadId).then((snap) => {
+    if (state.view !== v) return; // the reader moved on
+    applyThreadSnapshot(v, snap);
+    schedule();
+  }).catch((e: Error) => { if (state.view === v) { v.loading = false; v.error = e.message; schedule(); } });
+}
+
+/** Take the thread off the screen. The URL no longer names one. */
+function leaveThread() {
+  if (!state.view) return;
+  void clients.get(state.view.machine)?.unwatchThread();
+  state.view = null;
+  schedule();
+}
+
 const actions: Actions = {
   openThread(machine, threadId) {
-    const client = clients.get(machine);
-    if (!client) return;
-    const v = openView(state, machine, threadId);
-    history.pushState({ machine, threadId }, "");
-    schedule();
-    client.watchThread(threadId).then((snap) => {
-      if (state.view !== v) return; // the reader moved on
-      applyThreadSnapshot(v, snap);
-      schedule();
-    }).catch((e: Error) => { if (state.view === v) { v.loading = false; v.error = e.message; schedule(); } });
+    const hash = hashFor({ machine, threadId });
+    enteredFromList = true;
+    if (location.hash === hash) showThread(machine, threadId); else location.hash = hash;
   },
   back() {
     if (!state.view) return;
-    void clients.get(state.view.machine)?.unwatchThread();
-    state.view = null;
-    schedule();
+    // A thread entered from the list is one step back in the history. One
+    // opened by its URL has no list behind it, so the list is put there
+    // instead of a step back out of the page.
+    if (enteredFromList) history.back(); else location.replace(`${location.pathname}${location.search}`);
   },
   send(text) {
     const v = state.view;
@@ -148,6 +186,9 @@ const actions: Actions = {
   setBind(machine, bind) {
     clients.get(machine)?.command({ type: "machine.settings", bind }).catch(fail);
   },
+  archiveThread(machine, threadId) {
+    clients.get(machine)?.command({ type: "thread.archive", threadId, archived: true }).catch(fail);
+  },
 };
 
 const viewClient = () => (state.view ? clients.get(state.view.machine) : undefined);
@@ -162,12 +203,12 @@ function fail(e: Error) {
 
 const renderer = new Renderer(document.getElementById("app")!, actions);
 
-// The phone's own back control leaves the thread; a thread entered by the
-// history's forward control is opened again.
-addEventListener("popstate", (ev) => {
-  const st = ev.state as { machine?: string; threadId?: string } | null;
-  if (st?.machine && st.threadId) actions.openThread(st.machine, st.threadId);
-  else if (state.view) { void clients.get(state.view.machine)?.unwatchThread(); state.view = null; schedule(); }
+// The browser's back control, a swipe from the edge, and the forward control
+// all change the hash; the hash says what is on screen.
+addEventListener("hashchange", () => {
+  const r = routeOf(location.hash);
+  if (!r) { enteredFromList = false; leaveThread(); return; }
+  if (clients.has(r.machine)) showThread(r.machine, r.threadId); else pendingRoute = r;
 });
 // A phone that slept dropped its sockets. Each client has a budget of dials
 // and may have spent it; the reader coming back is the reason to spend more.
