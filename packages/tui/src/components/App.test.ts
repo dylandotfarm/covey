@@ -118,6 +118,24 @@ function fakeStore(initial: AppState) {
 
 const settle = (ms = 220) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Wait for the thing an assertion is about, rather than for a fixed spell.
+ *
+ * What these cases claim is *which* thread the preview opened, never how long
+ * covey took to open it — and a fixed wait measures the runner. On this
+ * project's Pi, with the rest of the suite painting Ink trees on the other
+ * cores, a keystroke and the render it causes can take longer than any number
+ * short enough to keep the file quick, and the case then fails a long way from
+ * anything it covers. Waiting on the condition is both quicker and honest: it
+ * returns as soon as the state is there, and the timeout only bounds a case
+ * that is genuinely broken. A case that asserts nothing *happened* still has to
+ * wait a spell — there is no condition to watch for that.
+ */
+async function until(ready: () => boolean, ms = 4000) {
+  const deadline = Date.now() + ms;
+  while (!ready() && Date.now() < deadline) await settle(20);
+}
+
 // ---- the test ----------------------------------------------------------------
 
 /**
@@ -146,7 +164,7 @@ test("a message in another thread does not move the sidebar cursor", async () =>
     // Rows: machine, project, delta, charlie, bravo, alpha. Four downs puts the
     // cursor on bravo, with one thread below it.
     for (let i = 0; i < 4; i++) { stdin.type("j"); await settle(20); }
-    await settle();
+    await until(() => opened.at(-1) === "bravo");
     assert.equal(opened.at(-1), "bravo", "the preview opens the thread under the cursor");
 
     // alpha takes a turn. It goes to the top of the project, so bravo moves
@@ -184,12 +202,12 @@ test("after the row under the cursor goes, the cursor holds the row it fell onto
   });
   try {
     for (let i = 0; i < 4; i++) { stdin.type("j"); await settle(20); }
-    await settle();
+    await until(() => opened.at(-1) === "bravo");
     assert.equal(opened.at(-1), "bravo", "the preview opens the thread under the cursor");
 
     // bravo is deleted from under the cursor. alpha moves up into its row.
     publish(appState(tree("2026-01-01T00:00:00Z").filter((t) => t.id !== "bravo")));
-    await settle();
+    await until(() => opened.at(-1) === "alpha");
     assert.equal(opened.at(-1), "alpha", "the cursor falls onto the row that took bravo's place");
 
     // Now alpha speaks and goes to the top, which moves its row. The cursor has

@@ -13,7 +13,8 @@ export function DiffPanel({ view, width, height, lines, selection }: { view: Non
   const start = Math.min(view.scroll, maxScroll);
   const d = view.diff;
   return (
-    <Box flexDirection="column" width={width} height={height} paddingX={1}>
+    /* `100%`, not `width`: see the root box in `App.tsx`. */
+    <Box flexDirection="column" width="100%" height={height} paddingX={1}>
       <Box height={1}>
         <Text color={T.text} bold>Changes </Text>
         <Text color={T.success}>+{d.additions} </Text>

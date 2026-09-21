@@ -12,8 +12,14 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
   // Rendered in place of the transcript (not floated): Ink cannot paint an
   // opaque background under an absolutely positioned box.
   const frame = (title: string, body: React.ReactNode, footer: string) => (
-    <Box flexDirection="column" width={width} height={height} alignItems="center" paddingTop={Math.max(0, Math.floor((height - maxRows - 6) / 2))}>
-      <Box width={w} flexDirection="column" borderStyle="round" borderColor={T.accentDim} paddingX={1}>
+    /* `100%`, not `width`: see the root box in `App.tsx`. */
+    <Box flexDirection="column" width="100%" height={height} alignItems="center" paddingTop={Math.max(0, Math.floor((height - maxRows - 6) / 2))}>
+      {/* `maxWidth` as well as `width`, because this box is a cross-axis item
+          and flex-shrink does not reach it: `w` is worked out from the `width`
+          this pane was handed, which in the frame Ink paints straight off a
+          resize is a terminal ago. The cap is what keeps the frame inside the
+          pane; `w` still decides how wide it wants to be. */}
+      <Box width={w} maxWidth="100%" flexDirection="column" borderStyle="round" borderColor={T.accentDim} paddingX={1}>
         <Text color={T.text} bold>{title}</Text>
         {body}
         <Text color={T.faint}>{footer}</Text>

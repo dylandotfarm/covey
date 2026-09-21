@@ -52,7 +52,11 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   const diff = turn?.diff && !turn.diff.unavailable && turn.diff.files.length > 0 ? turn.diff : null;
   const queued = thread?.queuedTurns ?? 0;
   return (
-    <Box flexDirection="column" width={width}>
+    /* `100%`, not `width`: see the root box in `App.tsx`. The width prop is
+       still what the editor wraps to; this box has to be the width the terminal
+       really is, because a frame is painted from it before React has caught up
+       with a resize. */
+    <Box flexDirection="column" width="100%">
       {menu && <PrefixMenu menu={menu} width={width} />}
       <Box flexDirection="column" borderStyle="round" borderColor={borderColor} paddingX={1}>
         {pending ? (
@@ -67,7 +71,11 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
         {!pending && value.length === 0 && !focused ? null : null}
       </Box>
       <Box paddingX={2} height={1} justifyContent="space-between">
-        <Box flexShrink={1} overflow="hidden" marginRight={2}>
+        {/* No `overflow` here. Ink takes the innermost clip on its stack rather
+            than the intersection, so a clip on this box would answer for the
+            status row at whatever width it had last — and the `wrap="truncate"`
+            below already holds the text to this box. */}
+        <Box flexShrink={1} marginRight={2}>
           <Text wrap="truncate">
             <Text color={T.subtle}>{thread ? shortModel(thread.model) : ""}</Text>
             {thread && <Text color={modeColor} bold={bypass}>  {modeLabel}</Text>}
