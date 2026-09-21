@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { repoOptions } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { openCommand, type LinkContext } from "../links.js";
@@ -347,18 +348,70 @@ export function App({ store }: { store: Store }) {
    * next answers. The connected ones start marked, because a pool is usually
    * the whole fleet.
    */
+  /** The last step of a new project: which machines clone `url`. */
+  const chooseMachines = (url: string) => {
+    const connected = state.order.filter((k) => state.machines.get(k)?.conn === "connected");
+    openPickMany(`Clone ${url} on which machines?`, machineOptions(), connected, (ids) => {
+      store.setOverlay(null);
+      if (ids.length === 0) { store.notify("no machine picked; nothing cloned", "error"); return; }
+      void store.createProjectOn(ids, url);
+    });
+  };
+
+  /** A repository by URL, for one `gh` cannot list: another host, or no `gh`. */
+  const askUrl = () => openInput("Repository to clone", (v) => {
+    const url = v.trim();
+    if (!url) { store.setOverlay(null); return; }
+    chooseMachines(url);
+  }, "", "git@github.com:org/repo.git or https://…");
+
+  /**
+   * A new repository on GitHub: its name, then private or public. `gh` on
+   * `asker` makes it, and the clone goes to the machines picked next.
+   */
+  const newRepo = (asker: string) => openInput("New repository: name, or owner/name", (name) => {
+    const n = name.trim();
+    if (!n) { store.setOverlay(null); return; }
+    openPick(`Make ${n}`, [
+      { id: "private", label: "Private", hint: "only you and those you invite" },
+      { id: "public", label: "Public", hint: "anyone can read it" },
+    ], (vis) => {
+      store.setOverlay(null);
+      store.notify(`creating ${n} on GitHub through ${machineLabel(state, asker)}…`);
+      void store.createRepo(asker, { name: n, visibility: vis as "private" | "public" }).then((made) => {
+        if (!made) return;
+        store.notify(`made ${made.nameWithOwner}`, "success");
+        chooseMachines(made.cloneUrl);
+      });
+    });
+  }, "", "my-repo, or acme/my-repo");
+
+  /**
+   * New project. The pick lists the repositories the user can reach, read
+   * through `gh` on the first connected machine that has it, newest push
+   * first, and typing filters them. Two rows above the list make a new
+   * repository, or take a URL for one `gh` cannot list. Without a `gh` to
+   * ask, the URL is the whole of it.
+   */
   const addProject = () => {
     if (state.order.length === 0) { store.notify("add a machine first", "error"); return; }
-    openInput("Repository to clone", (v) => {
-      const url = v.trim();
-      if (!url) { store.setOverlay(null); return; }
-      const connected = state.order.filter((k) => state.machines.get(k)?.conn === "connected");
-      openPickMany(`Clone ${url} on which machines?`, machineOptions(), connected, (ids) => {
-        store.setOverlay(null);
-        if (ids.length === 0) { store.notify("no machine picked; nothing cloned", "error"); return; }
-        void store.createProjectOn(ids, url);
+    const asker = store.ghMachine();
+    if (!asker) { askUrl(); return; }
+    store.notify(`reading your repositories through ${machineLabel(state, asker)}…`);
+    void store.listRepos(asker).then(({ repos, error }) => {
+      if (error) store.notify(error, "error");
+      if (error && repos.length === 0) { askUrl(); return; }
+      const rows: PickOption[] = [
+        { id: "\0new", label: "New repository…", hint: "gh repo create" },
+        { id: "\0url", label: "A URL…", hint: "any host" },
+        ...repoOptions(repos),
+      ];
+      openPick("Repository", rows, (id) => {
+        if (id === "\0new") return newRepo(asker);
+        if (id === "\0url") return askUrl();
+        chooseMachines(id);
       });
-    }, "", "git@github.com:org/repo.git or https://…");
+    });
   };
 
   /**

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { BuildInfo, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { isFinalMemberState } from "@covey/protocol";
 import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
@@ -1277,6 +1277,35 @@ export class Store {
 
   /** What each machine carries in run members, by machine id. */
   machineLoad(): Map<string, number> { return this.membersPerMachine(); }
+
+  /**
+   * The machine to ask about repositories: the first connected one whose
+   * daemon found `gh`. The token lives on the machine, so the client cannot
+   * ask GitHub itself. Null when no machine can.
+   */
+  ghMachine(): string | null {
+    for (const key of this.state.order) {
+      const m = this.state.machines.get(key);
+      if (m?.conn === "connected" && m.info?.resources?.tools.some((t) => t.name === "gh")) return key;
+    }
+    return null;
+  }
+
+  /** The repositories the user can reach, read through `gh` on `machine`. */
+  async listRepos(machine: string): Promise<{ repos: RepoInfo[]; error: string | null }> {
+    const client = this.clients.get(machine);
+    if (!client) return { repos: [], error: "not connected" };
+    try { return await client.rpc("repos.list", {}); }
+    catch (e: any) { return { repos: [], error: this.machineError(machine, e) }; }
+  }
+
+  /** Make a repository on GitHub through `gh` on `machine`; null, with a notice, when it could not. */
+  async createRepo(machine: string, o: { name: string; visibility: "private" | "public"; description?: string }): Promise<{ nameWithOwner: string; cloneUrl: string } | null> {
+    const client = this.clients.get(machine);
+    if (!client) { this.notify("not connected", "error"); return null; }
+    try { return await client.rpc("repos.create", o); }
+    catch (e: any) { this.notify(this.machineError(machine, e), "error"); return null; }
+  }
 
   /** Read the issues a task list names, with `gh` in that machine's checkout. */
   async runIssues(machine: string, projectId: string, numbers: number[]): Promise<{ issues: RunIssue[]; error: string | null }> {

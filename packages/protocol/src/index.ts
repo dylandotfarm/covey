@@ -1026,6 +1026,18 @@ export type RunMemberPatch = Partial<
   >
 >;
 
+/** One repository the user can reach, as `gh repo list` reports it. */
+export interface RepoInfo {
+  /** `owner/name`. */
+  nameWithOwner: string;
+  isPrivate: boolean;
+  /** ISO 8601, or null when the repository has no push yet. */
+  pushedAt: string | null;
+  /** The clone URL in the protocol `gh` is set to use, ssh or https. */
+  cloneUrl: string;
+  description: string;
+}
+
 /** One GitHub issue, as `gh` reports it for a run's task list. */
 export interface RunIssue {
   number: number;
@@ -1337,6 +1349,22 @@ export interface RpcMethods {
   "run.issues": {
     params: { projectId: ProjectId; numbers: number[] };
     result: { issues: RunIssue[]; error: string | null };
+  };
+  /**
+   * The repositories the user on this machine can reach, through `gh`: their
+   * own, and those of every organisation they belong to. Newest push first.
+   * `error` names a `gh` that is missing or not logged in; the list is then
+   * what could be read, which may be nothing.
+   */
+  "repos.list": { params: Record<string, never>; result: { repos: RepoInfo[]; error: string | null } };
+  /**
+   * Make a repository on GitHub with `gh repo create`, and answer with the URL
+   * to clone it from. The one write `gh` does outside a run's merge. `name`
+   * is `name` or `owner/name`; without an owner it is the user's own.
+   */
+  "repos.create": {
+    params: { name: string; visibility: "private" | "public"; description?: string };
+    result: { nameWithOwner: string; cloneUrl: string };
   };
   /**
    * The pull request for a member's branch, read with `gh` on the machine that

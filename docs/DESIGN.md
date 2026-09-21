@@ -398,7 +398,17 @@ than one asks, and the pick lists the machines the way `rankMachines` orders the
 the fastest with room first. The project's name starts as the repository's, and `r` on the
 row renames it on every machine of the pool, because each daemon holds its own row.
 
-A new project asks for the URL, then for the machines. The pick offers every saved machine,
+A new project starts from a pick of the repositories the user can reach. The client asks the
+first connected machine whose daemon found `gh`, because the token lives on the machine, and
+`repos.list` answers with the user's own repositories and every organisation's, newest push
+first. Typing filters the pick. Two rows above the list make a new repository through
+`repos.create`, private or public, or take a URL for one `gh` cannot list. With no `gh` to
+ask, the URL is the whole of it. The list is read through the daemon's read-only `gh` path;
+`repos.create` is the one write beside a run's merge, and it sits alone in `repos.ts`. A
+local repository, one machine holding the bare repository for the others, is not in this
+version: the others would have to pull from it, and daemons do not talk to each other.
+
+Then the machines. The pick offers every saved machine,
 connected or not, with the connected ones marked. A machine that is not connected clones when
 it next answers. The request waits in `TuiConfig.prefs.pendingProjects`, and the store sends
 it on the next connection. The entry leaves the list once the machine has the project, and

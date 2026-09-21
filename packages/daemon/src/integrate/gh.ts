@@ -89,6 +89,8 @@ const READ_ONLY_GH = new Set([
   "run view",
   "run list",
   "repo view",
+  "repo list",
+  "config get",
   "api",
 ]);
 
