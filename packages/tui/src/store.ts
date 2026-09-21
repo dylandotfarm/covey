@@ -1251,8 +1251,10 @@ export class Store {
     for (const key of this.state.order) {
       const m = this.state.machines.get(key);
       if (!m || m.conn !== "connected" || !m.info) continue;
-      const project = [...m.projects.values()].find((p) =>
-        repositoryIdentity ? p.repositoryIdentity === repositoryIdentity : false);
+      // A machine may hold the repository twice: a clone, and a checkout from
+      // before projects were clones. Work goes to the clone.
+      const held = [...m.projects.values()].filter((p) => repositoryIdentity ? p.repositoryIdentity === repositoryIdentity : false);
+      const project = held.find((p) => p.kind === "clone") ?? held[0];
       if (!project) continue;
       const r = m.info.resources;
       out.push({

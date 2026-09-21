@@ -228,3 +228,15 @@ test("rankMachines puts the machines with room first, fastest among them, the wa
   const full = new Map([["box", 20], ["mac", 3]]);
   assert.deepEqual(rankMachines([pi, mac, box], full).map((x) => x.name), ["mac", "pi", "box"], "a machine at its limit goes last, whatever its size");
 });
+
+test("a machine that holds a repository as a checkout and as a clone sends new work to the clone", () => {
+  const identity = "github.com/dylandotfarm/covey";
+  const { store } = storeWith([machine(PI, "pi", "connected", [
+    project("p-old", "covey", identity),
+    project("p-clone", "covey", identity, { kind: "clone", remoteUrl: "git@github.com:dylandotfarm/covey.git" }),
+  ], [])]);
+  assert.deepEqual(store.placementMachines(identity).map((m) => [m.key, m.projectId]), [[PI, "p-clone"]]);
+  const rows = sidebarRows(store.state as AppState);
+  assert.equal(rows.filter((r) => r.kind === "project").length, 1, "and the sidebar shows the two rows as one project");
+  assert.deepEqual(rows[0]!.pool!.map((x) => x.projectId), ["p-old", "p-clone"]);
+});

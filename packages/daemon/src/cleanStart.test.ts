@@ -22,7 +22,7 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { MachineInfo, SystemNoteItem } from "@covey/protocol";
-import { cleanStartBase, cleanStartNote, createWorktree, defaultBranchRef, forgetFetch, isBareRepo, worktreePath } from "./git.js";
+import { cleanStartBase, cleanStartNote, createWorktree, defaultBranchRef, forgetFetch, isBareRepo, normaliseRemote, worktreePath } from "./git.js";
 import { Db } from "./db.js";
 import { Engine } from "./engine.js";
 
@@ -323,4 +323,25 @@ test("a thread whose fetch failed is warned, in its own transcript, that it may 
   assert.equal(tones[0], "warning");
   assert.match(notes[0]!, new RegExp(`Branched from origin/main at ${here}`));
   assert.match(notes[0]!, /Fetch and merge origin\/main before you start/);
+});
+
+test("a clone goes in beside a checkout row of the same repository, and the old row keeps working", async (t) => {
+  const c = await scratchClone();
+  t.after(c.drop);
+  const e = engineOn();
+  t.after(e.drop);
+  // A row from before projects were clones: the user's own checkout, with
+  // the identity its remote gives it and no `kind`.
+  const now = "2026-01-01T00:00:00Z";
+  e.db.putProject({ id: "old", title: "repo", workspaceRoot: c.repo, repositoryIdentity: normaliseRemote(c.remote), defaultModel: null, createdAt: now, updatedAt: now });
+
+  await e.send({ type: "project.create", url: c.remote });
+  const projects = e.engine.shellSnapshot().projects;
+  assert.deepEqual(projects.map((p) => p.kind ?? "checkout").sort(), ["checkout", "clone"], "the clone sits beside the checkout, not in its place");
+  await assert.rejects(e.send({ type: "project.create", url: c.remote }), /already has/, "but a second clone is refused");
+
+  const oldThread = randomUUID();
+  await e.send({ type: "thread.create", projectId: "old", threadId: oldThread, sessionId: randomUUID() });
+  const tree = e.db.getThread(oldThread)!.worktreePath!;
+  assert.ok(tree.startsWith(join(c.repo, ".covey", "worktrees")), `the checkout's threads stay under it: ${tree}`);
 });

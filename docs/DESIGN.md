@@ -739,7 +739,11 @@ one a thread is told to merge.
 from before projects were clones. No new project is made that way. The rows that exist keep
 working. Their worktrees stay under `<root>/.covey/worktrees`, next to a self-ignoring
 `.gitignore`. A `checkout` with nothing to branch from is the one place a thread still works
-in the directory itself.
+in the directory itself. A machine may hold a repository twice, as a checkout from before
+and as a clone: `project.create` refuses a second clone, not a clone beside a checkout. The
+sidebar shows the two as one project, new threads and runs go to the clone, and `D` on the
+project names each row by kind, so the reader can remove the checkout once its threads are
+done.
 
 `thread.delete` removes the thread's worktree. `project.delete` removes the rows; the clone
 stays on disk, because its branches may hold commits nobody pushed. A later create for the
@@ -936,6 +940,11 @@ streaming, queueing, and diff capture.
   There is no reader for Windows, and no paste for a non-image on the clipboard.
 - **Rust client**: the protocol is the contract; a ratatui client can replace `packages/tui`
   without daemon changes. Worth doing once the protocol stops moving.
+- **Local repositories**: a project whose bare repository lives on one machine, with the
+  others in the pool pulling from it. The others would have to reach that machine's
+  repository, over ssh or over git served by the daemon, and daemons do not talk to each
+  other. The upgrade to a remote is easy once it exists: set the remote URL on every member
+  and push once.
 - **A control for the session limits**: `sessionIdleMinutes` and `maxLiveSessions` are in
   `MachineSettings`, and the machine control panel does not offer them yet. Until it does,
   `daemon.json` or the two environment variables set them.

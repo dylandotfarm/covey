@@ -258,13 +258,18 @@ export class Engine {
         const url = cmd.url.trim();
         if (!url) throw new EngineError("bad_url", "a repository URL is needed");
         const identity = normaliseRemote(url);
-        const dup = this.db.listProjects().find((p) => p.repositoryIdentity === identity);
+        // One clone per repository. A `checkout` row of the same repository
+        // from before projects were clones does not count: the clone goes in
+        // beside it, the sidebar shows the two as one project, and new threads
+        // prefer the clone. The old row keeps its threads until the reader
+        // removes it.
+        const dup = this.db.listProjects().find((p) => p.repositoryIdentity === identity && p.kind === "clone");
         if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}`);
         const root = join(this.projectsDir, projectSlug(identity), "repo.git");
         const cloned = await this.cloneOnce(url, root);
         if ("error" in cloned) throw new EngineError("git", `could not clone ${url}: ${cloned.error}`);
         // Two creates for one repository may have waited on the same clone.
-        const raced = this.db.listProjects().find((p) => p.repositoryIdentity === identity);
+        const raced = this.db.listProjects().find((p) => p.repositoryIdentity === identity && p.kind === "clone");
         if (raced) return this.db.shellSeq();
         const p: Project = {
           id: randomUUID(), title: cmd.title ?? basename(identity), workspaceRoot: root,

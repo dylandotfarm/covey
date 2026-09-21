@@ -1510,12 +1510,18 @@ export function App({ store }: { store: Store }) {
       const opts: PickOption[] = [
         { id: "no", label: "Cancel" },
         ...(pool.length > 1 ? [{ id: "all", label: `Remove from every machine (${pool.length}) and delete its threads` }] : []),
-        ...pool.map((x) => ({ id: x.machine, label: pool.length > 1 ? `Remove from ${name(x.machine)} and delete its threads there` : "Remove project and all its threads", hint: name(x.machine) })),
+        // A machine that holds the repository twice, as a clone and as a
+        // checkout from before, gets a row for each, named by kind.
+        ...pool.map((x) => {
+          const twice = pool.filter((y) => y.machine === x.machine).length > 1;
+          const what = twice ? ` (${x.project.kind === "clone" ? "the clone" : "your checkout"})` : "";
+          return { id: `${x.machine}\n${x.projectId}`, label: pool.length > 1 ? `Remove from ${name(x.machine)}${what} and delete its threads there` : "Remove project and all its threads", hint: name(x.machine) };
+        }),
       ];
       return openPick(`Remove project "${row.project!.title}"?`, opts, (id) => {
         store.setOverlay(null);
         if (id === "no") return;
-        const targets = id === "all" ? pool : pool.filter((x) => x.machine === id);
+        const targets = id === "all" ? pool : pool.filter((x) => `${x.machine}\n${x.projectId}` === id);
         for (const x of targets) void store.removeFromPool(x.machine, x.projectId);
       });
     }
