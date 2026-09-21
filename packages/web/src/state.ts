@@ -14,7 +14,7 @@
  */
 import {
   threadIsBusy,
-  type MachineAccess, type MachineInfo, type MachineUpdate, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
+  type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineUpdate, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress,
 } from "@covey/protocol";
 import type { ConnState } from "@covey/client";
@@ -47,12 +47,32 @@ export interface View {
   commands: SlashCommandInfo[] | null;
 }
 
+/**
+ * An issue or a pull request on screen (#108), over the thread or the list
+ * it was opened from. The daemon of `machine` reads it with `gh` in the
+ * project's checkout, and every act goes back to that daemon.
+ */
+export interface ItemView {
+  machine: string;
+  projectId: string;
+  number: number;
+  item: GitHubItem | null;
+  loading: boolean;
+  error: string | null;
+  /** An act is in flight, so the buttons wait. */
+  busy: boolean;
+  /** The text in the comment box, kept across paints. */
+  draft: string;
+}
+
 export interface State {
   machines: Map<string, MachineSlot>;
   /** Project groups the reader folded shut, by group key. */
   folded: Set<string>;
   /** The thread on screen, or null for the list. */
   view: View | null;
+  /** The issue or the pull request on screen, over the thread or the list. */
+  item: ItemView | null;
   /** Draft text per `machine:thread`, kept while the reader browses. */
   drafts: Map<string, string>;
   /** The token and the other addresses of the primary daemon, once asked for. */
@@ -64,7 +84,7 @@ export interface State {
 }
 
 export function emptyState(): State {
-  return { machines: new Map(), folded: new Set(), view: null, drafts: new Map(), access: null, showAddresses: false, choosing: null };
+  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), access: null, showAddresses: false, choosing: null };
 }
 
 export function addMachine(s: State, key: string, name: string, primary = false): MachineSlot {
@@ -301,4 +321,116 @@ export function threadStatusLabel(t: Thread): string {
   if (t.status === "error" || t.latestTurn?.state === "error") return t.lastError ? `error: ${t.lastError}` : "error";
   if (t.latestTurn?.state === "interrupted") return "interrupted";
   return "idle";
+}
+
+// ---------------------------------------------------------------------------
+// The URL
+// ---------------------------------------------------------------------------
+
+/**
+ * What the hash names: a thread, `#/t/<machine>/<thread>`; an issue or a pull
+ * request, `#/gh/<machine>/<project>/<number>`; or the list, no hash. The
+ * browser's back control, a swipe from the edge and a reload all read it.
+ */
+export type Route =
+  | { kind: "thread"; machine: string; threadId: string }
+  | { kind: "item"; machine: string; projectId: string; number: number }
+  | null;
+
+export function routeOf(hash: string): Route {
+  const t = /^#\/t\/([^/]+)\/([^/]+)$/.exec(hash);
+  if (t) return { kind: "thread", machine: decodeURIComponent(t[1]!), threadId: decodeURIComponent(t[2]!) };
+  const i = /^#\/gh\/([^/]+)\/([^/]+)\/(\d+)$/.exec(hash);
+  if (i) return { kind: "item", machine: decodeURIComponent(i[1]!), projectId: decodeURIComponent(i[2]!), number: Number(i[3]) };
+  return null;
+}
+
+export function threadHash(machine: string, threadId: string): string {
+  return `#/t/${encodeURIComponent(machine)}/${encodeURIComponent(threadId)}`;
+}
+
+export function itemHash(machine: string, projectId: string, number: number): string {
+  return `#/gh/${encodeURIComponent(machine)}/${encodeURIComponent(projectId)}/${number}`;
+}
+
+// ---------------------------------------------------------------------------
+// An issue or a pull request (#108)
+// ---------------------------------------------------------------------------
+
+/**
+ * A `#N` in prose: the start of the text or a space or a bracket before it,
+ * and no word character after it. Five digits at most, so a hex colour such
+ * as `#123456` stays text. Global, so a caller resets `lastIndex` or uses
+ * `matchAll`.
+ */
+export const REF = /(^|[\s([{,;:])#(\d{1,5})(?![\w-])/g;
+
+/** The `#N` references in one piece of text, as offsets, so a renderer can split it. */
+export function findRefs(text: string): { start: number; end: number; number: number }[] {
+  const out: { start: number; end: number; number: number }[] = [];
+  for (const m of text.matchAll(REF)) {
+    const start = m.index + m[1]!.length;
+    out.push({ start, end: start + 1 + m[2]!.length, number: Number(m[2]) });
+  }
+  return out;
+}
+
+/** The chips a thread row shows: the issue it took and the pull request it opened. */
+export function threadRefs(t: Thread): { kind: "issue" | "pull"; number: number; label: string }[] {
+  const out: { kind: "issue" | "pull"; number: number; label: string }[] = [];
+  if (t.issue) out.push({ kind: "issue", number: t.issue.number, label: `#${t.issue.number}` });
+  const pull = t.pullRequest?.number ?? t.watch?.number;
+  if (pull) out.push({ kind: "pull", number: pull, label: `PR #${pull}` });
+  return out;
+}
+
+/** One word for the state of an item, as the chip on the item screen says it. */
+export function itemStateLabel(item: GitHubItem): "open" | "closed" | "merged" | "draft" {
+  if (item.kind === "pull") {
+    if (item.state === "MERGED") return "merged";
+    if (item.state === "CLOSED") return "closed";
+    return item.isDraft ? "draft" : "open";
+  }
+  return item.state === "CLOSED" ? "closed" : "open";
+}
+
+/** What the checks add up to: the worst state wins, and no checks is nothing to say. */
+export function checksLabel(item: GitHubPullRequest): { state: "success" | "failure" | "pending" | "none"; text: string } {
+  const c = item.checks;
+  if (c.length === 0) return { state: "none", text: "no checks" };
+  const failed = c.filter((x) => x.state === "failure").length;
+  const pending = c.filter((x) => x.state === "pending").length;
+  const passed = c.filter((x) => x.state === "success").length;
+  if (failed) return { state: "failure", text: `${failed} of ${c.length} checks failed` };
+  if (pending) return { state: "pending", text: `${pending} of ${c.length} checks running` };
+  return { state: "success", text: passed === c.length ? `${c.length} checks passed` : `${passed} passed, ${c.length - passed} skipped` };
+}
+
+/** The acts the item screen offers, by kind and state. A merged pull request takes a comment and nothing else. */
+export function itemActions(item: GitHubItem): { action: GitHubAction; label: string; tone: "primary" | "danger" | "" ; needsBody: boolean }[] {
+  const comment = { action: { kind: "comment", body: "" } as GitHubAction, label: "Comment", tone: "" as const, needsBody: true };
+  if (item.kind === "pull") {
+    if (item.state === "MERGED") return [comment];
+    if (item.state === "CLOSED") return [comment, { action: { kind: "reopen" }, label: "Reopen", tone: "", needsBody: false }];
+    return [
+      { action: { kind: "review", event: "approve" }, label: "Approve", tone: "primary", needsBody: false },
+      { action: { kind: "review", event: "request_changes" }, label: "Request changes", tone: "danger", needsBody: true },
+      comment,
+      { action: { kind: "merge", method: "merge" }, label: "Merge", tone: "primary", needsBody: false },
+      { action: { kind: "close" }, label: "Close", tone: "danger", needsBody: false },
+    ];
+  }
+  if (item.state === "CLOSED") return [comment, { action: { kind: "reopen" }, label: "Reopen", tone: "", needsBody: false }];
+  return [comment, { action: { kind: "close" }, label: "Close", tone: "danger", needsBody: false }];
+}
+
+/** The live thread on `machine` that took the issue or opened the pull request, if one did. */
+export function holderOf(s: State, machine: string, projectId: string, number: number): Thread | null {
+  const m = s.machines.get(machine);
+  if (!m) return null;
+  for (const t of m.threads.values()) {
+    if (t.projectId !== projectId || t.archivedAt || t.movedTo) continue;
+    if (t.issue?.number === number || t.pullRequest?.number === number || t.watch?.number === number) return t;
+  }
+  return null;
 }

@@ -4,8 +4,11 @@ import { MACHINES_KEY, archiveKey, poolMachines, runKey, threadGroupKey, type Ap
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
+import { hyperlinksEnabled, osc8 } from "../links.js";
 import { runMemberStateLabel, runState, tallyRun } from "@covey/protocol";
 import { buildSkew } from "../build.js";
+
+const HYPERLINKS = hyperlinksEnabled();
 
 export function Sidebar({ state, rows, cells, cursor, width, focused }: { state: AppState; rows: SidebarRow[]; cells: SidebarCell[]; cursor: number; width: number; focused: boolean }) {
   const inner = width - 1;
@@ -270,13 +273,18 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // space, the space before the time, and the padding on the right.
       const titleW = Math.max(4, width - indent - 6 - time.length - held.length - tag.length);
       // The issue the thread took goes before the title, the way a run member
-      // row leads with its task key: the number is the link a reader follows.
+      // row leads with its task key: the number is the link a reader follows,
+      // and on a terminal that knows OSC 8 it is one (#108). The link wraps
+      // the number only, after the cut, so the row keeps its one line.
       const title = t.issue ? `#${t.issue.number} ${t.title}` : t.title;
+      const shown = truncate(title, titleW).padEnd(titleW);
+      const ref = t.issue ? `#${t.issue.number}` : "";
+      const linked = ref && t.issue?.url && HYPERLINKS && shown.startsWith(ref) ? osc8(t.issue.url, ref) + shown.slice(ref.length) : shown;
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={row.group ? T.subtle : T.awaiting}>{caret}</Text>
           <Text color={attention === "done" ? T.success : attention === "error" ? T.danger : statusColor(st, pulse)}>{showDot ? (attention === "done" ? "✓" : attention === "error" ? "✗" : "●") : t.pinnedAt ? "⋆" : " "} </Text>
-          <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{truncate(title, titleW).padEnd(titleW)}</Text>
+          <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{linked}</Text>
           <Text color={T.subtle}>{held}</Text>
           <Text color={T.faint}>{tag}</Text>
           <Text color={T.faint}> {time}</Text>

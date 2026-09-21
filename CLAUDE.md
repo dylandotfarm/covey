@@ -134,3 +134,10 @@
   (`plugin.ts`); a personal skill in `~/.claude/skills` does not reach a resumed session,
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
   Change the CLI and the skill together.
+- An issue or a pull request is a screen in the web client (#108): a `#N` in the transcript,
+  or a chip on a thread row, opens it, and the bar under it reviews, comments, merges,
+  closes or reopens. `github.item` reads it and `github.act` acts, each act on a `GhHost`
+  built for that one write (`allowReview`, `allowClose`, `allowComment`, `allowMerge`), so
+  `pnpm test` still changes nothing on GitHub (`githubItem.test.ts`). The TUI has no such
+  screen: `links.ts` makes a `#N` an OSC 8 hyperlink when the project is on GitHub, and
+  the palette opens the issue or the pull request in the browser.

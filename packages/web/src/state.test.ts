@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { MachineInfo, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
+import type { GitHubIssue, GitHubPullRequest, MachineInfo, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
 import {
-  addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, connectionSummary, emptyState, isCurrentAddress,
-  openHomes, openView, orderedItems, projectRows, relTime, threadStatusLabel, threadTone,
+  addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
+  itemActions, itemHash, itemStateLabel, openHomes, openView, orderedItems, projectRows, relTime, routeOf, threadHash, threadRefs, threadStatusLabel, threadTone,
 } from "./state.js";
 
 const info = (name: string): MachineInfo => ({
@@ -155,4 +155,62 @@ test("the page knows which address it is on", () => {
   assert.equal(isCurrentAddress("http://box.local:3790/", "http://box.local:3790"), true);
   assert.equal(isCurrentAddress("http://Box.local:3790/", "http://box.local:3790"), true);
   assert.equal(isCurrentAddress("http://192.168.1.2:3790/", "http://box.local:3790"), false);
+});
+
+test("the hash names a thread, an item, or the list (#108)", () => {
+  assert.deepEqual(routeOf(""), null);
+  assert.deepEqual(routeOf("#/t/ws%3A%2F%2Fbox%3A3790/t1"), { kind: "thread", machine: "ws://box:3790", threadId: "t1" });
+  assert.deepEqual(routeOf("#/gh/ws%3A%2F%2Fbox%3A3790/p1/12"), { kind: "item", machine: "ws://box:3790", projectId: "p1", number: 12 });
+  assert.deepEqual(routeOf("#/gh/m/p/x"), null);
+  assert.equal(routeOf(itemHash("ws://box:3790", "p1", 12))?.kind, "item");
+  assert.equal(routeOf(threadHash("ws://box:3790", "t1"))?.kind, "thread");
+});
+
+test("the #N references in a piece of text, with their offsets (#108)", () => {
+  assert.deepEqual(findRefs("Took #94 (#95). Not item#3, not #123456."), [{ start: 5, end: 8, number: 94 }, { start: 10, end: 13, number: 95 }]);
+  assert.deepEqual(findRefs("#1"), [{ start: 0, end: 2, number: 1 }]);
+  assert.deepEqual(findRefs("no refs"), []);
+});
+
+test("a thread's chips, an item's state word, its checks in one line, and the acts it offers (#108)", () => {
+  const t = thread("t1", "p1", { issue: { number: 94, title: null, url: null, takenAt: "2026-09-21T00:00:00Z" }, pullRequest: { number: 12, url: "u", branch: "b", base: "main", openedAt: "2026-09-21T00:00:00Z" } });
+  assert.deepEqual(threadRefs(t).map((r) => r.label), ["#94", "PR #12"]);
+  assert.deepEqual(threadRefs(thread("t2", "p1")), []);
+  const watched = thread("t3", "p1", { watch: { number: 7, state: "watching", reason: null, merge: "manual", mergeMethod: "merge", rounds: 0, maxRounds: 3, quiet: 0, cursor: { head: null, checks: null, reviews: [], comments: [], lineComments: [], state: "OPEN", mergeTried: null }, startedAt: "t", polledAt: null, endedAt: null, error: null } as never });
+  assert.deepEqual(threadRefs(watched).map((r) => r.label), ["PR #7"]);
+
+  const base = { number: 12, title: "t", url: "u", author: "a", body: "", createdAt: null, closedAt: null, labels: [], comments: [], viewer: "me", readAt: "r" };
+  const pull = (over: Partial<GitHubPullRequest>): GitHubPullRequest => ({ kind: "pull", ...base, state: "OPEN", isDraft: false, headRefName: "b", baseRefName: "main", mergeable: "MERGEABLE", reviewDecision: "", additions: 1, deletions: 0, files: [], checks: [], reviews: [], mergedAt: null, ...over });
+  const issue = (over: Partial<GitHubIssue>): GitHubIssue => ({ kind: "issue", ...base, state: "OPEN", ...over });
+  assert.equal(itemStateLabel(pull({})), "open");
+  assert.equal(itemStateLabel(pull({ isDraft: true })), "draft");
+  assert.equal(itemStateLabel(pull({ state: "MERGED" })), "merged");
+  assert.equal(itemStateLabel(pull({ state: "CLOSED" })), "closed");
+  assert.equal(itemStateLabel(issue({ state: "CLOSED" })), "closed");
+
+  const check = (state: "success" | "failure" | "pending" | "neutral") => ({ name: state, workflow: null, state, startedAt: null, url: null });
+  assert.deepEqual(checksLabel(pull({})), { state: "none", text: "no checks" });
+  assert.deepEqual(checksLabel(pull({ checks: [check("success"), check("neutral")] })), { state: "success", text: "1 passed, 1 skipped" });
+  assert.deepEqual(checksLabel(pull({ checks: [check("success"), check("success")] })), { state: "success", text: "2 checks passed" });
+  assert.deepEqual(checksLabel(pull({ checks: [check("success"), check("pending")] })), { state: "pending", text: "1 of 2 checks running" });
+  assert.deepEqual(checksLabel(pull({ checks: [check("failure"), check("pending")] })), { state: "failure", text: "1 of 2 checks failed" });
+
+  assert.deepEqual(itemActions(pull({})).map((a) => a.label), ["Approve", "Request changes", "Comment", "Merge", "Close"]);
+  assert.deepEqual(itemActions(pull({ state: "MERGED" })).map((a) => a.label), ["Comment"]);
+  assert.deepEqual(itemActions(pull({ state: "CLOSED" })).map((a) => a.label), ["Comment", "Reopen"]);
+  assert.deepEqual(itemActions(issue({})).map((a) => a.label), ["Comment", "Close"]);
+  assert.deepEqual(itemActions(issue({ state: "CLOSED" })).map((a) => a.label), ["Comment", "Reopen"]);
+});
+
+test("the thread that holds a number is found on its machine, and an archived one is not (#108)", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [project("p1", "one")], [
+    thread("t1", "p1", { issue: { number: 94, title: null, url: null, takenAt: "t" } }),
+    thread("t2", "p1", { pullRequest: { number: 12, url: "u", branch: "b", base: "main", openedAt: "t" }, archivedAt: "t" }),
+  ]));
+  assert.equal(holderOf(s, "ws://box:3790", "p1", 94)?.id, "t1");
+  assert.equal(holderOf(s, "ws://box:3790", "p1", 12), null);
+  assert.equal(holderOf(s, "ws://box:3790", "p2", 94), null);
+  assert.equal(holderOf(s, "ws://nope", "p1", 94), null);
 });

@@ -5,6 +5,9 @@ import { sumUsage, usageRows, fmtTokens, fmtCost, USAGE_WINDOWS, type Overlay } 
 import { PLACEMENT_RULE } from "../run.js";
 import { T } from "../theme.js";
 import { truncate, SPINNER } from "../lines.js";
+import { hyperlinksEnabled, osc8 } from "../links.js";
+
+const HYPERLINKS = hyperlinksEnabled();
 
 export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick, run, machineNameOf }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number; run?: Run | null; machineNameOf?: (id: string) => string }) {
   const w = Math.min(width - 4, 80);
@@ -238,7 +241,7 @@ function RunBody({ run, machineName, marked, cursor, busy, width, maxRows }: {
             <Text color={memberTint(m.state)}>{cell(runMemberStateLabel(m.state), RUN_COLS.state)}</Text>
             {cell(machineName(m.machineId), RUN_COLS.machine)}
             {cell(m.branch ?? "", RUN_COLS.branch)}
-            {cell(m.pullRequest ? `#${m.pullRequest.number}` : "", RUN_COLS.pr)}
+            {m.pullRequest && HYPERLINKS ? osc8(m.pullRequest.url, cell(`#${m.pullRequest.number}`, RUN_COLS.pr)) : cell(m.pullRequest ? `#${m.pullRequest.number}` : "", RUN_COLS.pr)}
           </Text>
         );
       })}

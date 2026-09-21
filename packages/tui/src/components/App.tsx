@@ -6,7 +6,9 @@ import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
-import { openCommand, type LinkContext } from "../links.js";
+import { hyperlinksEnabled, openCommand, osc8, repoUrlOf, type LinkContext } from "../links.js";
+
+const HYPERLINKS = hyperlinksEnabled();
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
@@ -200,7 +202,11 @@ export function App({ store }: { store: Store }) {
   // machine is the loopback one; a URL is openable from any machine.
   const viewMachine = state.view?.machine ?? null;
   const viewHome = viewMachine ? (state.machines.get(viewMachine)?.info?.homeDir ?? undefined) : undefined;
-  const linkCtx = useMemo<LinkContext>(() => ({ localFiles: !!viewMachine && isLoopbackUrl(viewMachine), homeDir: viewHome }), [viewMachine, viewHome]);
+  // A `#N` links to the project's repository on GitHub (#108), which is the
+  // same from every machine.
+  const viewProjectId = state.view?.thread?.projectId ?? null;
+  const viewRepoUrl = viewMachine && viewProjectId ? repoUrlOf(state.machines.get(viewMachine)?.projects.get(viewProjectId)?.repositoryIdentity) : undefined;
+  const linkCtx = useMemo<LinkContext>(() => ({ localFiles: !!viewMachine && isLoopbackUrl(viewMachine), homeDir: viewHome, repoUrl: viewRepoUrl }), [viewMachine, viewHome, viewRepoUrl]);
   // The lines of every item that did not change. A streamed reply replaces one
   // item and leaves the rest alone, so without this the client lays out the
   // whole transcript sixteen times a second to follow a single paragraph.
@@ -913,6 +919,10 @@ export function App({ store }: { store: Store }) {
       // Who merges the thread's pull request. Offered only while a watch runs:
       // there is nothing to merge before one, and nothing left after.
       if (t.watch?.state === "watching") opts.push({ id: "merge", label: t.watch.merge === "auto" ? `Merge policy: auto — covey merges #${t.watch.number} when it is green` : `Merge policy: manual — a person merges #${t.watch.number}`, hint: "M" });
+      // The issue and the pull request open in the browser (#108): the web
+      // client has the view in the page; the terminal has the link.
+      if (t.issue) opts.push({ id: "openissue", label: `Open issue #${t.issue.number} on GitHub${t.issue.title ? ` — ${truncate(t.issue.title, 50)}` : ""}`, hint: "browser" });
+      if (t.pullRequest) opts.push({ id: "openpr", label: `Open pull request #${t.pullRequest.number} on GitHub — into ${t.pullRequest.base}`, hint: "browser" });
       opts.push({ id: "stop", label: "Stop session process" });
     }
     opts.push({ id: "new", label: "New thread — in its own worktree", hint: "n" });
@@ -945,6 +955,12 @@ export function App({ store }: { store: Store }) {
         case "quiet": return;
         case "archive": return void store.threadCommand({ type: "thread.archive", threadId: t!.id, archived: !t!.archivedAt });
         case "merge": return void store.threadCommand({ type: "thread.setMerge", threadId: t!.id, merge: t!.watch?.merge === "auto" ? "manual" : "auto" });
+        case "openissue": {
+          // The daemon records the URL when `gh` could read the issue; else it is the repository's issues route.
+          const url = t!.issue!.url ?? `${repoUrlOf(state.machines.get(state.view!.machine)?.projects.get(t!.projectId)?.repositoryIdentity) ?? ""}/issues/${t!.issue!.number}`;
+          return url.startsWith("http") ? openLink(url) : store.notify("no URL for that issue", "error");
+        }
+        case "openpr": return openLink(t!.pullRequest!.url);
         case "stop": return void store.threadCommand({ type: "session.stop", threadId: t!.id });
         case "new": return void newThread();
         case "addproject": return addProject();
@@ -1857,7 +1873,7 @@ export function App({ store }: { store: Store }) {
         <Box height={1} paddingX={2} justifyContent="space-between">
           <Box>
             {summaryRow ? (<><Text color={T.text} bold>{truncate(summaryTitle || "", Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {summarySub}</Text></>)
-              : header ? (<><Text color={T.text} bold>{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {headerProject?.title}</Text>{header.movedTo && <Text color={T.warning}>  moved</Text>}</>)
+              : header ? (<><Text color={T.text} bold>{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {headerProject?.title}</Text>{header.pullRequest && <Text color={T.awaiting}>  {HYPERLINKS ? osc8(header.pullRequest.url, `PR #${header.pullRequest.number}`) : `PR #${header.pullRequest.number}`}</Text>}{header.movedTo && <Text color={T.warning}>  moved</Text>}</>)
               : <Text color={T.subtle}>covey — multi-agent TUI</Text>}
           </Box>
           <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : state.scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
