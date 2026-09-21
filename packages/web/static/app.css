@@ -70,7 +70,13 @@ button[disabled] { opacity: .45; }
 .project-row .count.waiting { color: var(--awaiting); }
 .project-row .new { min-height: 32px; padding: 0 12px; border-radius: 8px; font-size: 18px; line-height: 1; }
 .threads .none { color: var(--faint); padding: 8px 16px 8px 40px; font-size: 14px; }
-.thread-row { display: flex; align-items: center; gap: 12px; padding: 10px 16px 10px 20px; min-height: 56px; border-bottom: 1px solid var(--surface); }
+/* A row slides left over its button. The front paints its own background so
+   the button shows only where the row has moved away. */
+.swipe { position: relative; overflow: hidden; }
+.swipe .archive { position: absolute; top: 0; right: 0; bottom: 0; width: 88px; border: none; border-radius: 0; background: var(--warning); color: #1a1200; font-weight: 600; }
+.thread-row { position: relative; display: flex; align-items: center; gap: 12px; padding: 10px 16px 10px 20px; min-height: 56px; border-bottom: 1px solid var(--surface); background: var(--bg); touch-action: pan-y; user-select: none; -webkit-user-select: none; transition: transform .16s ease-out; }
+.thread-row.dragging { transition: none; }
+.swipe.open .thread-row { transform: translateX(-88px); }
 .thread-row:active { background: var(--surface); }
 .thread-row .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
 .tone-busy .dot { background: var(--working); animation: pulse 1.2s ease-in-out infinite; }

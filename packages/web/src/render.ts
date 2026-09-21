@@ -32,7 +32,16 @@ export interface Actions {
   restartMachine(machine: string): void;
   /** Where `machine` listens from now on: `tailnet`, `all`, or `loopback`. */
   setBind(machine: string, bind: string): void;
+  /** Take a thread off the list. The TUI can bring it back. */
+  archiveThread(machine: string, threadId: string): void;
 }
+
+/** How far a row slides to show the button under it, in CSS pixels. Matches `.swipe .archive` in app.css. */
+const SWIPE_REVEAL = 88;
+/** A drag past this is a swipe; short of it the row goes back. */
+const SWIPE_COMMIT = SWIPE_REVEAL / 2;
+/** Fingers wobble. Less than this is a tap, or the start of a scroll. */
+const SWIPE_SLOP = 8;
 
 /** Whether a tap is the reader's pointer. Enter sends on a keyboard and breaks a line on a phone. */
 const coarse = () => globalThis.matchMedia?.("(pointer: coarse)").matches ?? false;
@@ -52,6 +61,10 @@ export class Renderer {
   private shownThread: string | null = null;
   /** The reader is at the end, so a new row scrolls into view. */
   private atBottom = true;
+  /** The `machine:thread` whose row is slid open, showing its button. */
+  private swiped: string | null = null;
+  /** A drag just ended, so the click that follows it is not a tap. */
+  private suppressClick = false;
 
   constructor(private root: HTMLElement, private a: Actions) {
     this.banner = h("div", { class: "banner hidden", onclick: () => this.a.retry() });
@@ -218,10 +231,24 @@ export class Renderer {
     );
   }
 
+  /**
+   * A thread row slides left under a finger to show the button beneath it.
+   *
+   * The browser keeps vertical scrolling for itself (`touch-action: pan-y`),
+   * so a drag reaches here only when it is more sideways than up. A tap on
+   * a row that is slid open closes it; a tap anywhere else closes whatever
+   * is open. The list is rebuilt on every paint, so which row is open lives
+   * on the renderer, not on the element.
+   */
   private threadRow(ref: ThreadRef, showMachine: boolean): HTMLElement {
     const t = ref.thread;
+    const key = `${ref.machine}:${t.id}`;
     const tone = threadTone(t);
-    return h("div", { class: `thread-row tone-${tone}`, onclick: () => this.a.openThread(ref.machine, t.id) },
+    const front = h("div", { class: `thread-row tone-${tone}`, onclick: () => {
+      if (this.suppressClick) { this.suppressClick = false; return; }
+      if (this.swiped) { this.closeSwipe(); return; }
+      this.a.openThread(ref.machine, t.id);
+    } },
       h("span", { class: "dot" }),
       h("div", { class: "text" },
         h("div", { class: "title" }, t.pinnedAt ? "★ " : "", t.title),
@@ -229,6 +256,60 @@ export class Renderer {
       ),
       h("span", { class: "when" }, relTime(t.lastMessageAt ?? t.updatedAt)),
     );
+    const wrap = h("div", { class: `swipe${this.swiped === key ? " open" : ""}` },
+      h("button", { class: "archive", type: "button", onclick: () => { this.swiped = null; this.a.archiveThread(ref.machine, t.id); } }, "Archive"),
+      front,
+    );
+    this.attachSwipe(wrap, front, key);
+    return wrap;
+  }
+
+  private attachSwipe(wrap: HTMLElement, front: HTMLElement, key: string) {
+    let startX = 0, startY = 0, base = 0, offset = 0;
+    let pointer: number | null = null;
+    /** Null until the drag has said which way it goes. */
+    let sideways: boolean | null = null;
+    const place = (x: number) => { front.style.transform = x ? `translateX(${x}px)` : ""; };
+    front.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0) return;
+      pointer = ev.pointerId; startX = ev.clientX; startY = ev.clientY; sideways = null;
+      base = wrap.classList.contains("open") ? -SWIPE_REVEAL : 0; offset = base;
+    });
+    front.addEventListener("pointermove", (ev) => {
+      if (ev.pointerId !== pointer) return;
+      const dx = ev.clientX - startX, dy = ev.clientY - startY;
+      if (sideways === null) {
+        if (Math.abs(dx) < SWIPE_SLOP && Math.abs(dy) < SWIPE_SLOP) return;
+        sideways = Math.abs(dx) > Math.abs(dy);
+        if (!sideways) { pointer = null; return; }
+        front.setPointerCapture(ev.pointerId);
+        front.classList.add("dragging");
+        if (this.swiped && this.swiped !== key) this.closeSwipe();
+      }
+      offset = Math.max(-SWIPE_REVEAL, Math.min(0, base + dx));
+      place(offset);
+    });
+    const end = (ev: PointerEvent) => {
+      if (ev.pointerId !== pointer) return;
+      pointer = null;
+      if (!sideways) return;
+      front.classList.remove("dragging");
+      place(0);
+      const open = offset < -SWIPE_COMMIT;
+      wrap.classList.toggle("open", open);
+      this.swiped = open ? key : null;
+      // The click after a drag would open the thread the finger only slid.
+      this.suppressClick = true;
+      setTimeout(() => { this.suppressClick = false; }, 0);
+    };
+    front.addEventListener("pointerup", end);
+    front.addEventListener("pointercancel", end);
+  }
+
+  /** Slide the open row back, without a paint. */
+  private closeSwipe() {
+    this.swiped = null;
+    for (const el of this.list.querySelectorAll(".swipe.open")) el.classList.remove("open");
   }
 
   private paintThread(s: State, v: View) {

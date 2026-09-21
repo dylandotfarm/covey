@@ -148,6 +148,9 @@ const actions: Actions = {
   setBind(machine, bind) {
     clients.get(machine)?.command({ type: "machine.settings", bind }).catch(fail);
   },
+  archiveThread(machine, threadId) {
+    clients.get(machine)?.command({ type: "thread.archive", threadId, archived: true }).catch(fail);
+  },
 };
 
 const viewClient = () => (state.view ? clients.get(state.view.machine) : undefined);
