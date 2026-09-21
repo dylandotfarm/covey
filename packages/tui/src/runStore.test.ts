@@ -545,8 +545,7 @@ test("→ reopens a run the operator furled, before it opens the run's panel", a
   store.setOverlay(null);
   const { key, unmount } = await paint(store);
   try {
-    await key(DOWN);  // the machine row, then the project the run works in
-    await key(DOWN);  // and then the run itself
+    await key(DOWN);  // the project the run works in, then the run itself
 
     await key(LEFT);
     assert.equal(store.isExpanded(runKey(MAC, id)), false, "← furled the run");

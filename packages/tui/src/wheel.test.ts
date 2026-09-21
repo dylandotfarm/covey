@@ -178,7 +178,7 @@ test("a left notch mixed into a scroll down does not throw the view back up", as
 // here is the part this file is about: a chunk is still worth one row a notch.
 const thread = (n: number): Thread => ({
   id: `t${n}`, projectId: "p", title: `thread ${n}`, provider: "claude", sessionId: `s${n}`,
-  model: null, permissionMode: "default", modeChosen: false, createdAt: "2026-01-01T00:00:00Z",
+  model: null, permissionMode: "default", modeChosen: false, status: "idle", createdAt: "2026-01-01T00:00:00Z",
   updatedAt: `2026-01-01T00:00:${String(60 - n).padStart(2, "0")}Z`, archivedAt: null, movedTo: null,
 } as unknown as Thread);
 

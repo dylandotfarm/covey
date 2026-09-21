@@ -127,7 +127,7 @@ test("a thread a program started paints under the thread that started it, indent
   const store = storeWith(tree());
   store.state.expanded[threadGroupKey(PI, "manager")] = true;
   assert.deepEqual(painted(store.state as AppState), [
-    "manager@2", "agent-a@3", "agent-b@3", "agent-c@3", "mine@2",
+    "manager@1", "agent-a@2", "agent-b@2", "agent-c@2", "mine@1",
   ], "the children sit under their parent at a deeper level, not beside it as peers");
 });
 
@@ -151,7 +151,7 @@ test("a parent the sidebar cannot find leaves its child a row of its own", () =>
     started("orphan", "2026-01-08T00:00:00Z", "gone"),
     started("stranger", "2026-01-07T00:00:00Z", "not-a-thread-on-this-machine"),
   ]);
-  assert.deepEqual(painted(store.state as AppState), ["orphan@2", "stranger@2"]);
+  assert.deepEqual(painted(store.state as AppState), ["orphan@1", "stranger@1"]);
 });
 
 test("two threads naming each other as parent still each get exactly one row", () => {
@@ -161,10 +161,10 @@ test("two threads naming each other as parent still each get exactly one row", (
     started("a", "2026-01-09T00:00:00Z", "b"),
     started("b", "2026-01-08T00:00:00Z", "a"),
   ]);
-  assert.deepEqual(painted(store.state as AppState), ["a@2"], "the first of the pair is a row of its own");
+  assert.deepEqual(painted(store.state as AppState), ["a@1"], "the first of the pair is a row of its own");
   store.state.expanded[threadGroupKey(PI, "a")] = true;
   store.state.expanded[threadGroupKey(PI, "b")] = true;
-  assert.deepEqual(painted(store.state as AppState), ["a@2", "b@3"], "and the walk stops rather than looping");
+  assert.deepEqual(painted(store.state as AppState), ["a@1", "b@2"], "and the walk stops rather than looping");
 });
 
 // ---- a run in the tree --------------------------------------------------------
@@ -184,7 +184,7 @@ const shape = (s: AppState) => sidebarRows(s).map((r) => `${r.kind}@${r.depth}`)
 test("a run sits in the project its members work in, above that project's threads", () => {
   const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [run("build", ["working", "working"])]);
   assert.deepEqual(shape(store.state as AppState), [
-    "machine@0", "project@1", "run@2", "member@3", "member@3", "thread@2",
+    "project@0", "run@1", "member@2", "member@2", "thread@1", "machines@0",
   ], "the run is a child of the project, and its members are a level below it again");
 });
 
@@ -192,9 +192,9 @@ test("a run a thread asked for sits inside that thread's group", () => {
   const store = storeWith(tree(), [run("build", ["working"], "manager")]);
   store.state.expanded[threadGroupKey(PI, "manager")] = true;
   assert.deepEqual(shape(store.state as AppState), [
-    "machine@0", "project@1",
-    "thread@2", "run@3", "member@4", "thread@3", "thread@3", "thread@3",
-    "thread@2",
+    "project@0",
+    "thread@1", "run@2", "member@3", "thread@2", "thread@2", "thread@2",
+    "thread@1", "machines@0",
   ], "the run comes first inside the group, then the threads the manager started");
 });
 
@@ -206,7 +206,7 @@ test("a run whose parent thread has no row of its own falls back to the project"
     [thread("gone", "2026-01-09T00:00:00Z", { archivedAt: "2026-02-01T00:00:00Z" })],
     [run("build", ["working"], "gone")],
   );
-  assert.deepEqual(shape(store.state as AppState).slice(0, 3), ["machine@0", "project@1", "run@2"]);
+  assert.deepEqual(shape(store.state as AppState).slice(0, 3), ["project@0", "run@1", "member@2"]);
 });
 
 test("a furled thread holds its run as it holds its children, and counts it", () => {
@@ -244,14 +244,14 @@ test("a run this client cannot place in one project keeps its old row under the 
   const away = run("build", ["working"]);
   away.members[0]!.machineId = "m-elsewhere";
   const store = storeWith([thread("mine", "2026-01-09T00:00:00Z")], [away]);
-  assert.deepEqual(shape(store.state as AppState), ["machine@0", "run@1", "member@2", "project@1", "thread@2"]);
+  assert.deepEqual(shape(store.state as AppState), ["run@0", "member@1", "project@0", "thread@1", "machines@0"]);
 
   // The contrast, in the same case, because the shape above is also the shape
   // this file had before runs moved at all: bring the member home and the run
   // has to move into the project.
   away.members[0]!.machineId = info.machineId;
   store.state.machines.get(PI)!.runs.set(away.id, { ...away });
-  assert.deepEqual(shape(store.state as AppState), ["machine@0", "project@1", "run@2", "member@3", "thread@2"]);
+  assert.deepEqual(shape(store.state as AppState), ["project@0", "run@1", "member@2", "thread@1", "machines@0"]);
 });
 
 /**
@@ -273,7 +273,7 @@ test("a blocked run three levels down still reaches the screen", () => {
   // Both groups furled, which is how they start.
   const rows = sidebarRows(store.state as AppState);
   assert.deepEqual(rows.map((r) => `${r.kind}@${r.depth}`), [
-    "machine@0", "project@1", "thread@2", "thread@3", "run@4", "member@5", "member@5",
+    "project@0", "thread@1", "thread@2", "run@3", "member@4", "member@4", "machines@0",
   ], "the quiet thread is painted because of what it is holding, and the run with it");
   assert.equal(rows.find((r) => r.thread?.id === "root")!.hidden, 0, "nothing is held back");
 
@@ -282,8 +282,8 @@ test("a blocked run three levels down still reaches the screen", () => {
     thread("root", "2026-01-09T00:00:00Z"),
     started("mid", "2026-01-08T00:00:00Z", "root"),
   ], [run("build", ["working", "working"], "mid")]);
-  assert.deepEqual(shape(quiet.state as AppState), ["machine@0", "project@1", "thread@2"]);
-  assert.equal(sidebarRows(quiet.state as AppState)[2]!.hidden, 1);
+  assert.deepEqual(shape(quiet.state as AppState), ["project@0", "thread@1", "machines@0"]);
+  assert.equal(sidebarRows(quiet.state as AppState)[1]!.hidden, 1);
 });
 
 test("a run in planning sits with the thread that asked for it, not under the machine", () => {
@@ -294,7 +294,7 @@ test("a run in planning sits with the thread that asked for it, not under the ma
   const planned = run("build", [], "manager");
   const store = storeWith([thread("manager", "2026-01-09T00:00:00Z")], [planned]);
   store.state.expanded[threadGroupKey(PI, "manager")] = true;
-  assert.deepEqual(shape(store.state as AppState), ["machine@0", "project@1", "thread@2", "run@3"]);
+  assert.deepEqual(shape(store.state as AppState), ["project@0", "thread@1", "run@2", "machines@0"]);
 });
 
 /**
@@ -320,22 +320,22 @@ test("the tree of 2026-09-18: one project, one thread, and everything it started
   ], [run("pre-release", ["working", "working"], "create-issues")]);
 
   // Furled, which is how a group starts: one row for the eleven.
-  assert.deepEqual(shape(store.state as AppState), ["machine@0", "project@1", "thread@2", "thread@2"]);
+  assert.deepEqual(shape(store.state as AppState), ["project@0", "thread@1", "thread@1", "machines@0"]);
   const head = sidebarRows(store.state as AppState).find((r) => r.thread?.id === "create-issues")!;
   assert.equal(head.hidden, 3, "two review threads and the run");
 
   store.state.expanded[threadGroupKey(PI, "create-issues")] = true;
   const rows = sidebarRows(store.state as AppState);
   assert.deepEqual(rows.map((r) => `${r.kind}@${r.depth}`), [
-    "machine@0", "project@1",
-    "thread@2", "run@3", "member@4", "member@4", "thread@3", "thread@3",
-    "thread@2",
+    "project@0",
+    "thread@1", "run@2", "member@3", "member@3", "thread@2", "thread@2",
+    "thread@1", "machines@0",
   ]);
   const run278 = rows.find((r) => r.thread?.id === "review-278")!;
   const preRelease = rows.find((r) => r.kind === "run")!;
   assert.equal(run278.depth, preRelease.depth, "the review threads and the run are siblings under the thread");
   assert.ok(rows.indexOf(preRelease) < rows.indexOf(run278), "and the run comes first");
-  assert.deepEqual(rows.filter((r) => r.depth === 2 && r.kind === "thread").map((r) => r.thread!.id),
+  assert.deepEqual(rows.filter((r) => r.depth === 1 && r.kind === "thread").map((r) => r.thread!.id),
     ["create-issues", "mine"], "nothing an agent started is a row of the project any more");
 });
 
@@ -419,7 +419,7 @@ test("a group the user furled is still furled after a restart", () => {
   const again = storeWith(tree());
   assert.equal(again.isExpanded(key, false), false);
   assert.equal(again.getState().expanded[key], false, "the furl was written to the config, not only to memory");
-  assert.deepEqual(painted(again.state as AppState), ["manager@2", "mine@2"], "and it is still furled on screen");
+  assert.deepEqual(painted(again.state as AppState), ["manager@1", "mine@1"], "and it is still furled on screen");
 });
 
 // ---- App: the real frame, the real click, the real keys -----------------------
@@ -497,11 +497,11 @@ test("→ unfurls and ← furls, and a click on the parent opens it without furl
 
   const { rowOf, click, key, unmount } = await paint(store);
   try {
-    // Rows: pi, covey, manager, mine. The group is furled, so no agent shows.
+    // Rows: covey, manager, mine, machines. The group is furled, so no agent shows.
     assert.equal(store.isExpanded(gk, false), false);
 
-    // Down twice puts the cursor on the manager, then → unfurls.
-    await key(DOWN); await key(DOWN);
+    // Down once puts the cursor on the manager, then → unfurls.
+    await key(DOWN);
     await key(RIGHT);
     assert.equal(store.isExpanded(gk, false), true, "→ on the manager unfurled its group");
     assert.ok(rowOf("agent-a") > rowOf("manager"), "and the children are now painted under it");
@@ -541,8 +541,8 @@ test("← on a child moves to its parent, so ←← is the way out of a group", 
 
   const { key, unmount } = await paint(store);
   try {
-    // pi, covey, manager, agent-a, agent-b, agent-c, mine — four downs is agent-b.
-    for (let i = 0; i < 4; i++) await key(DOWN);
+    // covey, manager, agent-a, agent-b, agent-c, mine — three downs is agent-b.
+    for (let i = 0; i < 3; i++) await key(DOWN);
     assert.equal(opened.at(-1), "agent-b", "the cursor is on a child");
 
     // One ← moves to the parent. It does not furl: the child had no group.
@@ -675,7 +675,7 @@ test("a furled project says that a run inside it is waiting on somebody", async 
   const { frame, unmount } = await paint(store);
   try {
     // The project's own row, not the pane's header, which is also "covey".
-    const line = frame().find((l) => l.slice(0, 33).indexOf("covey") === 4) ?? "";
+    const line = frame().find((l) => l.slice(0, 33).indexOf("covey") === 3) ?? "";
     assert.ok(line.length > 0, "the project row was painted");
     assert.ok(line.includes("●"), `the fold swallowed the blocked member without a word: "${line.slice(0, 33)}"`);
   } finally { unmount(); }
@@ -727,8 +727,8 @@ test("← from a member reaches its run first, and the thread only after it", as
   store.state.expanded[runKey(PI, "build")] = false;   // the member shows because it is blocked
   const { key, unmount } = await paint(store);
   try {
-    // pi, covey, manager, build, the blocked member — four downs.
-    for (let i = 0; i < 4; i++) await key(DOWN);
+    // covey, manager, build, the blocked member — three downs.
+    for (let i = 0; i < 3; i++) await key(DOWN);
 
     await key(LEFT);   // onto the run, which is already furled
     await key(LEFT);   // onto the manager
@@ -749,11 +749,11 @@ test("← on a run never jumps the cursor into another part of the tree", async 
     thread("gone", "2026-01-09T00:00:00Z", { archivedAt: "2026-02-01T00:00:00Z" }),
     thread("mine", "2026-01-08T00:00:00Z"),
   ], [run("build", ["working"], "gone")]);
-  const ak = archiveKey(PI, project.id);
+  const ak = archiveKey(`${PI}:${project.id}`);
   store.state.expanded[ak] = true;
   const { key, unmount } = await paint(store);
   try {
-    await key(DOWN); await key(DOWN);   // pi, covey, then the run
+    await key(DOWN);   // covey, then the run
     await key(LEFT);                    // furls the run
     await key(LEFT);                    // nowhere to go from here
     await key(LEFT);
@@ -768,7 +768,7 @@ test("a furled project paints the dot and the count for what its runs hold", asy
   store.state.expanded[`${PI}:${project.id}`] = false;
   const { frame, unmount } = await paint(store);
   try {
-    const line = frame().find((l) => l.slice(0, 33).indexOf("covey") === 4) ?? "";
+    const line = frame().find((l) => l.slice(0, 33).indexOf("covey") === 3) ?? "";
     assert.ok(line.includes("●"), `the fold said nothing about the run working inside it: "${line.slice(0, 33)}"`);
     assert.ok(/covey 4\b/.test(line), `one thread and three tasks that are not threads yet: "${line.slice(0, 33)}"`);
   } finally { unmount(); }

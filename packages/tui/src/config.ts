@@ -39,6 +39,12 @@ export interface TuiConfig {
     defaultPermissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
     /** Disable the terminal bell for background thread events. */
     quiet?: boolean;
+    /**
+     * Clones asked of machines that were not connected at the time. The
+     * store sends each one when its machine next answers, and takes it off
+     * the list once the machine has the project.
+     */
+    pendingProjects?: { machine: string; url: string; title?: string }[];
   };
 }
 

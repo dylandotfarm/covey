@@ -7,8 +7,9 @@
  * list and the mouse hit test are one array: these cases click the terminal
  * output rather than ask `sidebarCells` where it thinks a row is.
  *
- * A machine keeps the tree it had when it answered, so the rows below an
- * offline machine are its own — which is what makes it worth clicking.
+ * The machines sit in their own section below the projects (#89), furled by
+ * default; these cases open it. A machine keeps the projects it had when it
+ * answered, so they still show under their repository above.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,7 +22,7 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-offline-"));
 import React from "react";
 import { render } from "ink";
 import type { Project, Thread, TimelineItem } from "@covey/protocol";
-import { Store, type MachineState } from "./store.js";
+import { Store, MACHINES_KEY, type MachineState } from "./store.js";
 import { App } from "./components/App.js";
 
 const OFF = "ws://steamdeck:3790";
@@ -34,7 +35,7 @@ const project = (id: string, title: string): Project => ({
 
 const thread = (id: string, projectId: string, title: string): Thread => ({
   id, projectId, title, provider: "claude", sessionId: id, model: null, permissionMode: "default",
-  modeChosen: false, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:10Z",
+  modeChosen: false, status: "idle", pendingApprovals: 0, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:10Z",
   archivedAt: null, movedTo: null,
 } as unknown as Thread);
 
@@ -99,12 +100,13 @@ function twoMachines() {
       [UP, machine(UP, "pi", "connected", [thread("open", "p", "ZZ still here")])],
     ]),
     order: [OFF, UP],
+    expanded: { [MACHINES_KEY]: true },
     view: {
       machine: UP, threadId: "open", thread: null,
       items: new Map(Array.from({ length: 200 }, (_, i) => item(i + 1)).map((i) => [i.id, i])),
       loading: false, error: null, hasMore: false, loadingOlder: false, seq: 200,
     },
-  } as Store["state"];
+  } as unknown as Store["state"];
   return store;
 }
 
@@ -124,6 +126,8 @@ test("a click below an offline machine opens what was painted there, not the mac
   (store as any).select = async (sel: { threadId: string }) => { opened.push(sel.threadId); };
   const retried: string[] = [];
   (store as any).retryMachine = (key: string) => { retried.push(key); };
+  const panels: string[] = [];
+  (store as any).setOverlay = (ov: any) => { if (ov) panels.push(ov.kind); };
 
   const { rowOf, lineAt, click, unmount } = await paint(store);
   try {
@@ -131,17 +135,20 @@ test("a click below an offline machine opens what was painted there, not the mac
     // Whatever the tree below it is, the click has to reach the row the
     // terminal drew on that line — a blank spacer line reaches nothing.
     const below = machineRow + 1;
-    assert.match(lineAt(below), /steamdeck project/i, "the line below an offline machine is its project");
+    assert.match(lineAt(below), /PI/, "the line below an offline machine is the next machine");
+    // The offline machine's project is still painted, above, under its repository.
+    assert.ok(rowOf("steamdeck project") < rowOf("MACHINES"), "an offline machine's project stays in the tree above");
 
-    // The thread first: folding a project moves every row under it, and the
-    // frame this reads was painted once, before any of these clicks.
+    // The thread first: the frame this reads was painted once, before any of
+    // these clicks.
     await click(rowOf("ZZ still here"));
     assert.deepEqual(opened, ["open"], "the thread painted on that line is the one that opened");
 
     await click(below);
-    assert.deepEqual(retried, [], "a click below the machine row is not a click on it");
-    assert.deepEqual(opened, ["open"], "and a project row folds rather than opening a conversation");
-    assert.equal(store.getState().expanded[`${OFF}:p`], false, "the project painted there is the one that folded");
+    assert.deepEqual(retried, [], "a click below the offline machine row is not a click on it");
+    assert.deepEqual(opened, ["open"], "and a machine row opens its panel rather than a conversation");
+    // The control panel is a pick over the machine's settings and actions.
+    assert.deepEqual(panels, ["pick"], "the connected machine painted there is the one whose panel opened");
   } finally { unmount(); }
 });
 

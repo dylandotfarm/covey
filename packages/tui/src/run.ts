@@ -149,6 +149,19 @@ function requirementText(r: TaskRequirement): string {
  * order the operator wrote, and a task that no machine can take says so rather
  * than landing somewhere that cannot do it.
  */
+/**
+ * Machines in the order placement tries them: fastest first, by cores, with a
+ * stable tiebreak on the name so two runs of the same task list place the
+ * same way. The ones with room come before the ones at their limit, so the
+ * first entry is where the next task goes. A new thread asks the same
+ * question, and gets the same answer.
+ */
+export function rankMachines(machines: PlacementMachine[], carrying?: Map<string, number>): PlacementMachine[] {
+  const load = (m: PlacementMachine) => carrying?.get(m.machineId) ?? 0;
+  const room = (m: PlacementMachine) => (load(m) < m.concurrency ? 0 : 1);
+  return [...machines].sort((a, b) => room(a) - room(b) || b.cpuCount - a.cpuCount || a.name.localeCompare(b.name));
+}
+
 export function placeTasks(tasks: RunTask[], machines: PlacementMachine[], carrying?: Map<string, number>): Placement[] {
   // Fastest first, by cores; a stable tiebreak on the name so two runs of the
   // same task list place the same way.

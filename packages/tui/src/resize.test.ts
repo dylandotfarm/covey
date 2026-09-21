@@ -273,15 +273,15 @@ test("the sidebar keeps its rail when the pane beside it cannot", async () => {
     `the rail should stand in one column, ${SIDEBAR_W - 1}, on every row that has it`);
 });
 
-test("the machine summary is bounded too", async () => {
-  // `summaryRow` needs the focus in the sidebar with the cursor on a machine
+test("the project summary is bounded too", async () => {
+  // `summaryRow` needs the focus in the sidebar with the cursor on a project
   // row, which is where it starts. Through the store's own setter, not by
   // writing to `state`: a bare write notifies nobody, and the client goes on
   // painting whatever it last committed.
   app.store.setFocus("sidebar");
-  await show(120, "threads in");
+  await show(120, "threads on");
   assert.deepEqual(overflow(await app.resize(80), 80), [],
-    "rows too wide for 80 columns with the machine summary on screen");
+    "rows too wide for 80 columns with the project summary on screen");
 });
 
 test("so is an overlay", async () => {
