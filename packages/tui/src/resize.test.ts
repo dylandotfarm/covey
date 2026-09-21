@@ -149,17 +149,36 @@ async function mount(cols: number, rowCount: number) {
   const app = render(React.createElement(App, { store }), {
     ...inkOptions(store), stdin, stdout, patchConsole: false, interactive: true,
   });
-  const settle = (ms = 150) => new Promise((r) => setTimeout(r, ms));
-  await settle(300);
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  /** A write tall enough to be a frame rather than a cursor move. */
+  const painted = () => writes.some((w) => rows(w).length > 10);
+  /**
+   * Wait for the client to paint, rather than for a fixed spell.
+   *
+   * A fixed wait measures the runner. On this project's Pi, with the rest of
+   * the suite laying out Ink trees on the other cores, a frame can take longer
+   * than any number short enough to keep this file quick — and a case that
+   * measures nothing passes, because no row it did not see was too wide. That
+   * is the worse direction to fail in, so the wait is on the frame.
+   */
+  const untilPainted = async (ms = 4000) => {
+    const deadline = Date.now() + ms;
+    while (!painted() && Date.now() < deadline) await settle(25);
+    await settle(50); // let a second frame, if the resize causes one, land too
+  };
+  await untilPainted();
   return {
     /** Change the terminal under the client, and hand back only what it then wrote. */
     async resize(nextCols: number, nextRows = rowCount) {
       writes = [];
       stdout.columns = nextCols; stdout.rows = nextRows;
       stdout.emit("resize");
-      await settle();
+      await untilPainted();
       return writes;
     },
+    /** Everything written since the last resize, for a wait on a condition. */
+    written: () => writes,
+    settle,
     store,
     unmount: () => app.unmount(),
   };
@@ -184,9 +203,17 @@ const overflow = (writes: string[], cols: number) => tooWide(writes, cols).map(w
  * some reason that has nothing to do with a resize.
  */
 async function show(cols: number, marker: string) {
-  const painted = (await app.resize(cols)).flatMap(rows).join("\n");
-  assert.ok(painted.includes(marker),
-    `expected ${JSON.stringify(marker)} on screen before the resize under test, got:\n${painted.slice(0, 400)}`);
+  await app.resize(cols);
+  // On the condition, not on a spell — see `untilPainted`. The pane may take
+  // more than one frame to arrive when the runner is busy.
+  const deadline = Date.now() + 4000;
+  let painted = "";
+  while (Date.now() < deadline) {
+    painted = app.written().flatMap(rows).join("\n");
+    if (painted.includes(marker)) return;
+    await app.settle(50);
+  }
+  assert.fail(`expected ${JSON.stringify(marker)} on screen before the resize under test, got:\n${painted.slice(0, 400)}`);
 }
 
 let app: Awaited<ReturnType<typeof mount>>;
