@@ -1733,6 +1733,15 @@ export function permissionModeLabel(mode: PermissionMode | null | undefined): st
 /** One machine's copy of a pooled project. */
 export interface PoolMember { machine: string; projectId: string; project: Project }
 
+/**
+ * How many machines a pool spans. Not how many rows it holds: a machine may
+ * hold a repository twice, as a clone and as a checkout from before projects
+ * were clones, and two rows on one machine are still one machine.
+ */
+export function poolMachines(pool: PoolMember[]): number {
+  return new Set(pool.map((x) => x.machine)).size;
+}
+
 /** How a machine is named in the sidebar: what it calls itself, else the
  *  name it was saved under, else its key. */
 export function machineLabel(s: AppState, key: string): string {
@@ -2088,7 +2097,7 @@ export function sidebarRows(s: AppState): SidebarRow[] {
   if (groups.length === 0 && anyConnected) rows.push({ key: "e:", kind: "empty", machine: s.order.find((k) => s.machines.get(k)?.conn === "connected") ?? "", depth: 0 });
   for (const g of groups) {
     const first = g.members[0]!;
-    const pooled = g.members.length > 1;
+    const pooled = poolMachines(g.members) > 1;
     rows.push({ key: `p:${g.key}`, kind: "project", machine: first.machine, projectId: first.projectId, project: first.project, pool: g.members, groupKey: g.key, depth: 0 });
     // Every machine's threads of this repository, in one list by recency. A
     // thread's row keeps the machine it lives on; the tag says which when the

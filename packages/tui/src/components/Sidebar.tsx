@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { MACHINES_KEY, archiveKey, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { MACHINES_KEY, archiveKey, poolMachines, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -147,7 +147,8 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       const num = count ? String(count) : "";
       // A pool of more than one machine says so, because the threads under it
       // then carry a machine each.
-      const pool = (row.pool?.length ?? 1) > 1 ? ` ${row.pool!.length}⧉` : "";
+      const machines = poolMachines(row.pool ?? []);
+      const pool = machines > 1 ? ` ${machines}⧉` : "";
       return (
         <Box paddingLeft={1} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
