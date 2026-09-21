@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * One machine, one command: install the dependencies, build the workspace, and
- * put a `covey` launcher on your PATH. After this, `covey` in any terminal
- * opens the TUI and starts the local daemon.
+ * put a `covey` launcher on your PATH, and link the `/covey` skill into
+ * ~/.claude/skills so an agent inside a covey thread knows the loop. After
+ * this, `covey` in any terminal opens the TUI and starts the local daemon.
  *
  *   node scripts/setup.mjs [--bin-dir DIR] [--add-to-path] [--skip-build] [--force]
  *
@@ -88,7 +89,28 @@ if (!existsSync(dest)) {
 }
 if (!windows) chmodSync(target, 0o755);
 
-// --- 4. PATH ----------------------------------------------------------------
+// --- 4. the /covey skill ------------------------------------------------------
+// The skill tells an agent inside a covey thread how to take an issue to a
+// merged pull request with `covey issue …` and `covey pr …`. Claude Code reads
+// skills from ~/.claude/skills/<name>/SKILL.md, so the directory is linked
+// there, back to this checkout, the way the launcher is: a pull updates both.
+const skillSrc = join(root, "skills", "covey");
+const skillDir = join(home, ".claude", "skills");
+const skillDest = join(skillDir, "covey");
+mkdirSync(skillDir, { recursive: true });
+if (isLink(skillDest) && resolveLink(skillDest) === skillSrc) ok(`${tilde(skillDest)} already points here`);
+else if (isLink(skillDest) && resolveLink(skillDest).endsWith(join("skills", "covey")) && !existsSync(resolveLink(skillDest))) { rmSync(skillDest); linkSkill(); }
+else if (isLink(skillDest) || existsSync(skillDest)) {
+  if (has("--force")) { rmSync(skillDest, { recursive: true }); linkSkill(); }
+  else info(`note: ${tilde(skillDest)} exists and is not this checkout's; pass --force to replace it, so /covey reads the skill here`);
+} else linkSkill();
+function linkSkill() {
+  if (windows) { info(`copy ${tilde(skillSrc)} to ${tilde(skillDest)} by hand: Windows symlinks need a privilege this script does not ask for`); return; }
+  symlinkSync(skillSrc, skillDest, "dir");
+  ok(`${tilde(skillDest)} → ${tilde(skillSrc)}  (the /covey skill)`);
+}
+
+// --- 5. PATH ----------------------------------------------------------------
 if (onPath(binDir)) {
   const other = shadowingCovey(binDir);
   if (other) info(`note: ${tilde(other)} comes first on your PATH and will run instead`);

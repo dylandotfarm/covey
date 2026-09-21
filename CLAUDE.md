@@ -109,4 +109,7 @@
   end — `watch.test.ts` and `news.test.ts` hold the rules. An engine test passes
   `EngineOptions.ghHost` so no test reaches GitHub. A watch's merge policy is `manual` unless
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
-  ready, and never under a running turn.
+  ready, and never under a running turn. An agent asks with `covey issue …` and `covey pr …`
+  (`packages/cli/src/loop.ts`), and the `/covey` skill in `skills/covey/SKILL.md` tells it
+  the loop; `pnpm run setup` links that directory into `~/.claude/skills`. Change the CLI and
+  the skill together.

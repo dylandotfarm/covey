@@ -14,8 +14,11 @@
     "covey": "dist/index.js"
   },
   "dependencies": {
-    "@covey/protocol": "workspace:*",
     "@covey/daemon": "workspace:*",
+    "@covey/protocol": "workspace:*",
     "@covey/tui": "workspace:*"
+  },
+  "devDependencies": {
+    "ws": "^8.21.3"
   }
 }

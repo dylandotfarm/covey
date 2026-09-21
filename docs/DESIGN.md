@@ -433,6 +433,16 @@ runs 72 hours without a merge or a close ends in `blocked` too. The TUI reads a 
 thread and moves the member to `blocked` with that reason, which is the run's own word for
 "a person has to look".
 
+**An agent asks from its shell.** `covey issue take <n>`, `covey pr open`, `covey pr watch`,
+`covey pr policy` and `covey pr status` (`packages/cli/src/loop.ts`) speak to the local
+daemon over loopback for the thread in `COVEY_THREAD_ID`, with Node's own `WebSocket`, so
+they need nothing installed in the agent's shell. The `/covey` skill (`skills/covey/SKILL.md`)
+tells the agent the loop: take the issue, work, prove it, open through covey, stop the turn,
+and act on each `covey watch:` message; `--auto` only when the user said to merge on their
+behalf. `pnpm run setup` links the skill into `~/.claude/skills/covey`, back to the checkout,
+the way it links the launcher, so a pull updates both. A brief is then one line:
+`/covey take issue 94 to completion, automerge when done`.
+
 **Every watch has an end.** A merge or a close ends it. Archiving, deleting or moving the
 thread drops it, as does `thread.watch` with `null`. The two hand-rolled loops still asking
 GitHub every fifteen seconds an hour after their timeout are the reason.
