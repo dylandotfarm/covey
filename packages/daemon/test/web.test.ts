@@ -40,6 +40,15 @@ test("the daemon serves the web client beside /health", async () => {
   }
   assert.equal((await fetch(`${base}/health`)).status, 200);
   assert.equal((await fetch(`${base}/`, { method: "POST" })).status, 405);
+
+  // The media route (#110) refuses anything that is not a GitHub attachment
+  // before it makes a request, so nothing here reaches the network.
+  for (const bad of ["/media", "/media?url=", "/media?url=https://example.com/x.png", "/media?url=https://github.com/dylandotfarm/covey"]) {
+    const r = await fetch(base + bad);
+    assert.equal(r.status, 400, bad);
+    assert.match(await r.text(), /user attachment/);
+  }
+  assert.equal((await fetch(`${base}/media?url=https://github.com/user-attachments/assets/x`, { method: "POST" })).status, 405);
 });
 
 /** One request over the socket, on a fresh connection. */
@@ -64,6 +73,7 @@ test("the web client is off until the control panel turns it on, and stops when 
   assert.equal(off.status, 404);
   assert.match(await off.text(), /off on quiet/);
   assert.equal((await fetch(`${base}/app/main.js`)).status, 404);
+  assert.equal((await fetch(`${base}/media?url=https://example.com/x.png`)).status, 404, "the media route is off with the client");
   assert.equal((await fetch(`${base}/health`)).status, 200);
 
   const hello = await rpc(d.port, "hello", { protocolVersion: 1, client: "covey-tui" });

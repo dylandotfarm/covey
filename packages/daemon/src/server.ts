@@ -8,6 +8,7 @@ import { readFleet, type DaemonConfig } from "./config.js";
 import { listRepos, createRepo, GH_CWD } from "./repos.js";
 import { listRemoteBranches } from "./git.js";
 import { findWebRoots, serveWeb } from "./web.js";
+import { serveMedia } from "./media.js";
 import { webAddresses } from "./addresses.js";
 
 const STARTED_AT = new Date().toISOString();
@@ -62,7 +63,19 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
     // The phone's client: static files only, and the WebSocket above stays the
     // one gate. See `web.ts` for what is reachable. Read per request, because
     // the control panel turns it on and off while the daemon runs.
-    if (o.engine.machine.settings.webEnabled) { if (serveWeb(req, res, webRoots)) return; }
+    if (o.engine.machine.settings.webEnabled) {
+      if (serveWeb(req, res, webRoots)) return;
+      // An attachment from a private repository, by the daemon's token (#110).
+      // The one file route that is gated: the answer is a signed link to the
+      // bytes, which only the owner may have.
+      if (req.url?.startsWith("/media?") || req.url === "/media") {
+        void authenticate(req, o.config, selfUserId).then((auth) => {
+          if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`media: ${auth.reason}\n`); return; }
+          return serveMedia(req, res);
+        }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+        return;
+      }
+    }
     else if (req.url === "/") {
       res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
       res.end(`The web client is off on ${o.config.name}. In the TUI, press enter on this machine and choose "Web server: off" to start it.\n`);

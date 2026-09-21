@@ -27,6 +27,8 @@ function readToken(): string | undefined {
 
 const state = emptyState();
 const clients = new Map<string, MachineClient>();
+/** Read once: the page's token, if this address needs one. The media route takes it too (#110). */
+const token = readToken();
 
 /**
  * What is on screen is in the URL: a thread, `#/t/<machine>/<thread>`, or an
@@ -258,7 +260,7 @@ function fail(e: Error) {
   setTimeout(() => { if (p.connError === e.message) { p.connError = null; schedule(); } }, 4000);
 }
 
-const renderer = new Renderer(document.getElementById("app")!, actions);
+const renderer = new Renderer(document.getElementById("app")!, actions, token);
 
 // The browser's back control, a swipe from the edge, and the forward control
 // all change the hash; the hash says what is on screen.
@@ -268,5 +270,5 @@ addEventListener("hashchange", () => applyRoute(routeOf(location.hash)));
 addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") actions.retry(); });
 
 const origin = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
-dial(addMachine(state, origin, location.hostname, true), readToken());
+dial(addMachine(state, origin, location.hostname, true), token);
 schedule();

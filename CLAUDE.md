@@ -141,3 +141,9 @@
   `pnpm test` still changes nothing on GitHub (`githubItem.test.ts`). The TUI has no such
   screen: `links.ts` makes a `#N` an OSC 8 hyperlink when the project is on GitHub, and
   the palette opens the issue or the pull request in the browser.
+- Media in the web client is inline (#110): `markdown.ts` writes an `<img>` or a `<video>`
+  and the style sheet caps it at 40% of the screen; a tap on an image opens it full size.
+  A GitHub user attachment loads through `GET /media?url=…` on the daemon (`media.ts`):
+  GitHub answers 404 without the account's token and a five-minute signed redirect with
+  it, and the daemon forwards that redirect with the `gh` token. The route is gated like
+  the socket, refuses every host but GitHub's two, and is on only with the web client.
