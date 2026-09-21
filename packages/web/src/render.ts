@@ -93,6 +93,8 @@ export class Renderer {
   private shownItem: { key: string; item: GitHubItem | null; error: string | null; loading: boolean } | null = null;
   /** How the Merge button merges. A select beside it changes this. */
   private mergeMethod: MergeMethod = "merge";
+  /** The item's act was in flight at the last paint, so the paint that ends it takes the draft the state holds. */
+  private itemWasBusy = false;
 
   constructor(private root: HTMLElement, private a: Actions) {
     this.banner = h("div", { class: "banner hidden", onclick: () => this.a.retry() });
@@ -531,6 +533,10 @@ export class Renderer {
       h("button", { class: "refresh", type: "button", "aria-label": "Refresh", disabled: iv.loading || iv.busy, onclick: () => this.a.refreshItem() }, "↻"),
     );
     const shown = this.shownItem;
+    // An act that went through empties the box; one that failed keeps the
+    // text, so the reader can try again. The state says which.
+    if (this.itemWasBusy && !iv.busy) this.itemDraft.value = iv.draft;
+    this.itemWasBusy = iv.busy;
     if (!shown || shown.key !== key || shown.item !== item || shown.error !== iv.error || shown.loading !== iv.loading) {
       this.shownItem = { key, item, error: iv.error, loading: iv.loading };
       clear(this.itemBody);
