@@ -11,7 +11,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, truncateSync, readdirSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -93,6 +93,8 @@ function setup() {
   const host = fakeHost({
     canCreate: true,
     canMerge: true,
+    canAttach: true,
+    canComment: true,
     prs: {},
     issues: { 94: { number: 94, title: "Let a thread take an issue", url: "https://github.com/o/r/issues/94", state: "OPEN" } },
   });
@@ -504,4 +506,143 @@ test("under auto, a review that asks for changes holds the merge, and a refusal 
   await s.poll();
   assert.equal(s.turns("t1").length, 2, "one try per head");
   assert.equal(s.thread("t1").watch?.state, "watching", "a refused merge is a person's question; the watch goes on");
+});
+
+// ---- media on the pull request (#105) ----------------------------------------
+//
+// The attachment store is under `dataDir()`, which reads `COVEY_HOME` at call
+// time, so each test points it at its own scratch directory.
+
+function media(s: ReturnType<typeof setup>, name: string, size = 4): string {
+  const path = join(s.dir, name);
+  writeFileSync(path, "");
+  truncateSync(path, size);
+  return path;
+}
+
+const withHome = async (s: ReturnType<typeof setup>, f: () => Promise<void>) => {
+  const prior = process.env.COVEY_HOME;
+  process.env.COVEY_HOME = s.dir;
+  try { await f(); } finally { if (prior === undefined) delete process.env.COVEY_HOME; else process.env.COVEY_HOME = prior; }
+};
+
+test("a video and an image go up as user attachments, render inline in the order given, and a copy is kept", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.command({ type: "thread.takeIssue", threadId: "t1", issue: 94 });
+  await withHome(s, async () => {
+    await s.open("t1", { attachments: [{ name: "demo.mp4", path: media(s, "demo.mp4") }, { name: "shot.png", path: media(s, "shot.png") }] });
+  });
+  assert.deepEqual(s.host.uploads.map((u) => [u.name, u.contentType, u.size]), [["demo.mp4", "video/mp4", 4], ["shot.png", "image/png", 4]]);
+  const [video, image] = s.host.uploads;
+  assert.equal(s.host.opened[0]!.body, `The change.\n\n${video!.url}\n\n![shot.png](${image!.url})\n\nCloses #94`,
+    "the video is a bare URL and the image an image, in the order the flags were given, before the Closes line");
+  const kept = readdirSync(join(s.dir, "attachments", "t1")).map((f) => f.slice(-4)).sort();
+  assert.deepEqual(kept, [".mp4", ".png"], "the thread's attachment store holds a copy of each");
+  const notes = s.notes("t1");
+  assert.match(notes.find((n) => n.startsWith("Attached demo.mp4"))!, /^Attached demo\.mp4 \(video\/mp4\) as https:\/\/github\.com\/user-attachments\/assets\/1-demo\.mp4; a copy is at .*attachments.*t1/);
+  assert.match(notes.find((n) => n.startsWith("Attached shot.png"))!, /^Attached shot\.png \(image\/png\)/);
+});
+
+test("a placeholder puts the media where the body says", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await withHome(s, async () => {
+    await s.open("t1", { body: "Before.\n\n{{attach:demo.mp4}}\n\nAfter.", attachments: [{ name: "demo.mp4", path: media(s, "demo.mp4") }] });
+  });
+  assert.equal(s.host.opened[0]!.body, `Before.\n\n${s.host.uploads[0]!.url}\n\nAfter.`);
+});
+
+test("a file GitHub would not render is refused before the upload and before the push, and names the list", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await withHome(s, async () => {
+    await assert.rejects(
+      () => s.open("t1", { attachments: [{ name: "notes.txt", path: media(s, "notes.txt") }] }),
+      (e: unknown) => e instanceof EngineError && e.code === "bad_attachment" && /cannot attach notes\.txt: GitHub renders only \.mp4, \.mov, \.webm, \.png, \.jpg, \.jpeg, \.gif, \.webp, \.svg inline/.test(e.message),
+    );
+  });
+  assert.equal(s.host.uploads.length, 0, "nothing went up");
+  assert.equal(s.host.opened.length, 0, "nothing was pushed or opened");
+  assert.equal(s.thread("t1").pullRequest, undefined);
+  assert.equal(existsSync(join(s.dir, "attachments")), false, "nothing was kept for a file that can never go up");
+});
+
+test("a file over the plan's cap is refused before the upload, with the size and the cap", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const big = media(s, "demo.mp4", 12 * 1024 * 1024);
+  await withHome(s, async () => {
+    await assert.rejects(
+      () => s.open("t1", { attachments: [{ name: "demo.mp4", path: big }] }),
+      (e: unknown) => e instanceof EngineError && /demo\.mp4: it is 12 MB, over 10 MB, the cap for a video on the free plan/.test(e.message),
+    );
+    assert.equal(s.host.uploads.length, 0);
+    assert.equal(s.host.opened.length, 0);
+    // The same file goes up on a paid plan, where the cap is 100 MB.
+    s.host.options.plan = "paid";
+    await s.open("t1", { attachments: [{ name: "demo.mp4", path: big }] });
+  });
+  assert.equal(s.host.uploads.length, 1);
+  assert.equal(s.host.opened.length, 1);
+});
+
+test("an upload GitHub refuses stops before the push, prints the status, and names the by-hand fallback", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.host.options.uploadFail = { status: 403, body: '{"message":"Forbidden"}' };
+  await withHome(s, async () => {
+    await assert.rejects(
+      () => s.open("t1", { attachments: [{ name: "shot.png", path: media(s, "shot.png") }] }),
+      (e: unknown) => e instanceof EngineError && e.code === "upload_refused"
+        && /GitHub refused the upload of shot\.png: HTTP 403 \{"message":"Forbidden"\}\. The file is kept at .*attachments.*t1.*\.png; a person can drag it into the pull request by hand instead\. Nothing was pushed and nothing was opened/.test(e.message),
+    );
+  });
+  assert.equal(s.host.opened.length, 0, "no pull request with a path in its body");
+  assert.equal(s.thread("t1").pullRequest, undefined);
+  assert.equal(readdirSync(join(s.dir, "attachments", "t1")).length, 1, "the copy is there for the by-hand path");
+});
+
+test("a path that is not a file, a missing placeholder and two files of one name are each refused before anything happens", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await withHome(s, async () => {
+    await assert.rejects(() => s.open("t1", { attachments: [{ name: "x.png", path: join(s.dir, "nope.png") }] }), (e: unknown) => e instanceof EngineError && e.code === "no_file");
+    await assert.rejects(() => s.open("t1", { body: "{{attach:other.png}}", attachments: [{ name: "x.png", path: media(s, "x.png") }] }), (e: unknown) => e instanceof EngineError && /no --attach gives a file called other\.png/.test(e.message));
+    const p = media(s, "same.png");
+    await assert.rejects(() => s.open("t1", { attachments: [{ name: "same.png", path: p }, { name: "same.png", path: p }] }), (e: unknown) => e instanceof EngineError && /two files are called same\.png/.test(e.message));
+  });
+  assert.equal(s.host.opened.length, 0);
+});
+
+test("a comment goes on the thread's pull request with its media, and a thread with no pull request is told so", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await assert.rejects(() => s.engine.commentPullRequest({ threadId: "t1", body: "hi" }), (e: unknown) => e instanceof EngineError && e.code === "no_pull_request");
+  await s.open("t1");
+  await assert.rejects(() => s.engine.commentPullRequest({ threadId: "t1", body: "  " }), (e: unknown) => e instanceof EngineError && e.code === "bad_body");
+  await withHome(s, async () => {
+    const r = await s.engine.commentPullRequest({ threadId: "t1", body: "After the fix:", attachments: [{ name: "after.png", path: media(s, "after.png") }] });
+    assert.deepEqual(r, { number: 101, url: "https://github.com/o/r/pull/101#issuecomment-1" });
+    // Media alone is a comment too.
+    await s.engine.commentPullRequest({ threadId: "t1", attachments: [{ name: "demo.mp4", path: media(s, "demo.mp4") }] });
+  });
+  assert.deepEqual(s.host.comments, [
+    { number: 101, body: `After the fix:\n\n![after.png](${s.host.uploads[0]!.url})` },
+    { number: 101, body: s.host.uploads[1]!.url },
+  ]);
+  assert.match(s.notes("t1").at(-1)!, /Commented on pull request #101/);
+  // A pull request handed to covey by hand takes a comment the same way.
+  s.newThread("t2");
+  s.host.options.prs!["covey/t2"] = pr({ number: 7, headRefName: "covey/t2" });
+  await s.command({ type: "thread.watch", threadId: "t2", number: 7 });
+  await s.engine.commentPullRequest({ threadId: "t2", body: "Seen." });
+  assert.deepEqual(s.host.comments.at(-1), { number: 7, body: "Seen." });
 });

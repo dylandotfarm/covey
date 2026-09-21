@@ -8,13 +8,15 @@
  * Two rules hold here:
  *  - `read` refuses a command that can change state. The allow-list below is
  *    the whole of it, and `assertReadOnly` proves the refusal.
- *  - `mergePullRequest` and `createPullRequest` are the only methods that
- *    change anything. They sit together at the end, so a reader can see every
- *    mutation in one place, and a host has neither unless it was built with it.
+ *  - `mergePullRequest`, `createPullRequest`, `commentPullRequest` and
+ *    `uploadAttachment` are the only methods that change anything. They sit
+ *    together at the end, so a reader can see every mutation in one place,
+ *    and a host has none of them unless it was built with it.
  */
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { BaseHead, MemberDiff } from "@covey/protocol";
+import type { OwnerPlan } from "./attach.js";
 
 const run = promisify(execFile);
 
@@ -108,6 +110,21 @@ export interface PullRequestDraft {
   draft: boolean;
 }
 
+/** What an upload needs to know about the repository. */
+export interface RepositoryFacts {
+  /** GitHub's numeric id, which the attachment route files the upload under. */
+  id: number;
+  /** The plan of the owner, which sets the cap on a video. `unknown` when the token cannot read it. */
+  plan: OwnerPlan;
+}
+
+/** One file for `uploadAttachment`. The bytes are read by the caller. */
+export interface AttachmentUpload {
+  name: string;
+  contentType: string;
+  bytes: Buffer;
+}
+
 /** One commit that a branch holds and the base branch does not. */
 export interface BranchCommit {
   sha: string;
@@ -116,7 +133,7 @@ export interface BranchCommit {
 
 /**
  * What the integration half asks of `gh` and `git`. Every method reads. The
- * one method that writes is named so, and a test host leaves it out.
+ * methods that write are named so, and a test host leaves them out.
  */
 export interface GhHost {
   /** The pull request on `branch`, or null when the member opened none. */
@@ -133,9 +150,31 @@ export interface GhHost {
   revList(base: string, branch: string): Promise<BranchCommit[]>;
   /** Merge a pull request. One of the two calls that change anything. */
   mergePullRequest?(number: number, method: "merge" | "squash" | "rebase"): Promise<void>;
-  /** Push a branch and open a pull request for it. The other call that changes anything. */
+  /** Push a branch and open a pull request for it. The second call that changes anything. */
   createPullRequest?(draft: PullRequestDraft): Promise<{ number: number; url: string }>;
+  /** The repository's id and its owner's plan, which an upload needs. */
+  repository(): Promise<RepositoryFacts>;
+  /**
+   * Put a file up as a user attachment, the kind GitHub renders inline, and
+   * answer with its URL. The third write. A status other than 201 throws an
+   * `UploadRefused` with the status and the body, whole, because the route is
+   * undocumented and the answer is the only clue.
+   */
+  uploadAttachment?(file: AttachmentUpload): Promise<{ url: string }>;
+  /** Leave a comment on a pull request. The fourth write. */
+  commentPullRequest?(number: number, body: string): Promise<{ url: string }>;
 }
+
+/** What `uploadAttachment` throws when GitHub answers anything but 201. */
+export class UploadRefused extends Error {
+  constructor(public readonly status: number, public readonly body: string) {
+    super(`GitHub answered HTTP ${status}`);
+  }
+}
+
+/** Where the web form sends a user attachment. Not in the REST or GraphQL docs; verified 2026-09-21. */
+export const UPLOAD_URL = "https://uploads.github.com/user-attachments/assets";
+
 
 // ---- the read-only guard ----------------------------------------------------
 
@@ -258,6 +297,12 @@ export interface RealHostOptions {
   allowMerge?: boolean;
   /** Let this host push a branch and open a pull request. Off by default, as above. */
   allowCreate?: boolean;
+  /** Let this host upload a user attachment. Off by default, as above. */
+  allowAttach?: boolean;
+  /** Let this host comment on a pull request. Off by default, as above. */
+  allowComment?: boolean;
+  /** The network, for the upload. A test hands in a function that reaches nothing. */
+  fetch?: typeof fetch;
 }
 
 export function realGhHost(options: RealHostOptions): GhHost {
@@ -280,6 +325,22 @@ export function realGhHost(options: RealHostOptions): GhHost {
       return null;
     }
     return parsePullRequest(JSON.parse(out));
+  };
+
+  // The plan is on `/user` for the owner's own repository and on `/orgs/<o>`
+  // for an organisation's, and each answers `null` for a token without the
+  // scope to read it. `unknown` then, and the caller applies the free cap.
+  const ownerPlan = async (owner: string, type: string): Promise<OwnerPlan> => {
+    try {
+      const path = type === "Organization" ? `orgs/${owner}` : "user";
+      const out = await gh(cwd, ["api", path, "--jq", "{login: .login, plan: .plan.name}"]);
+      const j = JSON.parse(out) as { login?: string; plan?: string | null };
+      if (type !== "Organization" && j.login !== owner) return "unknown";
+      if (!j.plan) return "unknown";
+      return j.plan === "free" ? "free" : "paid";
+    } catch {
+      return "unknown";
+    }
   };
 
   const host: GhHost = {
@@ -318,6 +379,12 @@ export function realGhHost(options: RealHostOptions): GhHost {
       }
     },
 
+    async repository() {
+      const out = await gh(cwd, ["api", "repos/{owner}/{repo}", "--jq", "{id: .id, owner: .owner.login, type: .owner.type}"]);
+      const j = JSON.parse(out) as { id: number; owner: string; type: string };
+      return { id: Number(j.id), plan: await ownerPlan(j.owner, j.type) };
+    },
+
     async revList(base, branch) {
       await fetchOnce();
       try {
@@ -354,7 +421,53 @@ export function realGhHost(options: RealHostOptions): GhHost {
       return url;
     };
   }
+  if (options.allowAttach) {
+    host.uploadAttachment = async (file) => {
+      // The token is the one `gh` holds, read once per upload and never
+      // stored: this host is built per request and dropped after it.
+      const [{ id }, { stdout: token }] = await Promise.all([
+        host.repository(),
+        run("gh", ["auth", "token"], { cwd, timeout: CALL_TIMEOUT_MS }),
+      ]);
+      const req = uploadRequest(file, id, token.trim());
+      const res = await (options.fetch ?? fetch)(req.url, req.init);
+      const text = await res.text();
+      if (res.status !== 201) throw new UploadRefused(res.status, text);
+      const url = parseUploadAnswer(text);
+      if (!url) throw new UploadRefused(res.status, text);
+      return { url };
+    };
+  }
+  if (options.allowComment) {
+    host.commentPullRequest = async (number, body) => {
+      const { stdout } = await run("gh", ["pr", "comment", String(number), "--body", body], { cwd, timeout: CALL_TIMEOUT_MS });
+      return { url: stdout.trim().split("\n").filter(Boolean).at(-1) ?? "" };
+    };
+  }
   return host;
+}
+
+/** The one request the upload makes, exactly as the web form makes it. Pure, for the test. */
+export function uploadRequest(file: AttachmentUpload, repositoryId: number, token: string): { url: string; init: RequestInit } {
+  const q = new URLSearchParams({ name: file.name, content_type: file.contentType, repository_id: String(repositoryId) });
+  return {
+    url: `${UPLOAD_URL}?${q}`,
+    init: {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, Accept: "application/json", "Content-Type": file.contentType },
+      body: new Uint8Array(file.bytes),
+    },
+  };
+}
+
+/** The URL in the attachment route's answer, or null when the answer is not the JSON it gives on 201. Pure, for the test. */
+export function parseUploadAnswer(text: string): string | null {
+  try {
+    const j = JSON.parse(text) as { url?: unknown };
+    return typeof j.url === "string" && /^https:\/\/github\.com\/user-attachments\/assets\//.test(j.url) ? j.url : null;
+  } catch {
+    return null;
+  }
 }
 
 /** The URL `gh pr create` prints, and the number in it. Pure, for the test. */

@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { PROTOCOL_VERSION, KNOWN_MODELS, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon } from "@covey/protocol";
+import { PROTOCOL_VERSION, KNOWN_MODELS, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon, type PullRequestAttachment } from "@covey/protocol";
 import { Engine, EngineError } from "./engine.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
@@ -219,6 +219,13 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
           maxRounds: typeof p.maxRounds === "number" ? p.maxRounds : undefined,
           merge: p.merge === "auto" ? "auto" : p.merge === "manual" ? "manual" : undefined,
           mergeMethod: p.mergeMethod,
+          attachments: readAttachmentParams(p.attachments),
+        });
+      case "thread.commentPullRequest":
+        return engine.commentPullRequest({
+          threadId: String(p.threadId),
+          body: p.body === undefined ? undefined : String(p.body),
+          attachments: readAttachmentParams(p.attachments),
         });
       case "run.gate":
         return engine.runGate(String(p.threadId), String(p.label ?? ""), p.state, p.evidence ?? null);
@@ -264,3 +271,9 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
 }
 
 export type { PushMessage };
+
+/** The `attachments` of a pull request call, as `{ name, path }` rows and nothing else. */
+function readAttachmentParams(v: unknown): PullRequestAttachment[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((a) => ({ name: String(a?.name ?? ""), path: String(a?.path ?? "") }));
+}
