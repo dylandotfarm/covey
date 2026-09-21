@@ -233,23 +233,18 @@ export function openHomes(r: ProjectRow): ProjectHome[] {
 }
 
 /**
- * What the banner says about the fleet. The primary daemon is the page's own
- * connection, so its state comes first; a machine among the others that is
- * not connected is named, because its threads are the ones missing from the
- * list.
+ * What the banner says. Only the primary daemon speaks here: it is the
+ * page's own connection, and without it there is nothing on screen to trust.
+ * A fleet machine that is down is a line on the settings page, not a banner
+ * over the list — a machine that is off for the day would otherwise sit
+ * over every visit.
  */
 export function connectionSummary(s: State): { state: ConnState; text: string } {
   const p = primaryMachine(s);
   if (!p) return { state: "connecting", text: "connecting…" };
-  if (p.conn !== "connected") {
-    const why = p.connError ? ` · ${p.connError}` : "";
-    return { state: p.conn, text: p.conn === "offline" ? `offline${why} · tap to retry` : p.conn === "error" ? `error${why}` : "connecting…" };
-  }
-  const down = [...s.machines.values()].filter((m) => !m.primary && m.conn !== "connected");
-  if (down.length === 0) return { state: "connected", text: "" };
-  const still = down.filter((m) => m.conn === "connecting" || m.conn === "disconnected");
-  if (still.length === down.length) return { state: "connecting", text: `${still.map((m) => m.name).join(", ")}: connecting…` };
-  return { state: "offline", text: `${down.map((m) => `${m.name} ${m.conn}`).join(", ")} · tap to retry` };
+  if (p.conn === "connected") return { state: "connected", text: "" };
+  const why = p.connError ? ` · ${p.connError}` : "";
+  return { state: p.conn, text: p.conn === "offline" ? `offline${why} · tap to retry` : p.conn === "error" ? `error${why}` : "connecting…" };
 }
 
 /**

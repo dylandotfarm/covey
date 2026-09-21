@@ -299,8 +299,8 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
   starts there, when the machine list changes, and on every reconnect. The daemon keeps it
   in `daemon.json` and hands it back in `machine.access`. The page dials each member the
   way the TUI does, one `MachineClient` per machine, and groups projects across machines by
-  repository the way the sidebar does. A machine that is down is named in the banner,
-  because its threads are the ones missing from the list.
+  repository the way the sidebar does. A machine that is down is a line on the settings
+  page, not a banner: the banner speaks for the page's own connection alone.
 - **Not yet:** runs, moving threads, attachments, and push notifications. The last needs a service worker, which needs a secure context, which
   `http://100.x.y.z` is not; `tailscale serve` can front the daemon with HTTPS later.
 
