@@ -11,6 +11,8 @@
   it for a throwaway daemon, and the TUI keeps it to one machine (`store.setWebServer`).
   The page dials every machine in the fleet; the TUI hands the serving daemon that list
   (`store.fleetFor`, `machine.fleet`) and the page reads it from `machine.access`.
+  `machine.settings { bind }` moves the daemon's listeners while it runs (`EngineOptions.rebind`
+  in `main.ts`); a `--bind` flag wins at start and is never written to `daemon.json`.
   No bundler: `tsc -b` writes browser ES modules and the import map in `static/index.html`
   names `@covey/protocol` and `@covey/client`. Nothing in `client` or `protocol` may import
   a node module, or the page stops loading. `web/src/state.ts` and `markdown.ts` hold no

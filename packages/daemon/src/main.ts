@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
 import { dataDir, loadDaemonConfig, machineSettings, platformInfo, projectsDir, type DaemonConfig } from "./config.js";
 import { Db } from "./db.js";
-import { Engine } from "./engine.js";
+import { Engine, EngineError } from "./engine.js";
 import { startServer } from "./server.js";
 import { buildInfo, buildLabel } from "./build.js";
 import { tailscaleSelf } from "./tailscale.js";
@@ -33,13 +33,15 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   const log = opts.log ?? ((m: string) => process.stderr.write(`[coveyd] ${m}\n`));
   const config = loadDaemonConfig({ port: opts.port, bind: opts.bind, name: opts.name });
   const ts = await tailscaleSelf();
-  let host: string;
-  switch (config.bind) {
-    case "loopback": host = "127.0.0.1"; break;
-    case "all": host = "0.0.0.0"; break;
-    case "tailnet": host = ts?.ips.find((ip) => ip.includes(".")) ?? "127.0.0.1"; break;
-    default: host = config.bind;
-  }
+  const hostFor = (bind: string): string => {
+    switch (bind) {
+      case "loopback": return "127.0.0.1";
+      case "all": return "0.0.0.0";
+      case "tailnet": return ts?.ips.find((ip) => ip.includes(".")) ?? "127.0.0.1";
+      default: return bind;
+    }
+  };
+  const host = hostFor(config.bind);
   if (config.bind === "tailnet" && !ts) log("tailscale not running; binding to loopback only");
 
   // The build, not the package version: "0.0.1" never moves, so it could not
@@ -61,16 +63,46 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   // a temporary config directory the SDK builds, which has no skills in it.
   const plugin = coveyPlugin(sourceRoot());
   log(plugin ? `plugin: ${plugin} (the /covey skill)` : "plugin: none, this daemon does not run from a checkout with plugin/");
-  const engine = new Engine(db, machine, { log, ...(plugin ? { plugins: [plugin] } : {}) });
   const updater = new Updater(config.machineId, log);
-  const server = await startServer({ config, engine, updater, host, log });
-  log(`listening on ws://${host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
-  if (host !== "127.0.0.1") {
-    // also listen on loopback so the local TUI never needs credentials
-    try {
-      await startServer({ config: { ...config }, engine, updater, host: "127.0.0.1", log });
-    } catch (e: any) { log(`loopback listener unavailable: ${e.message}`); }
-  }
+  /** The listeners now open. `bind` moves them; `close` ends them. */
+  let listeners: { close(): void; port: number }[] = [];
+  const listen = async (bind: string, engine: Engine) => {
+    const h = hostFor(bind);
+    const opened: { close(): void; port: number }[] = [];
+    opened.push(await startServer({ config, engine, updater, host: h, log }));
+    // Also listen on loopback so the local TUI never needs credentials. A
+    // wildcard listener already covers it, and a second bind would fail.
+    if (h !== "127.0.0.1" && h !== "0.0.0.0") {
+      try { opened.push(await startServer({ config: { ...config }, engine, updater, host: "127.0.0.1", log })); }
+      catch (e: any) { log(`loopback listener unavailable: ${e.message}`); }
+    }
+    return { host: h, opened };
+  };
+  const engine = new Engine(db, machine, {
+    log,
+    ...(plugin ? { plugins: [plugin] } : {}),
+    // Move the listeners while the daemon runs. The old ones close first: on
+    // Linux a wildcard bind fails while a listener on one address holds the
+    // port. A socket already open stays open — an upgraded connection is no
+    // longer the http server's to close — so the client that asked keeps its
+    // answer. If the new bind fails, the old addresses come back.
+    rebind: async (bind) => {
+      const was = machine.settings.bind ?? config.bind;
+      for (const l of listeners) l.close();
+      listeners = [];
+      try {
+        listeners = (await listen(bind, engine)).opened;
+      } catch (e: any) {
+        listeners = (await listen(was, engine)).opened;
+        throw new EngineError("bind", `cannot listen on ${bind}: ${e.message}`);
+      }
+      machine.webAddresses = webAddresses({ port: config.port, bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips });
+    },
+  });
+  const first = await listen(config.bind, engine);
+  listeners = first.opened;
+  const server = first.opened[0]!;
+  log(`listening on ws://${first.host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
   // What this machine is made of, and which tools *this process* can run. It
   // is read here rather than over ssh because an agent inherits this
   // environment and not a login shell's — see `resources.ts`. Running a program
@@ -89,7 +121,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     if (closed) return;
     closed = true;
     engine.shutdown();
-    server.close();
+    for (const l of listeners) l.close();
     clearPidFile(server.port, process.pid);
   };
   return { close, config, host, log };

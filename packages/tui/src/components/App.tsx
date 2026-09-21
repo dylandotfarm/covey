@@ -52,6 +52,19 @@ const PREVIEW_MS = 120;
 const PERMISSION_CYCLE: PermissionMode[] = ["default", "acceptEdits", "bypassPermissions", "plan"];
 
 /** The machine-wide default mode, in plain words. "" clears it. */
+/**
+ * Where a daemon listens. Three of the four choices are words; the fourth,
+ * one address, is typed at `covey daemon --bind <ip>` and shown as it is.
+ */
+const BIND_MODES: PickOption[] = [
+  { id: "tailnet", label: "Tailnet only", hint: "the tailnet address, plus this machine" },
+  { id: "all", label: "Tailnet and LAN", hint: "every address the machine has; the LAN needs the token" },
+  { id: "loopback", label: "This machine only", hint: "nothing reaches it from outside" },
+];
+function bindLabel(bind: string): string {
+  return BIND_MODES.find((o) => o.id === bind)?.label ?? bind;
+}
+
 const MACHINE_MODES: PickOption[] = [
   { id: "", label: "From Claude settings", hint: "permissions.defaultMode" },
   { id: "default", label: "Manual", hint: "approve every tool" },
@@ -538,6 +551,7 @@ export function App({ store }: { store: Store }) {
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
       { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
       { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
+      ...(settings.bind ? [{ id: "bind", label: `Reachable on: ${bindLabel(settings.bind)}`, hint: "where the daemon listens; changes at once" }] : []),
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
     openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
@@ -572,6 +586,14 @@ export function App({ store }: { store: Store }) {
           void store.setWebServer(machineKey!, !settings.webEnabled);
           return;
         }
+        case "bind": return openPick(`Where ${info.name} listens`, BIND_MODES.map((o) => ({ ...o, hint: o.id === settings.bind ? "current" : o.hint })), (bid) => {
+          store.setOverlay(null);
+          if (bid === settings.bind) return;
+          void store.setMachineDefaults(machineKey!, { bind: bid }).then(
+            () => store.notify(`${info.name} now listens on ${bindLabel(bid)}`, "success"),
+            (e: Error) => store.notify(`${info.name}: ${e.message}`, "error"),
+          );
+        });
         case "log": { store.setOverlay({ kind: "update", machine: machineKey! }); return; }
       }
     });

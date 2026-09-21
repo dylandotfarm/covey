@@ -44,7 +44,13 @@ function dial(slot: MachineSlot, token: string | undefined) {
     shellSynchronized: () => schedule(),
     threadEvent: (threadId, ev) => { if (applyThreadEvent(state, slot.key, threadId, ev)) schedule(); },
     threadSynchronized: () => schedule(),
-    machineUpdate: () => {},
+    machineUpdate: (update) => {
+      slot.update = update;
+      // The drop that follows is the update working: give the client the
+      // long budget, so the reconnect that reports success can happen.
+      if (update.state === "restarting") client.expectRestart();
+      schedule();
+    },
   }, { clientName: WEB_CLIENT });
   clients.set(slot.key, client);
   client.start();
@@ -123,6 +129,25 @@ const actions: Actions = {
   retry() { for (const c of clients.values()) if (c.state === "offline" || c.state === "error") c.retry(); schedule(); },
   setDraft(machine, threadId, text) { state.drafts.set(`${machine}:${threadId}`, text); },
   toggleAddresses() { state.showAddresses = !state.showAddresses; schedule(); },
+  updateMachine(machine) {
+    const slot = state.machines.get(machine);
+    const client = clients.get(machine);
+    if (!slot || !client) return;
+    const busy = [...slot.threads.values()].filter((t) => t.status === "running" || t.status === "starting").length;
+    if (!confirm(`Update ${slot.name}: pull, rebuild and restart the daemon?${busy ? ` ${busy} running turn${busy === 1 ? "" : "s"} will be interrupted.` : ""}`)) return;
+    client.rpc("machine.update", { restart: true }).then((u) => { slot.update = u; schedule(); }).catch(fail);
+  },
+  restartMachine(machine) {
+    const slot = state.machines.get(machine);
+    const client = clients.get(machine);
+    if (!slot || !client) return;
+    if (!confirm(`Restart the daemon on ${slot.name}? Running turns will be interrupted.`)) return;
+    client.expectRestart();
+    client.rpc("machine.restart", {}).catch(fail);
+  },
+  setBind(machine, bind) {
+    clients.get(machine)?.command({ type: "machine.settings", bind }).catch(fail);
+  },
 };
 
 const viewClient = () => (state.view ? clients.get(state.view.machine) : undefined);

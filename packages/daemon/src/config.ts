@@ -111,7 +111,7 @@ function readConfigFile(): Record<string, unknown> {
 }
 
 /** Settings written before these fields existed simply read as "no opinion". */
-export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled">>): MachineSettings {
+export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled" | "bind">>): MachineSettings {
   return {
     defaultModel: cfg.defaultModel ?? null,
     defaultPermissionMode: cfg.defaultPermissionMode ?? null,
@@ -125,6 +125,7 @@ export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" |
     maxLiveSessions: cfg.maxLiveSessions ?? envNumber("COVEY_MAX_LIVE_SESSIONS"),
     // `COVEY_WEB=1` seeds a throwaway daemon that has no TUI to turn it on.
     webEnabled: cfg.webEnabled ?? (process.env.COVEY_WEB === "1" ? true : null),
+    ...(cfg.bind ? { bind: cfg.bind } : {}),
   };
 }
 

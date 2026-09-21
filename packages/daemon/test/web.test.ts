@@ -100,3 +100,42 @@ test("the fleet the TUI hands over comes back to the page in machine.access, who
   await rpc(d.port, "command", { commandId: "f2", type: "machine.fleet", machines: [] });
   assert.deepEqual((await rpc(d.port, "machine.access", {})).result.fleet, []);
 });
+
+test("bind changes while the daemon runs, the socket that asked stays open, and a bind that fails leaves the old one listening", async () => {
+  const d = await startDaemon({ name: "mover" });
+  const base = `http://127.0.0.1:${d.port}`;
+  const ws = new WebSocket(`ws://127.0.0.1:${d.port}`);
+  await new Promise<void>((res, rej) => { ws.onopen = () => res(); ws.onerror = () => rej(new Error("dial")); });
+  let id = 0;
+  const ask = (m: string, p: unknown) => new Promise<any>((res) => {
+    const my = ++id;
+    const on = (ev: MessageEvent) => { const r = JSON.parse(String(ev.data)); if (r.id === my) { ws.removeEventListener("message", on); res(r); } };
+    ws.addEventListener("message", on);
+    ws.send(JSON.stringify({ id: my, method: m, params: p }));
+  });
+  const hello = await ask("hello", { protocolVersion: 1, client: "covey-tui" });
+  assert.equal(hello.result.settings.bind, "loopback", "the flag the test started it with, not the file");
+
+  const toAll = await ask("command", { commandId: "b1", type: "machine.settings", bind: "all" });
+  assert.equal(toAll.ok, true, JSON.stringify(toAll));
+  // The same socket, after its listener closed.
+  const after = await ask("hello", { protocolVersion: 1, client: "covey-tui" });
+  assert.equal(after.result.settings.bind, "all");
+  assert.ok(after.result.webAddresses.every((a: { reachable: boolean }) => a.reachable), "bound to all, every address is reachable");
+  assert.equal((await fetch(`${base}/health`)).status, 200, "loopback still answers through the wildcard listener");
+  // A new connection reaches the new listener.
+  const fresh = await rpc(d.port, "hello", { protocolVersion: 1, client: "covey-tui" });
+  assert.equal(fresh.result.settings.bind, "all");
+
+  // An address nobody has cannot be bound, and the old bind comes back.
+  const bad = await ask("command", { commandId: "b2", type: "machine.settings", bind: "203.0.113.7" });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error.message, /cannot listen on 203\.0\.113\.7/);
+  assert.equal((await fetch(`${base}/health`)).status, 200);
+  assert.equal((await ask("hello", { protocolVersion: 1, client: "covey-tui" })).result.settings.bind, "all");
+
+  const back = await ask("command", { commandId: "b3", type: "machine.settings", bind: "loopback" });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.equal((await rpc(d.port, "hello", { protocolVersion: 1, client: "covey-tui" })).result.settings.bind, "loopback");
+  ws.close();
+});

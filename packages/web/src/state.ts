@@ -14,7 +14,7 @@
  */
 import {
   threadIsBusy,
-  type MachineAccess, type MachineInfo, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
+  type MachineAccess, type MachineInfo, type MachineUpdate, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress,
 } from "@covey/protocol";
 import type { ConnState } from "@covey/client";
@@ -30,6 +30,8 @@ export interface MachineSlot {
   threads: Map<string, Thread>;
   /** The daemon that served the page. Its fleet list names the others. */
   primary: boolean;
+  /** The update in flight on that machine, or the last one it reported. */
+  update: MachineUpdate | null;
 }
 
 export interface View {
@@ -66,7 +68,7 @@ export function emptyState(): State {
 }
 
 export function addMachine(s: State, key: string, name: string, primary = false): MachineSlot {
-  const slot: MachineSlot = { key, name, conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), primary };
+  const slot: MachineSlot = { key, name, conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), primary, update: null };
   s.machines.set(key, slot);
   return slot;
 }
@@ -262,6 +264,27 @@ export function addressLink(a: WebAddress, token: string): string {
 /** True when `url` is the address this page was opened at. */
 export function isCurrentAddress(url: string, origin: string): boolean {
   return url.replace(/\/$/, "").toLowerCase() === origin.replace(/\/$/, "").toLowerCase();
+}
+
+/** One line for an update's progress: the step that runs, or how it ended. */
+export function updateLabel(u: MachineUpdate | null): string {
+  if (!u) return "";
+  if (u.state === "failed") return `update failed: ${u.error ?? "see the daemon log"}`;
+  if (u.state === "succeeded") return `updated${u.toCommit ? ` to ${u.toCommit}` : ""}`;
+  if (u.state === "restarting") return "restarting…";
+  const step = u.steps.find((s) => s.status === "running");
+  return step ? `${step.label}…` : `update: ${u.state}`;
+}
+
+/** The words for a bind mode, the same ones the TUI's panel uses. */
+export function bindLabel(bind: string | undefined): string {
+  switch (bind) {
+    case "tailnet": return "tailnet only";
+    case "all": return "tailnet and LAN";
+    case "loopback": return "this machine only";
+    case undefined: return "unknown";
+    default: return bind;
+  }
 }
 
 /** `now`, `5m`, `3h`, `2d`: the same words the TUI's sidebar uses. */
