@@ -6,15 +6,15 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import WebSocket from "ws";
 import type { RpcMethodName, RpcMethods } from "@covey/protocol";
 import { startDaemon, stopAll, tempDir, waitForExit, type TestDaemon } from "./daemons.js";
-import { scratchRemote, type ScratchRemote } from "../src/scratch.js";
-import { normaliseRemote } from "../src/git.js";
+import { scratchRemote, git, head, type ScratchRemote } from "../src/scratch.js";
+import { normaliseRemote, isBareRepo, projectSlug } from "../src/git.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -150,17 +150,19 @@ test("hello reports protocol + capabilities", async () => {
 test("projects: create clones the repository under the projects directory, once per repository, and streams shell events", async () => {
   await a.rpc("shell.subscribe", {});
   await a.command({ type: "project.create", url: remote.url });
-  await a.command({ type: "project.create", url: remote.url });
+  await assert.rejects(a.command({ type: "project.create", url: remote.url }), /already has shared/, "one project per repository, and the second create says so");
   const snap = await a.rpc("shell.snapshot", {});
   assert.equal(snap.projects.length, 1);
   const p = snap.projects[0]!;
-  assert.equal(p.repositoryIdentity, normaliseRemote(remote.url));
+  const identity = normaliseRemote(remote.url);
+  assert.equal(p.repositoryIdentity, identity);
   assert.equal(p.kind, "clone");
   assert.equal(p.remoteUrl, remote.url);
   assert.equal(p.title, "shared", "named after the repository");
   assert.equal(snap.machine.projectsDir, join(A.home, "projects"), "under COVEY_HOME, so a throwaway daemon never clones into the real directory");
-  assert.equal(p.workspaceRoot, join(A.home, "projects", basename(remote.dir).toLowerCase(), "shared", "repo.git"));
-  assert.equal(execFileSync("git", ["rev-parse", "--is-bare-repository"], { cwd: p.workspaceRoot, encoding: "utf8" }).trim(), "true", "nothing is checked out in the project itself");
+  assert.equal(p.workspaceRoot, join(A.home, "projects", projectSlug(identity), "repo.git"));
+  assert.equal(projectSlug("github.com/acme/api"), "github.com/acme/api", "the host stays in the path, so two hosts' acme/api never share a clone");
+  assert.ok(await isBareRepo(p.workspaceRoot), "nothing is checked out in the project itself");
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(a.pushes.some((p) => p.push === "shell" && p.event.kind === "project.upserted"));
   await assert.rejects(a.command({ type: "project.create", url: join(remote.dir, "nope.git") }), /could not clone/);
@@ -243,9 +245,9 @@ test("project.git reports live branch state", async () => {
   const projectId = (await a.rpc("shell.snapshot", {})).projects[0]!.id;
   const root = (await a.rpc("shell.snapshot", {})).projects[0]!.workspaceRoot;
   const git = await a.rpc("project.git", { projectId });
-  // A bare clone's default branch is the remote's. Its own `main` is a copy
-  // made at clone time so that HEAD resolves; nothing checks it out.
-  assert.deepEqual(git, { isRepo: true, root, currentBranch: "main", defaultBranch: "origin/main", hasCommits: true });
+  // A bare clone has no branch of its own checked out. Its default branch is
+  // the remote's, and that is its history.
+  assert.deepEqual(git, { isRepo: true, root, currentBranch: null, defaultBranch: "origin/main", hasCommits: true });
 });
 
 test("thread.create puts every thread in its own worktree beside the clone, from origin/main", async () => {
@@ -253,7 +255,7 @@ test("thread.create puts every thread in its own worktree beside the clone, from
   // What the clone knows of origin/main. A fetch within the last minute is
   // reused across threads, so this test does not move the remote and expect
   // the very next thread to see it; `cleanStart.test.ts` covers freshness.
-  const ahead = execFileSync("git", ["rev-parse", "--short", "origin/main"], { cwd: project.workspaceRoot, encoding: "utf8" }).trim();
+  const ahead = await git(project.workspaceRoot, "rev-parse", "--short", "origin/main");
 
   const wt = randomUUID();
   await a.command({ type: "thread.create", projectId: project.id, threadId: wt, sessionId: randomUUID() });
@@ -261,7 +263,7 @@ test("thread.create puts every thread in its own worktree beside the clone, from
   assert.equal(inWorktree.branch, `covey/${wt.slice(0, 8)}`);
   assert.equal(inWorktree.worktreePath, join(dirname(project.workspaceRoot), wt.slice(0, 8)), "beside repo.git, not inside it");
   assert.ok(existsSync(join(inWorktree.worktreePath!, "README.md")), "worktree is checked out");
-  assert.equal(execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: inWorktree.worktreePath!, encoding: "utf8" }).trim(), ahead, "the thread starts at origin/main");
+  assert.equal(await head(inWorktree.worktreePath!), ahead, "the thread starts at origin/main");
   const notes = (await a.rpc("thread.snapshot", { threadId: wt })).items.filter((i) => i.kind === "note");
   assert.equal(notes.length, 1);
   assert.match((notes[0] as any).text, new RegExp(`Branched from origin/main at ${ahead}, fetched from origin`));
@@ -288,13 +290,26 @@ test("a moved thread keeps its branch when the remote has it, and starts fresh w
   const imported = await b.rpc("thread.import", { export: exp });
   const moved = (await b.rpc("thread.snapshot", { threadId: imported.threadId })).thread;
   assert.equal(moved.branch, branch, "the same branch, on the other machine");
-  assert.equal(execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: moved.worktreePath!, encoding: "utf8" }).trim(), tip, "with the commits that were pushed");
+  assert.equal(await head(moved.worktreePath!), tip, "with the commits that were pushed");
   // The thread's own items came along, its clean-start note among them; the
   // move's note is the one written here.
   const moveNote = (items: any[]) => items.find((i) => i.kind === "note" && /Moved here/.test(i.text));
   const note = moveNote((await b.rpc("thread.snapshot", { threadId: imported.threadId })).items);
   assert.ok(note, "the move left a note");
-  assert.match(note.text, new RegExp(`Working in a worktree on ${branch}, fetched from origin`));
+  assert.match(note.text, new RegExp(`The thread works in a worktree on ${branch}, fetched from origin`));
+  await a.rpc("thread.markMoved", { threadId: pushed, machineId: (await b.rpc("hello", { protocolVersion: 1, client: "test" })).machineId, newThreadId: imported.threadId });
+  await new Promise((r) => setTimeout(r, 200));
+  const source = (await a.rpc("thread.snapshot", { threadId: pushed })).thread;
+  assert.ok(!existsSync(source.worktreePath!), "the source gives its worktree back once the move is marked");
+  assert.equal(await git((await a.rpc("shell.snapshot", {})).projects[0]!.workspaceRoot, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`).then(() => true, () => false), true, "and keeps the branch");
+
+  // Back again. The branch is still here from the first visit, and the
+  // worktree opens on it at what origin has, not on a second branch.
+  const back = await a.rpc("thread.import", { export: await b.rpc("thread.export", { threadId: imported.threadId }) });
+  const returned = (await a.rpc("thread.snapshot", { threadId: back.threadId })).thread;
+  assert.equal(returned.branch, branch, "the same branch on the way back");
+  assert.equal(await head(returned.worktreePath!), tip);
+  assert.notEqual(returned.worktreePath, source.worktreePath, "in a worktree named for the new thread");
 
   // Not on origin: the thread starts from the default branch and is told.
   const local = randomUUID();
@@ -304,7 +319,7 @@ test("a moved thread keeps its branch when the remote has it, and starts fresh w
   const fresh = (await b.rpc("thread.snapshot", { threadId: imported2.threadId })).thread;
   assert.equal(fresh.branch, `covey/${imported2.threadId.slice(0, 8)}`, "a new branch, named for the new thread");
   const note2 = moveNote((await b.rpc("thread.snapshot", { threadId: imported2.threadId })).items);
-  assert.match(note2.text, new RegExp(`the branch covey/${local.slice(0, 8)} was not on origin, so its commits stayed behind`));
+  assert.match(note2.text, new RegExp(`The branch covey/${local.slice(0, 8)} is not on origin, so its commits are still on alpha`));
 });
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {

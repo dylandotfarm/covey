@@ -22,7 +22,7 @@ import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import type { MachineInfo, SystemNoteItem } from "@covey/protocol";
-import { cleanStartBase, cleanStartNote, createWorktree, defaultBranchRef } from "./git.js";
+import { cleanStartBase, cleanStartNote, createWorktree, defaultBranchRef, forgetFetch, isBareRepo, worktreePath } from "./git.js";
 import { Db } from "./db.js";
 import { Engine } from "./engine.js";
 
@@ -103,7 +103,7 @@ test("a clean start branches from origin/main, not from the local main behind it
   assert.equal(start!.ref, "origin/main");
   assert.equal(start!.commit, ahead, "branched from what the remote has, not from the local copy");
 
-  const wt = await createWorktree(c.repo, "aaa111", start!.ref);
+  const wt = await createWorktree(c.repo, "aaa111", start!.ref, worktreePath({ workspaceRoot: c.repo }, "aaa111"));
   assert.ok(!("error" in wt), JSON.stringify(wt));
   if ("error" in wt) return;
   assert.equal(await head(wt.path), ahead, "the worktree itself starts at origin/main");
@@ -120,7 +120,7 @@ test("a clean start fetches first, so origin/main is what the remote has now", a
   assert.equal(start?.fetch.state, "fetched");
   assert.equal(start?.commit, ahead, "origin/main was only as fresh as the last fetch");
 
-  const wt = await createWorktree(c.repo, "bbb222", start!.ref);
+  const wt = await createWorktree(c.repo, "bbb222", start!.ref, worktreePath({ workspaceRoot: c.repo }, "bbb222"));
   if ("error" in wt) return assert.fail(wt.error);
   assert.equal(await head(wt.path), ahead);
 });
@@ -187,7 +187,7 @@ test("a repository with no remote still gets its local default branch", async (t
   assert.equal(start?.fetch.state, "no-remote");
   assert.equal(start?.commit, await head(repo));
 
-  const wt = await createWorktree(repo, "ccc333", start!.ref);
+  const wt = await createWorktree(repo, "ccc333", start!.ref, worktreePath({ workspaceRoot: repo }, "ccc333"));
   if ("error" in wt) return assert.fail(wt.error);
   assert.equal(await head(wt.path), start!.commit);
 });
@@ -210,7 +210,7 @@ test("a remote that cannot be reached still gets a worktree, and says it may be 
   assert.match(text, new RegExp(here));
   assert.match(text, /fetch from origin failed/);
 
-  const wt = await createWorktree(c.repo, "ddd444", start!.ref);
+  const wt = await createWorktree(c.repo, "ddd444", start!.ref, worktreePath({ workspaceRoot: c.repo }, "ddd444"));
   assert.ok(!("error" in wt), "the worktree is created anyway");
 });
 
@@ -231,7 +231,7 @@ test("worktree-head is untouched: it branches from the checkout, however far beh
   await git(c.repo, "fetch", "-q", "origin", "main");
   const local = await head(c.repo);
 
-  const wt = await createWorktree(c.repo, "eee555", "HEAD");
+  const wt = await createWorktree(c.repo, "eee555", "HEAD", worktreePath({ workspaceRoot: c.repo }, "eee555"));
   if ("error" in wt) return assert.fail(wt.error);
   assert.equal(await head(wt.path), local, "HEAD means HEAD; carrying work over is the point of this mode");
   assert.notEqual(await head(wt.path), ahead);
@@ -240,7 +240,7 @@ test("worktree-head is untouched: it branches from the checkout, however far beh
 test("a branch from origin/main does not take origin/main as its upstream", async (t) => {
   const c = await scratchClone();
   t.after(c.drop);
-  const wt = await createWorktree(c.repo, "fff666", "origin/main");
+  const wt = await createWorktree(c.repo, "fff666", "origin/main", worktreePath({ workspaceRoot: c.repo }, "fff666"));
   if ("error" in wt) return assert.fail(wt.error);
   // With origin/main as upstream, `git push` under push.default=simple refuses
   // the branch outright, because the upstream has another name.
@@ -288,7 +288,7 @@ async function threadNotes(url: string, beforeThread: (clone: string) => Promise
       branchedAt: wt ? await head(wt) : null,
       worktree: wt,
       clone: project.workspaceRoot,
-      bare: (await git(project.workspaceRoot, "rev-parse", "--is-bare-repository")) === "true",
+      bare: await isBareRepo(project.workspaceRoot),
       threadId,
     };
   } finally { e.drop(); }
@@ -316,9 +316,11 @@ test("a thread whose fetch failed is warned, in its own transcript, that it may 
   const { notes, tones, branchedAt } = await threadNotes(c.remote, async (clone) => {
     here = await git(clone, "rev-parse", "--short", "origin/main");
     await git(clone, "remote", "set-url", "origin", join(c.dir, "gone.git"));
+    // The clone's own fetch counts as fresh for a minute; this thread must try.
+    forgetFetch(clone);
   });
   assert.equal(branchedAt, here, "the thread started, which is the whole point");
   assert.equal(tones[0], "warning");
   assert.match(notes[0]!, new RegExp(`Branched from origin/main at ${here}`));
-  assert.match(notes[0]!, /Merge main before you start/);
+  assert.match(notes[0]!, /Fetch and merge origin\/main before you start/);
 });

@@ -672,42 +672,47 @@ set, so the panel is not silently overridden by the client.
 A project is a repository. The daemon clones it, and the clone is the daemon's:
 
 ```
-~/.covey/projects/<owner>/<repo>/repo.git     the bare clone
-~/.covey/projects/<owner>/<repo>/<prefix>     one worktree per thread
+~/.covey/projects/github.com/<owner>/<repo>/repo.git     the bare clone
+~/.covey/projects/github.com/<owner>/<repo>/<prefix>     one worktree per thread
 ```
 
-`project.create` takes a URL. The daemon normalises it to the same identity every machine
-derives (`github.com/org/repo`), and a second create for a repository this machine already
-has returns the project it has, so a client may send one create to every machine in a pool.
-The directory is the last two segments of the identity; the root is `COVEY_PROJECTS`, else
-`<COVEY_HOME>/projects` when `COVEY_HOME` is set, else `~/.covey/projects`. A throwaway
-daemon on another port therefore clones into its own directory and never into the real one.
-`MachineInfo.projectsDir` says which.
+`project.create` takes a URL. The daemon normalises it to the identity every machine derives
+from a remote, `github.com/org/repo`, and refuses a second create for a repository this
+machine already has. The directory is that identity as a path. The host stays in it, because
+`github.com/acme/api` and `gitlab.com/acme/api` are two repositories and must not share one
+clone. The root is `COVEY_PROJECTS`, else `<COVEY_HOME>/projects` when `COVEY_HOME` is set,
+else `~/.covey/projects`. A throwaway daemon on another port therefore clones into its own
+directory and never into the real one. `MachineInfo.projectsDir` says which.
 
-The clone is **bare** on purpose. There is no checkout to work from, so there is no "worktree
-from HEAD" and no "this checkout" for threads to share, and nothing on the machine is two
-days behind `origin` because nobody pulled it. `git clone --bare` writes no fetch refspec,
-which would leave `origin/main` unset for ever, so the daemon does `init --bare`, `remote add`
-and a fetch instead, then `remote set-head` for `origin/HEAD`. The bare repository's own
-`HEAD` names a copy of the default branch made at clone time: `git worktree add` refuses a
-`HEAD` that points outside `refs/heads`, and a `HEAD` that resolves is what lets the project
-read as one with history. Nothing checks that copy out.
+The clone is **bare** on purpose. There is no checkout to work from. So there is no "worktree
+from HEAD" and no "this checkout" for threads to share. And nothing on the machine is two
+days behind `origin` because nobody pulled it.
+
+`git clone --bare` writes no fetch refspec, which would leave `origin/main` unset for ever.
+The daemon does `init --bare`, `remote set-url`, a fetch and `remote set-head` instead. The
+URL is set on every create, so a retry with another URL for the same repository does not
+fetch from the one that failed. The bare repository's own `HEAD` stays unborn. A local copy
+of the default branch would never move, and an agent that ran `git merge main` in its
+worktree would merge the copy. `origin/main` is the ref every worktree can reach, and the
+one a thread is told to merge.
 
 `Project.kind` tells a `clone` from a `checkout`: a directory the user pointed covey at,
 from before projects were clones. No new project is made that way. The rows that exist keep
-working, with their worktrees where they always were, under `<root>/.covey/worktrees` next
-to a self-ignoring `.gitignore`. A `checkout` that is not a repository is the one place a
-thread still works in the directory itself. `project.delete` removes the rows; the
-worktrees and the clone stay on disk, and a later create for the same repository finds the
-clone and fetches rather than cloning again.
+working. Their worktrees stay under `<root>/.covey/worktrees`, next to a self-ignoring
+`.gitignore`. A `checkout` with nothing to branch from is the one place a thread still works
+in the directory itself.
+
+`thread.delete` removes the thread's worktree. `project.delete` removes the rows; the clone
+stays on disk, because its branches may hold commits nobody pushed. A later create for the
+same repository finds the clone and fetches rather than cloning again.
 
 ## Where a new thread works
 
 Every thread gets its own worktree, `git worktree add --no-track -b covey/<id> … <base>`,
 where the base is `origin/HEAD` (else `origin/main`, `origin/master`), and only a local
-`main`/`master` in a repo with no remote. Parallel threads in one checkout fight over the
-same files, and a clone has no checkout to offer, so there is no choice to make and nothing
-to ask.
+`main`/`master` in a repo with no remote. Parallel threads in one checkout change the same
+files, and a clone has no checkout to offer, so there is no choice to make and nothing to
+ask.
 
 covey **fetches `origin` first**. Work is pushed to `origin` and reviewed there, so `origin`
 is the truth about what the default branch is; the local branch of that name is one machine's
@@ -735,10 +740,12 @@ fails the command with an error the TUI shows. It is never silently downgraded t
 directory — isolation was the whole point.
 
 A thread that **moves** to another machine gets a worktree there too. When `origin` has the
-thread's branch, the worktree opens on it, with the commits the source pushed; when it does
-not, the thread starts from the default branch and its transcript says the old branch's
-commits stayed behind. A machine with no project for the repository clones it first, from
-the URL the export carries.
+thread's `covey/` branch, the worktree opens on it, with the commits the source pushed. When
+it does not, the thread starts from the default branch, and its transcript says where the
+old branch's commits are. A branch the destination held from an earlier visit is moved to
+what `origin` has. The source gives its worktree back when the move is marked; the branch
+stays. A machine with no project for the repository clones it first, from the URL the
+export carries.
 
 ## Thread titles
 

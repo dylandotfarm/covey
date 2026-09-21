@@ -45,8 +45,8 @@
   --bind loopback --port 3799` with `COVEY_HOME=/tmp/x`, then speak JSON over ws (see
   `docs/DESIGN.md` → Protocol).
 - A project is a bare clone the daemon owns, at `<projectsDir>/<owner>/<repo>/repo.git`, and
-  each thread's worktree sits beside it. `projectsDir` is `<COVEY_HOME>/projects` when
-  `COVEY_HOME` is set, else `~/.covey/projects`. A test that makes a project clones a
+  each thread's worktree sits beside it. `projectsDir` is `COVEY_PROJECTS`, else
+  `<COVEY_HOME>/projects` when `COVEY_HOME` is set, else `~/.covey/projects`. A test that makes a project clones a
   scratch remote from `packages/daemon/src/scratch.ts`; nothing in `pnpm test` reaches a
   real remote.
 - A covey session knows which thread it is: the daemon puts `COVEY_THREAD_ID` and

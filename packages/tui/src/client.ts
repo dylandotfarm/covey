@@ -305,19 +305,24 @@ export class MachineClient {
     }
   }
 
-  rpc<M extends RpcMethodName>(method: M, params: RpcMethods[M]["params"]): Promise<RpcMethods[M]["result"]> {
+  /**
+   * One request. `timeoutMs` is how long to wait for the answer: a minute for
+   * everything, except a call the daemon itself gives ten minutes, such as a
+   * clone. The caller that knows the daemon's budget says so.
+   */
+  rpc<M extends RpcMethodName>(method: M, params: RpcMethods[M]["params"], timeoutMs = 60_000): Promise<RpcMethods[M]["result"]> {
     return new Promise((res, rej) => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return rej(new Error("not connected"));
       const id = this.nextId++;
-      const timer = setTimeout(() => { if (this.waits.delete(id)) rej(new Error(`${method} timed out`)); }, 60_000);
+      const timer = setTimeout(() => { if (this.waits.delete(id)) rej(new Error(`${method} timed out`)); }, timeoutMs);
       this.waits.set(id, { res, rej, timer });
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
 
-  command(cmd: Command) {
+  command(cmd: Command, timeoutMs?: number) {
     const env: CommandEnvelope = { ...cmd, commandId: randomUUID() } as CommandEnvelope;
-    return this.rpc("command", env);
+    return this.rpc("command", env, timeoutMs);
   }
 }
 

@@ -13,7 +13,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFile = promisify(execFileCb);
-const git = async (cwd: string, ...args: string[]) => (await execFile("git", args, { cwd })).stdout.trim();
+
+/** Run git in `cwd` and return what it printed. */
+export const git = async (cwd: string, ...args: string[]) => (await execFile("git", args, { cwd })).stdout.trim();
+
+/** The short hash of `HEAD` in `cwd`. */
+export const head = (cwd: string) => git(cwd, "rev-parse", "--short", "HEAD");
 
 export interface ScratchRemote {
   /** The bare repository, as a URL a project can clone. */
@@ -50,6 +55,9 @@ export async function scratchRemote(prefix = "covey-remote-"): Promise<ScratchRe
   const pushBranch = async (branch: string, msg: string) => {
     const sha = await commit(msg);
     await git(seed, "push", "-q", "origin", `HEAD:refs/heads/${branch}`);
+    // The seed's `main` goes back to what origin has, so a later `push`
+    // publishes its own commit alone.
+    await git(seed, "reset", "-q", "--hard", "origin/main");
     return sha;
   };
   await push("hello");

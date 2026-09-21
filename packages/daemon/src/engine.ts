@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { existsSync, statSync, rmSync, readdirSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
@@ -10,7 +10,7 @@ import { USER_CLIENT } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
-import { normaliseRemote, remoteUrl, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
+import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
@@ -256,7 +256,7 @@ export class Engine {
         if (!url) throw new EngineError("bad_url", "a repository URL is needed");
         const identity = normaliseRemote(url);
         const dup = this.db.listProjects().find((p) => p.repositoryIdentity === identity);
-        if (dup) return this.db.shellSeq();
+        if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}`);
         const root = join(this.machine.projectsDir ?? projectsDir(), projectSlug(identity), "repo.git");
         const cloned = await this.cloneOnce(url, root);
         if ("error" in cloned) throw new EngineError("git", `could not clone ${url}: ${cloned.error}`);
@@ -293,9 +293,9 @@ export class Engine {
         if (this.db.getThread(cmd.threadId)) return this.db.shellSeq();
         // Every thread in a repository gets its own worktree, branched from the
         // remote's default branch after a fetch. There is no other place to
-        // work: a clone is bare, and parallel threads in one checkout fight
-        // over the same files. A `checkout` project that is not a repository
-        // is the one exception, and the thread works in the directory itself.
+        // work: a clone is bare, and parallel threads in one checkout change
+        // the same files. A `checkout` project that is not a repository is
+        // the one exception, and the thread works in the directory itself.
         const tree = await this.newWorktree(p, cmd.threadId.slice(0, 8), null);
         const { worktreePath, branch, cleanStart } = tree;
         const machineMode = this.machine.settings.defaultPermissionMode;
@@ -343,6 +343,10 @@ export class Engine {
         this.forgetAuthFailure(t.id);
         const proj = this.db.getProject(t.projectId);
         if (proj) void deleteCheckpointRefs(this.gitCwd(t, proj), t.id);
+        // The worktree goes with the thread; the branch stays, as it does on
+        // archive. A worktree with unsaved work is kept, and nobody is told,
+        // because the transcript that would carry the note is deleted below.
+        if (proj && t.worktreePath && existsSync(t.worktreePath)) await removeWorktree(proj.workspaceRoot, t.worktreePath);
         rmSync(attachmentsDir(t.id), { recursive: true, force: true });
         this.db.deleteThread(t.id);
         this.db.deleteTranscript(t.sessionId);
@@ -880,6 +884,9 @@ export class Engine {
     const p = this.db.getProject(t.projectId);
     if (!p) throw new EngineError("not_found", "project not found");
     const root = this.gitCwd(t, p);
+    // An archived thread in a clone has no directory: its worktree is gone and
+    // the project is a bare repository, whose insides are nobody's files.
+    if (existsSync(join(root, "HEAD")) && !existsSync(join(root, ".git"))) return { dir, entries: [], truncated: false };
     const target = resolve(root, dir || ".");
     if (target !== root && !target.startsWith(root + sep)) throw new EngineError("bad_path", `${dir} is outside the thread's directory`);
     // Half a directory name is not an error; it is what typing looks like.
@@ -918,26 +925,32 @@ export class Engine {
    * `carry` names a branch the thread had elsewhere. When `origin` has it the
    * worktree opens on that branch, so a moved thread keeps its commits; when
    * it does not, the thread starts from the default branch like any other, and
-   * `carried` says which happened.
+   * `carried` says which happened. Only a `covey/` branch is carried: a thread
+   * from before worktrees names the checkout's own branch, and `main` is not
+   * a branch to check out beside a clone.
    *
-   * A `checkout` that is not a git repository has no worktree to give: the
-   * thread works in the directory, as every thread there always did. A clone
-   * without its repository is an error, because a bare repository is nowhere
-   * to work.
+   * A `checkout` that is not a git repository, or one with nothing to branch
+   * from, has no worktree to give: the thread works in the directory, as
+   * every thread there did before projects were clones. A clone without its
+   * repository is an error, because a bare repository is nowhere to work.
    */
   private async newWorktree(p: Project, name: string, carry: string | null): Promise<{ worktreePath: string | null; branch: string | null; cleanStart: CleanStart | null; carried: boolean }> {
+    const inPlace = async () => ({ worktreePath: null, branch: isGitRepo(p.workspaceRoot) ? await currentBranch(p.workspaceRoot) : null, cleanStart: null, carried: false });
     if (!isGitRepo(p.workspaceRoot)) {
-      if (p.kind === "clone") throw new EngineError("git", `${p.workspaceRoot} is not a repository; the clone is gone`);
-      return { worktreePath: null, branch: null, cleanStart: null, carried: false };
+      if (p.kind === "clone") throw new EngineError("git", `${p.workspaceRoot} is not a repository; the bare clone was deleted`);
+      return inPlace();
     }
     const path = worktreePath(p, name);
-    if (carry && (await fetchBranch(p.workspaceRoot, carry))) {
+    if (carry?.startsWith("covey/") && (await fetchBranch(p.workspaceRoot, carry))) {
       const wt = await createWorktree(p.workspaceRoot, name, `origin/${carry}`, path, carry);
       if ("error" in wt) throw new EngineError("git", `could not create worktree from origin/${carry}: ${wt.error}`);
       return { worktreePath: wt.path, branch: wt.branch, cleanStart: null, carried: true };
     }
     const cleanStart = await cleanStartBase(p.workspaceRoot);
-    if (!cleanStart) throw new EngineError("git", "no default branch (origin/HEAD, main or master) to branch from");
+    if (!cleanStart) {
+      if (p.kind === "clone") throw new EngineError("git", "no default branch (origin/HEAD, main or master) to branch from");
+      return inPlace();
+    }
     // A failed worktree is reported, never silently downgraded to the shared
     // checkout: the whole point of a worktree is isolation.
     const wt = await createWorktree(p.workspaceRoot, name, cleanStart.ref, path);
@@ -954,7 +967,7 @@ export class Engine {
 
   /** Remove an archived thread's worktree, and record in its transcript what
    *  became of it — including the case where git kept it because of work in it. */
-  private async releaseWorktree(t: Thread): Promise<void> {
+  private async releaseWorktree(t: Thread, did: "Archived" | "Moved" = "Archived"): Promise<void> {
     const p = this.db.getProject(t.projectId);
     if (!p || !t.worktreePath || !existsSync(t.worktreePath)) return;
     const r = await removeWorktree(p.workspaceRoot, t.worktreePath);
@@ -963,8 +976,8 @@ export class Engine {
       id: `note:${randomUUID()}`, threadId: t.id, turnId: null, seq: 0, createdAt: now, updatedAt: now, kind: "note",
       tone: "error" in r ? "warning" : "info",
       text: "error" in r
-        ? `Archived, but the worktree stays: ${r.error.replace(/^fatal: /, "")}`
-        : `Archived · removed the worktree ${t.worktreePath}` + (t.branch ? `, kept the branch ${t.branch}` : ""),
+        ? `${did}, but the worktree stays: ${r.error.replace(/^fatal: /, "")}`
+        : `${did} · removed the worktree ${t.worktreePath}` + (t.branch ? `, kept the branch ${t.branch}` : ""),
     });
   }
 
@@ -1366,8 +1379,7 @@ export class Engine {
       sourceMachineId: this.machine.machineId, sourceMachineName: this.machine.name,
       project: {
         title: project.title, workspaceRoot: project.workspaceRoot, repositoryIdentity: project.repositoryIdentity,
-        remoteUrl: isGitRepo(project.workspaceRoot) ? await remoteUrl(project.workspaceRoot) : null,
-        worktreeHome: dirname(worktreePath(project, "x")),
+        remoteUrl: project.remoteUrl ?? (isGitRepo(project.workspaceRoot) ? await remoteUrl(project.workspaceRoot) : null),
       },
       thread, items: this.db.allItems(threadId), transcripts,
     };
@@ -1405,21 +1417,20 @@ export class Engine {
         this.db.putItem(moved);
       }
     });
-    // The transcript names the directory the session ran in. Both the old
-    // worktree and the old project directory are mapped, because a thread
-    // from before worktrees ran in the project directory itself.
+    // The transcript names the directory the session ran in: the thread's old
+    // worktree, or the project directory for a thread from before worktrees.
     const from = exp.thread.worktreePath ?? exp.project.workspaceRoot;
     const to = t.worktreePath ?? project.workspaceRoot;
     for (const tr of exp.transcripts) {
-      const entries = tr.entries.map((e) => rewriteCwd(rewriteCwd(e, from, to), exp.project.workspaceRoot, project!.workspaceRoot));
-      this.db.appendTranscript(threadId, t.sessionId, tr.subpath, entries);
+      this.db.appendTranscript(threadId, t.sessionId, tr.subpath, tr.entries.map((e) => rewriteCwd(e, from, to)));
     }
     const noteNow = new Date().toISOString();
-    const where = t.worktreePath
-      ? tree.carried
-        ? ` Working in a worktree on ${t.branch}, fetched from origin.`
-        : ` Working in a new worktree on ${t.branch}` + (exp.thread.branch ? `; the branch ${exp.thread.branch} was not on origin, so its commits stayed behind.` : ".")
-      : "";
+    let where = "";
+    if (t.worktreePath && tree.carried) where = ` The thread works in a worktree on ${t.branch}, fetched from origin.`;
+    else if (t.worktreePath) {
+      where = ` The thread works in a new worktree on ${t.branch}.`;
+      if (exp.thread.branch) where += ` The branch ${exp.thread.branch} is not on origin, so its commits are still on ${exp.sourceMachineName}.`;
+    }
     this.persistItem({ id: `note:${randomUUID()}`, threadId, turnId: null, seq: 0, createdAt: noteNow, updatedAt: noteNow, kind: "note", tone: "info", text: `Moved here from ${exp.sourceMachineName} (${from}).${where}` });
     if (tree.cleanStart) this.note(threadId, ...cleanStartNote(tree.cleanStart));
     this.emitShell({ kind: "thread.upserted", thread: this.db.getThread(threadId)! });
@@ -1434,6 +1445,9 @@ export class Engine {
     t.status = "idle";
     t.archivedAt = t.archivedAt ?? new Date().toISOString();
     this.putThreadAndEmit(t);
+    // The work lives on the other machine now. The worktree here is given
+    // back, the branch stays, and a thread that comes back gets a new one.
+    void this.releaseWorktree(t, "Moved");
   }
 
   shutdown() {
@@ -1500,17 +1514,6 @@ function titleIsAuto(t: Thread): boolean {
 }
 
 /** Rewrite the session's recorded cwd so the SDK resumes against the new path. */
-/**
- * The directory under `projectsDir` for a repository: the last two segments of
- * its identity, `github.com/dylandotfarm/covey` → `dylandotfarm/covey`, with
- * anything a path must not hold replaced by `-`.
- */
-export function projectSlug(identity: string): string {
-  const parts = identity.split("/").filter(Boolean).slice(-2);
-  const clean = parts.map((s) => s.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^\.+/, "_")).filter(Boolean);
-  return clean.length ? clean.join("/") : "repo";
-}
-
 function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): Record<string, unknown> {
   if (from === to) return entry;
   const e = { ...entry };

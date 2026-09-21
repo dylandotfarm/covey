@@ -48,7 +48,7 @@ function ProjectSummary({ m, projectId, width, height, tick }: { m: MachineState
       </Text>
       <Text wrap="truncate">
         <Text color={T.subtle}>{p.kind === "clone" ? "a clone covey keeps; " : "a checkout of your own; "}</Text>
-        <Text color={T.muted}>each thread works in a worktree from the remote's default branch</Text>
+        <Text color={T.muted}>{p.kind === "clone" ? "each thread works in a worktree from origin's default branch" : "threads work in worktrees under .covey/worktrees"}</Text>
         {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel)}</Text>}
       </Text>
       <Box height={1} />

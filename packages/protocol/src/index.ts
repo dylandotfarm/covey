@@ -53,9 +53,9 @@ export interface MachineInfo {
   /** Machine-wide defaults, changed from the TUI's machine control panel. */
   settings: MachineSettings;
   /**
-   * Where this daemon keeps the repositories it clones: `<COVEY_HOME>/projects`
-   * when `COVEY_HOME` is set, else `~/.covey/projects`. Absent on a daemon
-   * built before projects were clones.
+   * Where this daemon keeps the repositories it clones: `COVEY_PROJECTS`, else
+   * `<COVEY_HOME>/projects` when `COVEY_HOME` is set, else `~/.covey/projects`.
+   * Absent on a daemon built before projects were clones.
    */
   projectsDir?: string;
 }
@@ -1074,10 +1074,10 @@ export interface ThreadSnapshot {
 export type Command =
   /**
    * Clone `url` into this machine's projects directory and record the project.
-   * A project that already exists here for the same repository is returned,
-   * not made twice, so a client may send this to every machine in a pool. The
-   * clone can take a while on a large repository; the command answers when it
-   * is done.
+   * Refused, with code `exists`, when this machine already has a project for
+   * the same repository. The clone can take minutes on a large repository;
+   * the command answers when it is done, so the caller must wait as long as
+   * the daemon does (ten minutes).
    */
   | { type: "project.create"; url: string; title?: string }
   | {
@@ -1247,10 +1247,8 @@ export interface ThreadExport {
   sourceMachineId: MachineId;
   sourceMachineName: string;
   project: Pick<Project, "title" | "workspaceRoot" | "repositoryIdentity"> & {
-    /** The `origin` URL read at export time, so the destination can clone it. */
+    /** The `origin` URL of the source project, so the destination can clone it. */
     remoteUrl?: string | null;
-    /** Where the source kept the thread's worktree, so transcript paths can be rewritten. */
-    worktreeHome?: string;
   };
   thread: Thread;
   items: TimelineItem[];

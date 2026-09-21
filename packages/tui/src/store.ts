@@ -278,6 +278,12 @@ export function selectionIsEmpty(s: Selection): boolean {
 
 type Listener = () => void;
 
+/**
+ * How long a call that may clone a repository gets: the daemon's own budget
+ * for a clone, plus a little for the answer to cross the network.
+ */
+const CLONE_WAIT_MS = 10 * 60_000 + 10_000;
+
 export class Store {
   state: AppState;
   private listeners = new Set<Listener>();
@@ -793,13 +799,9 @@ export class Store {
 
   /** Clone a repository on a machine and record it as a project there. */
   async createProject(machine: string, url: string, title?: string) {
-    const client = this.clients.get(machine);
-    if (!client) { this.notify("that machine is not connected", "error"); return; }
-    this.notify(`cloning ${url} on ${this.state.machines.get(machine)?.info?.name ?? machine}…`);
-    try {
-      await client.command({ type: "project.create", url, ...(title ? { title } : {}) });
-      this.notify("project added", "success");
-    } catch (e: any) { this.notify(e.message, "error"); }
+    this.notify(`clone of ${url} started on ${this.state.machines.get(machine)?.info?.name ?? machine}…`);
+    const err = await this.threadCommand({ type: "project.create", url, ...(title ? { title } : {}) }, machine, CLONE_WAIT_MS);
+    if (err === null) this.notify("project added", "success");
   }
 
   async createThread(machine: string, projectId: string) {
@@ -1026,12 +1028,12 @@ export class Store {
    * also returned, because a caller that says "done" afterwards must first
    * know that the command went through. Null means it did.
    */
-  async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string): Promise<string | null> {
+  async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string, timeoutMs?: number): Promise<string | null> {
     const key = machine ?? this.state.selected?.machine;
     const client = key && this.clients.get(key);
     if (!client) return "no machine";
     try {
-      await client.command(cmd);
+      await client.command(cmd, timeoutMs);
       return null;
     } catch (e: any) {
       const msg = e?.message ?? "the machine refused the command";
@@ -1063,7 +1065,8 @@ export class Store {
       this.notify("exporting thread…");
       const exp = await src.rpc("thread.export", { threadId: from.threadId });
       this.notify(`importing on ${dstInfo.name}…`);
-      const r = await dst.rpc("thread.import", { export: exp, projectId: to.projectId, url: to.url });
+      // An import may clone first, and a clone gets the daemon's ten minutes.
+      const r = await dst.rpc("thread.import", { export: exp, projectId: to.projectId, url: to.url }, CLONE_WAIT_MS);
       await src.rpc("thread.markMoved", { threadId: from.threadId, machineId: dstInfo.machineId, newThreadId: r.threadId });
       this.notify(`moved to ${dstInfo.name}`, "success");
       await this.select({ machine: to.machine, threadId: r.threadId });
