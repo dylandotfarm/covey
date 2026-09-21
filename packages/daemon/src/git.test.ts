@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { createWorktree, normaliseRemote, removeWorktree, restoreWorktree } from "./git.js";
+import { worktreePath, createWorktree, normaliseRemote, removeWorktree, restoreWorktree } from "./git.js";
 
 const execFile = promisify(execFileCb);
 
@@ -36,7 +36,7 @@ const branches = async (repo: string) =>
 test("a thread's worktree goes away on archive, and comes back on the same branch", async (t) => {
   const repo = await scratchRepo();
   t.after(() => rmSync(repo, { recursive: true, force: true }));
-  const wt = await createWorktree(repo, "abc123", "HEAD");
+  const wt = await createWorktree(repo, "abc123", "HEAD", worktreePath({ workspaceRoot: repo }, "abc123"));
   assert.ok(!("error" in wt), "worktree created");
   if ("error" in wt) return;
   // ignored junk is exactly what a worktree accumulates, and must not hold it hostage
@@ -56,7 +56,7 @@ test("a thread's worktree goes away on archive, and comes back on the same branc
 test("a worktree with unsaved work is kept, and says why", async (t) => {
   const repo = await scratchRepo();
   t.after(() => rmSync(repo, { recursive: true, force: true }));
-  const wt = await createWorktree(repo, "def456", "HEAD");
+  const wt = await createWorktree(repo, "def456", "HEAD", worktreePath({ workspaceRoot: repo }, "def456"));
   if ("error" in wt) return assert.fail("worktree created");
   writeFileSync(join(wt.path, "a.txt"), "uncommitted\n");
 
@@ -68,7 +68,7 @@ test("a worktree with unsaved work is kept, and says why", async (t) => {
 test("a worktree deleted behind git's back can still be restored", async (t) => {
   const repo = await scratchRepo();
   t.after(() => rmSync(repo, { recursive: true, force: true }));
-  const wt = await createWorktree(repo, "ghi789", "HEAD");
+  const wt = await createWorktree(repo, "ghi789", "HEAD", worktreePath({ workspaceRoot: repo }, "ghi789"));
   if ("error" in wt) return assert.fail("worktree created");
   rmSync(wt.path, { recursive: true, force: true }); // leaves a stale admin entry
   assert.deepEqual(await restoreWorktree(repo, wt.path, wt.branch), { ok: true });

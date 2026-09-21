@@ -19,6 +19,22 @@ export function dataDir(): string {
   }
 }
 
+/**
+ * Where this daemon keeps the repositories it clones, one directory per
+ * project: `<projectsDir>/<owner>/<repo>/repo.git` is the bare clone and each
+ * thread's worktree sits beside it.
+ *
+ * Under `COVEY_HOME` when that is set, so a throwaway daemon on another port
+ * clones into its own directory and never into the real one. Otherwise
+ * `~/.covey/projects`: a path the user can find and read, on every platform.
+ * Override with `COVEY_PROJECTS`.
+ */
+export function projectsDir(): string {
+  if (process.env.COVEY_PROJECTS) return process.env.COVEY_PROJECTS;
+  if (process.env.COVEY_HOME) return join(process.env.COVEY_HOME, "projects");
+  return join(homedir(), ".covey", "projects");
+}
+
 /** Take over the directory that the previous name of this program used. This
  *  runs one time. After the move, the old directory does not exist. If the move
  *  fails, the old directory stays in use, so a machine keeps its id and token. */

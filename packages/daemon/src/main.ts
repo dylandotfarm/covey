@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
-import { dataDir, loadDaemonConfig, machineSettings, platformInfo, type DaemonConfig } from "./config.js";
+import { dataDir, loadDaemonConfig, machineSettings, platformInfo, projectsDir, type DaemonConfig } from "./config.js";
 import { Db } from "./db.js";
 import { Engine } from "./engine.js";
 import { startServer } from "./server.js";
@@ -49,6 +49,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     tailnetName: ts?.dnsName, tailnetIps: ts?.ips,
     capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
     settings: machineSettings(config),
+    projectsDir: projectsDir(),
   };
   const db = new Db(join(dataDir()));
   const engine = new Engine(db, machine, { log });

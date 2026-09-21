@@ -91,7 +91,7 @@ function tempDb(): { db: Db; dir: string } {
 
 function project(id: string, title: string): Project {
   const now = new Date().toISOString();
-  return { id, title, workspaceRoot: `/tmp/${id}`, repositoryIdentity: null, defaultModel: null, defaultWorkspaceMode: null, createdAt: now, updatedAt: now };
+  return { id, title, workspaceRoot: `/tmp/${id}`, repositoryIdentity: null, defaultModel: null, createdAt: now, updatedAt: now };
 }
 
 function thread(id: string, projectId: string, title: string): Thread {

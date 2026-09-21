@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { KNOWN_MODELS, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
 import type { AppState, MachineState, SidebarRow, ThreadTally } from "../store.js";
-import { liveThreads, byRecency, tallyThreads, permissionModeLabel, workspaceModeLabel } from "../store.js";
+import { liveThreads, byRecency, tallyThreads, permissionModeLabel } from "../store.js";
 import { T, connColor, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { buildLine, buildSkew } from "../build.js";
@@ -48,8 +48,8 @@ function ProjectSummary({ m, projectId, width, height, tick }: { m: MachineState
         {hidden > 0 && <Text color={T.faint}>  ·  {hidden} archived or moved</Text>}
       </Text>
       <Text wrap="truncate">
-        <Text color={T.subtle}>new threads run in </Text>
-        <Text color={T.muted}>{workspaceModeLabel(p.defaultWorkspaceMode)}</Text>
+        <Text color={T.subtle}>{p.kind === "clone" ? "a clone covey keeps; " : "a checkout of your own; "}</Text>
+        <Text color={T.muted}>{p.kind === "clone" ? "each thread works in a worktree from origin's default branch" : "threads work in worktrees under .covey/worktrees"}</Text>
         {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel)}</Text>}
       </Text>
       <Box height={1} />

@@ -46,7 +46,7 @@ const AT = "2026-01-01T00:00:00Z";
 
 const project: Project = {
   id: "p", title: "covey", workspaceRoot: "/src/covey", repositoryIdentity: null,
-  defaultModel: null, defaultWorkspaceMode: null, createdAt: AT, updatedAt: AT,
+  defaultModel: null, createdAt: AT, updatedAt: AT,
 };
 
 const info: MachineInfo = {

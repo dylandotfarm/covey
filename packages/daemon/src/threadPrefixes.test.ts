@@ -103,7 +103,7 @@ function withFiles(): { engine: Engine; root: string; cleanup: () => void } {
   writeFileSync(join(root, ".gitignore"), "");
   s.db.putProject({
     id: "p1", title: "p", workspaceRoot: root, repositoryIdentity: null, defaultModel: null,
-    defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   } as Project);
   return { engine: s.engine, root, cleanup: () => { s.cleanup(); rmSync(root, { recursive: true, force: true }); } };
 }

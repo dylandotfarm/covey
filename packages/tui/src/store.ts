@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, WorkspaceMode, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { BuildInfo, MachineInfo, Project, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { isFinalMemberState } from "@covey/protocol";
 import { MachineClient, type ClientOptions, type ConnState } from "./client.js";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
@@ -277,6 +277,12 @@ export function selectionIsEmpty(s: Selection): boolean {
 }
 
 type Listener = () => void;
+
+/**
+ * How long a call that may clone a repository gets: the daemon's own budget
+ * for a clone, plus a little for the answer to cross the network.
+ */
+const CLONE_WAIT_MS = 10 * 60_000 + 10_000;
 
 export class Store {
   state: AppState;
@@ -791,7 +797,14 @@ export class Store {
 
   // ---- actions -------------------------------------------------------------
 
-  async createThread(machine: string, projectId: string, opts: { workspaceMode?: WorkspaceMode } = {}) {
+  /** Clone a repository on a machine and record it as a project there. */
+  async createProject(machine: string, url: string, title?: string) {
+    this.notify(`clone of ${url} started on ${this.state.machines.get(machine)?.info?.name ?? machine}…`);
+    const err = await this.threadCommand({ type: "project.create", url, ...(title ? { title } : {}) }, machine, CLONE_WAIT_MS);
+    if (err === null) this.notify("project added", "success");
+  }
+
+  async createThread(machine: string, projectId: string) {
     const client = this.clients.get(machine);
     if (!client) return;
     const threadId = randomUUID();
@@ -801,7 +814,7 @@ export class Store {
       // last-used mode here would silently override what the control panel says.
       const machineMode = this.state.machines.get(machine)?.info?.settings?.defaultPermissionMode ?? null;
       const mode = machineMode ? undefined : this.defaultPermissionMode;
-      await client.command({ type: "thread.create", projectId, threadId, sessionId, ...(mode ? { permissionMode: mode } : {}), ...opts });
+      await client.command({ type: "thread.create", projectId, threadId, sessionId, ...(mode ? { permissionMode: mode } : {}) });
       await this.select({ machine, threadId });
       this.setFocus("composer");
       // The snapshot fetched by select() is authoritative about where the
@@ -817,11 +830,6 @@ export class Store {
     if (!client) return null;
     try { return await client.rpc("project.git", { projectId }); }
     catch (e: any) { this.notify(e.message, "error"); return null; }
-  }
-
-  /** Remember (or forget, with null) where new threads in a project run. */
-  async setProjectWorkspaceMode(machine: string, projectId: string, mode: WorkspaceMode | null) {
-    await this.threadCommand({ type: "project.update", projectId, defaultWorkspaceMode: mode }, machine);
   }
 
   // ---- machine control panel ------------------------------------------------
@@ -1020,12 +1028,12 @@ export class Store {
    * also returned, because a caller that says "done" afterwards must first
    * know that the command went through. Null means it did.
    */
-  async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string): Promise<string | null> {
+  async threadCommand(cmd: Parameters<MachineClient["command"]>[0], machine?: string, timeoutMs?: number): Promise<string | null> {
     const key = machine ?? this.state.selected?.machine;
     const client = key && this.clients.get(key);
     if (!client) return "no machine";
     try {
-      await client.command(cmd);
+      await client.command(cmd, timeoutMs);
       return null;
     } catch (e: any) {
       const msg = e?.message ?? "the machine refused the command";
@@ -1049,7 +1057,7 @@ export class Store {
   }
 
   /** Move the selected thread to another machine + project. */
-  async moveThread(from: { machine: string; threadId: string }, to: { machine: string; projectId?: string; workspaceRoot?: string }) {
+  async moveThread(from: { machine: string; threadId: string }, to: { machine: string; projectId?: string; url?: string }) {
     const src = this.clients.get(from.machine); const dst = this.clients.get(to.machine);
     const dstInfo = this.state.machines.get(to.machine)?.info;
     if (!src || !dst || !dstInfo) { this.notify("both machines must be connected", "error"); return; }
@@ -1057,7 +1065,8 @@ export class Store {
       this.notify("exporting thread…");
       const exp = await src.rpc("thread.export", { threadId: from.threadId });
       this.notify(`importing on ${dstInfo.name}…`);
-      const r = await dst.rpc("thread.import", { export: exp, projectId: to.projectId, workspaceRoot: to.workspaceRoot });
+      // An import may clone first, and a clone gets the daemon's ten minutes.
+      const r = await dst.rpc("thread.import", { export: exp, projectId: to.projectId, url: to.url }, CLONE_WAIT_MS);
       await src.rpc("thread.markMoved", { threadId: from.threadId, machineId: dstInfo.machineId, newThreadId: r.threadId });
       this.notify(`moved to ${dstInfo.name}`, "success");
       await this.select({ machine: to.machine, threadId: r.threadId });
@@ -1199,7 +1208,6 @@ export class Store {
     tasks: RunTask[];
     repositoryIdentity: string | null;
     briefTemplate?: string;
-    workspaceMode?: WorkspaceMode;
     /** The run's id. Supplied only by a test that needs a known one. */
     runId?: string;
   }): Promise<string | null> {
@@ -1239,7 +1247,6 @@ export class Store {
           name: o.name,
           goal: o.goal,
           briefTemplate: o.briefTemplate ?? DEFAULT_BRIEF,
-          workspaceMode: o.workspaceMode ?? "worktree-default",
           members,
         },
       });
@@ -1358,7 +1365,6 @@ export class Store {
         threadId,
         sessionId: randomUUID(),
         title: m.task.title,
-        workspaceMode: run.workspaceMode,
         // Said outright, because the client name cannot say it: this connection
         // is the TUI, the one client a person types into, but nobody typed this
         // thread. No parent — a member is grouped under its run row already,
@@ -1595,35 +1601,6 @@ export function isFolderName(s: string): boolean {
 /** The parent of a browsed directory, or the directory itself at the root. */
 export function parentPath(path: string): string {
   return path.replace(/[\\/][^\\/]+[\\/]?$/, "") || "/";
-}
-
-/**
- * The "where should this thread run?" choices for a repo. Always the same three
- * rows in the same order (so the answer can be remembered without ambiguity),
- * minus the default-branch row when the repo has no default branch to fork.
- */
-export function workspaceOptions(git: ProjectGit): PickOption[] {
-  const head = git.currentBranch ? ` (${git.currentBranch})` : "";
-  const opts: PickOption[] = [];
-  // The label names the ref the worktree really gets — `origin/main`, not the
-  // local copy of it — because that difference is the whole of #76. A ref that
-  // does not start with `origin/` is a repo with no remote, where there is
-  // nothing to fetch and the hint must not claim one.
-  const remote = git.defaultBranch?.startsWith("origin/") ?? false;
-  if (git.defaultBranch) opts.push({ id: "worktree-default", label: `Worktree from ${git.defaultBranch}`, hint: remote ? "clean start, fetched first" : "clean start" });
-  opts.push({ id: "worktree-head", label: `Worktree from HEAD${head}`, hint: "branch off what is checked out" });
-  opts.push({ id: "checkout", label: `This checkout${head}`, hint: "shared with other threads" });
-  return opts;
-}
-
-/** Short label for a remembered workspace mode, for menus. */
-export function workspaceModeLabel(mode: WorkspaceMode | null | undefined): string {
-  switch (mode) {
-    case "worktree-default": return "worktree from the remote's default branch";
-    case "worktree-head": return "worktree from HEAD";
-    case "checkout": return "the project checkout";
-    default: return "ask every time";
-  }
 }
 
 /** True for a machine URL that points at this very machine. */

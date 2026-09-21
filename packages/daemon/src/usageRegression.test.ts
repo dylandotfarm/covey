@@ -168,7 +168,7 @@ function tempEngine(): { engine: Engine; db: Db; dir: string; threadId: string }
     settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
   };
   const now = new Date().toISOString();
-  const project: Project = { id: "p1", title: "covey", workspaceRoot: "/tmp/p1", repositoryIdentity: null, defaultModel: null, defaultWorkspaceMode: null, createdAt: now, updatedAt: now };
+  const project: Project = { id: "p1", title: "covey", workspaceRoot: "/tmp/p1", repositoryIdentity: null, defaultModel: null, createdAt: now, updatedAt: now };
   const thread: Thread = {
     id: "t1", projectId: "p1", title: "A thread", provider: "claude", sessionId: "s1", model: OPUS,
     permissionMode: "default", branch: null, worktreePath: null, status: "running", lastError: null,

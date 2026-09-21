@@ -5,7 +5,7 @@
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync, writeFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -13,6 +13,8 @@ import { execFileSync } from "node:child_process";
 import WebSocket from "ws";
 import type { RpcMethodName, RpcMethods } from "@covey/protocol";
 import { startDaemon, stopAll, tempDir, waitForExit, type TestDaemon } from "./daemons.js";
+import { scratchRemote, git, head, type ScratchRemote } from "../src/scratch.js";
+import { normaliseRemote, isBareRepo, projectSlug } from "../src/git.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -67,28 +69,13 @@ class Client {
 }
 
 let A: TestDaemon, B: TestDaemon;
-let repoA: string, repoB: string;
+/** The one repository both daemons clone: a bare remote on disk, so a project
+ *  reaches no network. */
+let remote: ScratchRemote;
 const a = new Client(), b = new Client();
 
 before(async () => {
-  repoA = tempDir("covey-repo-a-");
-  repoB = tempDir("covey-repo-b-");
-  for (const r of [repoA, repoB]) {
-    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: r });
-    execFileSync("git", ["remote", "add", "origin", "git@github.com:example/shared.git"], { cwd: r });
-    // That URL is here for `repositoryIdentity`, which only reads it. Since #76
-    // a `worktree-default` thread *fetches* `origin`, and this file creates one
-    // below, so without this line `pnpm test` opens an ssh connection to
-    // github.com — measured, 0.7s and a real authentication. A test reaches no
-    // network. `false` as the ssh command fails the fetch here on the machine,
-    // which is the case the clean-start path already handles: branch from what
-    // is here and tell the thread.
-    execFileSync("git", ["config", "core.sshCommand", "false"], { cwd: r });
-    writeFileSync(join(r, "README.md"), "hello\n");
-    // a real commit: worktrees (and checkpoints) need a HEAD to branch from
-    execFileSync("git", ["add", "README.md"], { cwd: r });
-    execFileSync("git", ["-c", "user.email=test@covey", "-c", "user.name=covey test", "commit", "-qm", "init"], { cwd: r });
-  }
+  remote = await scratchRemote("covey-daemon-remote-");
   // If one of these throws the other is still reachable — `startDaemon`
   // registers a daemon before it waits on it, so `stopAll` below finds it.
   [A, B] = await Promise.all([
@@ -105,7 +92,7 @@ after(async () => {
     try { step(); } catch (e) { console.error(`covey test teardown: ${e}`); }
   }
   await stopAll();
-  for (const d of [repoA, repoB]) if (d) rmSync(d, { recursive: true, force: true });
+  remote?.drop();
 });
 
 // Issue #8: every daemon runs `node <dir>/index.js daemon`, so a pattern such
@@ -160,16 +147,26 @@ test("hello reports protocol + capabilities", async () => {
   await assert.rejects(a.rpc("hello", { protocolVersion: 99, client: "test" }), /speaks v1/);
 });
 
-test("projects: create derives repositoryIdentity, is idempotent per path, and streams shell events", async () => {
+test("projects: create clones the repository under the projects directory, once per repository, and streams shell events", async () => {
   await a.rpc("shell.subscribe", {});
-  await a.command({ type: "project.create", workspaceRoot: repoA });
-  await a.command({ type: "project.create", workspaceRoot: repoA });
+  await a.command({ type: "project.create", url: remote.url });
+  await assert.rejects(a.command({ type: "project.create", url: remote.url }), /already has shared/, "one project per repository, and the second create says so");
   const snap = await a.rpc("shell.snapshot", {});
   assert.equal(snap.projects.length, 1);
-  assert.equal(snap.projects[0]!.repositoryIdentity, "github.com/example/shared");
+  const p = snap.projects[0]!;
+  const identity = normaliseRemote(remote.url);
+  assert.equal(p.repositoryIdentity, identity);
+  assert.equal(p.kind, "clone");
+  assert.equal(p.remoteUrl, remote.url);
+  assert.equal(p.title, "shared", "named after the repository");
+  assert.equal(snap.machine.projectsDir, join(A.home, "projects"), "under COVEY_HOME, so a throwaway daemon never clones into the real directory");
+  assert.equal(p.workspaceRoot, join(A.home, "projects", projectSlug(identity), "repo.git"));
+  assert.equal(projectSlug("github.com/acme/api"), "github.com/acme/api", "the host stays in the path, so two hosts' acme/api never share a clone");
+  assert.ok(await isBareRepo(p.workspaceRoot), "nothing is checked out in the project itself");
   await new Promise((r) => setTimeout(r, 50));
   assert.ok(a.pushes.some((p) => p.push === "shell" && p.event.kind === "project.upserted"));
-  await assert.rejects(a.command({ type: "project.create", workspaceRoot: join(repoA, "nope") }), /not a directory/);
+  await assert.rejects(a.command({ type: "project.create", url: join(remote.dir, "nope.git") }), /could not clone/);
+  assert.equal((await a.rpc("shell.snapshot", {})).projects.length, 1, "a clone that failed is no project");
 });
 
 test("commands are idempotent by commandId", async () => {
@@ -205,13 +202,13 @@ test("a thread that has never run reports no `/` menu, which is not an empty one
 test("export → import on another daemon → markMoved tombstones the source", async () => {
   const snapA = await a.rpc("shell.snapshot", {});
   const threadId = snapA.threads[0]!.id;
-  await b.command({ type: "project.create", workspaceRoot: repoB });
+  await b.command({ type: "project.create", url: remote.url });
   const exp = await a.rpc("thread.export", { threadId });
   assert.equal(exp.version, 1);
   assert.equal(exp.thread.title, "renamed");
   const imported = await b.rpc("thread.import", { export: exp }); // matched by repositoryIdentity
   const snapB = await b.rpc("shell.snapshot", {});
-  assert.equal(snapB.projects[0]!.workspaceRoot, repoB);
+  assert.equal(snapB.projects[0]!.repositoryIdentity, normaliseRemote(remote.url));
   assert.equal(snapB.threads[0]!.id, imported.threadId);
   assert.equal(snapB.threads[0]!.sessionId, exp.thread.sessionId, "session id survives the move");
   const detail = await b.rpc("thread.snapshot", { threadId: imported.threadId });
@@ -224,13 +221,15 @@ test("export → import on another daemon → markMoved tombstones the source", 
 });
 
 test("fs.listDir lists directories and flags git repos", async () => {
+  const repoA = tempDir("covey-fs-");
   mkdirSync(join(repoA, "sub", "inner"), { recursive: true });
   execFileSync("git", ["init", "-q"], { cwd: join(repoA, "sub", "inner") });
   const r = await a.rpc("fs.listDir", { path: join(repoA, "sub") });
   assert.deepEqual(r.entries.map((e) => [e.name, e.isRepo]), [["inner", true]]);
 });
 
-test("fs.mkdir creates a folder to start a project in, and refuses to escape", async () => {
+test("fs.mkdir creates a folder, and refuses to escape", async () => {
+  const repoA = tempDir("covey-fs-");
   const made = await a.rpc("fs.mkdir", { path: repoA, name: "fresh" });
   assert.equal(made.path, join(repoA, "fresh"));
   assert.ok(existsSync(made.path));
@@ -240,60 +239,87 @@ test("fs.mkdir creates a folder to start a project in, and refuses to escape", a
   for (const name of ["", "  ", "..", "../escaped", "a/../../escaped"])
     await assert.rejects(a.rpc("fs.mkdir", { path: repoA, name }), /folder/, `refused ${JSON.stringify(name)}`);
   assert.ok(!existsSync(join(repoA, "..", "escaped")));
-  // A new project can be added in what was just created.
-  await a.command({ type: "project.create", workspaceRoot: made.path, title: "fresh" });
-  assert.ok((await a.rpc("shell.snapshot", {})).projects.some((pr) => pr.workspaceRoot === made.path));
 });
 
 test("project.git reports live branch state", async () => {
-  const projectId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === repoA)!.id;
+  const projectId = (await a.rpc("shell.snapshot", {})).projects[0]!.id;
+  const root = (await a.rpc("shell.snapshot", {})).projects[0]!.workspaceRoot;
   const git = await a.rpc("project.git", { projectId });
-  assert.deepEqual(git, { isRepo: true, root: repoA, currentBranch: "main", defaultBranch: "main", hasCommits: true });
+  // A bare clone has no branch of its own checked out. Its default branch is
+  // the remote's, and that is its history.
+  assert.deepEqual(git, { isRepo: true, root, currentBranch: null, defaultBranch: "origin/main", hasCommits: true });
 });
 
-test("thread.create puts a thread in a worktree, or in the checkout", async () => {
-  const projectId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === repoA)!.id;
+test("thread.create puts every thread in its own worktree beside the clone, from origin/main", async () => {
+  const project = (await a.rpc("shell.snapshot", {})).projects[0]!;
+  // What the clone knows of origin/main. A fetch within the last minute is
+  // reused across threads, so this test does not move the remote and expect
+  // the very next thread to see it; `cleanStart.test.ts` covers freshness.
+  const ahead = await git(project.workspaceRoot, "rev-parse", "--short", "origin/main");
 
   const wt = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: wt, sessionId: randomUUID(), workspaceMode: "worktree-head" });
+  await a.command({ type: "thread.create", projectId: project.id, threadId: wt, sessionId: randomUUID() });
   const inWorktree = (await a.rpc("thread.snapshot", { threadId: wt })).thread;
   assert.equal(inWorktree.branch, `covey/${wt.slice(0, 8)}`);
-  assert.equal(inWorktree.worktreePath, join(repoA, ".covey", "worktrees", wt.slice(0, 8)));
+  assert.equal(inWorktree.worktreePath, join(dirname(project.workspaceRoot), wt.slice(0, 8)), "beside repo.git, not inside it");
   assert.ok(existsSync(join(inWorktree.worktreePath!, "README.md")), "worktree is checked out");
-  assert.doesNotMatch(execFileSync("git", ["status", "--porcelain"], { cwd: repoA, encoding: "utf8" }), /\.covey/, "worktrees stay out of the main checkout's status");
+  assert.equal(await head(inWorktree.worktreePath!), ahead, "the thread starts at origin/main");
+  const notes = (await a.rpc("thread.snapshot", { threadId: wt })).items.filter((i) => i.kind === "note");
+  assert.equal(notes.length, 1);
+  assert.match((notes[0] as any).text, new RegExp(`Branched from origin/main at ${ahead}, fetched from origin`));
 
-  const plain = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: plain, sessionId: randomUUID(), workspaceMode: "checkout" });
-  const inCheckout = (await a.rpc("thread.snapshot", { threadId: plain })).thread;
-  assert.equal(inCheckout.worktreePath, null);
-  assert.equal(inCheckout.branch, "main");
-
-  // a worktree that cannot be made is reported, not silently downgraded
-  const plainDir = tempDir("covey-nogit-");
-  await a.command({ type: "project.create", workspaceRoot: plainDir });
-  const plainId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === plainDir)!.id;
-  await assert.rejects(
-    a.command({ type: "thread.create", projectId: plainId, threadId: randomUUID(), sessionId: randomUUID(), workspaceMode: "worktree-default" }),
-    /not a git repository/,
-  );
-  rmSync(plainDir, { recursive: true, force: true });
+  // Every thread gets one. There is no option to share the checkout: the
+  // project has none.
+  const second = randomUUID();
+  await a.command({ type: "thread.create", projectId: project.id, threadId: second, sessionId: randomUUID() });
+  const t2 = (await a.rpc("thread.snapshot", { threadId: second })).thread;
+  assert.notEqual(t2.worktreePath, inWorktree.worktreePath);
+  assert.equal(t2.branch, `covey/${second.slice(0, 8)}`);
 });
 
-test("a project remembers where new threads should run", async () => {
-  const projectId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === repoA)!.id;
-  const project = async () => (await a.rpc("shell.snapshot", {})).projects.find((p) => p.id === projectId)!;
-  await a.command({ type: "project.update", projectId, defaultWorkspaceMode: "worktree-default" });
-  assert.equal((await project()).defaultWorkspaceMode, "worktree-default");
+test("a moved thread keeps its branch when the remote has it, and starts fresh when it does not", async () => {
+  // On origin: the branch of a thread that pushed its work before the move.
+  const pushed = randomUUID();
+  const branch = `covey/${pushed.slice(0, 8)}`;
+  const tip = await remote.pushBranch(branch, "thread work");
+  await a.command({ type: "thread.create", projectId: (await a.rpc("shell.snapshot", {})).projects[0]!.id, threadId: pushed, sessionId: randomUUID() });
+  // The daemon's own record of the branch is the name; the commits are on origin.
+  const exp = await a.rpc("thread.export", { threadId: pushed });
+  assert.equal(exp.thread.branch, branch);
+  assert.ok(exp.project.remoteUrl, "the export carries the URL, so a machine with no project can clone");
+  const imported = await b.rpc("thread.import", { export: exp });
+  const moved = (await b.rpc("thread.snapshot", { threadId: imported.threadId })).thread;
+  assert.equal(moved.branch, branch, "the same branch, on the other machine");
+  assert.equal(await head(moved.worktreePath!), tip, "with the commits that were pushed");
+  // The thread's own items came along, its clean-start note among them; the
+  // move's note is the one written here.
+  const moveNote = (items: any[]) => items.find((i) => i.kind === "note" && /Moved here/.test(i.text));
+  const note = moveNote((await b.rpc("thread.snapshot", { threadId: imported.threadId })).items);
+  assert.ok(note, "the move left a note");
+  assert.match(note.text, new RegExp(`The thread works in a worktree on ${branch}, fetched from origin`));
+  await a.rpc("thread.markMoved", { threadId: pushed, machineId: (await b.rpc("hello", { protocolVersion: 1, client: "test" })).machineId, newThreadId: imported.threadId });
+  await new Promise((r) => setTimeout(r, 200));
+  const source = (await a.rpc("thread.snapshot", { threadId: pushed })).thread;
+  assert.ok(!existsSync(source.worktreePath!), "the source gives its worktree back once the move is marked");
+  assert.equal(await git((await a.rpc("shell.snapshot", {})).projects[0]!.workspaceRoot, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`).then(() => true, () => false), true, "and keeps the branch");
 
-  const id = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: id, sessionId: randomUUID() });
-  assert.equal((await a.rpc("thread.snapshot", { threadId: id })).thread.branch, `covey/${id.slice(0, 8)}`, "remembered default applied without asking");
+  // Back again. The branch is still here from the first visit, and the
+  // worktree opens on it at what origin has, not on a second branch.
+  const back = await a.rpc("thread.import", { export: await b.rpc("thread.export", { threadId: imported.threadId }) });
+  const returned = (await a.rpc("thread.snapshot", { threadId: back.threadId })).thread;
+  assert.equal(returned.branch, branch, "the same branch on the way back");
+  assert.equal(await head(returned.worktreePath!), tip);
+  assert.notEqual(returned.worktreePath, source.worktreePath, "in a worktree named for the new thread");
 
-  await a.command({ type: "project.update", projectId, defaultWorkspaceMode: null });
-  assert.equal((await project()).defaultWorkspaceMode, null);
-  const after = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: after, sessionId: randomUUID() });
-  assert.equal((await a.rpc("thread.snapshot", { threadId: after })).thread.worktreePath, null, "forgetting returns to the checkout");
+  // Not on origin: the thread starts from the default branch and is told.
+  const local = randomUUID();
+  await a.command({ type: "thread.create", projectId: (await a.rpc("shell.snapshot", {})).projects[0]!.id, threadId: local, sessionId: randomUUID() });
+  const exp2 = await a.rpc("thread.export", { threadId: local });
+  const imported2 = await b.rpc("thread.import", { export: exp2 });
+  const fresh = (await b.rpc("thread.snapshot", { threadId: imported2.threadId })).thread;
+  assert.equal(fresh.branch, `covey/${imported2.threadId.slice(0, 8)}`, "a new branch, named for the new thread");
+  const note2 = moveNote((await b.rpc("thread.snapshot", { threadId: imported2.threadId })).items);
+  assert.match(note2.text, new RegExp(`The branch covey/${local.slice(0, 8)} is not on origin, so its commits are still on alpha`));
 });
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {
@@ -313,9 +339,9 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal(onDisk.defaultModel, "claude-opus-5", "settings survive a daemon restart");
   assert.ok(onDisk.machineId, "writing settings does not clobber the rest of daemon.json");
 
-  const projectId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === repoA)!.id;
+  const projectId = (await a.rpc("shell.snapshot", {})).projects[0]!.id;
   const inherited = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: inherited, sessionId: randomUUID(), workspaceMode: "checkout" });
+  await a.command({ type: "thread.create", projectId, threadId: inherited, sessionId: randomUUID() });
   const t = (await a.rpc("thread.snapshot", { threadId: inherited })).thread;
   assert.equal(t.model, "claude-opus-5");
   assert.equal(t.permissionMode, "bypassPermissions");
@@ -323,7 +349,7 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal(t.streaming, true);
 
   const explicit = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId: explicit, sessionId: randomUUID(), workspaceMode: "checkout", model: "claude-haiku-4-5-20251001", permissionMode: "plan", streaming: false });
+  await a.command({ type: "thread.create", projectId, threadId: explicit, sessionId: randomUUID(), model: "claude-haiku-4-5-20251001", permissionMode: "plan", streaming: false });
   const e = (await a.rpc("thread.snapshot", { threadId: explicit })).thread;
   assert.equal(e.model, "claude-haiku-4-5-20251001", "an explicit model still wins");
   assert.equal(e.permissionMode, "plan");
@@ -341,9 +367,9 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
 });
 
 test("streaming is a per-thread switch that needs no restart", async () => {
-  const projectId = (await a.rpc("shell.snapshot", {})).projects.find((p) => p.workspaceRoot === repoA)!.id;
+  const projectId = (await a.rpc("shell.snapshot", {})).projects[0]!.id;
   const threadId = randomUUID();
-  await a.command({ type: "thread.create", projectId, threadId, sessionId: randomUUID(), workspaceMode: "checkout" });
+  await a.command({ type: "thread.create", projectId, threadId, sessionId: randomUUID() });
   assert.equal((await a.rpc("thread.snapshot", { threadId })).thread.streaming, false, "off until asked for");
 
   await a.rpc("thread.subscribe", { threadId, sinceSeq: 0 });
@@ -467,9 +493,10 @@ test("live: a real turn streams items, folds a second message in, and captures a
 
   // revert to before the edit turn: file restored, transcript truncated, items dropped
   const { readFileSync } = await import("node:fs");
-  assert.match(readFileSync(join(repoB, "README.md"), "utf8"), /second/);
+  const tree = (await b.rpc("thread.snapshot", { threadId })).thread.worktreePath!;
+  assert.match(readFileSync(join(tree, "README.md"), "utf8"), /second/);
   await b.command({ type: "turn.revert", threadId, turnId: editTurn });
-  assert.equal(readFileSync(join(repoB, "README.md"), "utf8"), "hello\n", "README restored");
+  assert.equal(readFileSync(join(tree, "README.md"), "utf8"), "hello\n", "README restored");
   const after = await b.rpc("thread.snapshot", { threadId });
   assert.ok(!after.items.some((i) => i.kind === "user" && (i as any).text.includes("Append")), "edit turn's user message removed");
   assert.ok(after.items.some((i) => i.kind === "note" && /Reverted to before/.test((i as any).text)));

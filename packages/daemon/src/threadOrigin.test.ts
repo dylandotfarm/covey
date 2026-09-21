@@ -17,7 +17,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -28,6 +28,7 @@ import { Db } from "./db.js";
 import { Engine, threadOrigin } from "./engine.js";
 import { startServer } from "./server.js";
 import { Updater } from "./update.js";
+import { scratchRemote } from "./scratch.js";
 
 /** A port the OS says is free. `startServer` reports back the port it was
  *  asked for, so asking for 0 would hand out 0 and never reach the listener. */
@@ -112,7 +113,7 @@ after(() => {
 async function daemon() {
   const dir = mkdtempSync(join(tmpdir(), "covey-origin-"));
   dirs.push(dir);
-  const engine = new Engine(new Db(dir), { ...MACHINE });
+  const engine = new Engine(new Db(dir), { ...MACHINE, projectsDir: join(dir, "projects") });
   const port = await freePort();
   const config = {
     machineId: "m1", name: "mac", token: "t", port, bind: "loopback",
@@ -123,9 +124,9 @@ async function daemon() {
     config, engine, updater: new Updater("m1", () => {}), host: "127.0.0.1", log: () => {},
   });
   closers.push(server.close);
-  const workspaceRoot = join(dir, "repo");
-  mkdirSync(workspaceRoot, { recursive: true });
-  return { engine, port: server.port, workspaceRoot };
+  const remote = await scratchRemote("covey-origin-remote-");
+  dirs.push(remote.dir);
+  return { engine, port: server.port, url: remote.url };
 }
 
 /**
@@ -160,9 +161,9 @@ const threadOf = (engine: Engine, id: string): Thread =>
   engine.shellSnapshot().threads.find((t) => t.id === id)!;
 
 test("a thread carries the origin of the connection that created it, and the name outlives hello", async () => {
-  const { engine, port, workspaceRoot } = await daemon();
+  const { engine, port, url } = await daemon();
   const ctl = await connect(port, "covey-ctl");
-  await ctl.command({ type: "project.create", workspaceRoot, title: "repo" });
+  await ctl.command({ type: "project.create", url, title: "repo" });
   const projectId = engine.shellSnapshot().projects[0]!.id;
 
   // Two threads on one connection. The second is what catches a daemon that
@@ -186,9 +187,9 @@ test("a thread carries the origin of the connection that created it, and the nam
 });
 
 test("a caller that knows better than its client name says so, parent and all", async () => {
-  const { engine, port, workspaceRoot } = await daemon();
+  const { engine, port, url } = await daemon();
   const tui = await connect(port, USER_CLIENT);
-  await tui.command({ type: "project.create", workspaceRoot, title: "repo" });
+  await tui.command({ type: "project.create", url, title: "repo" });
   const projectId = engine.shellSnapshot().projects[0]!.id;
 
   const manager = randomUUID();
@@ -211,9 +212,9 @@ test("a caller that knows better than its client name says so, parent and all", 
  * at `hello` has every thread and every run it creates filed under that thread.
  */
 test("a connection that names its own thread has its work filed under that thread", async () => {
-  const { engine, port, workspaceRoot } = await daemon();
+  const { engine, port, url } = await daemon();
   const tui = await connect(port, USER_CLIENT);
-  await tui.command({ type: "project.create", workspaceRoot, title: "repo" });
+  await tui.command({ type: "project.create", url, title: "repo" });
   const projectId = engine.shellSnapshot().projects[0]!.id;
   const manager = randomUUID();
   await tui.command({ type: "thread.create", projectId, threadId: manager, sessionId: randomUUID() });
@@ -234,15 +235,15 @@ test("a connection that names its own thread has its work filed under that threa
   const runId = randomUUID();
   await agent.command({
     type: "run.create",
-    run: { runId, name: "pre-release", goal: "g", briefTemplate: "b", workspaceMode: "worktree-default", members: [] },
+    run: { runId, name: "pre-release", goal: "g", briefTemplate: "b", members: [] },
   });
   assert.equal(engine.shellSnapshot().runs?.[0]?.parentThreadId, manager);
 });
 
 test("a parent this daemon does not hold is dropped rather than recorded", async () => {
-  const { engine, port, workspaceRoot } = await daemon();
+  const { engine, port, url } = await daemon();
   const tui = await connect(port, USER_CLIENT);
-  await tui.command({ type: "project.create", workspaceRoot, title: "repo" });
+  await tui.command({ type: "project.create", url, title: "repo" });
   const projectId = engine.shellSnapshot().projects[0]!.id;
 
   // A thread id from another machine, and a thread naming itself. Neither can
@@ -280,12 +281,12 @@ test("a thread created before this existed has none, and the daemon still serves
   const dir = mkdtempSync(join(tmpdir(), "covey-origin-old-"));
   dirs.push(dir);
   const db = new Db(dir);
-  const engine = new Engine(db, { ...MACHINE });
-  const workspaceRoot = join(dir, "repo");
-  mkdirSync(workspaceRoot, { recursive: true });
+  const engine = new Engine(db, { ...MACHINE, projectsDir: join(dir, "projects") });
+  const remote = await scratchRemote("covey-origin-remote-");
+  dirs.push(remote.dir);
   // `dispatch` with no client is the daemon's own caller, and it is also what
   // every thread in an existing database was written by.
-  await engine.dispatch({ type: "project.create", workspaceRoot, title: "repo", commandId: randomUUID() });
+  await engine.dispatch({ type: "project.create", url: remote.url, title: "repo", commandId: randomUUID() });
   const projectId = engine.shellSnapshot().projects[0]!.id;
   const id = randomUUID();
   await engine.dispatch({ type: "thread.create", projectId, threadId: id, sessionId: randomUUID(), commandId: randomUUID() });

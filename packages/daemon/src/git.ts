@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync as mkdirp, writeFileSync as writeFile } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import type { ProjectGit } from "@covey/protocol";
 
 const run = promisify(execFile);
@@ -22,8 +22,14 @@ async function git(cwd: string, args: string[]): Promise<string | null> {
   return r.ok ? r.out : null;
 }
 
+/** True for a working checkout (`.git` inside) and for a bare repository. */
 export function isGitRepo(dir: string): boolean {
-  return existsSync(join(dir, ".git"));
+  return existsSync(join(dir, ".git")) || (existsSync(join(dir, "HEAD")) && existsSync(join(dir, "objects")));
+}
+
+/** True when `dir` is a bare repository: refs and objects, no working tree. */
+export async function isBareRepo(dir: string): Promise<boolean> {
+  return (await git(dir, ["rev-parse", "--is-bare-repository"])) === "true";
 }
 
 /** Normalise a git remote into a stable cross-machine identity:
@@ -36,8 +42,25 @@ export function normaliseRemote(url: string): string {
   return u.toLowerCase();
 }
 
+/**
+ * The directory under `projectsDir` for a repository: its whole identity as a
+ * path, `github.com/dylandotfarm/covey`, with anything a path must not hold
+ * replaced by `-`. The host stays in, because `github.com/acme/api` and
+ * `gitlab.com/acme/api` are two repositories and must not share one clone.
+ */
+export function projectSlug(identity: string): string {
+  const parts = identity.split("/").filter(Boolean);
+  const clean = parts.map((s) => s.replace(/[^A-Za-z0-9._-]/g, "-").replace(/^\.+/, "_")).filter(Boolean);
+  return clean.length ? clean.join("/") : "repo";
+}
+
+/** The URL of `origin`, as git has it. */
+export async function remoteUrl(cwd: string): Promise<string | null> {
+  return git(cwd, ["remote", "get-url", "origin"]);
+}
+
 export async function repositoryIdentity(cwd: string): Promise<string | null> {
-  const remote = await git(cwd, ["remote", "get-url", "origin"]);
+  const remote = await remoteUrl(cwd);
   if (!remote) return null;
   return normaliseRemote(remote);
 }
@@ -46,8 +69,70 @@ export async function currentBranch(cwd: string): Promise<string | null> {
   return git(cwd, ["rev-parse", "--abbrev-ref", "HEAD"]);
 }
 
+/**
+ * The directory that git commands for this repository run in: the top of the
+ * working tree, or the bare repository itself when there is no working tree.
+ * A project covey cloned is bare, and every git call the engine makes on the
+ * project (fetch, worktree add, the checkpoint refs) works there.
+ *
+ * A checkout answers in one call. A bare repository refuses `--show-toplevel`,
+ * and then one more call reads the two facts that name it.
+ */
 export async function repoRoot(cwd: string): Promise<string | null> {
-  return git(cwd, ["rev-parse", "--show-toplevel"]);
+  const top = await git(cwd, ["rev-parse", "--show-toplevel"]);
+  if (top) return top;
+  const facts = await git(cwd, ["rev-parse", "--is-bare-repository", "--absolute-git-dir"]);
+  const [bare, dir] = facts?.split("\n") ?? [];
+  return bare === "true" && dir ? dir : null;
+}
+
+/** How long the first fetch of a repository may take. A large repository over
+ *  a slow link needs minutes, and a clone that is cut off is a project that
+ *  does not exist, so the budget is large. The client waits as long. */
+export const CLONE_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Make `dir` a bare repository that mirrors `origin` at `url`, or bring one
+ * that is already there up to date. Never a working tree: the threads'
+ * worktrees are the only checkouts, so there is no `HEAD` to work from and no
+ * directory that two threads change at the same time.
+ *
+ * `git clone --bare` would write no fetch refspec, so `origin/main` would never
+ * appear and every fetch after the first would find nothing. `init` plus
+ * `remote add` writes the refspec, and `remote set-head` records which branch
+ * the remote calls its default.
+ *
+ * The bare repository's own `HEAD` stays unborn on purpose. A local copy of
+ * the default branch would never move, and an agent that ran `git merge main`
+ * in its worktree would merge the copy, not the remote. `origin/main` is the
+ * ref every worktree can reach, and the one the thread is told to merge.
+ */
+export async function cloneBare(url: string, dir: string): Promise<{ ok: true } | { error: string }> {
+  if (!existsSync(join(dir, "HEAD"))) {
+    mkdirp(dir, { recursive: true });
+    const init = await gitTry(dir, ["init", "--quiet", "--bare"]);
+    if (!init.ok) return { error: init.err };
+  }
+  // The URL is the caller's, every time. A directory left by a clone that
+  // failed keeps the URL that failed, and a retry with another URL for the
+  // same repository must not fetch from the old one.
+  const has = await git(dir, ["remote", "get-url", "origin"]);
+  const remote = await gitTry(dir, has === null ? ["remote", "add", "origin", url] : ["remote", "set-url", "origin", url]);
+  if (!remote.ok) return { error: remote.err };
+  const fetch = await gitTry(dir, ["fetch", "--no-tags", "--quiet", "origin"], CLONE_TIMEOUT_MS);
+  if (!fetch.ok) return { error: fetch.err };
+  const head = await gitTry(dir, ["remote", "set-head", "origin", "--auto"]);
+  if (!head.ok) return { error: head.err };
+  // A whole fetch just happened. The next thread must not pay for another.
+  markFetched(dir);
+  return { ok: true };
+}
+
+/** Fetch one branch from `origin`, so it can be branched from. False when the
+ *  remote has no such branch, or cannot be reached. */
+export async function fetchBranch(root: string, branch: string): Promise<boolean> {
+  const r = await gitTry(root, ["fetch", "--no-tags", "--quiet", "origin", branch], FETCH_TIMEOUT_MS);
+  return r.ok;
 }
 
 /**
@@ -86,6 +171,18 @@ export type FetchOutcome =
  *  handful, so nothing evicts a good one before `FETCH_FRESH_MS` retires it in
  *  place. A failed one is deleted, so a blip is never remembered. */
 const fetches = new Map<string, { at: number; done: Promise<FetchOutcome> }>();
+
+/** Record that `root` was fetched whole just now, so the next clean start
+ *  within `FETCH_FRESH_MS` reuses it. */
+export function markFetched(root: string): void {
+  fetches.set(root, { at: Date.now(), done: Promise.resolve({ state: "fetched" }) });
+}
+
+/** Forget the last fetch of `root`, so the next clean start fetches again.
+ *  For a test that changes the remote and must see the change now. */
+export function forgetFetch(root: string): void {
+  fetches.delete(root);
+}
 
 /**
  * The remote's default branch, as a ref this machine can resolve: `origin/HEAD`
@@ -192,8 +289,9 @@ export async function cleanStartBase(cwd: string): Promise<CleanStart | null> {
 export function cleanStartNote(start: CleanStart): ["info" | "warning", string] {
   const at = `Branched from ${start.ref} at ${start.commit}`;
   if (start.fetch.state === "failed") {
-    const merge = start.ref.replace(/^origin\//, "");
-    return ["warning", `${at}, but the fetch from origin failed (${start.fetch.error}), so ${start.ref} is only as fresh as the last fetch that worked. Merge ${merge} before you start if the work has to land on it.`];
+    // The ref itself, not the local branch of that name: in a bare clone there
+    // is no local branch, and in a checkout the local one is the stale copy.
+    return ["warning", `${at}, but the fetch from origin failed (${start.fetch.error}), so ${start.ref} is only as fresh as the last fetch that worked. Fetch and merge ${start.ref} before you start if the work has to land on it.`];
   }
   if (start.fetch.state === "no-remote") return ["info", `${at}. The repository has no remote, so ${start.ref} is all there is.`];
   return ["info", `${at}, fetched from origin just now.`];
@@ -207,34 +305,68 @@ export async function gitInfo(dir: string): Promise<ProjectGit> {
   if (!root) return empty;
   // `branch --show-current` (unlike rev-parse) survives a repo with no commits
   // and reports empty rather than "HEAD" when detached.
-  const [branch, head, def] = await Promise.all([
+  const [branch, head, def, bare] = await Promise.all([
     git(root, ["branch", "--show-current"]),
     git(root, ["rev-parse", "--verify", "--quiet", "HEAD"]),
     defaultBranchRef(root),
+    isBareRepo(root),
   ]);
+  // A bare clone's HEAD is unborn on purpose (see `cloneBare`); its history is
+  // the remote's, and it has no branch of its own checked out.
+  if (bare) return { isRepo: true, root, currentBranch: null, defaultBranch: def, hasCommits: def !== null };
   return { isRepo: true, root, currentBranch: branch || null, defaultBranch: def, hasCommits: !!head };
 }
 
-/** Create a worktree for a thread at `base`, under <repo>/.covey/worktrees/<name>. */
+/**
+ * Where a thread's worktree goes. A clone keeps them beside its bare
+ * repository: `<projectsDir>/<owner>/<repo>/<name>`. A checkout keeps them
+ * inside itself, under `.covey/worktrees`, next to a self-ignoring `.gitignore`
+ * so they never show in the checkout's status or in a turn checkpoint.
+ */
+export function worktreePath(project: { workspaceRoot: string; kind?: "clone" | "checkout" }, name: string): string {
+  if (project.kind === "clone") return join(dirname(project.workspaceRoot), name);
+  return join(project.workspaceRoot, ".covey", "worktrees", name);
+}
+
+/**
+ * Create a worktree at `path` on `branch`, from `base`.
+ *
+ * `branch` is new in the common case: `covey/<name>`, which no repository has
+ * seen. A moved thread brings a branch the repository may already hold, from
+ * the time the thread was here before. That branch is moved to `base` and
+ * checked out, so the worktree holds what the remote has. Git refuses when
+ * the branch is checked out in another worktree, and the error says so.
+ */
 export async function createWorktree(
   repo: string,
   name: string,
   base: string,
+  path: string,
+  branch = `covey/${name}`,
 ): Promise<{ path: string; branch: string } | { error: string }> {
   const root = (await repoRoot(repo)) ?? repo;
-  const branch = `covey/${name}`;
-  const path = join(root, ".covey", "worktrees", name);
-  // A self-ignoring .gitignore, so worktrees never show up in the main repo's
-  // status — or in the turn checkpoints, which honour .gitignore.
-  try {
-    mkdirp(join(root, ".covey"), { recursive: true });
-    const ignore = join(root, ".covey", ".gitignore");
-    if (!existsSync(ignore)) writeFile(ignore, "*\n");
-  } catch { /* best effort; worktree creation is what matters */ }
+  // A checkout keeps its worktrees inside itself, under `.covey`. The
+  // self-ignoring `.gitignore` keeps them out of the checkout's status, and
+  // out of the turn checkpoints, which honour `.gitignore`. A bare repository
+  // has no status to keep them out of.
+  if (!(await isBareRepo(root))) {
+    try {
+      mkdirp(join(root, ".covey"), { recursive: true });
+      const ignore = join(root, ".covey", ".gitignore");
+      if (!existsSync(ignore)) writeFile(ignore, "*\n");
+    } catch { /* best effort; worktree creation is what matters */ }
+  }
+  const exists = await git(root, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+  if (exists) {
+    const moved = await gitTry(root, ["branch", "--force", branch, base]);
+    if (!moved.ok) return { error: moved.err };
+  }
   // `--no-track`: branching from `origin/main` would otherwise make it the new
   // branch's upstream, and `git push` under push.default=simple refuses a
   // branch whose upstream has another name.
-  const r = await gitTry(root, ["worktree", "add", "--no-track", "-b", branch, path, base]);
+  const r = await gitTry(root, exists
+    ? ["worktree", "add", path, branch]
+    : ["worktree", "add", "--no-track", "-b", branch, path, base]);
   if (!r.ok) return { error: r.err };
   return { path, branch };
 }
@@ -268,7 +400,6 @@ export async function restoreWorktree(repo: string, path: string, branch: string
 // never prunes it. Diff between two checkpoints = the turn's changes.
 
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 
 async function gitEnv(cwd: string, args: string[], env: Record<string, string>): Promise<string | null> {

@@ -112,7 +112,7 @@ function setup(stamps: (string | null)[] = []) {
   const db = new Db(dir);
   db.putProject({
     id: "p1", title: "p", workspaceRoot: dir, repositoryIdentity: null,
-    defaultModel: null, defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   } as Project);
   const clis: (FakeCli & { query: Query })[] = [];
   const engine = new Engine(db, MACHINE(), {

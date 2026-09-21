@@ -56,7 +56,7 @@ function setup(settings: Partial<MachineInfo["settings"]> = {}) {
   const db = new Db(dir);
   db.putProject({
     id: "p1", title: "p", workspaceRoot: dir, repositoryIdentity: null,
-    defaultModel: null, defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+    defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   } as Project);
   let clock = Date.parse("2026-01-01T12:00:00Z");
   const clis: FakeCli[] = [];

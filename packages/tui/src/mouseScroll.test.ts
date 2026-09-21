@@ -121,7 +121,7 @@ const thread = (n: number): Thread => ({
 
 function machineWithThreads(n: number): MachineState {
   const project = { id: "p", title: "proj", workspaceRoot: "/w", repositoryIdentity: null,
-    defaultModel: null, defaultWorkspaceMode: null, createdAt: "2026-01-01T00:00:00Z",
+    defaultModel: null, createdAt: "2026-01-01T00:00:00Z",
     updatedAt: "2026-01-01T00:00:00Z" } as unknown as Project;
   return {
     key: "m", saved: { name: "m", url: "ws://127.0.0.1:1" }, conn: "connected", error: null,
