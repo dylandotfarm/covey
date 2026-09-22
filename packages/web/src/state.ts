@@ -13,8 +13,8 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  KNOWN_MODELS, threadIsBusy,
-  type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
+  KNOWN_MODELS, modelLabel, modelVersion, threadIsBusy,
+  type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress,
 } from "@covey/protocol";
 import type { ConnState } from "@covey/client";
@@ -532,10 +532,13 @@ export interface SheetChoice {
   current: boolean;
 }
 
-/** The words for a model id. `null` is the model the machine's Claude settings pick. */
-export function modelLabel(id: string | null | undefined): string {
-  if (!id) return "From Claude settings";
-  return KNOWN_MODELS.find((k) => k.id === id)?.label ?? id;
+/**
+ * The models a machine offers, as its Claude Code reports them. The built-in
+ * list stands in for a daemon too old to send one, and for the moment before
+ * that daemon's first read answers.
+ */
+export function machineModels(m: MachineSlot | null | undefined): ModelChoice[] {
+  return m?.info?.models ?? KNOWN_MODELS;
 }
 
 /** The words for a permission mode, the same ones the TUI's panel uses. */
@@ -558,11 +561,20 @@ const MODE_HINT: Record<PermissionMode, string> = {
   plan: "plan first, change nothing",
 };
 
-/** The models to choose from, the one in force ticked. */
-export function modelChoices(current: string | null | undefined): SheetChoice[] {
+/**
+ * The models to choose from, the one in force ticked.
+ *
+ * The rows come from the machine, so a phone dialling two machines is offered
+ * what each one can actually run. `inherited` says what the first row — no
+ * model of its own — ends up being, which is how the reader tells one Opus
+ * from the next.
+ */
+export function modelChoices(current: string | null | undefined, models: ModelChoice[], inherited?: string): SheetChoice[] {
   return [
-    { id: "", label: modelLabel(null), hint: "the model the machine's Claude settings pick", current: !current },
-    ...KNOWN_MODELS.map((k) => ({ id: k.id, label: k.label, hint: k.id, current: k.id === current })),
+    // A machine that has not said what its default resolves to leaves the row
+    // saying only where the setting comes from — `modelVersion` answers "" there.
+    { id: "", label: "From Claude settings", hint: inherited || "the model the machine's Claude settings pick", current: !current },
+    ...models.map((k) => ({ id: k.id, label: k.label, hint: k.description ?? k.id, current: k.id === current || (!!k.resolved && k.resolved === current) })),
   ];
 }
 
@@ -598,17 +610,30 @@ export function sheetMachine(s: State, sheet: SheetState): MachineSlot | undefin
 
 const NO_SETTINGS: MachineSettings = { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null };
 
+/**
+ * What a thread with no model of its own ends up running there: the project's
+ * default, else the machine's, else whatever Claude Code itself picks. It is
+ * the hint under the first row of the model page, so "From Claude settings"
+ * says which model that is rather than leaving the reader to guess.
+ */
+export function inheritedModel(s: State, sheet: SheetState): string | undefined {
+  const m = sheetMachine(s, sheet);
+  const t = sheetThread(s, sheet);
+  const pinned = (t && m?.projects.get(t.projectId)?.defaultModel) || m?.info?.settings?.defaultModel || null;
+  return pinned ? modelLabel(pinned, machineModels(m)) : modelVersion(m?.info?.claudeDefaultModel);
+}
+
 /** The settings of a sheet's machine, or empty ones while it is not connected. */
 export function sheetSettings(s: State, sheet: SheetState): MachineSettings {
   return sheetMachine(s, sheet)?.info?.settings ?? NO_SETTINGS;
 }
 
 /** The settings of one conversation. */
-export function threadSheetRows(t: Thread): SheetRow[] {
+export function threadSheetRows(t: Thread, models: ModelChoice[] = KNOWN_MODELS): SheetRow[] {
   return [
     // The chips in the list are text, so the sheet is the way to the item (#115).
     ...threadRefs(t).map((r) => ({ id: `${VIEW_ROW}${r.number}`, label: r.menuLabel })),
-    { id: "model", label: "Model", value: modelLabel(t.model), choices: true },
+    { id: "model", label: "Model", value: modelLabel(t.model, models), choices: true },
     { id: "mode", label: "Permission mode", value: permissionModeLabel(t.permissionMode), choices: true },
     { id: "streaming", label: "Streaming", value: t.streaming ? "On" : "Off", choices: true },
     { id: "rename", label: "Rename conversation" },
@@ -627,7 +652,7 @@ export function threadSheetRows(t: Thread): SheetRow[] {
 export function machineSheetRows(m: MachineSlot): SheetRow[] {
   const g = m.info?.settings ?? NO_SETTINGS;
   const rows: SheetRow[] = [
-    { id: "model", label: "Default model", value: modelLabel(g.defaultModel), choices: true },
+    { id: "model", label: "Default model", value: modelLabel(g.defaultModel, machineModels(m)), choices: true },
     { id: "mode", label: "Default mode", value: permissionModeLabel(g.defaultPermissionMode), choices: true },
     { id: "streaming", label: "Default streaming", value: g.defaultStreaming ? "On" : "Off", choices: true },
   ];
@@ -639,7 +664,7 @@ export function machineSheetRows(m: MachineSlot): SheetRow[] {
 export function sheetRows(s: State, sheet: SheetState): SheetRow[] {
   if (sheet.target.kind === "thread") {
     const t = sheetThread(s, sheet);
-    return t ? threadSheetRows(t) : [];
+    return t ? threadSheetRows(t, machineModels(sheetMachine(s, sheet))) : [];
   }
   const m = sheetMachine(s, sheet);
   return m ? machineSheetRows(m) : [];
@@ -651,15 +676,18 @@ export function sheetChoices(s: State, sheet: SheetState): SheetChoice[] {
     const t = sheetThread(s, sheet);
     if (!t) return [];
     switch (sheet.page) {
-      case "model": return modelChoices(t.model);
+      case "model": return modelChoices(t.model, machineModels(sheetMachine(s, sheet)), inheritedModel(s, sheet));
       case "mode": return modeChoices(t.permissionMode, false);
       case "streaming": return onOffChoices(t.streaming === true, "text arrives word by word", "each reply lands whole");
       default: return [];
     }
   }
+  const m = sheetMachine(s, sheet);
   const g = sheetSettings(s, sheet);
   switch (sheet.page) {
-    case "model": return modelChoices(g.defaultModel);
+    // Not `inheritedModel`: the row being unset here *is* the machine default,
+    // so what it falls back to is Claude Code's own pick and nothing else.
+    case "model": return modelChoices(g.defaultModel, machineModels(m), modelVersion(m?.info?.claudeDefaultModel));
     case "mode": return modeChoices(g.defaultPermissionMode, true);
     case "streaming": return onOffChoices(g.defaultStreaming === true, "new threads show text as it arrives", "new threads show each reply whole");
     case "web": return onOffChoices(g.webEnabled === true, "this machine serves the phone client", "this machine serves nothing");

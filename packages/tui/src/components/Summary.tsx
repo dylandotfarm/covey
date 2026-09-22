@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { KNOWN_MODELS, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
+import { modelLabel, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
 import type { AppState, MachineState, PoolMember, SidebarRow, ThreadTally } from "../store.js";
 import { liveThreads, byRecency, tallyThreads, permissionModeLabel, projectGroups, machineLabel } from "../store.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
@@ -68,7 +68,7 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
         <Counts t={tally} where={` on ${pool.length} machine${pool.length === 1 ? "" : "s"}`} />
         {hidden > 0 && <Text color={T.faint}>  ·  {hidden} archived or moved</Text>}
         {p.baseBranch && <Text color={T.subtle}>  ·  from {p.baseBranch}</Text>}
-        {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel)}</Text>}
+        {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel, state.machines.get(pool[0]!.machine)?.info?.models)}</Text>}
       </Text>
       <Box height={1} />
       {pool.map((x) => <PoolLine key={x.machine} state={state} x={x} tally={tallyThreads(perMachine.get(x.machine) ?? [])} width={width} />)}
@@ -176,7 +176,7 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
       <Box height={1} />
       <Text wrap="truncate"><Counts t={tally} where={` in ${projects.length} project${projects.length === 1 ? "" : "s"}`} /></Text>
       <Text color={T.subtle} wrap="truncate">
-        new threads here: {settings?.defaultModel ? modelLabel(settings.defaultModel) : "model from Claude settings"}  ·  {permissionModeLabel(settings?.defaultPermissionMode)}
+        new threads here: {settings?.defaultModel ? modelLabel(settings.defaultModel, info?.models) : "model from Claude settings"}  ·  {permissionModeLabel(settings?.defaultPermissionMode)}
       </Text>
       <Text wrap="truncate">
         <Text color={T.subtle}>web server: </Text>
@@ -261,10 +261,6 @@ function ProjectLine({ m, p, width }: { m: MachineState; p: Project; width: numb
       {rest > 12 && <Text color={T.faint}>{truncate(p.workspaceRoot, rest)}</Text>}
     </Text>
   );
-}
-
-function modelLabel(id: string): string {
-  return KNOWN_MODELS.find((k) => k.id === id)?.label ?? id;
 }
 
 function updateColor(state: MachineUpdate["state"]): string {

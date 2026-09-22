@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, modelLabel, modelVersion, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
@@ -599,8 +599,12 @@ export function App({ store }: { store: Store }) {
     const info = m.info;
     const settings = info.settings ?? { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null };
     const busy = runningTurns(machineKey!);
-    const modelLabel = settings.defaultModel
-      ? (KNOWN_MODELS.find((k) => k.id === settings.defaultModel)?.label ?? settings.defaultModel)
+    // What this machine's Claude Code offers, not what covey was built
+    // knowing: a machine on a newer Claude Code offers newer models. The
+    // built-in list stands in for a daemon too old to send one.
+    const models = info.models ?? KNOWN_MODELS;
+    const defaultLabel = settings.defaultModel
+      ? modelLabel(settings.defaultModel, models)
       : "from Claude settings";
     // "behind" is the reason most updates get run, so say it where the finger
     // already is instead of only in the summary behind it.
@@ -608,7 +612,7 @@ export function App({ store }: { store: Store }) {
     const opts: PickOption[] = [
       { id: "update", label: "Update — pull, rebuild, restart", hint: skew === "behind" ? "older build than your client" : busy ? "interrupts running turns" : "" },
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
-      { id: "model", label: `Default model: ${modelLabel}`, hint: "new threads here" },
+      { id: "model", label: `Default model: ${defaultLabel}`, hint: "new threads here" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
       { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
       { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
@@ -620,12 +624,14 @@ export function App({ store }: { store: Store }) {
         case "update": return void confirmUpdate(machineKey!);
         case "restart": return confirmRestart(machineKey!);
         case "model": return openPick(`Default model on ${info.name}`, [
-          { id: "", label: "From Claude settings", hint: settings.defaultModel ? "" : "current" },
-          ...KNOWN_MODELS.map((k) => ({ id: k.id, label: k.label, hint: k.id === settings.defaultModel ? "current" : k.id })),
+          // The "no model set" row says what Claude Code's own default
+          // resolves to there, so the reader can tell which Opus they get.
+          { id: "", label: "From Claude settings", hint: settings.defaultModel ? modelVersion(info.claudeDefaultModel) : "current" },
+          ...models.map((k) => ({ id: k.id, label: k.label, hint: k.id === settings.defaultModel ? "current" : (modelVersion(k) || k.id) })),
         ], (mid) => {
           store.setOverlay(null);
           void store.setMachineDefaults(machineKey!, { defaultModel: mid || null });
-          store.notify(`${info.name}: new threads use ${mid ? (KNOWN_MODELS.find((k) => k.id === mid)?.label ?? mid) : "the model from Claude settings"}`);
+          store.notify(`${info.name}: new threads use ${mid ? modelLabel(mid, models) : "the model from Claude settings"}`);
         });
         case "mode": return openPick(`Default mode on ${info.name}`, MACHINE_MODES.map((o) => ({
           ...o, hint: (o.id === "" ? settings.defaultPermissionMode === null : o.id === settings.defaultPermissionMode) ? "current" : o.hint,
@@ -914,11 +920,20 @@ export function App({ store }: { store: Store }) {
 
   const palette = () => {
     const t = state.view?.thread;
+    // The models of the machine the open thread runs on. A thread on a Pi and
+    // a thread on a laptop may be offered different lists, because the two
+    // machines may run different Claude Codes.
+    const tm = state.view ? state.machines.get(state.view.machine) : null;
+    const threadModels = tm?.info?.models ?? KNOWN_MODELS;
+    // What a thread with no model of its own ends up running: the project's
+    // default, else the machine's, else whatever Claude Code itself picks.
+    const inherited = (t && tm?.projects.get(t.projectId)?.defaultModel) || tm?.info?.settings?.defaultModel || null;
+    const inheritedHint = inherited ? modelLabel(inherited, threadModels) : modelVersion(tm?.info?.claudeDefaultModel);
     const opts: PickOption[] = [];
     if (t) {
       opts.push({ id: "move", label: "Move thread to another machine", hint: "m" });
       opts.push({ id: "rename", label: "Rename thread", hint: "r" });
-      opts.push({ id: "model", label: `Model: ${t.model ?? "default"}` });
+      opts.push({ id: "model", label: `Model: ${t.model ? modelLabel(t.model, threadModels) : "default"}`, hint: t.model ? "" : inheritedHint });
       opts.push({ id: "mode", label: `Permission mode: ${t.permissionMode}` });
       opts.push({ id: "streaming", label: t.streaming ? "Streaming: on — text arrives token by token" : "Streaming: off — each reply lands whole", hint: "this thread" });
       opts.push({ id: "diff", label: "Show changes from the last turn", hint: "d" });
@@ -955,7 +970,10 @@ export function App({ store }: { store: Store }) {
       switch (id) {
         case "move": return moveThread();
         case "rename": return openInput("Rename thread", (v) => { store.setOverlay(null); void store.threadCommand({ type: "thread.rename", threadId: t!.id, title: v }); }, t!.title);
-        case "model": return openPick("Model", [{ id: "", label: "Default (from Claude settings)" }, ...KNOWN_MODELS.map((m) => ({ id: m.id, label: m.label, hint: m.id }))], (mid) => { store.setOverlay(null); void store.threadCommand({ type: "thread.setModel", threadId: t!.id, model: mid || null }); });
+        case "model": return openPick("Model", [
+          { id: "", label: "Default", hint: inheritedHint },
+          ...threadModels.map((m) => ({ id: m.id, label: m.label, hint: m.id === t!.model ? "current" : (modelVersion(m) || m.id) })),
+        ], (mid) => { store.setOverlay(null); void store.threadCommand({ type: "thread.setModel", threadId: t!.id, model: mid || null }); });
         case "mode": return openPick("Permission mode", PERMISSION_CYCLE.map((m) => ({ id: m, label: m, hint: m === "bypassPermissions" ? "runs tools without asking" : m === t!.permissionMode ? "current" : "" })), (m) => { store.setOverlay(null); void store.setPermissionMode(t!.id, m as PermissionMode); });
         case "streaming": return void store.setStreaming(t!.id, !t!.streaming);
         case "diff": return void store.toggleDiff();

@@ -6,7 +6,8 @@ import type {
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin,
 } from "@covey/protocol";
-import { isUserClient } from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS } from "@covey/protocol";
+import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
@@ -15,6 +16,7 @@ import { materialiseAttachments, attachmentsDir, keepAttachmentFile } from "./at
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
+import type { ClaudeModels } from "./models.js";
 import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod, GitHubAction, GitHubItem } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { realGhHost, UploadRefused, type GhHost, type RealHostOptions } from "./integrate/gh.js";
@@ -101,6 +103,12 @@ export interface EngineOptions {
    * old ones are listening again.
    */
   rebind?: (bind: string) => Promise<void>;
+  /**
+   * Ask this machine's Claude Code which models it offers. `main.ts` hands in
+   * `readModels`; a test hands in a stand-in or nothing, so `pnpm test`
+   * starts no Claude Code. A daemon without one keeps the fallback list.
+   */
+  readModels?: () => Promise<ClaudeModels | null>;
 }
 
 /**
@@ -208,6 +216,35 @@ export class Engine {
    */
   setResources(resources: MachineResources) {
     this.machine.resources = resources;
+    this.emitShell({ kind: "machine.updated", machine: this.machine });
+  }
+
+  /**
+   * The models this machine's Claude Code offers, for a caller that holds no
+   * `MachineInfo`. The fallback list stands in until the first read answers,
+   * so a picker is never empty.
+   */
+  models(): ModelChoice[] {
+    return this.machine.models ?? KNOWN_MODELS;
+  }
+
+  /**
+   * Read the model list from the install and publish it.
+   *
+   * It runs behind the listener, the way the machine's resources do, because
+   * it starts a Claude Code process. Clients that are already here get the
+   * answer as a `machine.updated` push; a client that arrives first reads the
+   * fallback list and is corrected by that push a moment later.
+   *
+   * Quiet on failure: a machine that cannot say keeps the fallback list, which
+   * is a shorter picker rather than no picker.
+   */
+  async refreshModels(): Promise<void> {
+    if (!this.opts.readModels) return;
+    const read = await this.opts.readModels().catch(() => null);
+    if (!read) return;
+    this.machine.models = read.models;
+    if (read.claudeDefault) this.machine.claudeDefaultModel = read.claudeDefault;
     this.emitShell({ kind: "machine.updated", machine: this.machine });
   }
 
@@ -1998,6 +2035,16 @@ export class Engine {
       onSessionInit: (info) => {
         const t = this.db.getThread(threadId);
         if (t && !t.model) { t.model = info.model; this.putThreadAndEmit(t); }
+        // The user updated Claude Code under a running daemon, so the model
+        // list this machine reported is a version old. A session says which
+        // version it is, which is the one signal that costs nothing — the
+        // alternative is a daemon that offers last week's models until it
+        // restarts.
+        if (info.claudeCodeVersion && info.claudeCodeVersion !== this.machine.claudeCodeVersion) {
+          this.machine.claudeCodeVersion = info.claudeCodeVersion;
+          if (this.opts.readModels) void this.refreshModels();
+          else this.emitShell({ kind: "machine.updated", machine: this.machine });
+        }
       },
       onModelUsed: () => {},
       onCommands: (commands) => this.setThreadCommands(threadId, commands),
