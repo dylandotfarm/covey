@@ -312,13 +312,26 @@ test("a daemon that opens the socket and refuses hello is capped too, and its wo
 // ---- 6. the wait after a drop --------------------------------------------------
 
 /**
+ * How much sooner than its delay a timer may come back, read with `Date.now()`.
+ *
+ * libuv counts a timer down from the loop time it cached, not from the moment
+ * `setTimeout` ran, and both clocks cut to whole milliseconds. So a 50ms timer
+ * reads as 49ms whenever the loop had work in hand. Measured on this project's
+ * machine, at 50ms: never under 49ms, and 49ms in 38 of 40 runs once the
+ * iteration that armed the timer did 5ms of work first. An idle loop gives 50ms
+ * every time, which is why this cost a gate run and not a local one.
+ */
+const EARLY_MS = 1;
+
+/**
  * A machine that has just connected has no failed dials behind it, so the index
  * into the backoff is the one before the first. Read at -1 an array gives
  * `undefined`, and `setTimeout` reads that as "now", which redials the drop on
  * the same tick.
  *
- * The assertion is one-sided: a slow machine makes the wait longer, never
- * shorter, so this does not race the machine it runs on.
+ * So the assertion has to tell no wait from a wait, and nothing finer. It does
+ * not hold the client to the millisecond: a busy machine can make the measured
+ * wait shorter, by `EARLY_MS` and no more.
  */
 test("a connection that drops waits the first backoff before it is dialled again", async (t) => {
   const daemon = new FakeDaemon();
@@ -338,7 +351,7 @@ test("a connection that drops waits the first backoff before it is dialled again
   await waitFor(() => dials() > before, "the client dialled again");
 
   const waited = Date.now() - dropped;
-  assert.ok(waited >= WAIT, `the drop was dialled again after ${waited}ms; the injected backoff is ${WAIT}ms`);
+  assert.ok(waited >= WAIT - EARLY_MS, `the drop was dialled again after ${waited}ms; the injected backoff is ${WAIT}ms`);
 });
 
 // ---- 7. the socket that goes before the answer ---------------------------------
