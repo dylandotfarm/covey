@@ -4,9 +4,10 @@ import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
-import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay } from "../store.js";
+import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { hyperlinksEnabled, openCommand, osc8, repoUrlOf, type LinkContext } from "../links.js";
+import { anchorAt, resolveScroll } from "../scroll.js";
 
 const HYPERLINKS = hyperlinksEnabled();
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
@@ -237,6 +238,15 @@ export function App({ store }: { store: Store }) {
   // Hoisted out of DiffPanel so mouse hit-testing and rendering agree on the
   // same line array.
   const diffLines = useMemo(() => (state.diffView?.diff ? diffToLines(state.diffView.diff.patch, mainW - 2) : []), [state.diffView?.diff, mainW]);
+  // The scroll the screen shows. The store's count is measured from the bottom
+  // and the transcript grows there while a reply streams, so a paint resolves
+  // the reader's anchor against the layout it draws (`scroll.ts`). The
+  // handlers below measure from `liveScroll`, never from the store's count.
+  const scrollFromBottom = useMemo(() => resolveScroll(layout, state.scrollFromBottom, state.scrollAnchor, transcriptH), [layout, state.scrollFromBottom, state.scrollAnchor, transcriptH]);
+  /** The reader's place against the layout on screen, read from the live store. */
+  const liveScroll = (live: AppState) => resolveScroll(layout, live.scrollFromBottom, live.scrollAnchor, transcriptH);
+  /** Scroll to `n` lines from the bottom, and anchor on the line that lands under the top row. */
+  const scrollTo = (n: number) => store.setScroll(n, anchorAt(layout, n, transcriptH));
   const machineName = state.view ? (state.machines.get(state.view.machine)?.info?.name ?? "") : "";
 
   useEffect(() => { lastCursor.current = cursor; }, [cursor]);
@@ -1039,7 +1049,7 @@ export function App({ store }: { store: Store }) {
       return { pane, line, col: Math.max(0, ev.col - 1 - mainX0 - 1), exact: true };
     }
     if (layout.lines.length === 0) return null;
-    const end = Math.max(0, layout.lines.length - state.scrollFromBottom);
+    const end = Math.max(0, layout.lines.length - scrollFromBottom);
     const start = Math.max(0, end - transcriptH);
     const pad = Math.max(0, transcriptH - (end - start));
     const line = clamp(start + (rowInBox - pad), start, Math.max(start, end - 1));
@@ -1081,8 +1091,8 @@ export function App({ store }: { store: Store }) {
     }
     // The transcript stores its scroll from the *bottom*, so the sign flips.
     const max = Math.max(0, layout.lines.length - transcriptH);
-    const next = Math.max(0, Math.min(max, live.scrollFromBottom - dir));
-    store.setScroll(next);
+    const next = Math.max(0, Math.min(max, liveScroll(live) - dir));
+    scrollTo(next);
     const end = Math.max(0, layout.lines.length - next);
     const start = Math.max(0, end - transcriptH);
     const line = dir < 0 ? start : Math.max(start, end - 1);
@@ -1194,8 +1204,8 @@ export function App({ store }: { store: Store }) {
       return;
     }
     const max = Math.max(0, layout.lines.length - transcriptH);
-    const next = Math.max(0, Math.min(max, live.scrollFromBottom - lines));
-    store.setScroll(next);
+    const next = Math.max(0, Math.min(max, liveScroll(live) - lines));
+    scrollTo(next);
     if (lines < 0 && next >= max && live.view?.hasMore) void store.loadOlder();
   }
 
@@ -1259,8 +1269,8 @@ export function App({ store }: { store: Store }) {
       const live = store.getState();
       if (live.diffView) return store.setDiffScroll(live.diffView.scroll - delta);
       const max = Math.max(0, layout.lines.length - transcriptH);
-      const next = Math.min(max, Math.max(0, live.scrollFromBottom + delta));
-      store.setScroll(next);
+      const next = Math.min(max, Math.max(0, liveScroll(live) + delta));
+      scrollTo(next);
       if (next >= max && live.view?.hasMore) void store.loadOlder();
       return;
     }
@@ -1876,7 +1886,7 @@ export function App({ store }: { store: Store }) {
               : header ? (<><Text color={T.text} bold>{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {headerProject?.title}</Text>{header.pullRequest && <Text color={T.awaiting}>  {HYPERLINKS ? osc8(header.pullRequest.url, `PR #${header.pullRequest.number}`) : `PR #${header.pullRequest.number}`}</Text>}{header.movedTo && <Text color={T.warning}>  moved</Text>}</>)
               : <Text color={T.subtle}>covey — multi-agent TUI</Text>}
           </Box>
-          <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : state.scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
+          <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
         </Box>
         {/* Truncated because this is a length, not a box: laid out with a
             `mainW` from the terminal before last it would wrap onto a second row
@@ -1889,7 +1899,7 @@ export function App({ store }: { store: Store }) {
               ? <DiffPanel view={state.diffView} width={mainW} height={transcriptH} lines={diffLines} selection={state.selection} />
               : summaryRow
                 ? <Summary state={state} row={summaryRow} width={mainW} height={transcriptH} />
-                : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={state.scrollFromBottom} width={mainW} selection={state.selection} />}
+                : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={scrollFromBottom} width={mainW} selection={state.selection} />}
         </Box>
         <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} menu={menu} />
       </Box>

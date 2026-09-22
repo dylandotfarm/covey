@@ -53,6 +53,8 @@ positioned boxes. We handle that by:
 
 - rendering timeline items to styled lines in pure code (`packages/tui/src/lines.ts`), so the
   transcript is a virtualised window over a line array with exact scrolling;
+- anchoring that window to the line under its top row while a reply streams
+  (`packages/tui/src/scroll.ts`), so the transcript growing at the bottom does not move it;
 - rendering overlays in place of the transcript rather than floating them;
 - a small markdown-lite formatter (fences, headers, bullets, inline code, bold).
 

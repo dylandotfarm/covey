@@ -51,6 +51,13 @@
   And don't lay out two hundred timeline items to follow one of them changing
   (`ItemLines` in `lines.ts`, keyed on item identity — sound only while the daemon keeps
   re-sending items whole).
+- The transcript's scroll is a count of lines from the bottom, and a streaming item is
+  re-sent whole and longer, so the bottom moves under it. `setScroll` therefore also takes
+  an anchor — the item under the top row and the offset into it — and App resolves the
+  anchor against the layout it is about to paint (`scroll.ts`). Read `scrollFromBottom`
+  from that resolved number, never from `state.scrollFromBottom`, or a reply that streams
+  drags the screen away from the reader again (#114). A count of 0 is "follow the bottom"
+  and has no anchor.
 - Screen rows are not row indices: the sidebar puts a blank line above each top-level
   row after the first and windows a long tree. `sidebar.ts` builds the painted line list and `App.tsx` gives
   the same array to the renderer and to the mouse hit test — change both or neither.
