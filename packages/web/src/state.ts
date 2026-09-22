@@ -375,14 +375,21 @@ export function findRefs(text: string): { start: number; end: number; number: nu
   return out;
 }
 
-/** The chips a thread row shows: the issue it took and the pull request it opened. */
-export function threadRefs(t: Thread): { kind: "issue" | "pull"; number: number; label: string }[] {
-  const out: { kind: "issue" | "pull"; number: number; label: string }[] = [];
-  if (t.issue) out.push({ kind: "issue", number: t.issue.number, label: `#${t.issue.number}` });
+/**
+ * The issue a thread took and the pull request it opened. `label` is the chip
+ * on the row, short enough to sit in one line of text. `menuLabel` is the row
+ * of the sheet a hold opens (#115), where there is room to say what it is.
+ */
+export function threadRefs(t: Thread): ItemRef[] {
+  const out: ItemRef[] = [];
+  if (t.issue) out.push({ kind: "issue", number: t.issue.number, label: `#${t.issue.number}`, menuLabel: `View issue #${t.issue.number}` });
   const pull = t.pullRequest?.number ?? t.watch?.number;
-  if (pull) out.push({ kind: "pull", number: pull, label: `PR #${pull}` });
+  if (pull) out.push({ kind: "pull", number: pull, label: `PR #${pull}`, menuLabel: `View pull request #${pull}` });
   return out;
 }
+
+/** One reference a thread holds, as `threadRefs` reports it. */
+export interface ItemRef { kind: "issue" | "pull"; number: number; label: string; menuLabel: string }
 
 /** One word for the state of an item, as the chip on the item screen says it. */
 export function itemStateLabel(item: GitHubItem): "open" | "closed" | "merged" | "draft" {

@@ -175,6 +175,8 @@ test("the #N references in a piece of text, with their offsets (#108)", () => {
 test("a thread's chips, an item's state word, its checks in one line, and the acts it offers (#108)", () => {
   const t = thread("t1", "p1", { issue: { number: 94, title: null, url: null, takenAt: "2026-09-21T00:00:00Z" }, pullRequest: { number: 12, url: "u", branch: "b", base: "main", openedAt: "2026-09-21T00:00:00Z" } });
   assert.deepEqual(threadRefs(t).map((r) => r.label), ["#94", "PR #12"]);
+  // The sheet a hold raises has room to say what each one is (#115).
+  assert.deepEqual(threadRefs(t).map((r) => r.menuLabel), ["View issue #94", "View pull request #12"]);
   assert.deepEqual(threadRefs(thread("t2", "p1")), []);
   const watched = thread("t3", "p1", { watch: { number: 7, state: "watching", reason: null, merge: "manual", mergeMethod: "merge", rounds: 0, maxRounds: 3, quiet: 0, cursor: { head: null, checks: null, reviews: [], comments: [], lineComments: [], state: "OPEN", mergeTried: null }, startedAt: "t", polledAt: null, endedAt: null, error: null } as never });
   assert.deepEqual(threadRefs(watched).map((r) => r.label), ["PR #7"]);

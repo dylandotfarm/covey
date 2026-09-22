@@ -51,6 +51,8 @@ const SWIPE_REVEAL = 88;
 const SWIPE_COMMIT = SWIPE_REVEAL / 2;
 /** Fingers wobble. Less than this is a tap, or the start of a scroll. */
 const SWIPE_SLOP = 8;
+/** A finger that rests this long on a thread row holds it, and the sheet comes up (#115). */
+const HOLD_MS = 450;
 
 /** Whether a tap is the reader's pointer. Enter sends on a keyboard and breaks a line on a phone. */
 const coarse = () => globalThis.matchMedia?.("(pointer: coarse)").matches ?? false;
@@ -81,8 +83,11 @@ export class Renderer {
   private atBottom = true;
   /** The `machine:thread` whose row is slid open, showing its button. */
   private swiped: string | null = null;
-  /** A drag just ended, so the click that follows it is not a tap. */
+  /** A drag or a hold just ended, so the click that follows it is not a tap. */
   private suppressClick = false;
+  /** The sheet a hold on a thread row raises (#115), and the panel it fills. */
+  private sheet: HTMLElement;
+  private sheetPanel: HTMLElement;
   /** The issue or pull request screen (#108): a header, a scrolling body, and the bar of acts. */
   private itemScreen: HTMLElement;
   private itemHeader: HTMLElement;
@@ -127,13 +132,21 @@ export class Renderer {
     this.itemScreen = h("main", { class: "item hidden" }, this.itemHeader, this.itemBody, this.itemBar);
     this.lightboxImg = h("img", { alt: "" });
     this.lightbox = h("div", { class: "lightbox hidden", onclick: () => this.closeLightbox() }, this.lightboxImg);
-    root.append(this.banner, this.list, this.threadScreen, this.itemScreen, this.lightbox);
+    // The sheet stands outside the list, because the list is rebuilt whole on
+    // every paint and the sheet must outlive one.
+    this.sheetPanel = h("div", { class: "sheet-panel", onclick: (ev) => ev.stopPropagation() });
+    this.sheet = h("div", { class: "sheet hidden", onclick: () => this.closeSheet() }, this.sheetPanel);
+    root.append(this.banner, this.list, this.threadScreen, this.itemScreen, this.sheet, this.lightbox);
     // A `#N` anywhere in the transcript, or in an item's own text, opens that
     // item, and an inline image opens full size. One listener per surface;
     // the anchor carries only the number, the image its own source.
     this.timeline.addEventListener("click", (ev) => this.refClick(ev));
     this.itemBody.addEventListener("click", (ev) => this.refClick(ev));
-    addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !this.lightbox.classList.contains("hidden")) this.closeLightbox(); });
+    addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") return;
+      if (!this.lightbox.classList.contains("hidden")) this.closeLightbox();
+      else if (!this.sheet.classList.contains("hidden")) this.closeSheet();
+    });
 
     this.timeline.addEventListener("scroll", () => {
       const t = this.timeline;
@@ -237,6 +250,8 @@ export class Renderer {
 
   paint(s: State) {
     this.paintBanner(s);
+    // The sheet stands over the list. Anything else on screen shuts it.
+    if ((s.view || s.item) && !this.sheet.classList.contains("hidden")) this.closeSheet();
     // The item sits over whatever it was opened from. The thread under it is
     // not painted meanwhile; its rows are keyed, so the return folds in what
     // arrived. A thread that is no longer on screen loses its skeleton, so a
@@ -412,7 +427,7 @@ export class Renderer {
       h("span", { class: "dot" }),
       h("div", { class: "text" },
         h("div", { class: "title" }, t.pinnedAt ? "★ " : "", t.title),
-        h("div", { class: "sub" }, showMachine ? `${ref.machineName} · ` : "", threadStatusLabel(t), t.branch ? ` · ${t.branch}` : "", this.refChips(ref.machine, t)),
+        h("div", { class: "sub" }, showMachine ? `${ref.machineName} · ` : "", threadStatusLabel(t), t.branch ? ` · ${t.branch}` : "", this.refChips(ref.machine, t, false)),
       ),
       h("span", { class: "when" }, relTime(t.lastMessageAt ?? t.updatedAt)),
     );
@@ -420,33 +435,62 @@ export class Renderer {
       h("button", { class: "archive", type: "button", onclick: () => { this.swiped = null; this.a.archiveThread(ref.machine, t.id); } }, "Archive"),
       front,
     );
-    this.attachSwipe(wrap, front, key);
+    this.attachSwipe(wrap, front, key, () => this.openSheet(ref.machine, t));
     return wrap;
   }
 
-  /** The issue a thread took and the pull request it opened, as chips that open the item (#108). */
-  private refChips(machine: string, t: Thread): HTMLElement | null {
+  /**
+   * The issue a thread took and the pull request it opened (#108). On the
+   * header of the open thread each chip is a button that opens the item. In
+   * the list it is text: the whole row is one target there, and a thumb that
+   * meant the row used to hit the chip (#115). A hold on the row opens the
+   * sheet instead.
+   */
+  private refChips(machine: string, t: Thread, interactive: boolean): HTMLElement | null {
     const refs = threadRefs(t);
     if (refs.length === 0) return null;
+    if (!interactive) return h("span", { class: "refs" }, ...refs.map((r) => h("span", { class: `ref ${r.kind}` }, r.label)));
     return h("span", { class: "refs" }, ...refs.map((r) => h("button", { type: "button", class: `ref ${r.kind}`, onclick: (ev) => { ev.stopPropagation(); this.a.openItem(machine, t.projectId, r.number); } }, r.label)));
   }
 
-  private attachSwipe(wrap: HTMLElement, front: HTMLElement, key: string) {
+  /**
+   * The gestures on one thread row: a drag left reveals the archive button,
+   * and a finger that rests calls `hold`. Every row holds, so a slow tap
+   * never opens a thread on one row and a sheet on the next.
+   */
+  private attachSwipe(wrap: HTMLElement, front: HTMLElement, key: string, hold: () => void) {
     let startX = 0, startY = 0, base = 0, offset = 0;
     let pointer: number | null = null;
     /** Null until the drag has said which way it goes. */
     let sideways: boolean | null = null;
+    /** The timer that runs while a finger rests on the row. */
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    /** The hold fired, so the tap that ends it must not open the thread. */
+    let held = false;
+    const dropHold = () => { if (holdTimer !== null) { clearTimeout(holdTimer); holdTimer = null; } };
     const place = (x: number) => { front.style.transform = x ? `translateX(${x}px)` : ""; };
     front.addEventListener("pointerdown", (ev) => {
       if (ev.button !== 0) return;
       pointer = ev.pointerId; startX = ev.clientX; startY = ev.clientY; sideways = null;
       base = wrap.classList.contains("open") ? -SWIPE_REVEAL : 0; offset = base;
+      held = false;
+      dropHold();
+      holdTimer = setTimeout(() => {
+        holdTimer = null;
+        held = true;
+        // The drag is over: a finger that now moves must not slide the row.
+        pointer = null;
+        navigator.vibrate?.(8);
+        hold();
+      }, HOLD_MS);
     });
     front.addEventListener("pointermove", (ev) => {
       if (ev.pointerId !== pointer) return;
       const dx = ev.clientX - startX, dy = ev.clientY - startY;
       if (sideways === null) {
         if (Math.abs(dx) < SWIPE_SLOP && Math.abs(dy) < SWIPE_SLOP) return;
+        // The finger moved, so this is a drag or a scroll, and not a hold.
+        dropHold();
         sideways = Math.abs(dx) > Math.abs(dy);
         if (!sideways) { pointer = null; return; }
         front.setPointerCapture(ev.pointerId);
@@ -457,6 +501,9 @@ export class Renderer {
       place(offset);
     });
     const end = (ev: PointerEvent) => {
+      dropHold();
+      // The click after a hold would open the thread the finger only held.
+      if (held) { held = false; this.suppressClick = true; setTimeout(() => { this.suppressClick = false; }, 0); return; }
       if (ev.pointerId !== pointer) return;
       pointer = null;
       if (!sideways) return;
@@ -471,6 +518,33 @@ export class Renderer {
     };
     front.addEventListener("pointerup", end);
     front.addEventListener("pointercancel", end);
+    // A right click on a desktop, and the browser's own hold on a phone.
+    front.addEventListener("contextmenu", (ev) => { ev.preventDefault(); dropHold(); held = true; hold(); });
+  }
+
+  /**
+   * The sheet a hold on a thread row raises: one full line for each item the
+   * thread holds, and what it is, and then the acts on the thread itself. It
+   * says the thread's title first, because the row it came from is under the
+   * sheet. Archive is here as well as under a swipe, so that every row has
+   * something in its sheet and the gesture reads the same everywhere.
+   */
+  private openSheet(machine: string, t: Thread) {
+    const refs = threadRefs(t);
+    this.closeSwipe();
+    clear(this.sheetPanel);
+    this.sheetPanel.append(
+      h("div", { class: "sheet-title" }, t.title),
+      ...refs.map((r) => h("button", { class: `sheet-row ${r.kind}`, type: "button", onclick: () => { this.closeSheet(); this.a.openItem(machine, t.projectId, r.number); } }, r.menuLabel)),
+      h("button", { class: "sheet-row archive", type: "button", onclick: () => { this.closeSheet(); this.a.archiveThread(machine, t.id); } }, "Archive"),
+      h("button", { class: "sheet-row cancel", type: "button", onclick: () => this.closeSheet() }, "Cancel"),
+    );
+    this.sheet.classList.remove("hidden");
+  }
+
+  private closeSheet() {
+    this.sheet.classList.add("hidden");
+    clear(this.sheetPanel);
   }
 
   /** Slide the open row back, without a paint. */
@@ -486,7 +560,7 @@ export class Renderer {
       h("button", { class: "back", type: "button", "aria-label": "Back", onclick: () => this.a.back() }, "‹"),
       h("div", { class: "text" },
         h("div", { class: "title" }, t?.title ?? "…"),
-        h("div", { class: `sub tone-${t ? threadTone(t) : "idle"}` }, s.machines.size > 1 ? `${s.machines.get(v.machine)?.name ?? ""} · ` : "", v.loading ? "loading…" : v.error ? v.error : t ? threadStatusLabel(t) : "", t ? this.refChips(v.machine, t) : null),
+        h("div", { class: `sub tone-${t ? threadTone(t) : "idle"}` }, s.machines.size > 1 ? `${s.machines.get(v.machine)?.name ?? ""} · ` : "", v.loading ? "loading…" : v.error ? v.error : t ? threadStatusLabel(t) : "", t ? this.refChips(v.machine, t, true) : null),
       ),
     );
     this.refScope = () => (t ? { machine: v.machine, projectId: t.projectId } : null);

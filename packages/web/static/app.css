@@ -146,10 +146,22 @@ details.tool[open] .summary { white-space: normal; overflow-wrap: anywhere; }
 .card .answer { color: var(--muted); }
 /* ---- the issue and the pull request of a thread, and a #N in prose (#108) ---- */
 .refs { display: inline-flex; gap: 4px; margin-left: 6px; vertical-align: middle; }
-.refs button.ref { min-height: 20px; padding: 0 7px; font-size: 12px; line-height: 18px; border-radius: 6px; color: var(--accent); background: var(--surface-alt); border-color: var(--border); }
-.refs button.ref.pull { color: var(--awaiting); }
+.refs .ref { min-height: 20px; padding: 0 7px; font-size: 12px; line-height: 18px; border-radius: 6px; color: var(--accent); background: var(--surface-alt); border: 1px solid var(--border); }
+.refs .ref.pull { color: var(--awaiting); }
+/* In the list a chip is text. The row under it takes the tap (#115). */
+.refs span.ref { display: inline-block; pointer-events: none; }
 a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
 .thread-header .sub .refs button.ref { pointer-events: auto; }
+
+/* ---- the sheet a hold on a thread row raises (#115) ---- */
+.sheet { position: fixed; inset: 0; z-index: 9; display: flex; align-items: flex-end; background: rgba(0, 0, 0, .55); }
+.sheet-panel { width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 6px 10px calc(10px + var(--sab)); background: var(--surface); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; box-shadow: 0 -8px 32px rgba(0, 0, 0, .5); }
+.sheet-title { padding: 8px 6px 2px; font-size: 13px; color: var(--subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-row { min-height: 48px; padding: 0 14px; text-align: left; font-size: 16px; border-radius: 12px; color: var(--accent); }
+.sheet-row.pull { color: var(--awaiting); }
+.sheet-row.archive { color: var(--warning); }
+.sheet-row.cancel { color: var(--muted); background: none; border-color: transparent; }
+.sheet-row:active { background: var(--border); }
 
 /* ---- one issue or pull request ---- */
 .item { flex: 1; display: flex; flex-direction: column; min-height: 0; }

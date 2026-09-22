@@ -142,8 +142,11 @@
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
   Change the CLI and the skill together.
 - An issue or a pull request is a screen in the web client (#108): a `#N` in the transcript,
-  or a chip on a thread row, opens it, and the bar under it reviews, comments, merges,
-  closes or reopens. `github.item` reads it and `github.act` acts, each act on a `GhHost`
+  or a chip in the header of the open thread, opens it, and the bar under it reviews,
+  comments, merges, closes or reopens. In the thread list the chips are text and the row is
+  one target (#115): a thumb aimed at the row used to hit the chip. Hold a row there and a
+  sheet names each item in full, and archives the thread. `attachSwipe` in `render.ts` owns
+  both gestures, and the hold and the drag cancel each other. `github.item` reads it and `github.act` acts, each act on a `GhHost`
   built for that one write (`allowReview`, `allowClose`, `allowComment`, `allowMerge`), so
   `pnpm test` still changes nothing on GitHub (`githubItem.test.ts`). The TUI has no such
   screen: `links.ts` makes a `#N` an OSC 8 hyperlink when the project is on GitHub, and
