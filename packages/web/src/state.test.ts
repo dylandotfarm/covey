@@ -72,6 +72,21 @@ test("one repository on two machines is one row, with a home per machine and the
   assert.equal(projectRows(s).filter((r) => r.title === "scratch").length, 2);
 });
 
+test("one repository on two base branches is two rows, each with its own threads", () => {
+  const s = emptyState();
+  const pi = addMachine(s, "ws://pi:3790", "pi", true);
+  const onMain = project("p-main", "covey", "github.com/dylandotfarm/covey");
+  const onFeature = { ...project("p-feat", "covey", "github.com/dylandotfarm/covey"), baseBranch: "ui-rework" };
+  applyShellSnapshot(pi, snap("pi", [onMain, onFeature], [thread("a", "p-main"), thread("b", "p-feat")]));
+  pi.conn = "connected";
+  const rows = projectRows(s);
+  assert.deepEqual(rows.map((r) => [r.key, r.base]), [
+    ["repo:github.com/dylandotfarm/covey", null],
+    ["repo:github.com/dylandotfarm/covey#ui-rework", "ui-rework"],
+  ], "the row on the remote's default branch keeps the key it always had");
+  assert.deepEqual(rows.map((r) => r.threads.map((t) => t.thread.id)), [["a"], ["b"]]);
+});
+
 test("a thread whose project the machine does not list is shown, not dropped", () => {
   const s = emptyState();
   const m = addMachine(s, "ws://m:3790", "m", true);

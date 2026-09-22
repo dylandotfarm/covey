@@ -17,7 +17,7 @@ import {
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress,
 } from "@covey/protocol";
-import type { ConnState } from "@covey/client";
+import { projectPool, type ConnState } from "@covey/client";
 
 export interface MachineSlot {
   /** The `ws://` URL the page dials. */
@@ -189,15 +189,21 @@ export interface ThreadRef {
 }
 
 /**
- * One row of the list: a repository, wherever it is checked out. Two machines
- * that hold the same repository are one row, the way the TUI's sidebar shows
- * one project with a pool of machines. A project with no remote is its own
- * row, keyed by its machine and id, because nothing says it is the same
- * as any other.
+ * One row of the list: a repository on one base branch, wherever it is checked
+ * out. Two machines that hold the same repository on the same base are one
+ * row, the way the TUI's sidebar shows one project with a pool of machines. A
+ * project with no remote is its own row, keyed by its machine and id, because
+ * nothing says it is the same as any other.
+ *
+ * Two projects of one repository that work from different branches are two
+ * rows. They hold different work, and the reader must see which base the
+ * threads in front of them start from.
  */
 export interface ProjectRow {
   key: string;
   title: string;
+  /** The branch its threads start from, or null for the remote's default. */
+  base: string | null;
   homes: ProjectHome[];
   threads: ThreadRef[];
   /** How many of its threads are at work or wait on the reader. */
@@ -206,7 +212,8 @@ export interface ProjectRow {
 }
 
 export function projectKey(machine: string, p: Project): string {
-  return p.repositoryIdentity ? `repo:${p.repositoryIdentity.toLowerCase()}` : `local:${machine}:${p.id}`;
+  const pool = projectPool(p);
+  return pool ? `repo:${pool}` : `local:${machine}:${p.id}`;
 }
 
 /**
@@ -218,24 +225,27 @@ export function projectKey(machine: string, p: Project): string {
  */
 export function projectRows(s: State): ProjectRow[] {
   const rows = new Map<string, ProjectRow>();
-  const row = (key: string, title: string) => {
+  const row = (key: string, title: string, base: string | null = null) => {
     let r = rows.get(key);
-    if (!r) { r = { key, title, homes: [], threads: [], active: 0, waiting: 0 }; rows.set(key, r); }
+    if (!r) { r = { key, title, base, homes: [], threads: [], active: 0, waiting: 0 }; rows.set(key, r); }
     return r;
   };
   for (const m of s.machines.values()) {
     for (const p of m.projects.values()) {
-      const r = row(projectKey(m.key, p), p.title);
+      const r = row(projectKey(m.key, p), p.title, p.baseBranch ?? null);
       r.homes.push({ machine: m.key, machineName: m.name, conn: m.conn, project: p });
     }
     for (const t of m.threads.values()) {
       if (t.archivedAt || t.movedTo) continue;
       const p = m.projects.get(t.projectId);
-      const r = p ? row(projectKey(m.key, p), p.title) : row(`orphan:${m.key}:${t.projectId}`, "(project not listed)");
+      const r = p ? row(projectKey(m.key, p), p.title, p.baseBranch ?? null) : row(`orphan:${m.key}:${t.projectId}`, "(project not listed)");
       r.threads.push({ machine: m.key, machineName: m.name, thread: t });
     }
   }
-  const out = [...rows.values()].sort((a, b) => a.title.localeCompare(b.title));
+  // Two rows of one repository carry one title, so the base breaks the tie and
+  // the order is the same on every paint. The row on the remote's default
+  // branch sorts first.
+  const out = [...rows.values()].sort((a, b) => a.title.localeCompare(b.title) || (a.base ?? "").localeCompare(b.base ?? ""));
   for (const r of out) {
     r.threads.sort((a, b) => byRecency(a.thread, b.thread));
     r.active = r.threads.filter((x) => threadIsBusy(x.thread)).length;

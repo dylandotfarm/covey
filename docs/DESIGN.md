@@ -640,10 +640,12 @@ on; a person decides, or a push starts the loop again.
 
 ## Browsing the sidebar
 
-The tree is **projects first**. A project is a repository, and one row stands for it however
-many machines hold a clone. The client groups every machine's projects by their normalised
-remote (`projectGroups` in `store.ts`). The threads of every machine in the pool sit under
-the one row, by recency. Each thread row names its machine when the pool has more than one.
+The tree is **projects first**. A project is a repository on one base branch, and one row
+stands for it however many machines hold a clone. The client groups every machine's projects
+by their normalised remote *and* their base branch (`projectPool` in `@covey/client`, which
+`projectGroups` in `store.ts` keys on). One repository on `main` and the same repository on a
+feature branch are therefore two rows: the work differs, and so does the commit each thread
+starts from. The threads of every machine in the pool sit under the one row, by recency. Each thread row names its machine when the pool has more than one.
 A project with no remote is a group of its own, keyed by machine and id, so two machines'
 directories of the same name never merge. The fold key of a project is its group key. A fold
 made under the old key, `<machine>:<project id>`, moves to the group key when the machine's
@@ -1075,8 +1077,15 @@ not have is refused with code `no_branch`, and a name git would read as an optio
 (`--x`, `a..b`) is refused before any fetch. The threads that exist keep their worktrees; the
 next thread starts from the new base.
 
-A clone is one per repository per machine, whatever branch it names. The bare repository and
-the worktree directory are shared by identity, and the sidebar groups by identity too.
+A project is one per repository **per base branch** per machine. A second create for a base
+another project already works from is refused with code `exists`, and so is a
+`project.update` that would move a project onto another one's base: two rows on one base
+would fold into one sidebar row, and a new thread could land on either. The bare repository
+and the worktree directory are shared by identity, so the two projects share one clone on
+disk and `cloneOnce` makes it once. The sidebar, the placement of a new thread and of a run's
+members, and the pending clones of a machine that is away are all keyed on the pool, not on
+the identity alone. The sidebar row and the web client's row name the base beside the title,
+because the two rows carry the same title otherwise.
 
 ## Where a new thread works
 
