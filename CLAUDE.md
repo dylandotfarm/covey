@@ -96,13 +96,18 @@
   add one at another time. `credentialExpiry` reads when the token runs out, `auth.ts` tells
   this failure from a failure of the work, and the engine drops the session, cycles the idle
   ones, refreshes, and restarts the turn once (`authRecovery.test.ts`).
-- The model picker is the machine's, not a list covey ships: the daemon asks its own Claude
-  Code (`packages/daemon/src/models.ts`, a query whose prompt never yields — no turn, no
-  tokens, about 300 ms) and the answer rides on `MachineInfo.models`. Never add a model to
-  `KNOWN_MODELS` when one ships; that list is only the fallback for a daemon too old to send
-  one. Store the id Claude Code gives, which is usually an alias (`sonnet`, `opus[1m]`) and
-  so follows the install; match a stored id on `resolved` too, because covey stored wire ids
-  before this. A session that reports a new Claude Code version makes the daemon read again.
+- The model picker is read from the Claude Code covey runs, not from a list covey ships:
+  the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
+  no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The
+  Claude Code covey runs is the one the Agent SDK ships, *not* the `claude` on the PATH:
+  the SDK spawns its own binary unless `pathToClaudeCodeExecutable` is set and covey never
+  sets it, and SDK `0.3.N` carries Claude Code `2.1.N`. So a new model reaches covey by
+  bumping `@anthropic-ai/claude-agent-sdk` — which is the one package excused from the
+  seven-day age rule, in pnpm-workspace.yaml and in `scripts/pkg-age.mjs` both. Never add a
+  model to `KNOWN_MODELS`; that list is only the fallback for a daemon too old to send one.
+  Store the id Claude Code gives, usually an alias (`sonnet`, `opus[1m]`), so a pinned
+  thread follows the SDK; match a stored id on `resolved` too, because covey stored wire
+  ids before this. A session that reports a new version makes the daemon read again.
 - The daemon listens on port 3790 by default. `COVEY_PORT` moves it.
 - A machine's control panel (enter on a sidebar machine row) makes the daemon pull, rebuild
   and restart itself (`packages/daemon/src/update.ts`). Restarting ends every turn that

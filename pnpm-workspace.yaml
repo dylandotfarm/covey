@@ -6,6 +6,33 @@ packages:
 # (value in minutes). CI double-checks the lockfile with scripts/pkg-age.mjs.
 minimumReleaseAge: 10080
 
+# The one package the age rule does not cover, and why.
+#
+# The Agent SDK is not an ordinary dependency: it carries the Claude Code that
+# every covey session runs, and the model list every picker shows
+# (`packages/daemon/src/models.ts`). SDK `0.3.N` bundles Claude Code `2.1.N`,
+# so a model released today reaches covey only through this package. Waiting a
+# week for it means a week of offering a model list that is a version behind
+# the one the user reads about.
+#
+# The exclusion is by name, so it always allows the newest SDK. The independent
+# check in `scripts/pkg-age.mjs` holds the same exception and says which
+# version it let through, so the waiver is visible on every run rather than
+# silent. The eight platform packages are the SDK's optionalDependencies —
+# one Claude Code binary each, published in the same minute as the SDK — so
+# an exclusion that named only the SDK would still fail the install.
+# Add nothing else here without the same argument.
+minimumReleaseAgeExclude:
+  - "@anthropic-ai/claude-agent-sdk"
+  - "@anthropic-ai/claude-agent-sdk-linux-x64"
+  - "@anthropic-ai/claude-agent-sdk-linux-x64-musl"
+  - "@anthropic-ai/claude-agent-sdk-linux-arm64"
+  - "@anthropic-ai/claude-agent-sdk-linux-arm64-musl"
+  - "@anthropic-ai/claude-agent-sdk-darwin-x64"
+  - "@anthropic-ai/claude-agent-sdk-darwin-arm64"
+  - "@anthropic-ai/claude-agent-sdk-win32-x64"
+  - "@anthropic-ai/claude-agent-sdk-win32-arm64"
+
 # Install scripts are denied unless listed here as `true`. pnpm 12 fails the
 # install for any dependency with a build script that has no entry, so a new
 # one surfaces as a decision rather than running silently. Both of these ship

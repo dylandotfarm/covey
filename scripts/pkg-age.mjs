@@ -10,6 +10,30 @@
  */
 import { readFileSync } from "node:fs";
 
+/**
+ * The packages the age rule does not cover, and why.
+ *
+ * Keep this in step with `minimumReleaseAgeExclude` in pnpm-workspace.yaml:
+ * pnpm enforces the rule at resolution, this script is the independent check,
+ * and an exception in one place only is a hole that nobody sees. A waiver is
+ * never silent — every run prints what it let through and how young it was.
+ *
+ * The Agent SDK carries the Claude Code that every covey session runs, and
+ * the model list every picker shows. SDK `0.3.N` bundles Claude Code `2.1.N`,
+ * so a model released today reaches covey only through this package.
+ */
+const EXEMPT = new Set([
+  "@anthropic-ai/claude-agent-sdk",
+  "@anthropic-ai/claude-agent-sdk-linux-x64",
+  "@anthropic-ai/claude-agent-sdk-linux-x64-musl",
+  "@anthropic-ai/claude-agent-sdk-linux-arm64",
+  "@anthropic-ai/claude-agent-sdk-linux-arm64-musl",
+  "@anthropic-ai/claude-agent-sdk-darwin-x64",
+  "@anthropic-ai/claude-agent-sdk-darwin-arm64",
+  "@anthropic-ai/claude-agent-sdk-win32-x64",
+  "@anthropic-ai/claude-agent-sdk-win32-arm64",
+]);
+
 const args = process.argv.slice(2);
 const mode = args[0] ?? "check";
 const days = Number(args[args.indexOf("--days") + 1] || 0) || Number(process.env.COVEY_PKG_MIN_DAYS || 7);
@@ -40,6 +64,8 @@ if (wanted.size === 0) { console.error("✖ no packages found in pnpm-lock.yaml"
 const registry = process.env.NPM_CONFIG_REGISTRY ?? "https://registry.npmjs.org";
 const names = [...wanted.keys()];
 const violations = [];
+/** Exempt versions younger than the cutoff. Reported, never fatal. */
+const waived = [];
 let checked = 0;
 /**
  * One registry document, asked for up to three times. A dropped connection or
@@ -82,17 +108,20 @@ async function worker() {
       const published = new Date(t);
       if (published > cutoff) {
         const age = ((Date.now() - published.getTime()) / 86_400_000).toFixed(1);
-        violations.push(`${name}@${version}: published ${age} days ago (${t})`);
+        if (EXEMPT.has(name)) waived.push(`${name}@${version}: published ${age} days ago (${t})`);
+        else violations.push(`${name}@${version}: published ${age} days ago (${t})`);
       }
     }
   }
 }
 await Promise.all(Array.from({ length: 8 }, worker));
 
+for (const w of waived) console.log(`! waived by policy: ${w}`);
 if (violations.length) {
   console.error(`✖ ${violations.length} package version(s) younger than ${days} days (cutoff ${cutoff.toISOString()}):`);
   for (const v of violations) console.error("  " + v);
   console.error(`\npnpm should have refused these (minimumReleaseAge in pnpm-workspace.yaml). Re-run: pnpm run deps:refresh`);
   process.exit(1);
 }
-console.log(`✔ ${checked} locked package versions are all ≥ ${days} days old (cutoff ${cutoff.toISOString().slice(0, 10)})`);
+const note = waived.length ? `, ${waived.length} waived by policy` : "";
+console.log(`✔ ${checked - waived.length} locked package versions are all ≥ ${days} days old (cutoff ${cutoff.toISOString().slice(0, 10)})${note}`);
