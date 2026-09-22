@@ -122,13 +122,14 @@ function trimLeading(l: Line): Line {
   return out;
 }
 
-/** Minimal markdown: fences, headers, bullets, inline code, bold, links. */
+/** Minimal markdown: fences, headers, bullets, tables, inline code, bold, links. */
 export function markdownToLines(text: string, w: number, base: Partial<Span> = {}, links?: LinkContext): Line[] {
   const out: Line[] = [];
   const src = text.replace(/\r\n/g, "\n").split("\n");
   let inFence = false;
   let fenceLang = "";
-  for (const raw of src) {
+  for (let i = 0; i < src.length; i++) {
+    const raw = src[i]!;
     const fence = raw.match(/^\s*```(\w*)/);
     if (fence) {
       if (!inFence) { inFence = true; fenceLang = fence[1] ?? ""; out.push([{ text: fenceLang ? ` ${fenceLang} ` : " ", color: T.subtle, bg: T.surfaceAlt }]); }
@@ -141,6 +142,8 @@ export function markdownToLines(text: string, w: number, base: Partial<Span> = {
       continue;
     }
     if (raw.trim() === "") { out.push([]); continue; }
+    const table = tableAt(src, i);
+    if (table) { out.push(...tableToLines(table, w, base, links)); i = table.end - 1; continue; }
     const h = raw.match(/^(#{1,6})\s+(.*)$/);
     if (h) { out.push(...wrapSpans(inline(h[2]!, { ...base, bold: true, color: T.text }, links), w, links)); continue; }
     const bullet = raw.match(/^(\s*)([-*•]|\d+\.)\s+(.*)$/);
@@ -158,6 +161,110 @@ export function markdownToLines(text: string, w: number, base: Partial<Span> = {
     }
     out.push(...wrapSpans(inline(raw, base, links), w, links));
   }
+  return out;
+}
+
+type Align = "left" | "right" | "center";
+
+/** A pipe table, parsed: the header row, the body rows, and how each column aligns. */
+interface Table {
+  header: string[];
+  rows: string[][];
+  align: Align[];
+  /** The index of the first source line after the table. */
+  end: number;
+}
+
+/** A row that starts with `|`, or that holds one `|` not at either end. */
+const tableRow = (line: string) => /^\s*\|/.test(line) || /\S\s*\|\s*\S/.test(line);
+/** The row under the header: `---`, `:--`, `--:` or `:-:` in each cell. */
+const tableRule = (line: string) => line.includes("|") && /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(line);
+
+/**
+ * Split a pipe row into its cells. One `|` at each end is a border and not a
+ * cell, and `\|` is a pipe that stays in the cell.
+ */
+function tableCells(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|") && !s.endsWith("\\|")) s = s.slice(0, -1);
+  return s.split(/(?<!\\)\|/).map((c) => c.replace(/\\\|/g, "|").trim());
+}
+
+/**
+ * The table that starts at `src[i]`, or null. A table is a header row, a rule
+ * row with as many cells as the header, and then every row up to the first
+ * line without a pipe, as GitHub reads one.
+ */
+function tableAt(src: string[], i: number): Table | null {
+  const head = src[i]!; const rule = src[i + 1];
+  if (rule === undefined || !tableRow(head) || !tableRule(rule)) return null;
+  const header = tableCells(head);
+  const marks = tableCells(rule);
+  if (marks.length !== header.length) return null;
+  const align = marks.map<Align>((m) => (m.startsWith(":") && m.endsWith(":") ? "center" : m.endsWith(":") ? "right" : "left"));
+  const rows: string[][] = [];
+  let end = i + 2;
+  for (; end < src.length && src[end]!.trim() !== "" && tableRow(src[end]!); end++) {
+    // A short row is padded and a long one is cut, so every row has the
+    // header's columns.
+    const cells = tableCells(src[end]!).slice(0, header.length);
+    while (cells.length < header.length) cells.push("");
+    rows.push(cells);
+  }
+  return { header, rows, align, end };
+}
+
+/** The room between two columns. */
+const TABLE_GAP = 2;
+
+/**
+ * Lay a table out in aligned columns: the header in bold, a rule under it,
+ * and each cell padded to its column. A table wider than the pane gives up
+ * width from its widest columns first, and a cell then wraps inside its own
+ * column, so the columns stay aligned however narrow the pane is.
+ */
+function tableToLines(t: Table, w: number, base: Partial<Span>, links?: LinkContext): Line[] {
+  const n = t.header.length;
+  const cells = [t.header.map((c) => inline(c, { ...base, bold: true, color: T.text }, links)), ...t.rows.map((r) => r.map((c) => inline(c, base, links)))];
+  const spanW = (sp: Span[]) => sp.reduce((a, s) => a + width(s.text), 0);
+  const cols = t.header.map((_, j) => Math.max(1, ...cells.map((r) => spanW(r[j]!))));
+  const room = w - TABLE_GAP * (n - 1);
+  // Every column may keep at least an equal share; only what a column asks
+  // for above that share is taken back, widest first, until the table fits.
+  const floor = Math.max(1, Math.floor(room / n));
+  let total = cols.reduce((a, b) => a + b, 0);
+  while (total > room) {
+    let j = 0;
+    for (let k = 1; k < n; k++) if (cols[k]! > cols[j]!) j = k;
+    if (cols[j]! <= floor) break;
+    cols[j]!--; total--;
+  }
+  const out: Line[] = [];
+  const pad = (line: Line, j: number): Line => {
+    const gap = cols[j]! - line.reduce((a, s) => a + width(s.text), 0);
+    if (gap <= 0) return line;
+    const a = t.align[j]!;
+    const left = a === "right" ? gap : a === "center" ? Math.floor(gap / 2) : 0;
+    return [...(left ? [{ text: " ".repeat(left) }] : []), ...line, ...(gap - left ? [{ text: " ".repeat(gap - left) }] : [])];
+  };
+  cells.forEach((row, ri) => {
+    const wrapped = row.map((sp, j) => wrapSpans(sp, cols[j]!, links));
+    const height = Math.max(...wrapped.map((l) => l.length));
+    for (let k = 0; k < height; k++) {
+      const line: Line = [];
+      for (let j = 0; j < n; j++) {
+        if (j) line.push({ text: " ".repeat(TABLE_GAP) });
+        line.push(...pad(wrapped[j]![k] ?? [], j));
+      }
+      // The trailing pad of the last column is dropped, so a copy of the row
+      // does not end in spaces. The wrap marker is not carried: every row of
+      // the table is a row of its own, like a list item.
+      while (line.length && /^\s+$/.test(line[line.length - 1]!.text)) line.pop();
+      out.push(line);
+    }
+    if (ri === 0) out.push([{ text: cols.map((c) => "─".repeat(c)).join(" ".repeat(TABLE_GAP)), color: T.subtle }]);
+  });
   return out;
 }
 

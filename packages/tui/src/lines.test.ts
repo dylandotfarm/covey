@@ -90,3 +90,65 @@ test("highlightLine spanning a boundary keeps both spans' styles", () => {
     ["d", "y", undefined],
   ]);
 });
+
+const TABLE = [
+  "| Batch | Issues |",
+  "|---|---|",
+  "| Deformers merge c759ca22 | #4, #118 |",
+  "| Corner-pin survey 1aa5803a / 9582328b | #143, #144, #145, #146 |",
+  "| gate-promotion | #119 |",
+].join("\n");
+
+test("markdownToLines lays a pipe table out in aligned columns", () => {
+  // Before table support each row reached the screen as its own source line,
+  // pipes and all, and nothing lined up.
+  const texts = markdownToLines(TABLE, 80).map(text);
+  assert.deepEqual(texts, [
+    "Batch                                  Issues",
+    "─────────────────────────────────────  ──────────────────────",
+    "Deformers merge c759ca22               #4, #118",
+    "Corner-pin survey 1aa5803a / 9582328b  #143, #144, #145, #146",
+    "gate-promotion                         #119",
+  ]);
+  const head = markdownToLines(TABLE, 80)[0]!;
+  assert.ok(head.filter((s) => s.text.trim()).every((s) => s.bold), "the header row is bold");
+});
+
+test("a table wider than the pane wraps a cell inside its own column", () => {
+  // A source row wider than the pane used to wrap mid-row, with the tail of one
+  // row on a line of its own. Now the widest column gives up width, the cell
+  // wraps in it, and every line stays inside the pane.
+  const lines = markdownToLines(TABLE, 40);
+  const texts = lines.map(text);
+  assert.ok(texts.every((t) => width(t) <= 40), `every line fits: ${JSON.stringify(texts)}`);
+  assert.deepEqual(texts.slice(2), [
+    "Deformers merge      #4, #118",
+    "c759ca22",
+    "Corner-pin survey    #143, #144, #145,",
+    "1aa5803a / 9582328b  #146",
+    "gate-promotion       #119",
+  ]);
+  assert.ok(lines.every((l) => l.wrap === undefined), "a table row is a row of its own, like a list item");
+});
+
+test("a table's rule row sets the alignment of each column", () => {
+  const texts = markdownToLines("| n | name | mid |\n|--:|:--|:-:|\n| 1 | a | b |\n| 100 | bb | ccc |", 80).map(text);
+  assert.equal(texts[2], "  1  a      b");
+  assert.equal(texts[3], "100  bb    ccc");
+});
+
+test("a cell keeps its inline markdown and an escaped pipe", () => {
+  const lines = markdownToLines("| a | b |\n|---|---|\n| **bold** | `x \\| y` |", 80);
+  assert.equal(text(lines[2]!), "bold  x | y");
+  assert.ok(lines[2]![0]!.bold, "bold survives in a cell");
+});
+
+test("a row with a pipe and no rule row under it is text, not a table", () => {
+  const texts = markdownToLines("use a | b here\nand more", 80).map(text);
+  assert.deepEqual(texts, ["use a | b here", "and more"]);
+});
+
+test("a table ends at a blank line and a short row is padded", () => {
+  const texts = markdownToLines("| a | b |\n|---|---|\n| 1 |\n\nafter", 80).map(text);
+  assert.deepEqual(texts, ["a  b", "─  ─", "1", "", "after"]);
+});
