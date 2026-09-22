@@ -1,5 +1,7 @@
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
 import { readModels } from "./models.js";
 import { dataDir, loadDaemonConfig, machineSettings, platformInfo, projectsDir, type DaemonConfig } from "./config.js";
@@ -169,7 +171,25 @@ export function installStopHandlers(d: DaemonHandle): void {
   process.on("SIGTERM", stop);
 }
 
+/**
+ * The Claude Code covey runs, which is the one the Agent SDK ships.
+ *
+ * Not `claude --version` from the PATH. The SDK spawns its own binary unless
+ * a caller sets `pathToClaudeCodeExecutable`, and covey never does, so a
+ * machine whose own install is newer would have reported a version that runs
+ * nothing here — and, worse, a version that disagrees with the one every
+ * session reports, which made the engine re-read the model list on the first
+ * turn after every start. The SDK's manifest names the binary it carries:
+ * SDK `0.3.N` ships Claude Code `2.1.N`.
+ */
 function detectClaudeVersion(): string | undefined {
+  try {
+    const sdk = dirname(fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk")));
+    const manifest = JSON.parse(readFileSync(join(sdk, "manifest.json"), "utf8")) as { version?: string };
+    if (manifest.version) return manifest.version;
+  } catch { /* fall through to the install on the PATH */ }
+  // Better than nothing on a build where the manifest moved: it is at least a
+  // Claude Code on this machine.
   try { return execFileSync("claude", ["--version"], { timeout: 5000 }).toString().trim().split(/\s+/)[0]; } catch { return undefined; }
 }
 

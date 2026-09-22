@@ -973,10 +973,21 @@ set, so the panel is not silently overridden by the client.
 
 The model picker is not a list covey ships. A list covey ships is stale the day a model
 ships, and it is stale differently on every machine, because one daemon runs a Claude Code
-from last week and another runs today's. So the daemon asks its own install
+from last week and another runs today's. So the daemon asks the Claude Code it runs
 (`packages/daemon/src/models.ts`): a query whose prompt stream never yields, which starts
 the CLI, answers `supportedModels()` from the handshake, and aborts. It runs no turn and
 spends no tokens, and it takes about a third of a second.
+
+**Which Claude Code that is.** Not the `claude` on the PATH. The Agent SDK ships its own
+binary and spawns it unless a caller sets `pathToClaudeCodeExecutable`, and covey never
+does, so the Claude Code covey runs is the one inside `@anthropic-ai/claude-agent-sdk`:
+SDK `0.3.N` carries Claude Code `2.1.N`. That is the version `MachineInfo.claudeCodeVersion`
+reports, and it is the point of reading the list from it rather than from a constant — the
+picker offers exactly what a session on that machine can run, and a machine whose daemon
+runs an older build says so. A new model therefore reaches covey through the SDK
+dependency, which is why that package is the one exception to the seven-day age rule
+(`minimumReleaseAgeExclude` in pnpm-workspace.yaml, and the matching `EXEMPT` in
+`scripts/pkg-age.mjs`).
 
 The answer is Claude Code's own list, the account's plan already accounted for. It reaches
 clients on `MachineInfo.models`, so both of them have it without asking, and the read
@@ -993,9 +1004,10 @@ Three rules make it hold up:
   before this and a thread on `claude-sonnet-5` must still read as "Sonnet". An id no row
   covers is shown as itself: it is what the thread really runs.
 - **Read the list again when a session reports a Claude Code that is not the one the
-  machine knows** (`onSessionInit`). It is the one signal that costs nothing, and without
-  it a user who updates Claude Code is offered last week's models until somebody restarts
-  the daemon.
+  machine knows** (`onSessionInit`). It is the one signal that costs nothing. This is why
+  `detectClaudeVersion` reads the SDK's manifest and not `claude --version`: a start-up
+  version from the PATH disagrees with the one every session reports, and the re-read then
+  fires once per daemon start for nothing.
 
 `KNOWN_MODELS` in the protocol is the fallback, for a daemon too old to send a list and for
 the moment before the first read answers. It is aliases for the same reason.
