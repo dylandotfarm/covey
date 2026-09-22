@@ -85,22 +85,67 @@ export function fileMime(path: string): string {
 }
 
 /**
- * Is this token a file that somebody dropped, rather than a word in a sentence?
- *
- * An image extension is enough on its own, so a dropped image that has since
- * moved still reports "could not read" instead of landing in the composer as
- * text. Every other file has to be an absolute path to a file that is really
- * there. Terminals always paste an absolute path on a drop, so that costs
- * nothing, and it keeps prose such as "see README.md and fix it" as text.
+ * A file that is really on this machine. A drop always pastes an absolute
+ * path, so the rule keeps prose such as "see README.md and fix it" as text.
  */
-function isDroppedFile(path: string): boolean {
-  if (imageMime(path)) return true;
+function isLocalFile(path: string): boolean {
   if (!isAbsolute(path)) return false;
   try { return statSync(path).isFile(); } catch { return false; }
 }
 
+/**
+ * A name that says a file was meant even though this machine does not hold it.
+ * An image extension is the one such promise: the drop then reports "could not
+ * read" instead of putting a path in the composer as text.
+ */
+function looksLikeImage(path: string): boolean {
+  return imageMime(path) !== null;
+}
+
+/**
+ * Join the tokens back into the paths they came from.
+ *
+ * A terminal that escapes or quotes every space gives one token per file, but
+ * one missed space — which is what a real screenshot name gets — breaks a path
+ * into several tokens, and then the whole drop used to land in the draft as
+ * text (#85). So each position takes the *longest* run of tokens that names a
+ * file on this machine, and, failing that, the longest run that names an
+ * image. A position that matches neither makes the whole chunk prose.
+ *
+ * @returns the paths, or null when the chunk is not a drop.
+ */
+export function groupDroppedPaths(tokens: string[]): string[] | null {
+  const paths: string[] = [];
+  for (let i = 0; i < tokens.length;) {
+    const run = longestRun(tokens, i);
+    if (!run) return null;
+    paths.push(run.path);
+    i = run.end;
+  }
+  return paths.length > 0 ? paths : null;
+}
+
+/** The longest run of tokens from `i` that names a file. */
+function longestRun(tokens: string[], i: number): { path: string; end: number } | null {
+  // A file that is there beats a longer run that only promises to be one, so a
+  // missing `/a/one.png` after a real `/a/two.png` cannot swallow both.
+  for (const names of [isLocalFile, looksLikeImage]) {
+    for (let end = tokens.length; end > i; end--) {
+      const path = tokens.slice(i, end).join(" ");
+      if (names(path)) return { path, end };
+    }
+  }
+  return null;
+}
+
 export interface DropResult {
   attachments: Attachment[];
+  /**
+   * The names of the files this drop could not read, in drop order. The
+   * composer puts each in the draft as a chip in an error state, because a
+   * path on the screen helps nobody (#85).
+   */
+  unreadable: string[];
   errors: string[];
 }
 
@@ -110,24 +155,25 @@ export interface DropResult {
  */
 export function readDroppedFiles(raw: string): DropResult {
   const attachments: Attachment[] = [];
+  const unreadable: string[] = [];
   const errors: string[] = [];
-  const candidates = parseDroppedPaths(raw);
-  // Every token has to look like a dropped file, otherwise this was prose that
-  // happened to contain a filename and should be inserted as text.
-  if (candidates.length === 0 || !candidates.every(isDroppedFile)) return { attachments, errors };
-  for (const path of candidates) {
+  const paths = groupDroppedPaths(parseDroppedPaths(raw));
+  if (!paths) return { attachments, unreadable, errors };
+  for (const path of paths) {
     try {
       const size = statSync(path).size;
       if (size > MAX_ATTACHMENT_BYTES) {
         errors.push(`${basename(path)} is ${mb(size)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)`);
+        unreadable.push(basename(path));
         continue;
       }
       attachments.push({ name: basename(path), path, mimeType: fileMime(path), data: readFileSync(path).toString("base64") });
     } catch {
       errors.push(`could not read ${path}`);
+      unreadable.push(basename(path));
     }
   }
-  return { attachments, errors };
+  return { attachments, unreadable, errors };
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +329,9 @@ export function keepTagged<T extends TaggedAttachment>(text: string, atts: T[]):
   return atts.filter((a) => text.includes(a.tag));
 }
 
+/** What a chip says about a file the drop could not read. */
+export const UNREADABLE_SUFFIX = " — unreadable";
+
 /**
  * Work out what a drop does to the composer: the tags go into the draft at the
  * caret, and the pending list comes back with the new files on the end.
@@ -290,10 +339,20 @@ export function keepTagged<T extends TaggedAttachment>(text: string, atts: T[]):
  * A drop first forgets the files whose tag the user already deleted, so a name
  * that is free again is free to use, and the count the composer holds matches
  * what the draft says.
+ *
+ * `unreadable` names the files the drop recognised but could not read. Each
+ * gets a chip too, marked as the failure it is, so the reader sees which file
+ * did not attach. The chip is text alone: no file stands behind it.
  */
-export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[]): { value: string; caret: number; attachments: TaggedAttachment[] } {
+export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[], unreadable: string[] = []): { value: string; caret: number; attachments: TaggedAttachment[] } {
   const live = keepTagged(draft, pending);
   const tagged = tagAttachments(dropped, [draft, ...live.map((a) => a.tag)].join("\n"));
-  const text = spliceTags(draft, caret, tagged.map((a) => a.tag));
+  let taken = [draft, ...live.map((a) => a.tag), ...tagged.map((a) => a.tag)].join("\n");
+  const failed = unreadable.map((name) => {
+    const tag = makeTag(`${name}${UNREADABLE_SUFFIX}`, taken);
+    taken += `\n${tag}`;
+    return tag;
+  });
+  const text = spliceTags(draft, caret, [...tagged.map((a) => a.tag), ...failed]);
   return { ...text, attachments: [...live, ...tagged] };
 }

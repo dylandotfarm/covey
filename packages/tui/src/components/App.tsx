@@ -1416,10 +1416,9 @@ export function App({ store }: { store: Store }) {
       // A drag-and-drop arrives as a paste of the file's path. If the whole
       // chunk parses as dropped files, attach them; otherwise it is ordinary text.
       if (state.view) {
-        const { attachments, errors } = readDroppedFiles(rawInput);
+        const { attachments, unreadable, errors } = readDroppedFiles(rawInput);
         for (const e of errors) store.notify(e, "error");
-        if (attach(attachments)) return;
-        if (errors.length > 0) return;
+        if (attach(attachments, unreadable)) return;
       }
       // paste: normalise line endings and tabs, then insert
       insert(Ed.normalisePaste(rawInput));
@@ -1838,14 +1837,17 @@ export function App({ store }: { store: Store }) {
     const e = mentionItems[menu.index];
     if (e && mention) applyEdit(acceptMention(draft, mention, e));
   }
-  /** Hand new attachments to the store. Returns false when there were none. */
   /**
    * Put the files into the sentence as tags, at the caret. Both ways in — a
    * drop and a clipboard paste — come through here, so both read the same.
+   * `unreadable` names the dropped files that did not attach; each gets a chip
+   * of its own, so the drop never leaves a path on the screen (#85).
+   *
+   * @returns false when the drop held nothing at all.
    */
-  function attach(attachments: Attachment[]): boolean {
-    if (attachments.length === 0 || !state.view) return false;
-    const drop = applyDrop(draft, caret, attachments, store.attachments(state.view.threadId));
+  function attach(attachments: Attachment[], unreadable: string[] = []): boolean {
+    if ((attachments.length === 0 && unreadable.length === 0) || !state.view) return false;
+    const drop = applyDrop(draft, caret, attachments, store.attachments(state.view.threadId), unreadable);
     store.setAttachments(state.view.threadId, drop.attachments);
     applyEdit({ value: drop.value, caret: drop.caret });
     return true;

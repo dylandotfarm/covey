@@ -50,6 +50,54 @@ test("a missing file reports an error rather than attaching", () => {
   assert.equal(errors.length, 1);
 });
 
+test("a screenshot whose name holds unescaped spaces is one drop, not prose (#85)", () => {
+  // The case that made an agent read a path instead of an image: a terminal
+  // that pastes the name as it is, and a screenshot name full of spaces.
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, "Screenshot from 2026-09-18 at 6.38.45 PM.png");
+  writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
+  const { attachments, unreadable, errors } = readDroppedFiles(png);
+  assert.deepEqual(errors, []);
+  assert.deepEqual(unreadable, []);
+  assert.deepEqual(attachments.map((a) => a.name), ["Screenshot from 2026-09-18 at 6.38.45 PM.png"]);
+});
+
+test("a path the terminal escaped all but one space of is still one drop", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, "shot 1 of 2.png");
+  writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
+  const escaped = `${join(dir, "shot")}\\ 1\\ of 2.png`;
+  assert.ok(parseDroppedPaths(escaped).length > 1, "this case tests nothing unless the paste splits");
+  assert.deepEqual(readDroppedFiles(escaped).attachments.map((a) => a.name), ["shot 1 of 2.png"]);
+});
+
+test("a drop of two files takes the shorter path first, spaces or not", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const one = join(dir, "shot one.png");
+  const two = join(dir, "two.png");
+  writeFileSync(one, Buffer.from("89504e470d0a1a0a", "hex"));
+  writeFileSync(two, Buffer.from("89504e470d0a1a0a", "hex"));
+  assert.deepEqual(readDroppedFiles(`${one} ${two}`).attachments.map((a) => a.name), ["shot one.png", "two.png"]);
+});
+
+test("a real path inside a sentence is still prose", () => {
+  // The joining rule must not turn a path somebody typed into an attachment:
+  // every token has to belong to a file, or the whole chunk is text.
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, "shot.png");
+  writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
+  const drop = readDroppedFiles(`${png} is broken, fix it`);
+  assert.deepEqual(drop.attachments, []);
+  assert.deepEqual(drop.errors, []);
+});
+
+test("a file that cannot be read is named for a chip, not left to the path", () => {
+  const { attachments, unreadable, errors } = readDroppedFiles("/nope/missing shot.png");
+  assert.deepEqual(attachments, []);
+  assert.deepEqual(unreadable, ["missing shot.png"], "the composer needs the name to put a chip in the draft");
+  assert.equal(errors.length, 1);
+});
+
 test("labels a non-image by extension, and anything unknown generically", () => {
   assert.equal(fileMime("/a/b.PDF"), "application/pdf");
   assert.equal(fileMime("/a/b.log"), "text/plain");
@@ -202,6 +250,19 @@ test("two files with one name get two tags the user can tell apart", () => {
   const tags = second.attachments.map((a) => a.tag);
   assert.equal(new Set(tags).size, 2, `two files called shot.png need two tags, got ${JSON.stringify(tags)}`);
   assert.equal(second.value, "compare [shot.png] [shot.png 2] ");
+});
+
+test("a file that did not attach gets a chip that says so, and no attachment", () => {
+  const drop = applyDrop("look at", 7, [], [], ["shot.png"]);
+  assert.equal(drop.value, "look at [shot.png — unreadable] ");
+  assert.deepEqual(drop.attachments, [], "a chip in an error state stands for no file");
+  assert.doesNotMatch(drop.value, /\//, "the point of the chip is that no path reaches the screen (#85)");
+});
+
+test("a failed chip cannot take the tag a real file needs", () => {
+  const drop = applyDrop("", 0, [att("shot.png")], [], ["shot.png"]);
+  assert.equal(drop.value, "[shot.png] [shot.png — unreadable] ");
+  assert.deepEqual(drop.attachments.map((a) => a.tag), ["[shot.png]"]);
 });
 
 test("a drop forgets the file whose tag the user already deleted", () => {
