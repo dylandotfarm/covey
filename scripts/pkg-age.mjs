@@ -41,10 +41,38 @@ const registry = process.env.NPM_CONFIG_REGISTRY ?? "https://registry.npmjs.org"
 const names = [...wanted.keys()];
 const violations = [];
 let checked = 0;
+/**
+ * One registry document, asked for up to three times. A dropped connection or
+ * a 5xx from the registry is a fault of the network, not of the lock file, and
+ * one such fault must not fail the whole check (it did, on 2026-09-22, with
+ * ECONNRESET before the TLS handshake). A 4xx is an answer, and comes back at
+ * once.
+ */
+async function lookup(name) {
+  let last;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const res = await fetch(`${registry}/${name.replace("/", "%2F")}`, { headers: { accept: "application/json" } });
+      if (res.ok || (res.status < 500 && res.status !== 429)) return res;
+      last = new Error(`registry answered ${res.status}`);
+    } catch (e) {
+      last = e;
+    }
+    if (attempt < 3) await new Promise((r) => setTimeout(r, 1000 * attempt));
+  }
+  throw last;
+}
+
 async function worker() {
   while (names.length) {
     const name = names.shift();
-    const res = await fetch(`${registry}/${name.replace("/", "%2F")}`, { headers: { accept: "application/json" } });
+    let res;
+    try {
+      res = await lookup(name);
+    } catch (e) {
+      violations.push(`${name}: registry lookup failed after 3 attempts (${e?.cause?.message ?? e?.message ?? e})`);
+      continue;
+    }
     if (!res.ok) { violations.push(`${name}: registry lookup failed (${res.status})`); continue; }
     const doc = await res.json();
     for (const version of wanted.get(name)) {
