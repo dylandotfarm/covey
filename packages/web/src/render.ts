@@ -13,7 +13,7 @@ import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type Gi
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, primaryMachine, projectRows, relTime, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
 
 export interface Actions {
   openThread(machine: string, threadId: string): void;
@@ -43,6 +43,15 @@ export interface Actions {
   /** One act on the item on screen: a review, a comment, a merge, a close or a reopen. */
   actItem(action: GitHubAction): void;
   setItemDraft(text: string): void;
+  /** Open the settings sheet over the page, for a conversation or a machine. */
+  openSheet(target: SheetTarget): void;
+  closeSheet(): void;
+  /** Show the choices of one setting, or `""` to go back to the list. */
+  sheetPage(page: string): void;
+  /** Take a choice on the page the sheet is on. The sheet then closes. */
+  sheetChoose(id: string): void;
+  /** Take a row that acts instead of opening choices: rename, archive. */
+  sheetAct(id: string): void;
 }
 
 /** How far a row slides to show the button under it, in CSS pixels. Matches `.swipe .archive` in app.css. */
@@ -100,6 +109,11 @@ export class Renderer {
   private lightboxImg: HTMLImageElement;
   /** How markdown loads its media: a GitHub attachment through the daemon, with the page's token. */
   private markdown: { media: (url: string) => string };
+  /** The settings sheet over the page (#117): a scrim, and a panel at the foot. */
+  private sheet: HTMLElement;
+  private sheetPanel: HTMLElement;
+  /** What the panel was built from, so a paint mid-turn leaves the sheet alone. */
+  private shownSheet: string | null = null;
 
   /**
    * `token` is the one the page holds for a LAN address, so the media route
@@ -127,13 +141,20 @@ export class Renderer {
     this.itemScreen = h("main", { class: "item hidden" }, this.itemHeader, this.itemBody, this.itemBar);
     this.lightboxImg = h("img", { alt: "" });
     this.lightbox = h("div", { class: "lightbox hidden", onclick: () => this.closeLightbox() }, this.lightboxImg);
-    root.append(this.banner, this.list, this.threadScreen, this.itemScreen, this.lightbox);
+    this.sheetPanel = h("div", { class: "sheet-panel", role: "dialog", "aria-modal": "true" });
+    // A tap on the scrim, and only on the scrim, shuts the sheet.
+    this.sheet = h("div", { class: "sheet hidden", onclick: (ev) => { if (ev.target === this.sheet) this.a.closeSheet(); } }, this.sheetPanel);
+    root.append(this.banner, this.list, this.threadScreen, this.itemScreen, this.lightbox, this.sheet);
     // A `#N` anywhere in the transcript, or in an item's own text, opens that
     // item, and an inline image opens full size. One listener per surface;
     // the anchor carries only the number, the image its own source.
     this.timeline.addEventListener("click", (ev) => this.refClick(ev));
     this.itemBody.addEventListener("click", (ev) => this.refClick(ev));
-    addEventListener("keydown", (ev) => { if (ev.key === "Escape" && !this.lightbox.classList.contains("hidden")) this.closeLightbox(); });
+    addEventListener("keydown", (ev) => {
+      if (ev.key !== "Escape") return;
+      if (!this.lightbox.classList.contains("hidden")) { this.closeLightbox(); return; }
+      if (!this.sheet.classList.contains("hidden")) this.a.closeSheet();
+    });
 
     this.timeline.addEventListener("scroll", () => {
       const t = this.timeline;
@@ -237,6 +258,9 @@ export class Renderer {
 
   paint(s: State) {
     this.paintBanner(s);
+    // The sheet sits over every screen, so it is painted before the one under
+    // it is chosen and it survives a move between them.
+    this.paintSheet(s);
     // The item sits over whatever it was opened from. The thread under it is
     // not painted meanwhile; its rows are keyed, so the return folds in what
     // arrived. A thread that is no longer on screen loses its skeleton, so a
@@ -376,6 +400,8 @@ export class Renderer {
         h("span", { class: "name" }, m.name),
         h("span", { class: "kind" }, m.primary ? "this page" : "fleet"),
         h("span", { class: `conn` }, m.conn),
+        // The defaults every new thread on this machine inherits (#117).
+        h("button", { class: "opts", type: "button", "aria-label": `Settings for ${m.name}`, disabled: !connected, onclick: () => this.a.openSheet({ kind: "machine", machine: m.key }) }, "⋮"),
       ),
       h("div", { class: "meta" }, m.info ? `${m.info.os}/${m.info.arch} · build ${m.info.daemonVersion} · ${web}` : m.connError ?? m.key),
       progress ? h("div", { class: `progress ${m.update?.state ?? ""}` }, progress) : null,
@@ -422,6 +448,58 @@ export class Renderer {
     );
     this.attachSwipe(wrap, front, key);
     return wrap;
+  }
+
+  // ---- the settings sheet (#117) ---------------------------------------
+
+  /**
+   * The sheet at the foot of the page: a list of settings, or the choices of
+   * one of them. It is rebuilt only when what it says changes, because a paint
+   * runs on every frame of a running turn and a panel rebuilt under a finger
+   * loses the tap that was on its way.
+   */
+  private paintSheet(s: State) {
+    const sh = s.sheet;
+    this.sheet.classList.toggle("hidden", !sh);
+    if (!sh) {
+      if (this.shownSheet === null) return;
+      // The class goes with the content, so the next open animates again.
+      clear(this.sheetPanel);
+      this.sheetPanel.classList.remove("opening");
+      this.shownSheet = null;
+      return;
+    }
+    const key = sheetKey(s, sh);
+    if (key === this.shownSheet) return;
+    const fresh = this.shownSheet === null;
+    this.shownSheet = key;
+    clear(this.sheetPanel);
+    this.sheetPanel.append(h("div", { class: "sheet-head" },
+      sh.page ? h("button", { class: "back", type: "button", "aria-label": "Back", onclick: () => this.a.sheetPage("") }, "‹") : null,
+      h("span", { class: "title" }, sheetTitle(s, sh)),
+      h("button", { class: "close", type: "button", "aria-label": "Close", onclick: () => this.a.closeSheet() }, "✕"),
+    ));
+    const note = sheetNote(s, sh);
+    if (note) this.sheetPanel.append(h("p", { class: "sheet-note" }, note));
+    if (sh.page) {
+      for (const c of sheetChoices(s, sh)) {
+        this.sheetPanel.append(h("button", { class: `sheet-row${c.current ? " current" : ""}`, type: "button", onclick: () => this.a.sheetChoose(c.id) },
+          h("span", { class: "text" }, h("span", { class: "label" }, c.label), c.hint ? h("span", { class: "hint" }, c.hint) : null),
+          h("span", { class: "tick" }, c.current ? "✓" : ""),
+        ));
+      }
+    } else {
+      for (const r of sheetRows(s, sh)) {
+        this.sheetPanel.append(h("button", { class: `sheet-row${r.tone ? ` ${r.tone}` : ""}`, type: "button", onclick: () => (r.choices ? this.a.sheetPage(r.id) : this.a.sheetAct(r.id)) },
+          h("span", { class: "text" }, h("span", { class: "label" }, r.label)),
+          r.value ? h("span", { class: "value" }, r.value) : null,
+          r.choices ? h("span", { class: "chevron" }, "›") : null,
+        ));
+      }
+    }
+    // A sheet that has just opened slides up from the foot. A page inside it
+    // does not: the panel is already there and only its rows changed.
+    this.sheetPanel.classList.toggle("opening", fresh);
   }
 
   /** The issue a thread took and the pull request it opened, as chips that open the item (#108). */
@@ -488,6 +566,9 @@ export class Renderer {
         h("div", { class: "title" }, t?.title ?? "…"),
         h("div", { class: `sub tone-${t ? threadTone(t) : "idle"}` }, s.machines.size > 1 ? `${s.machines.get(v.machine)?.name ?? ""} · ` : "", v.loading ? "loading…" : v.error ? v.error : t ? threadStatusLabel(t) : "", t ? this.refChips(v.machine, t) : null),
       ),
+      // The settings of this conversation (#117): the model it runs, the mode
+      // it runs in, and the two things a reader does to a conversation itself.
+      h("button", { class: "opts", type: "button", "aria-label": "Conversation settings", disabled: !t, onclick: () => this.a.openSheet({ kind: "thread", machine: v.machine, threadId: v.threadId }) }, "⋮"),
     );
     this.refScope = () => (t ? { machine: v.machine, projectId: t.projectId } : null);
     const busy = t ? threadIsBusy(t) : false;
