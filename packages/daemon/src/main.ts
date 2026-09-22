@@ -13,6 +13,7 @@ import { machineResources } from "./resources.js";
 import { webAddresses } from "./addresses.js";
 import { sourceRoot } from "./update.js";
 import { coveyPlugin } from "./plugin.js";
+import { credentialExpiry, refreshCredentials } from "./auth.js";
 
 export interface RunDaemonOptions {
   port?: number;
@@ -80,6 +81,9 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   };
   const engine = new Engine(db, machine, {
     log,
+    // The real store: when its token runs out, and how Claude Code refreshes it.
+    credentialExpiry,
+    refreshCredentials,
     ...(plugin ? { plugins: [plugin] } : {}),
     // Move the listeners while the daemon runs. The old ones close first: on
     // Linux a wildcard bind fails while a listener on one address holds the

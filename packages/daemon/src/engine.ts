@@ -59,6 +59,13 @@ const SWEEP_INTERVAL_MS = 30_000;
 /** How often the daemon looks for a pull request watch that is due a poll. */
 const WATCH_TICK_MS = 15_000;
 
+/** A token this close to its expiry is refreshed before a session copies it:
+ *  the copy cannot refresh, and a process takes seconds to start. */
+const EXPIRY_MARGIN_MS = 2 * 60_000;
+
+/** Why a session goes when the token it copied has run out. */
+const EXPIRED_NOTE = "This thread's session held an access token that has expired, and a resumed session cannot refresh one, so covey stopped it before it failed.";
+
 export interface EngineOptions {
   /** How a session reaches the SDK. A test hands in a stand-in, so nothing
    *  spawns a Claude subprocess. */
@@ -77,6 +84,16 @@ export interface EngineOptions {
   /** The fingerprint of the credential store. A test hands in a stand-in, so
    *  a rotation is a variable rather than a login. */
   credentialStamp?: () => Promise<string | null>;
+  /** When the access token in the store expires, in milliseconds since the
+   *  epoch, or `null` when the store cannot be read. `main.ts` hands in
+   *  `credentialExpiry`; a test hands in a number. */
+  credentialExpiry?: () => Promise<number | null>;
+  /** Make Claude Code refresh the credential store, and resolve once a fresh
+   *  process has answered on it. `main.ts` hands in `refreshCredentials`; a
+   *  test hands in a stand-in, so nothing here reaches the API. A daemon
+   *  without one cannot refresh, and a failure then ends at the note that
+   *  names `claude auth login`. */
+  refreshCredentials?: () => Promise<void>;
   /**
    * Listen on other addresses from now on. `main.ts` owns the listeners, so
    * it hands this in; the engine calls it when `machine.settings` changes
@@ -122,6 +139,24 @@ export class Engine {
   private retryTimers = new Map<string, NodeJS.Timeout>();
   /** What the credential store looked like when we last read it. */
   private credStamp: string | null = null;
+  /** When each live session's process started, in milliseconds. A failure
+   *  from a process that started before the last refresh says nothing about
+   *  the store as it is now. */
+  private sessionStartedAt = new Map<string, number>();
+  /** When the token a *resumed* session holds expires. The SDK hands such a
+   *  session a copy of the store without the refresh token, so that token is
+   *  the last one the process will ever have. A fresh session has no entry:
+   *  it reads the real store and refreshes for itself. */
+  private sessionExpiry = new Map<string, number>();
+  /** A session that read the store as it is now failed on the credentials,
+   *  so the next session must not start until Claude Code has refreshed. */
+  private credStale = false;
+  /** When the last refresh this daemon asked for answered, in milliseconds. */
+  private credRefreshedAt = 0;
+  /** The refresh in flight, so ten threads that fail at once ask for one. */
+  private refreshing: Promise<void> | null = null;
+  /** Session starts in flight, one per thread. */
+  private starting = new Map<string, Promise<ClaudeSession>>();
   private watchTimer: NodeJS.Timeout | null = null;
   /** Threads whose watch is being polled right now, so a slow `gh` is not
    *  asked twice. */
@@ -1252,7 +1287,7 @@ export class Engine {
     if (!p) throw new EngineError("not_found", "project not found");
     await this.reviveWorktree(t, p);
     const cwd = t.worktreePath ?? p.workspaceRoot;
-    const session = this.ensureSession(t);
+    const session = await this.ensureSession(t);
     const now = new Date().toISOString();
     // snapshot the working tree before the agent touches it
     const before = await captureCheckpoint(cwd, `${threadId}/${turnId}/before`).catch(() => null);
@@ -1534,15 +1569,30 @@ export class Engine {
 
   // ---- sessions -------------------------------------------------------------
 
-  private ensureSession(t: Thread): ClaudeSession {
+  private ensureSession(t: Thread): Promise<ClaudeSession> {
     const live = this.sessions.get(t.id);
-    if (live?.running) { this.touch(t.id); return live; }
+    if (live?.running && !this.tokenExpired(t.id)) { this.touch(t.id); return Promise.resolve(live); }
+    // A start waits on the credentials, and a second message in that time
+    // must not start a second process for the same thread.
+    let starting = this.starting.get(t.id);
+    if (!starting) {
+      starting = this.startSession(t, live).finally(() => this.starting.delete(t.id));
+      this.starting.set(t.id, starting);
+    }
+    return starting;
+  }
+
+  private async startSession(t: Thread, live: ClaudeSession | undefined): Promise<ClaudeSession> {
     // A session that stopped answering still owns a subprocess until somebody
     // aborts it. Replacing it without that leaves a process no map names.
-    if (live) this.dropSession(t.id);
+    if (live?.running) this.release(t.id, "token expired", EXPIRED_NOTE);
+    else if (live) this.dropSession(t.id);
     const p = this.db.getProject(t.projectId);
     if (!p) throw new EngineError("not_found", "project not found");
     const hasTranscript = this.db.loadTranscript(t.id, t.sessionId, "") !== null;
+    // The token the new process will copy has to be one the API takes. This
+    // waits on Claude Code when it is not, and throws when it cannot be.
+    const expiry = await this.freshenCredentials(t.id);
     // Say where the wait comes from before the wait starts, so a slow first
     // turn reads as a resume rather than as a thread that hangs.
     if (this.released.delete(t.id) && hasTranscript) {
@@ -1568,6 +1618,8 @@ export class Engine {
       this.opts.spawn,
     );
     this.sessions.set(t.id, session);
+    this.sessionStartedAt.set(t.id, this.now());
+    if (hasTranscript && expiry !== null) this.sessionExpiry.set(t.id, expiry);
     this.touch(t.id);
     session.start();
     this.opts.log?.(`session started thread=${t.id.slice(0, 8)} resume=${hasTranscript} live=${this.sessions.size}/${this.liveSessionLimit()}`);
@@ -1599,6 +1651,8 @@ export class Engine {
     this.sessions.get(threadId)?.stop();
     this.sessions.delete(threadId);
     this.touchedAt.delete(threadId);
+    this.sessionStartedAt.delete(threadId);
+    this.sessionExpiry.delete(threadId);
     this.released.delete(threadId);
   }
 
@@ -1703,14 +1757,81 @@ export class Engine {
    * @returns the threads whose session it stopped.
    */
   async checkCredentials(): Promise<string[]> {
+    const expired = this.releaseExpired();
     const stamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null);
-    if (!stamp) return [];
+    if (!stamp) return expired;
     const seen = this.credStamp;
     this.credStamp = stamp;
-    if (seen === null || seen === stamp) return [];
+    if (seen === null || seen === stamp) return expired;
     const cycled = this.cycleSessions(null, "Your Claude credentials changed while this session was live, so the token it holds no longer works.");
     if (cycled.length) this.opts.log?.(`credentials rotated: cycled ${cycled.length} session${cycled.length === 1 ? "" : "s"}`);
-    return cycled;
+    return [...expired, ...cycled];
+  }
+
+  /**
+   * Stop every idle session whose copied token has run out, before a user
+   * types into one. Such a session cannot refresh, so its next request fails
+   * whatever the store holds; a busy one is left to fail on its own and land
+   * in `onAuthFailure`, which restarts its work.
+   */
+  private releaseExpired(): string[] {
+    const released: string[] = [];
+    for (const threadId of [...this.sessions.keys()]) {
+      if (!this.tokenExpired(threadId) || this.sessionBusy(threadId)) continue;
+      this.release(threadId, "token expired", EXPIRED_NOTE);
+      released.push(threadId);
+    }
+    return released;
+  }
+
+  /** Does this session hold a copied token that the API no longer takes? */
+  private tokenExpired(threadId: string): boolean {
+    const at = this.sessionExpiry.get(threadId);
+    return at !== undefined && this.now() >= at;
+  }
+
+  /**
+   * See that the store holds a token the next session can use, and say when
+   * it expires.
+   *
+   * Claude Code refreshes when the token is expired or within the margin of
+   * it, and when a session that read the store as it is now failed on the
+   * credentials. It refreshes at no other time: a refresh revokes what every
+   * live session holds, so an early one would be the fault itself. One
+   * refresh serves every thread that waits on it.
+   *
+   * A refresh that fails on the credentials is a dead refresh token, which
+   * only `claude auth login` mends; the note says so and the throw stops the
+   * turn, because a process started now would fail the same way. Any other
+   * failure is a fault of the network or the model, and the session starts
+   * anyway: Claude Code saves a refreshed pair before it asks the model, so
+   * the store may well be fresh, and a token that is not fails on its own.
+   */
+  private async freshenCredentials(threadId: string): Promise<number | null> {
+    let expiry = await this.readExpiry();
+    const due = this.credStale || (expiry !== null && expiry - this.now() < EXPIRY_MARGIN_MS);
+    if (!due) return expiry;
+    if (!this.opts.refreshCredentials) return expiry;
+    this.refreshing ??= this.opts.refreshCredentials().then(
+      () => { this.credStale = false; this.credRefreshedAt = this.now(); this.opts.log?.("credentials refreshed"); },
+    ).finally(() => { this.refreshing = null; });
+    try {
+      await this.refreshing;
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      this.opts.log?.(`credential refresh failed: ${msg.slice(0, 200)}`);
+      if (isAuthFailure(msg)) {
+        this.note(threadId, "warning", `Covey could not refresh the credentials: ${msg} Run "claude auth login" in a terminal on this machine, then send a message.`);
+        throw new EngineError("auth", "Claude Code could not refresh its credentials on this machine");
+      }
+      this.note(threadId, "warning", `Covey could not refresh the credentials: ${msg} The session starts on the store as it is.`);
+    }
+    expiry = await this.readExpiry();
+    return expiry;
+  }
+
+  private async readExpiry(): Promise<number | null> {
+    return this.opts.credentialExpiry ? await this.opts.credentialExpiry().catch(() => null) : null;
   }
 
   /**
@@ -1748,19 +1869,23 @@ export class Engine {
     // One failure reaches this twice — the turn's result and the session's
     // status both carry it — and the user needs to read it once.
     if (state === "scheduled" || state === "told") return;
+    // A process that started before the last refresh held the old token, and
+    // its failure says nothing about the store as it is now.
+    const stale = (this.sessionStartedAt.get(threadId) ?? 0) >= this.credRefreshedAt;
+    if (stale) this.credStale = true;
     this.dropSession(threadId);
     const cycled = this.cycleSessions(threadId, "Another thread's session could not authenticate, and this one holds the same credentials.");
-    this.opts.log?.(`auth failure thread=${threadId.slice(0, 8)} restart=${state !== "spent"} cycled=${cycled.length} error=${error.slice(0, 120)}`);
+    this.opts.log?.(`auth failure thread=${threadId.slice(0, 8)} restart=${state !== "spent"} refresh=${stale} cycled=${cycled.length} error=${error.slice(0, 120)}`);
     if (state === "spent") {
       this.authRetry.set(threadId, "told");
       this.note(threadId, "warning", `This thread could not authenticate twice in a row: ${error} Covey stopped the session and stops here. Run "claude auth login" in a terminal on this machine, then send a message.`);
       return;
     }
     if ((this.queues.get(threadId)?.length ?? 0) > 0) {
-      this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it. The next message in the queue starts a new session, which reads your credentials again.`);
+      this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it. The next message in the queue starts a new session on refreshed credentials.`);
       return;
     }
-    this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it and starts a new one, which reads your credentials again.`);
+    this.note(threadId, "warning", `This thread's session could not authenticate: ${error} Covey stopped it, refreshes the credentials, and starts a new session that goes on with the work.`);
     this.authRetry.set(threadId, "scheduled");
     const timer = setTimeout(() => {
       this.retryTimers.delete(threadId);
@@ -1787,7 +1912,8 @@ export class Engine {
     const text = this.restartText(threadId, turnId);
     if (!text) return;
     await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text })
-      .catch((e: any) => this.note(threadId, "warning", `Could not start a new session after the authentication error: ${e?.message ?? String(e)}`));
+      // A refresh that failed has already said so, and named the command.
+      .catch((e: any) => { if (e?.code !== "auth") this.note(threadId, "warning", `Could not start a new session after the authentication error: ${e?.message ?? String(e)}`); });
   }
 
   /**

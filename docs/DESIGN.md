@@ -180,7 +180,7 @@ processes than this daemon started.
 `COVEY_SESSION_IDLE_MINUTES` and `COVEY_MAX_LIVE_SESSIONS` seed the two settings for a machine
 whose `daemon.json` says nothing. `sessionIdleMinutes: 0` keeps every session for ever.
 
-## Credentials, and the 401 that follows a rotation
+## Credentials, and the 401 that follows a rotation or an expiry
 
 Every session on a machine reads one credential store, and then holds its access token in its
 own memory. The token lives about eight hours. Whichever process refreshes it first receives a
@@ -197,31 +197,67 @@ answered at once. The process cannot recover. An SDK session has no terminal, so
 answers `isn't available in this environment`, and every later message to that process fails
 the same way — a thread where even a bare `ping` returns the 401.
 
-The daemon cannot refresh the token for the user. A refresh **is** the rotation that revokes
-what the other sessions hold, so a daemon that refreshed early would cause the fault it means
-to prevent. It does three other things, in `auth.ts` and the engine.
+A resumed session cannot refresh at all. The SDK resumes from covey's store by writing a
+temporary config directory and copying the credentials into it, and the copy carries the
+access token and **no refresh token** (`wnt` in `sdk.mjs` deletes it; measured on 2026-09-22
+on six such copies in `/tmp/claude-resume-*`). So a resumed session dies when the access token
+expires, whatever else happens:
+
+```
+Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.
+```
+
+A daemon that has run for a day holds only resumed sessions, so nothing on the machine
+refreshes the store. Every new session copies the same expired token and fails the same way,
+and every thread on the machine is stuck until a person runs `claude` by hand. That is what a
+thread looked like on 2026-09-21: a merge landed, the next turn failed on `expired`, the
+restart failed on `expired`, and the note said to log in, on a machine whose login was fine.
+
+The daemon does not refresh the token itself, and never talks to the OAuth server. It asks
+Claude Code to, in `auth.ts` and the engine.
 
 1. **It knows this failure from a failure of the work.** The error text must name the
    credential *and* say that the credential was refused. `401` alone is a page a tool fetched,
    and `invalid` alone is most of what a model ever gets told.
-2. **It stops the processes that hold the dead token.** The thread that failed loses its
+2. **It knows when the token runs out.** `credentialExpiry` reads `expiresAt` out of the store:
+   one number from `.credentials.json`, or from the keychain item on macOS, read the way the
+   SDK itself reads it at every resume. A resumed session is recorded with the expiry of the
+   token it copied. The sweep stops such a session once that time has passed, before a user
+   types into it, and a message to one starts a new process instead.
+3. **It refreshes before a session copies a dead token.** Before a process starts, the engine
+   reads the expiry. When the token is expired or within two minutes of it, or when a session
+   that read the store as it is now has failed on the credentials, `refreshCredentials` runs
+   one fresh one-turn Claude Code process against the real store — no resume, no temporary
+   directory, no tools, no transcript, one word from the cheapest model. That process holds
+   the refresh token, refreshes the pair, and saves it where every later session reads it,
+   exactly as under `claude -p`. Ten threads that fail at once wait on one refresh. The daemon
+   refreshes at no other time: a refresh revokes what every live session holds, so an early
+   one would be the fault itself.
+4. **It stops the processes that hold the dead token.** The thread that failed loses its
    session at once. Every session that owes nobody an answer goes with it, because they hold
    the same token. A busy session stays: to kill a turn in flight costs more than the failure
    it saves, and that turn arrives here by itself if its own token is dead.
-3. **It restarts the work, once.** A turn that had already written something gets `Go on from
-   the point where it stopped`, because the transcript holds that work. A turn that died
-   before its first word is sent again word for word, because "go on" means nothing to a model
-   that never started. The second failure in a row is a note that names `claude auth login`,
-   not a third process — a thread must not talk to itself while the credentials stay broken.
+5. **It restarts the work, once, on the refreshed store.** A turn that had already written
+   something gets `Go on from the point where it stopped`, because the transcript holds that
+   work. A turn that died before its first word is sent again word for word, because "go on"
+   means nothing to a model that never started. The second failure in a row is a note that
+   names `claude auth login`, not a third process — a thread must not talk to itself while the
+   credentials stay broken.
+
+A refresh that fails on the credentials is a dead refresh token — a logout, a revocation, or
+the end of its own life — and only `claude auth login` mends it. The note says so, and no
+process starts, because one started now would fail the same way. A refresh that fails on the
+network or on the model lets the session start anyway: Claude Code saves a refreshed pair
+before it asks the model, so the store may well be fresh, and a token that is not fails on its
+own and lands in the path above.
 
 The sweep timer also reads a fingerprint of the credential store: the `mdat` attribute of the
 macOS keychain item, or the size and time of `~/.claude/.credentials.json`. A fingerprint that
 changed means a rotation, and the idle sessions then go before anybody types into them. The
-daemon never reads the token itself. An attribute needs no keychain prompt and costs about
-40 ms, and a secret the daemon never reads is a secret it cannot leak. The macOS item holds
-the MCP tokens beside the account token, so an MCP login cycles the idle sessions too; that
-costs one resume. A store this daemon cannot read gives `null`, the watch stays off, and the
-failure path above still catches the fault.
+attribute needs no keychain prompt and costs about 40 ms. The macOS item holds the MCP tokens
+beside the account token, so an MCP login cycles the idle sessions too; that costs one resume.
+A store this daemon cannot read gives `null`, the watch stays off, and the failure path above
+still catches the fault.
 
 One credential ends the race for good. `claude setup-token` issues a long-lived token, and a
 daemon started with that token in `CLAUDE_CODE_OAUTH_TOKEN` never refreshes and never rotates.

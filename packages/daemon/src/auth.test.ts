@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isAuthFailure, fileStamp, parseKeychainStamp } from "./auth.js";
+import { isAuthFailure, fileStamp, fileExpiry, parseExpiry, parseKeychainStamp } from "./auth.js";
 
 test("the failures that are about the credentials", () => {
   for (const text of [
@@ -58,4 +58,21 @@ test("the file stamp follows the file, and a missing file is not a failure", asy
 
   writeFileSync(join(dir, ".credentials.json"), "{\"claudeAiOauth\":{\"accessToken\":\"two-and-longer\"}}");
   assert.notEqual(await fileStamp(dir), first);
+});
+
+test("the expiry is one number out of the store, and nothing else is kept", async (t) => {
+  assert.equal(parseExpiry("{\"claudeAiOauth\":{\"accessToken\":\"secret\",\"expiresAt\":1790000000000}}"), 1790000000000);
+  // A store this daemon cannot read, a store without the field, and a store of
+  // another shape all read as "unknown", never as "expired".
+  assert.equal(parseExpiry(null), null);
+  assert.equal(parseExpiry(""), null);
+  assert.equal(parseExpiry("not json"), null);
+  assert.equal(parseExpiry("{\"claudeAiOauth\":{\"accessToken\":\"secret\"}}"), null);
+  assert.equal(parseExpiry("{\"claudeAiOauth\":{\"expiresAt\":\"soon\"}}"), null);
+
+  const dir = mkdtempSync(join(tmpdir(), "covey-cred-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(await fileExpiry(dir), null, "no file: the expiry is unknown");
+  writeFileSync(join(dir, ".credentials.json"), "{\"claudeAiOauth\":{\"accessToken\":\"secret\",\"expiresAt\":1790000000000}}");
+  assert.equal(await fileExpiry(dir), 1790000000000);
 });
