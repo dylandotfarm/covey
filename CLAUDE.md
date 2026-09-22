@@ -148,6 +148,16 @@
   `pnpm test` still changes nothing on GitHub (`githubItem.test.ts`). The TUI has no such
   screen: `links.ts` makes a `#N` an OSC 8 hyperlink when the project is on GitHub, and
   the palette opens the issue or the pull request in the browser.
+- A setting in the web client is a sheet at the foot of the page (#117). The `⋮`
+  in the conversation nav bar opens that thread's model, permission mode,
+  streaming, rename and archive; the `⋮` on a machine card on the settings page
+  opens that machine's defaults. `state.ts` holds what a sheet says
+  (`sheetRows`, `sheetChoices`, `sheetNote`) and node tests it; `render.ts`
+  paints it and `main.ts` maps one choice to one command (`sheetCommand`).
+  The sheet is rebuilt only when `sheetKey` changes, because a paint runs on
+  every frame of a turn and a panel rebuilt under a finger loses the tap. The
+  machine that serves the page is not offered the web server row: to turn it
+  off there is to close the page.
 - Media in the web client is inline (#110): `markdown.ts` writes an `<img>` or a `<video>`
   and the style sheet caps it at 40% of the screen; a tap on an image opens it full size.
   A GitHub user attachment loads through `GET /media?url=…` on the daemon (`media.ts`):

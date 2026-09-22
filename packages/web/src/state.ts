@@ -13,8 +13,8 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  threadIsBusy,
-  type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineUpdate, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
+  KNOWN_MODELS, threadIsBusy,
+  type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress,
 } from "@covey/protocol";
 import type { ConnState } from "@covey/client";
@@ -81,10 +81,12 @@ export interface State {
   showAddresses: boolean;
   /** A project group the reader is picking a machine for, to start a thread. */
   choosing: string | null;
+  /** The settings sheet over the page, or null when none is open. */
+  sheet: SheetState | null;
 }
 
 export function emptyState(): State {
-  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), access: null, showAddresses: false, choosing: null };
+  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), access: null, showAddresses: false, choosing: null, sheet: null };
 }
 
 export function addMachine(s: State, key: string, name: string, primary = false): MachineSlot {
@@ -470,4 +472,214 @@ export function mediaKind(url: string): "image" | "video" | null {
   // GitHub puts an image in `![]()` or `<img>`, and a video as a bare URL.
   if (isGitHubAttachment(url) && new URL(url).hostname === "github.com") return "video";
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// The settings sheet (#117)
+// ---------------------------------------------------------------------------
+//
+// The phone had no way to change a setting. A conversation ran on whatever
+// model its machine gave it, and the machine's own defaults were a TUI-only
+// panel. Both now open the same sheet: a list of settings, and one page of
+// choices per setting. This file holds what the sheet says; `render.ts` paints
+// it and `main.ts` turns a choice into a command.
+
+/** What a sheet is about: one conversation, or one machine. */
+export type SheetTarget =
+  | { kind: "thread"; machine: string; threadId: string }
+  | { kind: "machine"; machine: string };
+
+export interface SheetState {
+  target: SheetTarget;
+  /** `""` is the list of settings. Anything else is the choices of that setting. */
+  page: string;
+}
+
+/** One row of the list of settings. */
+export interface SheetRow {
+  id: string;
+  label: string;
+  /** What the setting is now, at the right of the row. */
+  value?: string;
+  /** The row opens a page of choices. Without it the row acts at once. */
+  choices?: boolean;
+  tone?: "danger";
+}
+
+/** One row of a page of choices. */
+export interface SheetChoice {
+  id: string;
+  label: string;
+  hint?: string;
+  /** The value in force, ticked. */
+  current: boolean;
+}
+
+/** The words for a model id. `null` is the model the machine's Claude settings pick. */
+export function modelLabel(id: string | null | undefined): string {
+  if (!id) return "From Claude settings";
+  return KNOWN_MODELS.find((k) => k.id === id)?.label ?? id;
+}
+
+/** The words for a permission mode, the same ones the TUI's panel uses. */
+export function permissionModeLabel(mode: PermissionMode | null | undefined): string {
+  switch (mode) {
+    case "default": return "Manual";
+    case "acceptEdits": return "Auto";
+    case "bypassPermissions": return "Bypass";
+    case "plan": return "Plan";
+    default: return "From Claude settings";
+  }
+}
+
+const MODE_ORDER: PermissionMode[] = ["default", "acceptEdits", "bypassPermissions", "plan"];
+
+const MODE_HINT: Record<PermissionMode, string> = {
+  default: "approve every tool",
+  acceptEdits: "file edits go through, other tools ask",
+  bypassPermissions: "never ask",
+  plan: "plan first, change nothing",
+};
+
+/** The models to choose from, the one in force ticked. */
+export function modelChoices(current: string | null | undefined): SheetChoice[] {
+  return [
+    { id: "", label: modelLabel(null), hint: "the model the machine's Claude settings pick", current: !current },
+    ...KNOWN_MODELS.map((k) => ({ id: k.id, label: k.label, hint: k.id, current: k.id === current })),
+  ];
+}
+
+/**
+ * The permission modes to choose from. A machine may also have no opinion, and
+ * then its threads take the mode from the user's own Claude settings; a thread
+ * always runs in one mode, so its page offers no such row.
+ */
+export function modeChoices(current: PermissionMode | null | undefined, withDefault: boolean): SheetChoice[] {
+  const modes = MODE_ORDER.map((m) => ({ id: m, label: permissionModeLabel(m), hint: MODE_HINT[m], current: m === current }));
+  if (!withDefault) return modes;
+  return [{ id: "", label: permissionModeLabel(null), hint: "permissions.defaultMode", current: !current }, ...modes];
+}
+
+/** An on/off setting as two rows, so it reads the same way as the rest. */
+export function onOffChoices(on: boolean, onHint: string, offHint: string): SheetChoice[] {
+  return [
+    { id: "on", label: "On", hint: onHint, current: on },
+    { id: "off", label: "Off", hint: offHint, current: !on },
+  ];
+}
+
+/** The thread a sheet is about, or null when it is about a machine or the thread is gone. */
+export function sheetThread(s: State, sheet: SheetState): Thread | null {
+  if (sheet.target.kind !== "thread") return null;
+  return s.machines.get(sheet.target.machine)?.threads.get(sheet.target.threadId) ?? null;
+}
+
+/** The machine a sheet is about, whichever kind it is. */
+export function sheetMachine(s: State, sheet: SheetState): MachineSlot | undefined {
+  return s.machines.get(sheet.target.machine);
+}
+
+const NO_SETTINGS: MachineSettings = { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null };
+
+/** The settings of a sheet's machine, or empty ones while it is not connected. */
+export function sheetSettings(s: State, sheet: SheetState): MachineSettings {
+  return sheetMachine(s, sheet)?.info?.settings ?? NO_SETTINGS;
+}
+
+/** The settings of one conversation. */
+export function threadSheetRows(t: Thread): SheetRow[] {
+  return [
+    { id: "model", label: "Model", value: modelLabel(t.model), choices: true },
+    { id: "mode", label: "Permission mode", value: permissionModeLabel(t.permissionMode), choices: true },
+    { id: "streaming", label: "Streaming", value: t.streaming ? "On" : "Off", choices: true },
+    { id: "rename", label: "Rename conversation" },
+    { id: "archive", label: "Archive conversation", tone: "danger" },
+  ];
+}
+
+/**
+ * The defaults of one machine. Every new thread there inherits them; a thread
+ * that already runs keeps what it has.
+ *
+ * The web server row is left off the machine that serves this page: to turn it
+ * off there is to close the page, and a row that ends the session it is tapped
+ * in is a trap, not a setting.
+ */
+export function machineSheetRows(m: MachineSlot): SheetRow[] {
+  const g = m.info?.settings ?? NO_SETTINGS;
+  const rows: SheetRow[] = [
+    { id: "model", label: "Default model", value: modelLabel(g.defaultModel), choices: true },
+    { id: "mode", label: "Default mode", value: permissionModeLabel(g.defaultPermissionMode), choices: true },
+    { id: "streaming", label: "Default streaming", value: g.defaultStreaming ? "On" : "Off", choices: true },
+  ];
+  if (!m.primary) rows.push({ id: "web", label: "Web server", value: g.webEnabled ? "On" : "Off", choices: true });
+  return rows;
+}
+
+/** The rows of the list of settings, for whichever sheet is open. */
+export function sheetRows(s: State, sheet: SheetState): SheetRow[] {
+  if (sheet.target.kind === "thread") {
+    const t = sheetThread(s, sheet);
+    return t ? threadSheetRows(t) : [];
+  }
+  const m = sheetMachine(s, sheet);
+  return m ? machineSheetRows(m) : [];
+}
+
+/** The choices of the page a sheet is on. An unknown page has none. */
+export function sheetChoices(s: State, sheet: SheetState): SheetChoice[] {
+  if (sheet.target.kind === "thread") {
+    const t = sheetThread(s, sheet);
+    if (!t) return [];
+    switch (sheet.page) {
+      case "model": return modelChoices(t.model);
+      case "mode": return modeChoices(t.permissionMode, false);
+      case "streaming": return onOffChoices(t.streaming === true, "text arrives word by word", "each reply lands whole");
+      default: return [];
+    }
+  }
+  const g = sheetSettings(s, sheet);
+  switch (sheet.page) {
+    case "model": return modelChoices(g.defaultModel);
+    case "mode": return modeChoices(g.defaultPermissionMode, true);
+    case "streaming": return onOffChoices(g.defaultStreaming === true, "new threads show text as it arrives", "new threads show each reply whole");
+    case "web": return onOffChoices(g.webEnabled === true, "this machine serves the phone client", "this machine serves nothing");
+    default: return [];
+  }
+}
+
+/** What the head of the sheet says: the thing, then the setting being changed. */
+export function sheetTitle(s: State, sheet: SheetState): string {
+  const rows = sheetRows(s, sheet);
+  const open = sheet.page ? rows.find((r) => r.id === sheet.page) : undefined;
+  if (open) return open.label;
+  if (sheet.target.kind === "thread") return sheetThread(s, sheet)?.title ?? "Conversation";
+  return sheetMachine(s, sheet)?.name ?? "Machine";
+}
+
+/**
+ * One line under the head, or `""` for none. A machine's sheet holds defaults,
+ * and a default is not the setting a running thread has; the caption says so
+ * where the reader is about to change one.
+ */
+export function sheetNote(s: State, sheet: SheetState): string {
+  if (sheet.target.kind !== "machine") return "";
+  const name = sheetMachine(s, sheet)?.name ?? "this machine";
+  return sheet.page === "web"
+    ? `Whether ${name} serves the phone client.`
+    : `Every new thread on ${name} starts with this. A thread that runs keeps what it has.`;
+}
+
+/**
+ * Everything on the open sheet, as one string. The renderer keeps the last one
+ * and rebuilds only when it changes: a paint runs on every frame of a turn,
+ * and a sheet rebuilt under a finger loses the tap.
+ */
+export function sheetKey(s: State, sheet: SheetState): string {
+  const t = sheet.target;
+  const head = [t.kind, t.machine, t.kind === "thread" ? t.threadId : "", sheet.page, sheetTitle(s, sheet), sheetNote(s, sheet)];
+  const body = sheet.page
+    ? sheetChoices(s, sheet).map((c) => `${c.id}:${c.current ? 1 : 0}`)
+    : sheetRows(s, sheet).map((r) => `${r.id}:${r.value ?? ""}`);
+  return [...head, ...body].join("|");
 }
