@@ -9,6 +9,7 @@ import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
 import { Frames, type FrameOptions } from "./frames.js";
+import type { ScrollAnchor } from "./scroll.js";
 
 /**
  * How many timeline items a thread opens with when the reader means it. Big
@@ -161,6 +162,11 @@ export interface AppState {
   overlay: Overlay | null;
   notice: Notice | null;
   scrollFromBottom: number; // lines scrolled up from bottom (0 = follow)
+  /**
+   * The line under the top row when the reader scrolled, so a reply that
+   * grows below it does not move the screen (`scroll.ts`). Null at the bottom.
+   */
+  scrollAnchor: ScrollAnchor | null;
   drafts: Map<string, string>;
   /** Files dropped into the composer, per thread, pending the next send. */
   pendingAttachments: Map<string, TaggedAttachment[]>;
@@ -331,7 +337,7 @@ export class Store {
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
       expanded: this.config.prefs.expanded ?? {}, expandedItems: new Set(),
       toolsExpanded: this.config.prefs.toolsExpanded ?? false, overlay: null, notice: null,
-      scrollFromBottom: 0, drafts: new Map(), pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
+      scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
       selection: null, relaunch: null,
       clientBuild: opts.build ?? null, clientStale: false,
     };
@@ -651,13 +657,13 @@ export class Store {
         // because a file may have appeared since the reader was last here.
         commands: cached.commands, dirs: new Map(),
       };
-      this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
+      this.set({ selected: sel, view, scrollFromBottom: 0, scrollAnchor: null, diffView: null });
       client?.resumeThread(sel.threadId, cached.seq);
       return;
     }
 
     const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0, commands: null, dirs: new Map() };
-    this.set({ selected: sel, view, scrollFromBottom: 0, diffView: null });
+    this.set({ selected: sel, view, scrollFromBottom: 0, scrollAnchor: null, diffView: null });
     try {
       const snap: ThreadSnapshot | undefined = await client?.watchThread(sel.threadId, limit);
       if (gen !== this.selectGen || this.state.selected?.threadId !== sel.threadId) return;
@@ -705,7 +711,8 @@ export class Store {
     this.persist();
     this.notify(next ? "showing every tool call" : "tool calls folded into >_ rows");
   }
-  setScroll(n: number) { this.set({ scrollFromBottom: Math.max(0, n) }); }
+  /** `anchor` is the line under the top row at `n`; App measures it against the layout it drew. */
+  setScroll(n: number, anchor: ScrollAnchor | null = null) { this.set({ scrollFromBottom: Math.max(0, n), scrollAnchor: n > 0 ? anchor : null }); }
   setDraft(threadId: string, text: string) { this.state.drafts.set(threadId, text); }
   draft(threadId: string) { return this.state.drafts.get(threadId) ?? ""; }
 
@@ -1120,7 +1127,7 @@ export class Store {
     try {
       await client.command({ type: "turn.send", threadId: v.threadId, turnId: randomUUID(), text, ...(attachments.length ? { attachments } : {}) });
       this.clearAttachments(v.threadId);
-      this.set({ scrollFromBottom: 0 });
+      this.set({ scrollFromBottom: 0, scrollAnchor: null });
     } catch (e: any) { this.notify(e.message, "error"); }
   }
 
