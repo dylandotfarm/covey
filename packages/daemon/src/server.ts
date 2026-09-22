@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
-import { PROTOCOL_VERSION, KNOWN_MODELS, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon, type PullRequestAttachment } from "@covey/protocol";
+import { PROTOCOL_VERSION, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon, type PullRequestAttachment } from "@covey/protocol";
 import { Engine, EngineError } from "./engine.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
@@ -199,7 +199,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         engine.markMoved(p.threadId, p.machineId, p.newThreadId);
         return null;
       case "models.list":
-        return KNOWN_MODELS;
+        return engine.models();
       case "thread.listDir":
         return engine.listThreadDir(p.threadId, String(p.dir ?? ""));
       case "project.git":

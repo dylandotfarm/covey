@@ -64,6 +64,43 @@ export interface MachineInfo {
    * web client existed; empty on a machine with no tailnet and no LAN.
    */
   webAddresses?: WebAddress[];
+  /**
+   * The models the Claude Code on that machine offers, read from the install
+   * itself (`packages/daemon/src/models.ts`). A machine on a newer Claude Code
+   * offers newer models with no covey release. Absent on a daemon built before
+   * this field, and while the first read is still in flight; the client falls
+   * back to `KNOWN_MODELS`.
+   */
+  models?: ModelChoice[];
+  /**
+   * The row that Claude Code's own picker calls "Default", so covey can say
+   * what "no model set" resolves to on that machine. Its `id` is `""`, which
+   * is what covey stores for "no model set".
+   */
+  claudeDefaultModel?: ModelChoice;
+}
+
+/**
+ * One row of a model picker.
+ *
+ * `id` is what covey sends to the SDK as `model`, and it is Claude Code's own
+ * value: often an alias such as `sonnet` or `opus[1m]` rather than a wire id.
+ * An alias is the better thing to store — it names the newest model of that
+ * family, so a thread pinned to it follows the install.
+ */
+export interface ModelChoice {
+  /** What covey sends as `model`. `""` means covey sends none. */
+  id: string;
+  /** Claude Code's name for it, e.g. `Opus (1M context)`. */
+  label: string;
+  /**
+   * The wire id an alias resolves to, e.g. `sonnet` → `claude-sonnet-5`. It
+   * matches a model covey stored as a wire id against the row that covers it,
+   * so a thread pinned to `claude-sonnet-5` still reads as "Sonnet".
+   */
+  resolved?: string;
+  /** Claude Code's one line about it, e.g. `Sonnet 5 · Efficient for routine tasks`. */
+  description?: string;
 }
 
 /**
@@ -1643,7 +1680,12 @@ export interface RpcMethods {
     params: { threadId: ThreadId; machineId: MachineId; newThreadId: ThreadId };
     result: null;
   };
-  "models.list": { params: Record<string, never>; result: { id: string; label: string }[] };
+  /**
+   * The models that machine's Claude Code offers. The same list rides on
+   * `MachineInfo.models`, so a client that holds the machine needs no call;
+   * this is for one that does not, such as a script over the socket.
+   */
+  "models.list": { params: Record<string, never>; result: ModelChoice[] };
   /**
    * One directory under a thread's working directory, for the `@` menu. The
    * candidates are on the daemon's machine, so the client cannot read them
@@ -1864,12 +1906,59 @@ export interface SavedMachine {
   machineId?: MachineId;
 }
 
-export const KNOWN_MODELS: { id: string; label: string }[] = [
-  { id: "claude-fable-5-1", label: "Fable 5.1" },
-  { id: "claude-opus-5", label: "Opus 5" },
-  { id: "claude-sonnet-5", label: "Sonnet 5" },
-  { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5" },
+/**
+ * The fallback model list, used only when a machine cannot say its own.
+ *
+ * The real list comes from the Claude Code on that machine and arrives as
+ * `MachineInfo.models`, so a new model needs no covey release. This list is
+ * what a client shows for a daemon too old to send one, and for the moment
+ * before the first read answers. It is aliases on purpose: an alias names the
+ * newest model of its family, so it stays right for longer than a wire id.
+ */
+export const KNOWN_MODELS: ModelChoice[] = [
+  { id: "fable", label: "Fable" },
+  { id: "opus", label: "Opus" },
+  { id: "sonnet", label: "Sonnet" },
+  { id: "haiku", label: "Haiku" },
 ];
+
+/**
+ * Whether `id` is the model this row stands for.
+ *
+ * A row matches what it resolves to as well as its own id, because covey may
+ * hold a wire id from before the machine offered aliases: a thread pinned to
+ * `claude-sonnet-5` is on the row named `sonnet`, and a picker that does not
+ * say so leaves the reader looking for a model that is already in force.
+ */
+export function modelIsCurrent(m: ModelChoice, id: string | null | undefined): boolean {
+  if (!id) return false;
+  return m.id === id || m.resolved === id;
+}
+
+/**
+ * Which model a row is, in as few words as Claude Code gives.
+ *
+ * A description reads `Sonnet 5 · Efficient for routine tasks`: the version
+ * first, then the blurb. A terminal row has no width for both, and the version
+ * is the half a reader needs — it is how they tell one Opus from the next.
+ */
+export function modelVersion(m: ModelChoice | undefined): string {
+  return m?.description?.split(" · ")[0]?.trim() ?? "";
+}
+
+/**
+ * The words for a model id, from the list the machine sent.
+ *
+ * A row matches on `id` or on what it resolves to, because covey may hold a
+ * wire id from before the machine offered aliases. An id no list knows is
+ * shown as itself — a model the user pinned by hand is still a model.
+ */
+export function modelLabel(id: string | null | undefined, models?: ModelChoice[]): string {
+  if (!id) return "From Claude settings";
+  const rows = models?.length ? models : KNOWN_MODELS;
+  const row = rows.find((m) => m.id === id) ?? rows.find((m) => modelIsCurrent(m, id));
+  return row?.label ?? id;
+}
 
 // ---------------------------------------------------------------------------
 // Integration of a run: gates, the conflict queue, and the audit

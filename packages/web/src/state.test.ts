@@ -1,16 +1,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { GitHubIssue, GitHubPullRequest, MachineInfo, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
+import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
   isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
 } from "./state.js";
 
+// The model rows as a daemon sends them: its own Claude Code's list, aliases
+// and all, with `resolved` naming the wire id each alias stands for.
+const MODELS: ModelChoice[] = [
+  { id: "opus[1m]", label: "Opus (1M context)", resolved: "claude-opus-5[1m]", description: "Opus 5 with 1M context · Best for everyday, complex tasks" },
+  { id: "claude-fable-5-1[1m]", label: "Fable", resolved: "claude-fable-5-1", description: "Fable 5.1 · Most capable for your hardest tasks" },
+  { id: "sonnet", label: "Sonnet", resolved: "claude-sonnet-5", description: "Sonnet 5 · Efficient for routine tasks" },
+];
+const CLAUDE_DEFAULT: ModelChoice = { id: "", label: "Default (recommended)", resolved: "claude-opus-5[1m]", description: "Opus 5 with 1M context" };
 const info = (name: string): MachineInfo => ({
   machineId: `${name}-id`, name, os: "linux", arch: "arm64", homeDir: "/home/x", daemonVersion: "t", protocolVersion: 1,
   capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
   settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
+  models: MODELS, claudeDefaultModel: CLAUDE_DEFAULT,
 });
 const project = (id: string, title: string, repo: string | null = null): Project => ({ id, title, workspaceRoot: `/p/${id}`, repositoryIdentity: repo, defaultModel: null, createdAt: "2026-09-21T00:00:00Z", updatedAt: "2026-09-21T00:00:00Z" });
 const thread = (id: string, projectId: string, extra: Partial<Thread> = {}): Thread => ({
@@ -242,13 +251,15 @@ test("the conversation sheet says what the thread runs, and its pages tick what 
   const s = emptyState();
   const box = addMachine(s, "ws://box:3790", "box", true);
   applyShellSnapshot(box, snap("box", [project("p", "alpha")], [
-    thread("t1", "p", { title: "fix the parser", model: "claude-opus-5", permissionMode: "acceptEdits", streaming: true }),
+    thread("t1", "p", { title: "fix the parser", model: "claude-sonnet-5", permissionMode: "acceptEdits", streaming: true }),
   ]));
   s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" };
 
   assert.equal(sheetTitle(s, s.sheet), "fix the parser");
+  // The thread was pinned by wire id; the machine offers the alias that covers
+  // it, and `resolved` is what joins the two.
   assert.deepEqual(sheetRows(s, s.sheet).map((r) => [r.id, r.value ?? ""]), [
-    ["model", "Opus 5"],
+    ["model", "Sonnet"],
     ["mode", "Auto"],
     ["streaming", "On"],
     ["rename", ""],
@@ -261,8 +272,13 @@ test("the conversation sheet says what the thread runs, and its pages tick what 
   assert.equal(sheetTitle(s, s.sheet), "Model");
   const models = sheetChoices(s, s.sheet);
   assert.equal(models[0]!.id, "", "the first row hands the choice back to Claude's own settings");
-  assert.deepEqual(models.filter((c) => c.current).map((c) => c.id), ["claude-opus-5"]);
-  assert.ok(models.some((c) => c.id === "claude-fable-5-1"), "every known model is offered");
+  assert.equal(models[0]!.hint, "Opus 5 with 1M context", "and says which model that turns out to be");
+  // The thread holds a wire id; the row that covers it is the alias, and it is
+  // the row the page ticks.
+  assert.deepEqual(models.filter((c) => c.current).map((c) => c.id), ["sonnet"]);
+  // The rows are the machine's, not a list covey was built holding.
+  assert.deepEqual(models.slice(1).map((c) => c.id), ["opus[1m]", "claude-fable-5-1[1m]", "sonnet"]);
+  assert.equal(models[3]!.hint, "Sonnet 5 · Efficient for routine tasks", "each row says which version it is");
 
   // A thread always runs in one mode, so its page offers no "from Claude settings" row.
   s.sheet.page = "mode";
@@ -312,6 +328,43 @@ test("a thread with no model of its own reads as the machine's Claude settings, 
   assert.deepEqual(sheetChoices(s, s.sheet).filter((c) => c.current).map((c) => c.id), ["off"]);
 });
 
+test("the model page offers what the machine's own Claude Code offers, and says what no model of its own means", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [project("p", "alpha")], [thread("t1", "p")]));
+  s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "model" };
+  // Nothing is pinned anywhere, so the first row is what Claude Code picks.
+  assert.equal(sheetChoices(s, s.sheet)[0]!.hint, "Opus 5 with 1M context");
+
+  // A default on the machine is what the thread inherits instead.
+  const m = info("box");
+  m.settings = { defaultModel: "sonnet", defaultPermissionMode: null, defaultStreaming: null };
+  applyShellEvent(s, box, { seq: 2, kind: "machine.updated", machine: m });
+  assert.equal(sheetChoices(s, s.sheet)[0]!.hint, "Sonnet");
+
+  // And the project's own default beats the machine's.
+  applyShellEvent(s, box, { seq: 3, kind: "project.upserted", project: { ...project("p", "alpha"), defaultModel: "claude-fable-5-1[1m]" } });
+  assert.equal(sheetChoices(s, s.sheet)[0]!.hint, "Fable");
+});
+
+test("a machine that has not said which models it has keeps a picker, from the built-in list", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  // A daemon built before the model list existed, or one whose first read has
+  // not answered yet. Either way the page still offers a model.
+  const m = info("box");
+  delete m.models;
+  delete m.claudeDefaultModel;
+  applyShellSnapshot(box, { seq: 1, machine: m, projects: [project("p", "alpha")], threads: [thread("t1", "p", { model: "claude-opus-5" })] });
+  s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "model" };
+  const choices = sheetChoices(s, s.sheet);
+  assert.deepEqual(choices.map((c) => c.id), ["", "fable", "opus", "sonnet", "haiku"]);
+  assert.equal(choices[0]!.hint, "the model the machine's Claude settings pick", "with nothing to say about what that resolves to");
+  // A model no row covers is shown as itself. It is what the thread really
+  // runs, and a wrong name would be worse than a plain one.
+  assert.equal(sheetRows(s, s.sheet).find((r) => r.id === "model")!.value, "claude-opus-5");
+});
+
 test("the machine sheet is the defaults new threads there inherit, and may hand each one back to Claude's settings", () => {
   const s = emptyState();
   const box = addMachine(s, "ws://box:3790", "box", true);
@@ -322,7 +375,7 @@ test("the machine sheet is the defaults new threads there inherit, and may hand 
 
   assert.equal(sheetTitle(s, s.sheet), "box");
   assert.deepEqual(sheetRows(s, s.sheet).map((r) => [r.id, r.value ?? ""]), [
-    ["model", "Sonnet 5"],
+    ["model", "Sonnet"],
     ["mode", "From Claude settings"],
     ["streaming", "On"],
   ]);

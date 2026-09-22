@@ -969,6 +969,37 @@ project → machine, and a permission mode as command → machine → the user's
 `permissions.defaultMode`. The TUI omits its own last-used mode when a machine default is
 set, so the panel is not silently overridden by the client.
 
+### The models a machine offers
+
+The model picker is not a list covey ships. A list covey ships is stale the day a model
+ships, and it is stale differently on every machine, because one daemon runs a Claude Code
+from last week and another runs today's. So the daemon asks its own install
+(`packages/daemon/src/models.ts`): a query whose prompt stream never yields, which starts
+the CLI, answers `supportedModels()` from the handshake, and aborts. It runs no turn and
+spends no tokens, and it takes about a third of a second.
+
+The answer is Claude Code's own list, the account's plan already accounted for. It reaches
+clients on `MachineInfo.models`, so both of them have it without asking, and the read
+happens behind the listener like the machine's resources do — a client that connects first
+shows `KNOWN_MODELS` and a `machine.updated` push corrects it a moment later. `models.list`
+answers from the same place, for a caller that holds no `MachineInfo`.
+
+Three rules make it hold up:
+
+- **Store the id Claude Code gives**, which is usually an alias — `sonnet`, `opus[1m]`.
+  An alias names the newest model of its family, so a thread pinned to one follows the
+  install. A wire id is what froze the old list.
+- **Match a stored id on `resolved` as well as on `id`**, because covey stored wire ids
+  before this and a thread on `claude-sonnet-5` must still read as "Sonnet". An id no row
+  covers is shown as itself: it is what the thread really runs.
+- **Read the list again when a session reports a Claude Code that is not the one the
+  machine knows** (`onSessionInit`). It is the one signal that costs nothing, and without
+  it a user who updates Claude Code is offered last week's models until somebody restarts
+  the daemon.
+
+`KNOWN_MODELS` in the protocol is the fallback, for a daemon too old to send a list and for
+the moment before the first read answers. It is aliases for the same reason.
+
 ## Projects: a repository, cloned by covey
 
 A project is a repository. The daemon clones it, and the clone is the daemon's:

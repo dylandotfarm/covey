@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
+import { readModels } from "./models.js";
 import { dataDir, loadDaemonConfig, machineSettings, platformInfo, projectsDir, type DaemonConfig } from "./config.js";
 import { Db } from "./db.js";
 import { Engine, EngineError } from "./engine.js";
@@ -81,6 +82,10 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   };
   const engine = new Engine(db, machine, {
     log,
+    // Which models this machine offers. Read from the Claude Code installed
+    // here, so a machine on a newer Claude Code offers newer models without a
+    // covey release, and a fleet where the installs differ says so per machine.
+    readModels,
     // The real store: when its token runs out, and how Claude Code refreshes it.
     credentialExpiry,
     refreshCredentials,
@@ -107,6 +112,12 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   listeners = first.opened;
   const server = first.opened[0]!;
   log(`listening on ws://${first.host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
+  // Which models this machine's Claude Code offers. The read starts a Claude
+  // Code process, so it happens behind the listener and reaches clients as a
+  // `machine.updated` push.
+  void engine.refreshModels()
+    .then(() => log(machine.models ? `models: ${machine.models.map((m) => m.id).join(" ")}` : "models: claude code did not say; using the built-in list"))
+    .catch((e) => log(`could not read the model list: ${e.message}`));
   // What this machine is made of, and which tools *this process* can run. It
   // is read here rather than over ssh because an agent inherits this
   // environment and not a login shell's — see `resources.ts`. Running a program
