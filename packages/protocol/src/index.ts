@@ -1923,6 +1923,19 @@ export const KNOWN_MODELS: ModelChoice[] = [
 ];
 
 /**
+ * Whether `id` is the model this row stands for.
+ *
+ * A row matches what it resolves to as well as its own id, because covey may
+ * hold a wire id from before the machine offered aliases: a thread pinned to
+ * `claude-sonnet-5` is on the row named `sonnet`, and a picker that does not
+ * say so leaves the reader looking for a model that is already in force.
+ */
+export function modelIsCurrent(m: ModelChoice, id: string | null | undefined): boolean {
+  if (!id) return false;
+  return m.id === id || m.resolved === id;
+}
+
+/**
  * Which model a row is, in as few words as Claude Code gives.
  *
  * A description reads `Sonnet 5 · Efficient for routine tasks`: the version
@@ -1943,7 +1956,7 @@ export function modelVersion(m: ModelChoice | undefined): string {
 export function modelLabel(id: string | null | undefined, models?: ModelChoice[]): string {
   if (!id) return "From Claude settings";
   const rows = models?.length ? models : KNOWN_MODELS;
-  const row = rows.find((m) => m.id === id) ?? rows.find((m) => m.resolved === id);
+  const row = rows.find((m) => m.id === id) ?? rows.find((m) => modelIsCurrent(m, id));
   return row?.label ?? id;
 }
 

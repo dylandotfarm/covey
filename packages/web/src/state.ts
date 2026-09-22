@@ -13,7 +13,7 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  KNOWN_MODELS, modelLabel, modelVersion, threadIsBusy,
+  KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy,
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress,
 } from "@covey/protocol";
@@ -574,7 +574,7 @@ export function modelChoices(current: string | null | undefined, models: ModelCh
     // A machine that has not said what its default resolves to leaves the row
     // saying only where the setting comes from — `modelVersion` answers "" there.
     { id: "", label: "From Claude settings", hint: inherited || "the model the machine's Claude settings pick", current: !current },
-    ...models.map((k) => ({ id: k.id, label: k.label, hint: k.description ?? k.id, current: k.id === current || (!!k.resolved && k.resolved === current) })),
+    ...models.map((k) => ({ id: k.id, label: k.label, hint: k.description ?? k.id, current: modelIsCurrent(k, current) })),
   ];
 }
 

@@ -273,6 +273,8 @@ test("the conversation sheet says what the thread runs, and its pages tick what 
   const models = sheetChoices(s, s.sheet);
   assert.equal(models[0]!.id, "", "the first row hands the choice back to Claude's own settings");
   assert.equal(models[0]!.hint, "Opus 5 with 1M context", "and says which model that turns out to be");
+  // The thread holds a wire id; the row that covers it is the alias, and it is
+  // the row the page ticks.
   assert.deepEqual(models.filter((c) => c.current).map((c) => c.id), ["sonnet"]);
   // The rows are the machine's, not a list covey was built holding.
   assert.deepEqual(models.slice(1).map((c) => c.id), ["opus[1m]", "claude-fable-5-1[1m]", "sonnet"]);

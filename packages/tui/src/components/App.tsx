@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, modelLabel, modelVersion, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
@@ -627,7 +627,7 @@ export function App({ store }: { store: Store }) {
           // The "no model set" row says what Claude Code's own default
           // resolves to there, so the reader can tell which Opus they get.
           { id: "", label: "From Claude settings", hint: settings.defaultModel ? modelVersion(info.claudeDefaultModel) : "current" },
-          ...models.map((k) => ({ id: k.id, label: k.label, hint: k.id === settings.defaultModel ? "current" : (modelVersion(k) || k.id) })),
+          ...models.map((k) => ({ id: k.id, label: k.label, hint: modelIsCurrent(k, settings.defaultModel) ? "current" : (modelVersion(k) || k.id) })),
         ], (mid) => {
           store.setOverlay(null);
           void store.setMachineDefaults(machineKey!, { defaultModel: mid || null });
@@ -972,7 +972,7 @@ export function App({ store }: { store: Store }) {
         case "rename": return openInput("Rename thread", (v) => { store.setOverlay(null); void store.threadCommand({ type: "thread.rename", threadId: t!.id, title: v }); }, t!.title);
         case "model": return openPick("Model", [
           { id: "", label: "Default", hint: inheritedHint },
-          ...threadModels.map((m) => ({ id: m.id, label: m.label, hint: m.id === t!.model ? "current" : (modelVersion(m) || m.id) })),
+          ...threadModels.map((m) => ({ id: m.id, label: m.label, hint: modelIsCurrent(m, t!.model) ? "current" : (modelVersion(m) || m.id) })),
         ], (mid) => { store.setOverlay(null); void store.threadCommand({ type: "thread.setModel", threadId: t!.id, model: mid || null }); });
         case "mode": return openPick("Permission mode", PERMISSION_CYCLE.map((m) => ({ id: m, label: m, hint: m === "bypassPermissions" ? "runs tools without asking" : m === t!.permissionMode ? "current" : "" })), (m) => { store.setOverlay(null); void store.setPermissionMode(t!.id, m as PermissionMode); });
         case "streaming": return void store.setStreaming(t!.id, !t!.streaming);
