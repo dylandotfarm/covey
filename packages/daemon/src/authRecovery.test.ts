@@ -17,12 +17,19 @@ import { Engine } from "./engine.js";
  * revokes the old one, so a session that was live across the rotation answers
  * every later message with `401 OAuth access token has been revoked` — a
  * thread that cannot be typed out of, because an SDK session has no `/login`.
+ * And a resumed session holds a copy without the refresh token, so when the
+ * token expires it answers `401 OAuth access token has expired` and every
+ * resume after it copies the same dead token, until Claude Code refreshes the
+ * store. The daemon asks for that refresh (`refreshCredentials`) before it
+ * starts the next process.
  *
- * These tests drive a whole engine against a stand-in for the CLI, so the
- * failure is a line in a test rather than a revoked account.
+ * These tests drive a whole engine against a stand-in for the CLI and a
+ * stand-in for the refresh, so the failure is a line in a test rather than a
+ * revoked account, and a refresh is a count rather than a rotation.
  */
 
 const AUTH_ERROR = "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
+const EXPIRED_ERROR = "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.";
 
 const MACHINE = (): MachineInfo => ({
   machineId: "m1", name: "test", os: "darwin", arch: "arm64", homeDir: "/tmp", daemonVersion: "0",
@@ -123,7 +130,19 @@ const settle = async (ok?: () => boolean, ms = 10_000) => {
 /** The prompt a restarted process was given, once it has one. */
 const restarted = (clis: { prompts: string[] }[], n: number) => () => (clis[n]?.prompts.length ?? 0) > 0;
 
-function setup(stamps: (string | null)[] = []) {
+interface SetupOptions {
+  /** What the credential store's fingerprint reads on each check. */
+  stamps?: (string | null)[];
+  /** When the store's token expires; `null` is a store the daemon cannot read. */
+  expiry?: () => number | null;
+  /** What a refresh does. The default answers; a test that wants a dead
+   *  refresh token throws the CLI's own error text. */
+  refresh?: () => Promise<void>;
+  /** A daemon with no way to refresh, as before this existed. */
+  noRefresher?: boolean;
+}
+
+function setup(o: SetupOptions = {}) {
   const dir = mkdtempSync(join(tmpdir(), "covey-auth-"));
   const db = new Db(dir);
   db.putProject({
@@ -131,17 +150,31 @@ function setup(stamps: (string | null)[] = []) {
     defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   } as Project);
   const clis: (FakeCli & { query: Query })[] = [];
+  const stamps = o.stamps ?? [];
+  /** Each refresh, as the number of processes that existed when it was asked
+   *  for — so a test can say "the refresh came before the second process". */
+  const refreshes: number[] = [];
+  let clock = Date.now();
   const engine = new Engine(db, MACHINE(), {
     spawn: ({ prompt, options }) => {
       const cli = makeCli(prompt, options);
       clis.push(cli);
       return cli.query;
     },
+    now: () => clock,
     credentialStamp: async () => (stamps.length > 1 ? stamps.shift()! : stamps[0] ?? null),
+    credentialExpiry: async () => o.expiry?.() ?? null,
+    ...(o.noRefresher ? {} : { refreshCredentials: async () => { refreshes.push(clis.length); await (o.refresh ?? (async () => {}))(); } }),
   });
   return {
-    db, engine, dir, clis,
+    db, engine, dir, clis, refreshes,
+    /** Move the engine's clock by `ms`. */
+    tick(ms: number) { clock += ms; },
+    now() { return clock; },
     newThread(id: string) { db.putThread(thread(id)); return id; },
+    /** Give the thread a transcript, so its next session is a resume — the
+     *  kind whose copy of the credentials has no refresh token. */
+    withTranscript(id: string) { db.appendTranscript(id, `sess-${id}`, "", [{ type: "user", uuid: randomUUID(), message: { role: "user", content: "hi" } }]); },
     async send(threadId: string, text: string) {
       await engine.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text });
       await settle();
@@ -169,8 +202,10 @@ test("a turn that dies on the credentials loses its process, and a new one goes 
   assert.equal(s.clis.length, 2, "a second process took the work");
   assert.equal(s.clis[1]!.prompts.length, 1);
   assert.match(s.clis[1]!.prompts[0]!, /Go on from the point where it stopped/);
-  assert.ok(s.notes("t1").some((n) => n.includes("could not authenticate") && n.includes("starts a new one")), s.notes("t1").join(" | "));
+  assert.ok(s.notes("t1").some((n) => n.includes("could not authenticate") && n.includes("refreshes the credentials")), s.notes("t1").join(" | "));
   assert.equal(s.engine.sessionCensus().live, 1);
+  // The store was refreshed between the two processes, and once.
+  assert.deepEqual(s.refreshes, [1], "one refresh, asked for when one process existed");
 });
 
 test("a turn that died before its first word is sent again, word for word", async (t) => {
@@ -274,7 +309,7 @@ test("a sibling in the middle of a turn keeps its session", async (t) => {
 // ---- the rotation, before anything fails ----------------------------------
 
 test("a rotation of the credential store stops the sessions it left stale", async (t) => {
-  const s = setup(["keychain:20260918210920Z", "keychain:20260919050920Z"]);
+  const s = setup({ stamps: ["keychain:20260918210920Z", "keychain:20260919050920Z"] });
   t.after(s.cleanup);
   s.newThread("t1");
   await s.send("t1", "hello");
@@ -292,7 +327,7 @@ test("a rotation of the credential store stops the sessions it left stale", asyn
 });
 
 test("a store this daemon cannot read turns the watch off, and nothing else", async (t) => {
-  const s = setup([null]);
+  const s = setup({ stamps: [null] });
   t.after(s.cleanup);
   s.newThread("t1");
   await s.send("t1", "hello");
@@ -302,4 +337,171 @@ test("a store this daemon cannot read turns the watch off, and nothing else", as
   assert.deepEqual(await s.engine.checkCredentials(), []);
   assert.deepEqual(await s.engine.checkCredentials(), []);
   assert.equal(s.clis[0]!.aborted, false);
+});
+
+// ---- the refresh ----------------------------------------------------------
+
+test("an expired token is refreshed before a session copies it, and a live one is left alone", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.withTranscript("t1");
+
+  expiresAt = s.now() - 1;
+  await s.send("t1", "hello");
+  assert.deepEqual(s.refreshes, [0], "the refresh came before the first process");
+  assert.equal(s.clis.length, 1);
+  assert.deepEqual(s.clis[0]!.prompts, ["hello"]);
+  s.clis[0]!.finish("hi");
+  await settle();
+  assert.equal(s.notes("t1").length, 0, "nothing to tell the user: the turn simply went through");
+
+  // The store is fresh for hours; a new thread's process copies it as it is.
+  expiresAt = s.now() + 8 * 3_600_000;
+  s.newThread("t2");
+  await s.send("t2", "hello");
+  assert.deepEqual(s.refreshes, [0], "no second refresh");
+  assert.equal(s.clis.length, 2);
+});
+
+test("a token about to expire counts as expired: a process takes seconds to start", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  expiresAt = s.now() + 60_000;
+  await s.send("t1", "hello");
+  assert.deepEqual(s.refreshes, [0]);
+});
+
+test("the sweep stops an idle resumed session whose copied token ran out, before anyone types into it", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.withTranscript("t1");
+  s.newThread("t2");   // no transcript: a fresh process, which refreshes for itself
+  expiresAt = s.now() + 3_600_000;
+  await s.send("t1", "hello");
+  s.clis[0]!.finish("hi");
+  await s.send("t2", "hello");
+  s.clis[1]!.finish("hi");
+  await settle();
+  assert.equal(s.engine.sessionCensus().live, 2);
+
+  s.tick(3_600_000 - 1);
+  assert.deepEqual(await s.engine.checkCredentials(), [], "not yet");
+  s.tick(2);
+  assert.deepEqual(await s.engine.checkCredentials(), ["t1"]);
+  assert.equal(s.clis[0]!.aborted, true);
+  assert.equal(s.clis[1]!.aborted, false, "a fresh process holds the refresh token and refreshes for itself");
+  assert.ok(s.notes("t1").some((n) => n.includes("has expired") && n.includes("stopped it before it failed")), s.notes("t1").join(" | "));
+
+  // The next message refreshes the store — the stand-in's expiry has not
+  // moved, so the daemon sees it still expired — and resumes.
+  await s.send("t1", "again");
+  assert.deepEqual(s.refreshes, [2]);
+  assert.equal(s.clis.length, 3);
+  assert.deepEqual(s.clis[2]!.prompts, ["again"]);
+});
+
+test("a message to a live session whose copied token ran out starts a new process instead", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.withTranscript("t1");
+  expiresAt = s.now() + 3_600_000;
+  await s.send("t1", "hello");
+  s.clis[0]!.finish("hi");
+  await settle();
+
+  s.tick(3_600_001);
+  await s.send("t1", "again");
+  assert.equal(s.clis[0]!.aborted, true, "the copy it holds cannot be refreshed");
+  assert.equal(s.clis.length, 2);
+  assert.deepEqual(s.refreshes, [1], "refreshed before the new process copied the store");
+  assert.deepEqual(s.clis[1]!.prompts, ["again"]);
+});
+
+test("a refresh that fails on the credentials names claude auth login, and starts no process", async (t) => {
+  const s = setup({ refresh: async () => { throw new Error(EXPIRED_ERROR); } });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.send("t1", "hello");
+  s.clis[0]!.fail(EXPIRED_ERROR);
+  await settle(() => s.notes("t1").some((n) => n.includes("could not refresh")));
+
+  assert.equal(s.clis.length, 1, "a process started now would fail the same way");
+  assert.deepEqual(s.refreshes, [1]);
+  const notes = s.notes("t1");
+  assert.ok(notes.some((n) => n.includes("could not refresh the credentials") && n.includes("claude auth login")), notes.join(" | "));
+  assert.ok(!notes.some((n) => n.includes("Could not start a new session")), "the refresh already said so: " + notes.join(" | "));
+  assert.equal(s.engine.sessionCensus().live, 0);
+
+  // Each later message asks again, and says so again, until a login mends it.
+  await s.send("t1", "ping").catch(() => {});
+  assert.equal(s.clis.length, 1);
+  assert.deepEqual(s.refreshes, [1, 1]);
+});
+
+test("a refresh that fails on the network starts the process anyway", async (t) => {
+  const s = setup({ expiry: () => 0, refresh: async () => { throw new Error("fetch failed: ENOTFOUND api.anthropic.com"); } });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.send("t1", "hello");
+  assert.deepEqual(s.refreshes, [0]);
+  assert.equal(s.clis.length, 1, "Claude Code saves a refreshed pair before it asks the model, so the store may be fresh");
+  assert.ok(s.notes("t1").some((n) => n.includes("could not refresh") && n.includes("starts on the store as it is")), s.notes("t1").join(" | "));
+});
+
+test("two threads that fail at once share one refresh", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.newThread("t2");
+  await s.send("t1", "one");
+  await s.send("t2", "two");
+  s.clis[0]!.fail(EXPIRED_ERROR);
+  s.clis[1]!.fail(EXPIRED_ERROR);
+  await settle(() => s.clis.length === 4 && restarted(s.clis, 2)() && restarted(s.clis, 3)());
+
+  assert.equal(s.clis.length, 4);
+  assert.equal(s.refreshes.length, 1, "one rotation, not one per thread: " + JSON.stringify(s.refreshes));
+});
+
+test("a failure from a process that started before the last refresh does not refresh again", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.newThread("t2");
+  await s.send("t1", "one");
+  await s.send("t2", "a long job");   // left running across the refresh
+  s.tick(1000);
+  s.clis[0]!.fail(EXPIRED_ERROR);
+  await settle(restarted(s.clis, 2));
+  assert.deepEqual(s.refreshes, [2], "asked for once, with both processes live");
+  s.tick(1000);
+
+  // t2's process copied the old token; its failure was written before the
+  // refresh, and the store as it is now has answered a process already.
+  s.clis[1]!.fail(EXPIRED_ERROR);
+  await settle(restarted(s.clis, 3));
+  assert.equal(s.clis.length, 4);
+  assert.deepEqual(s.refreshes, [2], "the store is fresh; the work restarts on it");
+});
+
+test("a daemon that cannot refresh restarts once, as before, and then names the command", async (t) => {
+  const s = setup({ noRefresher: true, expiry: () => 0 });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.send("t1", "hello");
+  assert.equal(s.clis.length, 1, "an expired token it cannot refresh is not a reason to refuse the turn");
+  s.clis[0]!.fail(EXPIRED_ERROR);
+  await settle(restarted(s.clis, 1));
+  s.clis[1]!.fail(EXPIRED_ERROR);
+  await settle();
+  assert.equal(s.clis.length, 2);
+  assert.ok(s.notes("t1").some((n) => n.includes("twice in a row") && n.includes("claude auth login")), s.notes("t1").join(" | "));
 });
