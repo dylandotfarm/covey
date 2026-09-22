@@ -9,7 +9,7 @@ import { hyperlinksEnabled, osc8 } from "../links.js";
 
 const HYPERLINKS = hyperlinksEnabled();
 
-export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick, run, machineNameOf }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number; run?: Run | null; machineNameOf?: (id: string) => string }) {
+export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick, run, machineNameOf, secretKeys }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number; run?: Run | null; machineNameOf?: (id: string) => string; secretKeys?: string[] }) {
   const w = Math.min(width - 4, 80);
   const maxRows = Math.max(4, Math.min(height - 10, 20));
   // Rendered in place of the transcript (not floated): Ink cannot paint an
@@ -38,10 +38,33 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
           {HELP.map(([k, d], i) => <Text key={i}><Text color={T.accent}>{k.padEnd(14)}</Text><Text color={T.muted}>{d}</Text></Text>)}
         </Box>
       ), "esc close");
-    case "input":
+    case "input": {
+      // A masked prompt paints one bullet per character (#126). The count is
+      // the only feedback there is, and it is enough to see that a paste
+      // arrived; the value itself never reaches the screen or a log.
+      const shown = overlay.mask ? "•".repeat(filter.length) : filter;
       return frame(overlay.title, (
-        <Box marginY={1}><Text color={T.text}>{filter}</Text><Text inverse> </Text>{filter.length === 0 && overlay.placeholder ? <Text color={T.subtle}>{overlay.placeholder}</Text> : null}</Box>
+        <Box marginY={1}><Text color={T.text}>{shown}</Text><Text inverse> </Text>{filter.length === 0 && overlay.placeholder ? <Text color={T.subtle}>{overlay.placeholder}</Text> : null}</Box>
       ), "enter confirm · esc cancel");
+    }
+    case "secrets": {
+      const keys = secretKeys ?? [];
+      const at = Math.min(cursor, Math.max(0, keys.length - 1));
+      const start = Math.max(0, Math.min(at - Math.floor(maxRows / 2), keys.length - maxRows));
+      return frame(overlay.title, (
+        <Box flexDirection="column">
+          <Text color={T.subtle}>{overlay.scope === "project" ? "Every thread of this project works with these. A thread can set its own on top." : "This thread only. A name here hides the project's name of the same spelling."}</Text>
+          <Box marginTop={1} flexDirection="column">
+            {keys.slice(start, start + maxRows).map((k, i) => {
+              const sel = start + i === at;
+              return <Text key={k} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>{" "}{truncate(k, w - 4)}</Text>;
+            })}
+            {keys.length === 0 && <Text color={T.subtle} italic> nothing set — press a to add one</Text>}
+          </Box>
+          <Box marginTop={1}><Text color={T.faint}>The agent gets the names and never the values: covey puts them in the session's environment, and takes any that turn up back out of the transcript. `covey env` is what it reads.</Text></Box>
+        </Box>
+      ), "a add · enter change the value · D remove · esc close");
+    }
     case "pick":
     case "palette": {
       const options = overlay.kind === "pick" ? overlay.options : [];
@@ -298,6 +321,8 @@ const HELP: [string, string][] = [
   ["  a", "add project — pick a repository, make one, or give a URL; then the machines"],
   ["  m", "move thread to another machine"],
   ["  r", "rename thread, or a project"],
+  ["  e", "secrets: the environment a project's threads work in, or one thread's"],
+  ["", "  the agent uses them by name ($NAME, covey env) and never reads a value"],
   ["  x", "archive / unarchive thread (sending a message unarchives)"],
   ["", "  archiving hands back the worktree, keeping its branch"],
   ["  D", "delete thread"],

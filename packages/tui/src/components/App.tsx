@@ -2,10 +2,10 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { projectPool } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
-import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
+import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { hyperlinksEnabled, openCommand, osc8, repoUrlOf, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
@@ -292,6 +292,8 @@ export function App({ store }: { store: Store }) {
   /** A pick of many: space marks, enter hands over the marked ids. */
   const openPickMany = (title: string, options: PickOption[], marked: string[], onMany: (ids: string[]) => void) => openPick(title, options, () => {}, undefined, undefined, { marked: new Set(marked), onMany });
   const openInput = (title: string, onSubmit: (v: string) => void, initial = "", placeholder?: string, onCancel?: () => void) => { setOvFilter(initial); store.setOverlay({ kind: "input", title, onSubmit, initial, placeholder, onCancel }); };
+  /** The same prompt with the characters hidden: a secret's value (#126). */
+  const openSecretInput = (title: string, onSubmit: (v: string) => void, placeholder?: string, onCancel?: () => void) => { setOvFilter(""); store.setOverlay({ kind: "input", title, onSubmit, mask: true, placeholder, onCancel }); };
 
   // ---- actions ----------------------------------------------------------------
   const currentRow = rows[cursor];
@@ -785,6 +787,78 @@ export function App({ store }: { store: Store }) {
 
   /** Come back to the run panel after a pick, with the cursor where it was. */
   const backToRun = (ov: Extract<Overlay, { kind: "run" }>, at: number) => { store.setOverlay(ov); setOvFilter(""); setOvCursor(at); };
+  const backToSecrets = (ov: Extract<Overlay, { kind: "secrets" }>, at: number) => { store.setOverlay(ov); setOvFilter(""); setOvCursor(at); };
+
+  /**
+   * The environment a project's threads work in, or one thread's own — `e` on
+   * a sidebar row (#126).
+   *
+   * A project's panel writes to every machine of its pool, so the same
+   * repository works the same wherever a thread of it runs.
+   */
+  function openSecrets(row: SidebarRow) {
+    setOvCursor(0);
+    if (row.kind === "project" && row.project) {
+      const pool = row.pool?.length ? row.pool : [{ machine: row.machine, projectId: row.project.id }];
+      return store.setOverlay({
+        kind: "secrets", scope: "project", title: `Secrets — ${row.project.title}`,
+        targets: pool.map((x) => ({ machine: x.machine, ownerId: x.projectId })),
+      });
+    }
+    if (row.kind === "thread" && row.thread) {
+      store.setOverlay({
+        kind: "secrets", scope: "thread", title: `Secrets — ${row.thread.title}`,
+        targets: [{ machine: row.machine, ownerId: row.thread.id }],
+      });
+    }
+  }
+
+  /**
+   * The secrets panel's keys. The list is the names the renderer paints, in
+   * the same order, so the row under the cursor is the row a key acts on —
+   * the rule the run panel and the sidebar both follow.
+   *
+   * A value is never read back, because covey keeps no way to read one: enter
+   * writes a new value over the old, it does not edit it.
+   */
+  function handleSecretsKey(ov: Extract<Overlay, { kind: "secrets" }>, input: string, key: any) {
+    const keys = secretPanelKeys(state, ov);
+    const at = Math.min(ovCursor, Math.max(0, keys.length - 1));
+    const name = keys[at];
+    const write = (k: string, value: string | null, cursor: number) => {
+      backToSecrets(ov, cursor);
+      void store.setSecrets(ov.scope, ov.targets, [{ key: k, value }]);
+    };
+    const askValue = (k: string, title: string) => openSecretInput(
+      title,
+      (v) => {
+        if (!v) { backToSecrets(ov, at); return store.notify(`${k} is unchanged: a secret needs a value`, "error"); }
+        write(k, v, Math.max(0, keys.includes(k) ? keys.indexOf(k) : keys.filter((x) => x < k).length));
+      },
+      "paste it — the characters stay hidden",
+      () => backToSecrets(ov, at),
+    );
+    if (key.upArrow || input === "k") return setOvCursor(() => Math.max(0, at - 1));
+    if (key.downArrow || input === "j") return setOvCursor(() => Math.min(keys.length - 1, at + 1));
+    if (input === "a") {
+      return openInput("New secret: the name", (k) => {
+        const bad = secretKeyError(k.trim());
+        if (bad) { backToSecrets(ov, at); return store.notify(bad, "error"); }
+        askValue(k.trim(), `Value for ${k.trim()}`);
+      }, "", "STRIPE_KEY", () => backToSecrets(ov, at));
+    }
+    if (!name) return;
+    if (key.return) return askValue(name, `New value for ${name}`);
+    if (input === "D") {
+      return openPick(`Remove ${name}?`, [
+        { id: "no", label: "Cancel" },
+        { id: "yes", label: ov.scope === "project" ? `Remove ${name} from this project on ${ov.targets.length} machine${ov.targets.length === 1 ? "" : "s"}` : `Remove ${name} from this thread` },
+      ], (id) => {
+        if (id === "yes") write(name, null, Math.max(0, at - 1));
+        else backToSecrets(ov, at);
+      }, undefined, () => backToSecrets(ov, at));
+    }
+  }
 
   /**
    * The run panel's keys. The list is the run's members in order, so the row
@@ -1255,7 +1329,8 @@ export function App({ store }: { store: Store }) {
   function scrollOverlay(ev: MouseEvent) {
     const ov = state.overlay;
     if (!ov) return;
-    const rows = ov.kind === "pick" ? filterOptions(ov.options, ovFilter).length : 0;
+    const rows = ov.kind === "pick" ? filterOptions(ov.options, ovFilter).length
+      : ov.kind === "secrets" ? secretPanelKeys(state, ov).length : 0;
     if (rows === 0) return;
     const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
     if (delta === 0) return;
@@ -1497,6 +1572,7 @@ export function App({ store }: { store: Store }) {
     }
     if (ov.kind === "help" || ov.kind === "update") return;
     if (ov.kind === "run") return handleRunKey(ov, input, key);
+    if (ov.kind === "secrets") return handleSecretsKey(ov, input, key);
     if (ov.kind === "usage") {
       const last = USAGE_WINDOWS.length - 1;
       if (key.leftArrow || input === "h") return void store.loadUsage(Math.max(0, ov.window - 1), ov.groupBy);
@@ -1508,6 +1584,8 @@ export function App({ store }: { store: Store }) {
       return;
     }
     if (ov.kind === "input") {
+      // Trimmed, masked or not: a value pasted from a password manager often
+      // carries a newline, and no credential wants the space around it.
       if (key.return) { ov.onSubmit(ovFilter.trim()); setOvFilter(""); return; }
       if (key.backspace || key.delete) { setOvFilter((f) => f.slice(0, -1)); return; }
       if (input && !key.ctrl && !key.meta) setOvFilter((f) => f + input);
@@ -1627,6 +1705,9 @@ export function App({ store }: { store: Store }) {
     if (input === "r" && row.kind === "project") return openInput("Rename project", (v) => { store.setOverlay(null); if (v.trim()) void store.renameProject(row.pool ?? [], v.trim()); }, row.project!.title);
     // The branch the project's threads start from and its pull requests target.
     if (input === "b" && row.kind === "project") return changeBase(row);
+    // The environment the threads of a project work in, or one thread's own.
+    // The values go to the daemon and never come back (#126).
+    if (input === "e" && (row.kind === "project" || row.kind === "thread")) return openSecrets(row);
     if (input === "x" && row.kind === "thread") return void store.threadCommand({ type: "thread.archive", threadId: row.thread!.id, archived: !row.thread!.archivedAt }, row.machine);
     // Flip who merges the thread's pull request. A person who has looked at
     // the change and wants it landed presses this once.
@@ -1938,7 +2019,7 @@ export function App({ store }: { store: Store }) {
         <Box height={1}><Text color={T.border} wrap="truncate">{"─".repeat(Math.max(0, mainW))}</Text></Box>
         <Box height={transcriptH} flexDirection="column">
           {state.overlay
-            ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} run={overlayRun} machineNameOf={(id) => store.machineNameOf(id)} />
+            ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} run={overlayRun} machineNameOf={(id) => store.machineNameOf(id)} secretKeys={state.overlay.kind === "secrets" ? secretPanelKeys(state, state.overlay) : undefined} />
             : state.diffView
               ? <DiffPanel view={state.diffView} width={mainW} height={transcriptH} lines={diffLines} selection={state.selection} />
               : summaryRow

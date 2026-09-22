@@ -144,7 +144,7 @@ export interface LoopOutcome {
 }
 
 /** One request and one answer over one socket. */
-interface Rpc {
+export interface Rpc {
   call(method: string, params: unknown): Promise<unknown>;
   close(): void;
 }
@@ -234,7 +234,7 @@ export function describeThread(t: Thread): string[] {
  * The socket. Node 22 has `WebSocket` built in, so this needs no package —
  * which matters, because this runs in every agent's shell.
  */
-async function openRpc(url: string): Promise<Rpc> {
+export async function openRpc(url: string): Promise<Rpc> {
   const ws = new WebSocket(url);
   await new Promise<void>((resolve, reject) => {
     ws.onopen = () => resolve();

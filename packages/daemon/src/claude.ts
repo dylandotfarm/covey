@@ -48,6 +48,13 @@ export interface SessionParams {
    *  as `COVEY_PROJECT_ID`, for an agent that creates a thread to put it in
    *  the project it is working in. Nothing in covey reads it back. */
   projectId: string;
+  /**
+   * The thread's secrets (#126), which go into the session's environment so a
+   * tool call reads `$STRIPE_KEY` the way it reads `$PATH`. The engine merges
+   * the project's names with the thread's own before it gets here, and no name
+   * covey sets itself can be one of these (`secretKeyError`).
+   */
+  secrets?: Record<string, string>;
 }
 
 interface Pending {
@@ -171,8 +178,11 @@ export class ClaudeSession {
       // The SDK *replaces* the environment with this object rather than
       // merging it, so `process.env` is spread first — dropping it would take
       // PATH, HOME and the credentials with it.
+      // The thread's secrets go in before covey's own names, which no secret
+      // may take, so the two can never disagree about what this thread is.
       env: {
         ...process.env,
+        ...this.params.secrets,
         COVEY_THREAD_ID: this.params.threadId,
         COVEY_PROJECT_ID: this.params.projectId,
       },

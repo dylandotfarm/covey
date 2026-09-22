@@ -7,6 +7,7 @@ import { runTui, loadConfig, saveConfig, localMachine, type RelaunchRequest } fr
 import { runDaemon, installStopHandlers, dataDir, loadDaemonConfig, webAddresses, withToken, tailscaleSelf, Updater, sourceInfo, readPidFile, clearPidFile, pidFilePath, isAlive, buildInfo, buildDirs, newestBuildMtime, buildIsNewerThan } from "@covey/daemon";
 import { daemonArgs } from "./daemonArgs.js";
 import { parseLoopArgs, runLoop, LOOP_USAGE } from "./loop.js";
+import { parseEnvArgs, runEnv, ENV_USAGE } from "./env.js";
 import { childEnv, releaseNodeEnv } from "./nodeEnv.js";
 
 const argv = process.argv.slice(2);
@@ -101,6 +102,22 @@ async function main() {
       (out.ok ? console.log : console.error)(out.lines.join("\n"));
       process.exit(out.ok ? 0 : 1);
     }
+    case "env": {
+      // The names of this thread's secrets, or one command run with them.
+      // Nothing here prints a value: the whole point is that the transcript
+      // never holds one (#126).
+      const parsed = parseEnvArgs(argv);
+      if ("error" in parsed) { console.error(`covey: ${parsed.error}\n\n${ENV_USAGE}`); process.exit(2); }
+      const out = await runEnv(parsed.request, { threadId: flag("--thread") ?? process.env.COVEY_THREAD_ID, port: flag("--port") ? portFlag() : localPort() });
+      if (out.lines.length) (out.ok ? console.log : console.error)(out.lines.join("\n"));
+      if (!out.ok || !out.run) process.exit(out.ok ? 0 : 1);
+      // The command takes this process's place at the terminal: its output is
+      // the tool's output, and its exit code is covey's.
+      const child = spawn(out.run.command, out.run.args, { stdio: "inherit", env: { ...process.env, ...out.run.env } });
+      child.on("error", (e: any) => { console.error(`covey: could not run ${out.run!.command}: ${e?.message ?? e}`); process.exit(127); });
+      child.on("exit", (code, signal) => process.exit(signal ? 1 : code ?? 0));
+      return;
+    }
     case "restart":
       process.exit((await restartLocalDaemon()) ? 0 : 1);
     case "stop":
@@ -131,6 +148,7 @@ function usage(code = 0) {
 
 Inside a covey thread (the /covey skill runs these):
 ${LOOP_USAGE}
+${ENV_USAGE}
 
 One machine, from a fresh clone: \`pnpm run setup\` builds covey and puts this
 command on your PATH. Run it again after you move the checkout.`);

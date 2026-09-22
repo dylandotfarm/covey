@@ -166,6 +166,20 @@
   (`plugin.ts`); a personal skill in `~/.claude/skills` does not reach a resumed session,
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
   Change the CLI and the skill together.
+- A project holds an environment and a thread may hold its own on top (#126): the daemon
+  merges the two into `options.env` of the Claude session, so a tool call reads `$STRIPE_KEY`
+  like `$PATH`. `e` on a sidebar row is the editor, and a project's panel writes to every
+  machine of the pool. A value lives in the `secrets` table of the daemon's database and goes
+  nowhere else: a command carries one in, an event carries only the names
+  (`Project.secretKeys`, `Thread.secretKeys`), and `secrets.env` — the one call that answers
+  with a value — is refused off loopback, which is why `server.ts` passes `handleConnection`
+  a flag it worked out rather than one a client declared. Every timeline item and every
+  transcript line goes through `redact.ts` first, so a `printenv` writes `[secret NAME]`;
+  keep it that way, and keep the eight-character floor, or a short value rewrites ordinary
+  prose. Never let a secret take a name covey sets (`secretKeyError`): a thread that could
+  rewrite `COVEY_THREAD_ID` would file its work under another thread. The agent reads
+  `covey env`, which prints names; `packages/cli/src/env.ts` and the `/covey` skill are one
+  change, like the loop.
 - An issue or a pull request is a screen in the web client (#108): a `#N` in the transcript,
   or a chip in the header of the open thread, opens it, and the bar under it reviews,
   comments, merges, closes or reopens. In the thread list the chips are text and the row is

@@ -1,9 +1,10 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type {
   Project,
   Run,
+  SecretScope,
   Thread,
   TimelineItem,
   ShellEvent,
@@ -27,6 +28,7 @@ import type {
  *  shell_events / thread_events     — append log with seq for replay
  *  transcripts                      — SDK SessionStore mirror (raw JSONL rows)
  *  command_receipts                 — idempotency for retried commands
+ *  secrets                          — a project's or a thread's environment (#126)
  */
 /** Take over the database that the previous name of this program wrote. The
  *  checkpoint empties the write-ahead log first, so the move keeps every turn
@@ -42,6 +44,26 @@ function adoptOldDb(dir: string): void {
   for (const ext of ["-wal", "-shm"]) rmSync(from + ext, { force: true });
 }
 
+/**
+ * Keep the database to the user that owns it.
+ *
+ * It held the transcripts already; since #126 it holds the secrets of every
+ * project as well, so another account on the machine must not be able to read
+ * it. A file system that does not carry modes answers with an error, and the
+ * daemon goes on — the mode is a lock on a door, not the wall.
+ */
+function ownerOnly(dir: string): void {
+  try {
+    chmodSync(dir, 0o700);
+    for (const ext of ["", "-wal", "-shm"]) {
+      const f = join(dir, `covey.db${ext}`);
+      if (existsSync(f)) chmodSync(f, 0o600);
+    }
+  } catch {
+    // Windows, or a mount with no modes. Nothing to do and nothing to say.
+  }
+}
+
 export class Db {
   readonly sql: DatabaseSync;
 
@@ -51,6 +73,7 @@ export class Db {
     this.sql = new DatabaseSync(join(dir, "covey.db"));
     this.sql.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
     this.migrate();
+    ownerOnly(dir);
   }
 
   private migrate() {
@@ -100,6 +123,10 @@ export class Db {
       CREATE INDEX IF NOT EXISTS turns_project ON turns(project_id, ended_at);
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS secrets (
+        scope TEXT NOT NULL, owner_id TEXT NOT NULL, key TEXT NOT NULL,
+        value TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY (scope, owner_id, key));
     `);
     const cols = (this.sql.prepare("PRAGMA table_info(turn_checkpoints)").all() as any[]).map((c) => c.name);
     if (!cols.includes("user_message_uuid")) this.sql.exec("ALTER TABLE turn_checkpoints ADD COLUMN user_message_uuid TEXT");
@@ -141,7 +168,42 @@ export class Db {
       .run(p.id, JSON.stringify(p), p.updatedAt);
   }
   deleteProject(id: string) {
+    this.deleteSecrets("project", id);
     this.sql.prepare("DELETE FROM projects WHERE id = ?").run(id);
+  }
+
+  // ---- secrets (#126) -----------------------------------------------------
+  /**
+   * The environment a project or a thread holds. This is the one method that
+   * reads a value, and only three callers use it: the environment of a
+   * session, the redaction of an item, and `covey env exec` over loopback.
+   * Everything else asks `secretKeys`.
+   */
+  secretValues(scope: SecretScope, ownerId: string): Record<string, string> {
+    const rows = this.sql.prepare("SELECT key, value FROM secrets WHERE scope = ? AND owner_id = ?").all(scope, ownerId) as any[];
+    const out: Record<string, string> = {};
+    for (const r of rows) out[String(r.key)] = String(r.value);
+    return out;
+  }
+  /** The names alone, sorted, which is what a `Project` or a `Thread` carries. */
+  secretKeys(scope: SecretScope, ownerId: string): string[] {
+    return (this.sql.prepare("SELECT key FROM secrets WHERE scope = ? AND owner_id = ? ORDER BY key").all(scope, ownerId) as any[])
+      .map((r) => String(r.key));
+  }
+  /** Name, scope and time, for `secrets.list`. No value. */
+  secretRows(scope: SecretScope, ownerId: string): { key: string; updatedAt: string }[] {
+    return (this.sql.prepare("SELECT key, updated_at AS updatedAt FROM secrets WHERE scope = ? AND owner_id = ? ORDER BY key").all(scope, ownerId) as any[])
+      .map((r) => ({ key: String(r.key), updatedAt: String(r.updatedAt) }));
+  }
+  putSecret(scope: SecretScope, ownerId: string, key: string, value: string, at: string) {
+    this.sql.prepare("INSERT OR REPLACE INTO secrets(scope,owner_id,key,value,updated_at) VALUES(?,?,?,?,?)")
+      .run(scope, ownerId, key, value, at);
+  }
+  removeSecret(scope: SecretScope, ownerId: string, key: string) {
+    this.sql.prepare("DELETE FROM secrets WHERE scope = ? AND owner_id = ? AND key = ?").run(scope, ownerId, key);
+  }
+  deleteSecrets(scope: SecretScope, ownerId: string) {
+    this.sql.prepare("DELETE FROM secrets WHERE scope = ? AND owner_id = ?").run(scope, ownerId);
   }
 
   // ---- threads ------------------------------------------------------------
@@ -159,6 +221,7 @@ export class Db {
     ).run(t.id, t.projectId, t.sessionId, JSON.stringify(t), t.updatedAt);
   }
   deleteThread(id: string) {
+    this.deleteSecrets("thread", id);
     this.sql.prepare("DELETE FROM items WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM thread_commands WHERE thread_id = ?").run(id);
     this.sql.prepare("DELETE FROM thread_events WHERE thread_id = ?").run(id);
