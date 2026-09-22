@@ -149,15 +149,20 @@
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
   Change the CLI and the skill together.
 - An issue or a pull request is a screen in the web client (#108): a `#N` in the transcript,
-  or a chip on a thread row, opens it, and the bar under it reviews, comments, merges,
-  closes or reopens. `github.item` reads it and `github.act` acts, each act on a `GhHost`
+  or a chip in the header of the open thread, opens it, and the bar under it reviews,
+  comments, merges, closes or reopens. In the thread list the chips are text and the row is
+  one target (#115): a thumb aimed at the row used to hit the chip. Hold a row there and the
+  conversation's sheet comes up, and its first rows name each item in full (`threadSheetRows`,
+  `viewRowNumber`). `attachSwipe` in `render.ts` owns the hold and the drag, and each cancels
+  the other. `github.item` reads it and `github.act` acts, each act on a `GhHost`
   built for that one write (`allowReview`, `allowClose`, `allowComment`, `allowMerge`), so
   `pnpm test` still changes nothing on GitHub (`githubItem.test.ts`). The TUI has no such
   screen: `links.ts` makes a `#N` an OSC 8 hyperlink when the project is on GitHub, and
   the palette opens the issue or the pull request in the browser.
 - A setting in the web client is a sheet at the foot of the page (#117). The `⋮`
   in the conversation nav bar opens that thread's model, permission mode,
-  streaming, rename and archive; the `⋮` on a machine card on the settings page
+  streaming, rename and archive, and a hold on its row in the list opens the same
+  sheet (#115); the `⋮` on a machine card on the settings page
   opens that machine's defaults. `state.ts` holds what a sheet says
   (`sheetRows`, `sheetChoices`, `sheetNote`) and node tests it; `render.ts`
   paints it and `main.ts` maps one choice to one command (`sheetCommand`).

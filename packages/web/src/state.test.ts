@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { GitHubIssue, GitHubPullRequest, MachineInfo, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
-  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle,
+  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
 } from "./state.js";
 
@@ -176,6 +176,8 @@ test("the #N references in a piece of text, with their offsets (#108)", () => {
 test("a thread's chips, an item's state word, its checks in one line, and the acts it offers (#108)", () => {
   const t = thread("t1", "p1", { issue: { number: 94, title: null, url: null, takenAt: "2026-09-21T00:00:00Z" }, pullRequest: { number: 12, url: "u", branch: "b", base: "main", openedAt: "2026-09-21T00:00:00Z" } });
   assert.deepEqual(threadRefs(t).map((r) => r.label), ["#94", "PR #12"]);
+  // The sheet a hold raises has room to say what each one is (#115).
+  assert.deepEqual(threadRefs(t).map((r) => r.menuLabel), ["View issue #94", "View pull request #12"]);
   assert.deepEqual(threadRefs(thread("t2", "p1")), []);
   const watched = thread("t3", "p1", { watch: { number: 7, state: "watching", reason: null, merge: "manual", mergeMethod: "merge", rounds: 0, maxRounds: 3, quiet: 0, cursor: { head: null, checks: null, reviews: [], comments: [], lineComments: [], state: "OPEN", mergeTried: null }, startedAt: "t", polledAt: null, endedAt: null, error: null } as never });
   assert.deepEqual(threadRefs(watched).map((r) => r.label), ["PR #7"]);
@@ -270,6 +272,32 @@ test("the conversation sheet says what the thread runs, and its pages tick what 
 
   s.sheet.page = "streaming";
   assert.deepEqual(sheetChoices(s, s.sheet).filter((c) => c.current).map((c) => c.id), ["on"]);
+});
+
+test("the conversation sheet leads with the issue and the pull request a thread holds (#115)", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [project("p", "alpha")], [
+    thread("t1", "p", {
+      title: "fix the parser",
+      issue: { number: 94, title: null, url: null, takenAt: "2026-09-21T00:00:00Z" },
+      pullRequest: { number: 12, url: "u", branch: "b", base: "main", openedAt: "2026-09-21T00:00:00Z" },
+    }),
+  ]));
+  s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" };
+  const rows = sheetRows(s, s.sheet);
+  assert.deepEqual(rows.slice(0, 2).map((r) => [r.id, r.label]), [
+    ["view:94", "View issue #94"],
+    ["view:12", "View pull request #12"],
+  ]);
+  // Each one acts at once, and none of them opens a page of choices.
+  assert.ok(rows.slice(0, 2).every((r) => !r.choices));
+  assert.deepEqual(rows.slice(2).map((r) => r.id), ["model", "mode", "streaming", "rename", "archive"]);
+
+  assert.equal(viewRowNumber("view:94"), 94);
+  assert.equal(viewRowNumber("model"), null);
+  assert.equal(viewRowNumber("view:0"), null);
+  assert.equal(viewRowNumber("view:x"), null);
 });
 
 test("a thread with no model of its own reads as the machine's Claude settings, and streaming absent reads as off", () => {

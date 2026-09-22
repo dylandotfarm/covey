@@ -8,7 +8,7 @@
 import { MachineClient, uuid } from "@covey/client";
 import { WEB_CLIENT, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
-import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, emptyState, itemHash, openView, primaryMachine, routeOf, threadHash, type MachineSlot, type Route, type SheetTarget } from "./state.js";
+import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, emptyState, itemHash, openView, primaryMachine, routeOf, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
 
 const TOKEN_KEY = "covey.token";
 
@@ -271,6 +271,16 @@ const actions: Actions = {
     const sh = state.sheet;
     if (!sh || sh.target.kind !== "thread") return;
     const { machine, threadId } = sh.target;
+    // A row that opens an issue or a pull request (#115). It needs no client:
+    // the item screen reads the item itself.
+    const number = viewRowNumber(id);
+    if (number !== null) {
+      const projectId = state.machines.get(machine)?.threads.get(threadId)?.projectId;
+      if (!projectId) return;
+      state.sheet = null;
+      actions.openItem(machine, projectId, number);
+      return;
+    }
     const client = clients.get(machine);
     if (!client) return;
     if (id === "rename") {

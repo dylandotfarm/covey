@@ -377,13 +377,30 @@ export function findRefs(text: string): { start: number; end: number; number: nu
   return out;
 }
 
-/** The chips a thread row shows: the issue it took and the pull request it opened. */
-export function threadRefs(t: Thread): { kind: "issue" | "pull"; number: number; label: string }[] {
-  const out: { kind: "issue" | "pull"; number: number; label: string }[] = [];
-  if (t.issue) out.push({ kind: "issue", number: t.issue.number, label: `#${t.issue.number}` });
+/**
+ * The issue a thread took and the pull request it opened. `label` is the chip
+ * on the row, short enough to sit in one line of text. `menuLabel` is the row
+ * of the sheet (#115), where there is room to say what it is.
+ */
+export function threadRefs(t: Thread): ItemRef[] {
+  const out: ItemRef[] = [];
+  if (t.issue) out.push({ kind: "issue", number: t.issue.number, label: `#${t.issue.number}`, menuLabel: `View issue #${t.issue.number}` });
   const pull = t.pullRequest?.number ?? t.watch?.number;
-  if (pull) out.push({ kind: "pull", number: pull, label: `PR #${pull}` });
+  if (pull) out.push({ kind: "pull", number: pull, label: `PR #${pull}`, menuLabel: `View pull request #${pull}` });
   return out;
+}
+
+/** One reference a thread holds, as `threadRefs` reports it. */
+export interface ItemRef { kind: "issue" | "pull"; number: number; label: string; menuLabel: string }
+
+/** What the id of a sheet row that opens an item starts with; the number follows. */
+export const VIEW_ROW = "view:";
+
+/** The item a sheet row opens, or null when the row is a setting. */
+export function viewRowNumber(id: string): number | null {
+  if (!id.startsWith(VIEW_ROW)) return null;
+  const n = Number(id.slice(VIEW_ROW.length));
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 /** One word for the state of an item, as the chip on the item screen says it. */
@@ -589,6 +606,8 @@ export function sheetSettings(s: State, sheet: SheetState): MachineSettings {
 /** The settings of one conversation. */
 export function threadSheetRows(t: Thread): SheetRow[] {
   return [
+    // The chips in the list are text, so the sheet is the way to the item (#115).
+    ...threadRefs(t).map((r) => ({ id: `${VIEW_ROW}${r.number}`, label: r.menuLabel })),
     { id: "model", label: "Model", value: modelLabel(t.model), choices: true },
     { id: "mode", label: "Permission mode", value: permissionModeLabel(t.permissionMode), choices: true },
     { id: "streaming", label: "Streaming", value: t.streaming ? "On" : "Off", choices: true },
