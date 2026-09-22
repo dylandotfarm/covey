@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { basename, extname, isAbsolute, join } from "node:path";
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { MAX_ATTACHMENT_BYTES, type Attachment } from "@covey/protocol";
+import { IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, type Attachment } from "@covey/protocol";
 
 /**
  * Terminals do not deliver file *data* on drag-and-drop — they paste a path.
@@ -150,30 +150,44 @@ export interface DropResult {
 }
 
 /**
- * Interpret a pasted chunk as dropped files. Returns nothing when the chunk is
- * ordinary text, so the caller can fall back to inserting it.
+ * Read one file into an attachment. A drop and a clipboard paste both come
+ * through here, so the size cap, the media type and the name are one rule and
+ * cannot drift apart (#124).
  */
-export function readDroppedFiles(raw: string): DropResult {
+export function readFileAttachment(path: string): { attachment?: Attachment; error?: string } {
+  try {
+    const size = statSync(path).size;
+    if (size > MAX_ATTACHMENT_BYTES) return { error: `${basename(path)} is ${mb(size)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)` };
+    return { attachment: { name: basename(path), path, mimeType: fileMime(path), data: readFileSync(path).toString("base64") } };
+  } catch {
+    return { error: `could not read ${path}` };
+  }
+}
+
+/** Read every path into attachments, and name the ones that failed. */
+function readFiles(paths: string[]): DropResult {
   const attachments: Attachment[] = [];
   const unreadable: string[] = [];
   const errors: string[] = [];
-  const paths = groupDroppedPaths(parseDroppedPaths(raw));
-  if (!paths) return { attachments, unreadable, errors };
   for (const path of paths) {
-    try {
-      const size = statSync(path).size;
-      if (size > MAX_ATTACHMENT_BYTES) {
-        errors.push(`${basename(path)} is ${mb(size)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)`);
-        unreadable.push(basename(path));
-        continue;
-      }
-      attachments.push({ name: basename(path), path, mimeType: fileMime(path), data: readFileSync(path).toString("base64") });
-    } catch {
-      errors.push(`could not read ${path}`);
+    const { attachment, error } = readFileAttachment(path);
+    if (attachment) attachments.push(attachment);
+    else {
+      errors.push(error!);
       unreadable.push(basename(path));
     }
   }
   return { attachments, unreadable, errors };
+}
+
+/**
+ * Interpret a pasted chunk as dropped files. Returns nothing when the chunk is
+ * ordinary text, so the caller can fall back to inserting it.
+ */
+export function readDroppedFiles(raw: string): DropResult {
+  const paths = groupDroppedPaths(parseDroppedPaths(raw));
+  if (!paths) return { attachments: [], unreadable: [], errors: [] };
+  return readFiles(paths);
 }
 
 // ---------------------------------------------------------------------------
@@ -181,36 +195,27 @@ export function readDroppedFiles(raw: string): DropResult {
 // ---------------------------------------------------------------------------
 
 /**
- * A terminal never tells the TUI that a copied *image* was pasted: cmd+v puts
- * text on the tty and an image produces nothing at all. So the composer binds
- * its own key and asks the platform instead.
+ * A terminal never tells the TUI what the clipboard holds: cmd+v puts text on
+ * the tty, a copied file puts nothing there at all, and an image produces
+ * nothing either. So the composer binds its own key and asks the platform.
  *
- * Every platform reader is a small command line program that covey does not
- * ship and does not depend on. The read stays optional: when no reader is
- * installed the result names the one to install, and everything else keeps
- * working.
+ * Three things reach the clipboard and all three mean "attach this" (#124):
+ *
+ *   a file      cmd+c in Finder, ctrl+c in Nautilus  -> a file URL, no bytes
+ *   image bytes a screenshot, "Copy image" in a browser
+ *   text        a path somebody copied, or prose
+ *
+ * covey asks what is there before it reads, takes a file over bytes, and takes
+ * the bytes of any type the model accepts rather than PNG alone. Text is the
+ * last answer, and goes back through the drop parser, so a copied path becomes
+ * the file it names.
+ *
+ * Every platform reader is a small command line program. The macOS pair,
+ * `osascript` and `sips`, ships with the system; `pngpaste` is a faster route
+ * to the same bytes when somebody has it. On Linux nothing is shipped, so the
+ * read stays optional: with no reader installed the result names the one to
+ * install, and everything else keeps working.
  */
-interface ClipboardReader {
-  bin: string;
-  args: string[];
-  /** What to tell a user who has none of the readers for this platform. */
-  install: string;
-}
-
-function clipboardReaders(): ClipboardReader[] {
-  if (process.platform === "darwin") return [{ bin: "pngpaste", args: ["-"], install: "brew install pngpaste" }];
-  if (process.platform === "win32") return [];
-  return [
-    { bin: "wl-paste", args: ["--no-newline", "--type", "image/png"], install: "install wl-clipboard" },
-    { bin: "xclip", args: ["-selection", "clipboard", "-t", "image/png", "-o"], install: "install xclip" },
-  ];
-}
-
-/** The first 8 bytes of every PNG file. */
-const PNG_MAGIC = Buffer.from("89504e470d0a1a0a", "hex");
-
-/** Headroom over the limit, so an oversized image reports a size, not ENOBUFS. */
-const CLIPBOARD_BUFFER_BYTES = MAX_ATTACHMENT_BYTES + 1024 * 1024;
 
 /** One run of a clipboard reader. Injected so the tests need no binary. */
 export type RunReader = (bin: string, args: string[]) => {
@@ -219,56 +224,252 @@ export type RunReader = (bin: string, args: string[]) => {
   error?: NodeJS.ErrnoException;
 };
 
+/** Headroom over the limit, so an oversized image reports a size, not ENOBUFS. */
+const CLIPBOARD_BUFFER_BYTES = MAX_ATTACHMENT_BYTES + 1024 * 1024;
+
 const runReader: RunReader = (bin, args) => {
   const r = spawnSync(bin, args, { maxBuffer: CLIPBOARD_BUFFER_BYTES });
   return { stdout: r.stdout, status: r.status, error: r.error as NodeJS.ErrnoException | undefined };
 };
 
-export interface ClipboardResult {
-  attachment?: Attachment;
-  error?: string;
+/** The first bytes of each image type the model accepts. */
+export function imageMimeOfBytes(buf: Buffer): string | null {
+  const ascii = (from: number, to: number) => buf.subarray(from, to).toString("latin1");
+  if (ascii(0, 8) === "\x89PNG\r\n\x1a\n") return "image/png";
+  if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
+  if (ascii(0, 3) === "GIF") return "image/gif";
+  if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp";
+  return null;
 }
 
 /**
- * Read an image from the system clipboard. Reports an error string in every
- * failure, including "no reader installed", so the composer can say one line
- * and carry on.
+ * The paths in a `text/uri-list`. GNOME's `x-special/gnome-copied-files` is the
+ * same list under a `copy` or `cut` line, and a comment line starts with `#`;
+ * both fall out of taking the `file://` lines alone.
  */
-export function readClipboardImage(run: RunReader = runReader): ClipboardResult {
-  const readers = clipboardReaders();
-  if (readers.length === 0) return { error: `covey cannot read the clipboard on ${process.platform}` };
-  const absent: string[] = [];
-  for (const reader of readers) {
-    const r = run(reader.bin, reader.args);
-    if (r.error?.code === "ENOENT") { absent.push(reader.install); continue; }
-    if (r.error?.code === "ENOBUFS") return { error: `the clipboard image is over the ${mb(MAX_ATTACHMENT_BYTES)} MB limit` };
-    if (r.error) return { error: `${reader.bin} failed: ${r.error.message}` };
-    const buf = r.stdout;
-    // pngpaste and xclip both exit non-zero when the clipboard holds no image;
-    // wl-paste can exit 0 with nothing on stdout.
-    if (r.status !== 0 || !buf || buf.byteLength === 0) return { error: "the clipboard has no image" };
-    if (!buf.subarray(0, PNG_MAGIC.byteLength).equals(PNG_MAGIC)) return { error: "the clipboard has no image" };
+export function parseUriList(s: string): string[] {
+  return s.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("file://")).map(fromFileUri);
+}
+
+/** What a reader found on the clipboard. Exactly one of these is set. */
+interface Found {
+  paths?: string[];
+  image?: { buf: Buffer; mime: string };
+  text?: string;
+}
+
+/**
+ * What one reader has to say. `absent` means the program is not installed and
+ * the next reader should try; `empty` means the clipboard holds nothing this
+ * reader can attach, and names what it does hold, for the line the user sees.
+ */
+type ReaderResult =
+  | { found: Found }
+  | { absent: true }
+  | { empty: true; holds?: string[] }
+  | { error: string };
+
+interface ClipboardReader {
+  /** What to tell a user who has none of the readers for this platform. */
+  install: string;
+  read(run: RunReader): ReaderResult;
+}
+
+/** Read image bytes from a command, and type them by their first bytes. */
+function readImageBytes(run: RunReader, bin: string, args: string[]): ReaderResult {
+  const r = run(bin, args);
+  if (r.error?.code === "ENOENT") return { absent: true };
+  if (r.error?.code === "ENOBUFS") return { error: `the clipboard image is over the ${mb(MAX_ATTACHMENT_BYTES)} MB limit` };
+  if (r.error) return { error: `${bin} failed: ${r.error.message}` };
+  const buf = r.stdout;
+  // A reader that has no image exits non-zero, or exits 0 with nothing.
+  if (r.status !== 0 || !buf || buf.byteLength === 0) return { empty: true };
+  const mime = imageMimeOfBytes(buf);
+  if (!mime) return { empty: true };
+  if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
+    return { error: `the clipboard image is ${mb(buf.byteLength)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)` };
+  }
+  return { found: { image: { buf, mime } } };
+}
+
+/** Read text from a command, for the last answer. */
+function readText(run: RunReader, bin: string, args: string[]): ReaderResult {
+  const r = run(bin, args);
+  if (r.error?.code === "ENOENT") return { absent: true };
+  if (r.error) return { error: `${bin} failed: ${r.error.message}` };
+  const text = r.stdout?.toString() ?? "";
+  return r.status === 0 && text.trim() ? { found: { text } } : { empty: true };
+}
+
+/** The type of a file list, when the clipboard has one. */
+const FILE_LIST_TYPES = ["text/uri-list", "x-special/gnome-copied-files"];
+
+/** One Linux reader: list the types, then read the best of them. */
+function linuxReader(bin: string, install: string, list: string[], read: (type: string) => string[]): ClipboardReader {
+  return {
+    install,
+    read(run) {
+      const listing = run(bin, list);
+      if (listing.error?.code === "ENOENT") return { absent: true };
+      if (listing.error) return { error: `${bin} failed: ${listing.error.message}` };
+      const types = (listing.stdout?.toString() ?? "").split(/\r?\n/).map((t) => t.trim()).filter(Boolean);
+      const fileType = types.find((t) => FILE_LIST_TYPES.includes(t));
+      if (fileType) {
+        const r = run(bin, read(fileType));
+        const paths = parseUriList(r.stdout?.toString() ?? "");
+        if (paths.length > 0) return { found: { paths } };
+      }
+      const imageType = types.find((t) => (IMAGE_MIME_TYPES as readonly string[]).includes(t));
+      if (imageType) {
+        const r = readImageBytes(run, bin, read(imageType));
+        if (!("empty" in r)) return r;
+      }
+      const textType = types.find((t) => t === "text/plain;charset=utf-8" || t === "text/plain" || t === "UTF8_STRING" || t === "STRING");
+      if (textType) {
+        const r = readText(run, bin, read(textType));
+        if (!("empty" in r)) return r;
+      }
+      return { empty: true, holds: types };
+    },
+  };
+}
+
+/**
+ * macOS names the pasteboard's types in its own words: `«class furl»` for a
+ * file, `«class PNGf»` and `TIFF picture` for an image. `clipboard info` lists
+ * them, and nothing there needs installing.
+ */
+function macReader(): ClipboardReader {
+  return {
+    install: "brew install pngpaste",
+    read(run) {
+      const info = run("osascript", ["-e", "clipboard info"]);
+      if (info.error?.code === "ENOENT") return { absent: true };
+      if (info.error) return { error: `osascript failed: ${info.error.message}` };
+      const types = (info.stdout?.toString() ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+      const holds = types.filter((_, i) => i % 2 === 0);
+      // A file first: it has a name, and a name makes a better chip than
+      // `clipboard-20260922.png`. AppleScript hands back the first file only,
+      // so a copy of several files attaches one.
+      if (holds.some((t) => t.includes("furl"))) {
+        const r = run("osascript", ["-e", "POSIX path of (the clipboard as «class furl»)"]);
+        const path = r.stdout?.toString().trim() ?? "";
+        if (r.status === 0 && path) return { found: { paths: [path] } };
+      }
+      if (holds.some((t) => /PNGf|TIFF|JPEG|GIF/i.test(t))) {
+        // pngpaste is one command and gives PNG; without it, the system's own
+        // pair does the same job through a temporary file.
+        const direct = readImageBytes(run, "pngpaste", ["-"]);
+        if (!("absent" in direct) && !("empty" in direct)) return direct;
+        const converted = macImageViaSips(run);
+        if (!("empty" in converted)) return converted;
+        // The pasteboard says it holds a picture and neither route got it.
+        // `install` is the only line that helps, so ask for the reader rather
+        // than report that there is no image, which is false.
+        return { absent: true };
+      }
+      const text = run("pbpaste", []);
+      if (!text.error && text.status === 0 && (text.stdout?.toString() ?? "").trim()) {
+        return { found: { text: text.stdout!.toString() } };
+      }
+      return { empty: true, holds };
+    },
+  };
+}
+
+/**
+ * Write the pasteboard's TIFF to a file and convert it with `sips`. Both
+ * programs ship with macOS, so `ctrl+v` works on a Mac with nothing installed.
+ */
+function macImageViaSips(run: RunReader): ReaderResult {
+  const tiff = join(tmpdir(), `covey-clipboard-${randomUUID()}.tiff`);
+  const png = `${tiff}.png`;
+  const script = [
+    "set d to (the clipboard as «class TIFF»)",
+    `set f to open for access POSIX file "${tiff}" with write permission`,
+    "set eof f to 0",
+    "write d to f",
+    "close access f",
+  ].join("\n");
+  const wrote = run("osascript", ["-e", script]);
+  if (wrote.error || wrote.status !== 0) return { empty: true };
+  const made = run("sips", ["-s", "format", "png", tiff, "--out", png]);
+  if (made.error || made.status !== 0) return { empty: true };
+  try {
+    const buf = readFileSync(png);
     if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
       return { error: `the clipboard image is ${mb(buf.byteLength)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)` };
     }
-    try {
-      return { attachment: saveClipboardImage(buf) };
-    } catch {
-      return { error: "could not write the clipboard image to a temporary file" };
-    }
+    const mime = imageMimeOfBytes(buf);
+    return mime ? { found: { image: { buf, mime } } } : { empty: true };
+  } catch {
+    return { empty: true };
   }
-  return { error: `to paste an image: ${absent.join(", or ")}` };
+}
+
+/**
+ * The readers to try, in order. The platform is an argument so a test can ask
+ * for the macOS pair on any machine: covey is developed on Linux boxes that
+ * have no pasteboard at all, and the macOS route is the one most people use.
+ */
+export function clipboardReadersFor(platform: NodeJS.Platform): ClipboardReader[] {
+  if (platform === "darwin") return [macReader()];
+  if (platform === "win32") return [];
+  return [
+    linuxReader("wl-paste", "install wl-clipboard", ["--list-types"], (t) => ["--no-newline", "--type", t]),
+    linuxReader("xclip", "install xclip", ["-selection", "clipboard", "-t", "TARGETS", "-o"], (t) => ["-selection", "clipboard", "-t", t, "-o"]),
+  ];
+}
+
+export interface ClipboardResult {
+  attachments: Attachment[];
+  /** The names of the files the clipboard named but covey could not read. */
+  unreadable: string[];
+  errors: string[];
+  /** Text, when that is all the clipboard held. The caller pastes it. */
+  text?: string;
+}
+
+/**
+ * Read whatever the clipboard holds: a file, an image, or text. Reports an
+ * error string in every failure, including "no reader installed", so the
+ * composer can say one line and carry on.
+ */
+export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platform = process.platform): ClipboardResult {
+  const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], unreadable: [], errors });
+  const readers = clipboardReadersFor(platform);
+  if (readers.length === 0) return nothing([`covey cannot read the clipboard on ${platform}`]);
+  const absent: string[] = [];
+  let holds: string[] = [];
+  for (const reader of readers) {
+    const r = reader.read(run);
+    if ("absent" in r) { absent.push(reader.install); continue; }
+    if ("error" in r) return nothing([r.error]);
+    if ("empty" in r) { holds = r.holds ?? holds; continue; }
+    if (r.found.paths) return readFiles(r.found.paths);
+    if (r.found.image) {
+      try {
+        return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], unreadable: [], errors: [] };
+      } catch {
+        return nothing(["could not write the clipboard image to a temporary file"]);
+      }
+    }
+    return { attachments: [], unreadable: [], errors: [], text: r.found.text };
+  }
+  if (absent.length === readers.length) return nothing([`to paste an image: ${absent.join(", or ")}`]);
+  return nothing([holds.length > 0 ? `the clipboard holds ${holds.join(", ")}, which is not a file or an image` : "the clipboard has no file and no image"]);
 }
 
 /**
  * Give the clipboard bytes a real file, so the attachment has a path that
  * points at something. The daemon still copies the bytes into its own data dir.
  */
-function saveClipboardImage(buf: Buffer): Attachment {
+function saveClipboardImage(buf: Buffer, mime: string): Attachment {
   const stamp = new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
-  const path = join(tmpdir(), `covey-clipboard-${randomUUID()}.png`);
+  const ext = Object.entries(IMAGE_EXT).find(([, m]) => m === mime)?.[0] ?? ".png";
+  const path = join(tmpdir(), `covey-clipboard-${randomUUID()}${ext}`);
   writeFileSync(path, buf);
-  return { name: `clipboard-${stamp}.png`, path, mimeType: "image/png", data: buf.toString("base64") };
+  return { name: `clipboard-${stamp}${ext}`, path, mimeType: mime, data: buf.toString("base64") };
 }
 
 /**

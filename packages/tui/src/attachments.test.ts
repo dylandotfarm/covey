@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readClipboardImage, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, type RunReader } from "./attachments.js";
+import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readClipboard, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, type RunReader } from "./attachments.js";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -160,45 +160,209 @@ test("an oversized drop reports its size instead of attaching", () => {
 // --- clipboard -------------------------------------------------------------
 
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
-const reader = (r: { stdout?: Buffer; status?: number; error?: NodeJS.ErrnoException }): RunReader =>
-  () => ({ stdout: r.stdout ?? null, status: r.status ?? 0, error: r.error });
+const JPEG = Buffer.concat([Buffer.from("ffd8ffe0", "hex"), Buffer.alloc(16)]);
 const enoent = (): NodeJS.ErrnoException => Object.assign(new Error("spawnSync ENOENT"), { code: "ENOENT" });
 
-test("a clipboard image becomes an attachment with real bytes on disk", () => {
-  const { attachment, error } = readClipboardImage(reader({ stdout: PNG }));
-  assert.equal(error, undefined);
-  assert.ok(attachment);
-  assert.equal(attachment!.mimeType, "image/png");
-  assert.match(attachment!.name, /^clipboard-\d{14}\.png$/);
-  assert.equal(Buffer.from(attachment!.data!, "base64").toString("hex"), PNG.toString("hex"));
-  assert.deepEqual(readFileSync(attachment!.path), PNG, "the path should point at the bytes");
+/**
+ * A fake clipboard: one answer per command line, keyed by the binary and its
+ * arguments joined with spaces. Anything the fake does not name is a program
+ * that is not installed, which is the state every Linux box starts in.
+ */
+function fakeClipboard(
+  answers: Record<string, { stdout?: Buffer | string; status?: number; error?: NodeJS.ErrnoException }>,
+  /** Bytes for `sips` to write at its `--out` path, the way the real one does. */
+  sips?: Buffer,
+): { run: RunReader; calls: string[] } {
+  const calls: string[] = [];
+  const run: RunReader = (bin, args) => {
+    const key = [bin, ...args].join(" ");
+    calls.push(key);
+    if (bin === "sips" && sips) {
+      writeFileSync(args[args.indexOf("--out") + 1]!, sips);
+      return { stdout: null, status: 0 };
+    }
+    const a = answers[key];
+    // The script that writes the TIFF carries a temporary path, so it cannot
+    // be keyed. Any other osascript ran and printed nothing, as the real one
+    // does; everything else is a program nobody installed.
+    if (!a) return bin === "osascript" ? { stdout: null, status: 0 } : { stdout: null, status: null, error: enoent() };
+    const stdout = typeof a.stdout === "string" ? Buffer.from(a.stdout) : a.stdout ?? null;
+    return { stdout, status: a.status ?? 0, error: a.error };
+  };
+  return { run, calls };
+}
+
+/** The readers are chosen by platform, so every test names the one it means. */
+const LINUX: NodeJS.Platform = "linux";
+const MAC: NodeJS.Platform = "darwin";
+
+test("the media type of clipboard bytes comes from the bytes, not from a name", () => {
+  assert.equal(imageMimeOfBytes(PNG), "image/png");
+  assert.equal(imageMimeOfBytes(JPEG), "image/jpeg");
+  assert.equal(imageMimeOfBytes(Buffer.from("GIF89a....")), "image/gif");
+  assert.equal(imageMimeOfBytes(Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WEBP")])), "image/webp");
+  assert.equal(imageMimeOfBytes(Buffer.from("Usage: pngpaste")), null);
+});
+
+test("a uri list gives up its paths, under GNOME's copy line or without it", () => {
+  assert.deepEqual(parseUriList("file:///home/me/shot%201.png\r\nfile:///home/me/b.pdf\r\n"), ["/home/me/shot 1.png", "/home/me/b.pdf"]);
+  assert.deepEqual(parseUriList("copy\nfile:///home/me/a.png"), ["/home/me/a.png"], "GNOME puts `copy` or `cut` on the first line");
+  assert.deepEqual(parseUriList("#comment\nnot a uri"), []);
+});
+
+test("a file copied in a file manager attaches, with its own name (#124)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const pdf = join(dir, "report 1.pdf");
+  writeFileSync(pdf, "%PDF-1.7\n");
+  const { run } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "text/uri-list\ntext/plain" },
+    [`wl-paste --no-newline --type text/uri-list`]: { stdout: `file://${encodeURI(pdf)}` },
+  });
+  const r = readClipboard(run, LINUX);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.attachments.map((a) => a.name), ["report 1.pdf"], "the copied file keeps its name, which a chip needs");
+  assert.equal(r.attachments[0]!.mimeType, "application/pdf", "a copied file is not required to be an image");
+});
+
+test("a file list is preferred over image bytes for the same copy", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, "shot.png");
+  writeFileSync(png, PNG);
+  const { run, calls } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "text/uri-list\nimage/png" },
+    [`wl-paste --no-newline --type text/uri-list`]: { stdout: `file://${encodeURI(png)}` },
+    "wl-paste --no-newline --type image/png": { stdout: PNG },
+  });
+  assert.deepEqual(readClipboard(run, LINUX).attachments.map((a) => a.name), ["shot.png"]);
+  assert.ok(!calls.includes("wl-paste --no-newline --type image/png"), "a named file beats bytes called clipboard-<date>");
+});
+
+test("clipboard image bytes of any type the model takes are attached", () => {
+  const { run } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "image/jpeg" },
+    "wl-paste --no-newline --type image/jpeg": { stdout: JPEG },
+  });
+  const r = readClipboard(run, LINUX);
+  assert.deepEqual(r.errors, []);
+  assert.equal(r.attachments[0]!.mimeType, "image/jpeg", "PNG was the only type covey took before #124");
+  assert.match(r.attachments[0]!.name, /^clipboard-\d{14}\.jpg$/);
+  assert.deepEqual(readFileSync(r.attachments[0]!.path), JPEG, "the path should point at the bytes");
+});
+
+test("xclip answers when wl-paste is not installed", () => {
+  const { run } = fakeClipboard({
+    "xclip -selection clipboard -t TARGETS -o": { stdout: "TARGETS\nimage/png" },
+    "xclip -selection clipboard -t image/png -o": { stdout: PNG },
+  });
+  assert.equal(readClipboard(run, LINUX).attachments[0]!.mimeType, "image/png");
+});
+
+test("text on the clipboard comes back for the caller to paste", () => {
+  const { run } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "text/plain;charset=utf-8" },
+    "wl-paste --no-newline --type text/plain;charset=utf-8": { stdout: "/home/me/shot.png" },
+  });
+  const r = readClipboard(run, LINUX);
+  assert.deepEqual(r.attachments, []);
+  assert.equal(r.text, "/home/me/shot.png", "the composer runs it through the drop parser, so a copied path becomes a chip");
 });
 
 test("a missing reader asks for an install, it does not report the spawn failure", () => {
-  const { attachment, error } = readClipboardImage(() => ({ stdout: null, status: null, error: enoent() }));
-  assert.equal(attachment, undefined);
+  const { run } = fakeClipboard({});
+  const { attachments, errors } = readClipboard(run, LINUX);
+  assert.deepEqual(attachments, []);
   // covey depends on no clipboard binary, so "none installed" is an ordinary
   // state. The line has to be an instruction the reader can act on. Matching
   // the binary name alone is not enough: "pngpaste failed: spawnSync ENOENT"
   // contains it too, and that is the degradation this test exists to stop.
-  assert.match(error!, /^to paste an image: /);
-  assert.match(error!, /pngpaste|wl-clipboard|xclip/);
-  assert.doesNotMatch(error!, /ENOENT|spawnSync|failed/);
+  assert.match(errors[0]!, /^to paste an image: /);
+  assert.match(errors[0]!, /wl-clipboard|xclip/);
+  assert.doesNotMatch(errors[0]!, /ENOENT|spawnSync|failed/);
 });
 
-test("an empty clipboard says so", () => {
-  assert.match(readClipboardImage(reader({ stdout: Buffer.alloc(0) })).error!, /no image/);
-  assert.match(readClipboardImage(reader({ status: 1 })).error!, /no image/);
-});
-
-test("output that is not a PNG is not attached", () => {
-  // pngpaste writes its usage line to stdout on some failures.
-  assert.match(readClipboardImage(reader({ stdout: Buffer.from("Usage: pngpaste") })).error!, /no image/);
+test("a clipboard with neither a file nor an image says what it does hold", () => {
+  const { run } = fakeClipboard({ "wl-paste --list-types": { stdout: "text/html\napplication/pdf" } });
+  const { errors } = readClipboard(run, LINUX);
+  assert.match(errors[0]!, /text\/html/, "`the clipboard has no image` hid what was really on it");
 });
 
 test("an oversized clipboard image reports its size", () => {
   const big = Buffer.concat([PNG, Buffer.alloc(6 * 1024 * 1024)]);
-  assert.match(readClipboardImage(reader({ stdout: big })).error!, /limit 5 MB/);
+  const { run } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "image/png" },
+    "wl-paste --no-newline --type image/png": { stdout: big },
+  });
+  assert.match(readClipboard(run, LINUX).errors[0]!, /limit 5 MB/);
+});
+
+test("an oversized copied file gets the same chip a dropped one gets", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const big = join(dir, "huge.log");
+  writeFileSync(big, Buffer.alloc(6 * 1024 * 1024));
+  const { run } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "text/uri-list" },
+    "wl-paste --no-newline --type text/uri-list": { stdout: `file://${encodeURI(big)}` },
+  });
+  const r = readClipboard(run, LINUX);
+  assert.deepEqual(r.attachments, []);
+  assert.deepEqual(r.unreadable, ["huge.log"]);
+  assert.match(r.errors[0]!, /huge\.log is 6 MB \(limit 5 MB\)/);
+});
+
+// --- the macOS pasteboard --------------------------------------------------
+
+/**
+ * macOS is where most of these pastes happen and is the one platform covey
+ * cannot try here, so each branch of its reader is held by a test: a copied
+ * file, a screenshot with pngpaste, and the same screenshot without it.
+ */
+
+const MAC_FILE_INFO = "«class furl», 78, «class hfs », 122, string, 62";
+const MAC_IMAGE_INFO = "«class PNGf», 21358, TIFF picture, 61522";
+const FURL = "osascript -e POSIX path of (the clipboard as «class furl»)";
+
+test("a file copied in Finder attaches by its path (#124)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, "Screenshot 2026-09-22 at 1.02.33 PM.png");
+  writeFileSync(png, PNG);
+  const { run } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: MAC_FILE_INFO },
+    [FURL]: { stdout: `${png}\n` },
+  });
+  const r = readClipboard(run, MAC);
+  assert.deepEqual(r.errors, []);
+  assert.deepEqual(r.attachments.map((a) => a.name), ["Screenshot 2026-09-22 at 1.02.33 PM.png"]);
+});
+
+test("a screenshot on the pasteboard goes through pngpaste when it is there", () => {
+  const { run, calls } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: MAC_IMAGE_INFO },
+    "pngpaste -": { stdout: PNG },
+  });
+  assert.equal(readClipboard(run, MAC).attachments[0]!.mimeType, "image/png");
+  assert.ok(!calls.some((c) => c.startsWith("sips")), "pngpaste answered, so the slower route is never run");
+});
+
+test("without pngpaste the system's own osascript and sips do the same job", () => {
+  const { run, calls } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: MAC_IMAGE_INFO },
+    // Every osascript that is not `clipboard info` is the one that writes the
+    // TIFF; the fake answers it by exit code alone, and sips writes the PNG.
+  }, PNG);
+  const answers = (bin: string) => calls.filter((c) => c.startsWith(bin)).length;
+  const r = readClipboard(run, MAC);
+  assert.deepEqual(r.errors, [], "a Mac with nothing installed must still paste an image");
+  assert.equal(r.attachments[0]!.mimeType, "image/png");
+  assert.equal(answers("sips"), 1);
+  assert.ok(calls.includes("pngpaste -"), "pngpaste is tried first, and was absent here");
+});
+
+test("a pasteboard holding only text hands the text back", () => {
+  const { run } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: "«class utf8», 34, string, 34" },
+    "pbpaste": { stdout: "/Users/me/shot.png" },
+  });
+  assert.equal(readClipboard(run, MAC).text, "/Users/me/shot.png");
 });
 
 const att = (name: string) => ({ name, path: `/a/${name}`, mimeType: "image/png" });

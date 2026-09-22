@@ -28,7 +28,7 @@ import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboardImage, readDroppedFiles, applyDrop } from "../attachments.js";
+import { readClipboard, readDroppedFiles, applyDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -1413,15 +1413,7 @@ export function App({ store }: { store: Store }) {
       return;
     }
     if (editing && rawInput.length > 1 && !special) {
-      // A drag-and-drop arrives as a paste of the file's path. If the whole
-      // chunk parses as dropped files, attach them; otherwise it is ordinary text.
-      if (state.view) {
-        const { attachments, unreadable, errors } = readDroppedFiles(rawInput);
-        for (const e of errors) store.notify(e, "error");
-        if (attach(attachments, unreadable)) return;
-      }
-      // paste: normalise line endings and tabs, then insert
-      insert(Ed.normalisePaste(rawInput));
+      pasteText(rawInput);
       return;
     }
     handleKey(rawInput, rawKey);
@@ -1819,7 +1811,7 @@ export function App({ store }: { store: Store }) {
     // Terminals paste with cmd+v (macOS) or ctrl+shift+v (Linux) and send the
     // TUI nothing at all when the clipboard holds an image, so ctrl+v is free
     // for covey to read the clipboard itself.
-    if (key.ctrl && input === "v") return pasteClipboardImage();
+    if (key.ctrl && input === "v") return pasteClipboard();
     if (input && !key.ctrl && !key.meta && !key.super) insert(input);
   }
   /**
@@ -1852,11 +1844,31 @@ export function App({ store }: { store: Store }) {
     applyEdit({ value: drop.value, caret: drop.caret });
     return true;
   }
-  function pasteClipboardImage() {
+  /**
+   * Put a pasted chunk into the draft. A drag-and-drop arrives as a paste of
+   * the file's path, so a chunk that names files becomes attachments; anything
+   * else is ordinary text.
+   */
+  function pasteText(raw: string) {
+    if (state.view) {
+      const { attachments, unreadable, errors } = readDroppedFiles(raw);
+      for (const e of errors) store.notify(e, "error");
+      if (attach(attachments, unreadable)) return;
+    }
+    // Normalise line endings and tabs, then insert.
+    insert(Ed.normalisePaste(raw));
+  }
+  /**
+   * ctrl+v: attach whatever the clipboard holds (#124). A file and an image
+   * attach; text goes back through the paste path, so a copied path becomes
+   * the file it names rather than a path in the sentence.
+   */
+  function pasteClipboard() {
     if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
-    const { attachment, error } = readClipboardImage();
-    if (attachment) attach([attachment]);
-    else if (error) store.notify(error, "error");
+    const { attachments, unreadable, errors, text } = readClipboard();
+    for (const e of errors) store.notify(e, "error");
+    if (attach(attachments, unreadable)) return;
+    if (text) pasteText(text);
   }
   function applyEdit(next: Ed.EditState) { setDraft(next.value); setCaret(next.caret); }
   function insert(s: string) { applyEdit(Ed.insert({ value: draft, caret }, s)); }

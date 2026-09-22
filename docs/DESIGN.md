@@ -1275,9 +1275,11 @@ streaming, queueing, and diff capture.
   signal handling and the alternate-screen escape are untested there.
 - **Other providers**: `Thread.provider` and `MachineCapabilities.providers` exist; the
   engine currently instantiates only `ClaudeSession`.
-- **Attachments**: drag-and-drop attaches a file of any type, and `ctrl+v` attaches the
-  clipboard image through `pngpaste` / `wl-paste` / `xclip` when one of them is installed.
-  There is no reader for Windows, and no paste for a non-image on the clipboard.
+- **Attachments**: drag-and-drop attaches a file of any type, and `ctrl+v` attaches what the
+  clipboard holds — a copied file, image bytes of any type the model takes, or text, which
+  goes back through the drop parser so a copied path becomes the file it names. macOS reads
+  the pasteboard with its own `osascript` and `sips`, and with `pngpaste` when it is there;
+  Linux needs `wl-paste` or `xclip`. There is still no reader for Windows.
 - **Rust client**: the protocol is the contract; a ratatui client can replace `packages/tui`
   without daemon changes. Worth doing once the protocol stops moving.
 - **Local repositories**: a project whose bare repository lives on one machine, with the
