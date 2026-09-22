@@ -127,6 +127,31 @@ harness, a browser driven by a script, `ffmpeg`, or a terminal capture. Keep
 a video short, under a minute, and name what it shows in the body next to
 the placeholder.
 
+## Secrets: use them by name, never print one
+
+A project or a thread may hold credentials that covey keeps for you. They are
+already in your environment, so a script, a `curl` header or a config file
+reads `$NAME` like any other variable. What you must not do is read a value
+into your own words: a value you print lands in the transcript, and the whole
+point of this is that it does not.
+
+```
+covey env                  the names you can use, and where each comes from
+covey env exec -- <cmd>    run one command with those secrets in its environment
+```
+
+- `covey env` prints names only. Use it to find out what is there.
+- Write `$NAME` into the file or the command. Do not interpolate the value into
+  a message, a commit, a pull request body or a comment.
+- Do not run `printenv`, `env`, `echo $NAME` or anything else whose purpose is
+  to show a value. Covey redacts a value it finds in your output, so the attempt
+  costs you a tool call and tells you nothing.
+- `covey env exec -- <cmd>` is for the case your session started before the
+  secret was set. Ordinary tool calls need no such thing.
+- A name you need that is not there is a person's job, not yours. Say which name
+  you need and stop; the reader presses `e` on the project in the covey TUI.
+- Never write a credential into a file in the repository, and never commit one.
+
 ## What not to do
 
 - Do not poll `gh pr view`, `gh pr checks` or `gh run list` in a loop. Covey
@@ -147,6 +172,8 @@ covey pr watch <n> [--auto]   watch a pull request opened by hand
 covey pr watch --stop         stop the watch
 covey pr policy auto|manual   change who merges
 covey pr status               the issue, the pull request and the watch of this thread
+covey env                     the secrets this thread can use, by name
+covey env exec -- <cmd>       run one command with those secrets in its environment
 ```
 
 `--rounds N` bounds how many messages that ask for more work covey sends

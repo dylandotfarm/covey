@@ -383,6 +383,14 @@ export interface Project {
    */
   baseBranch?: string;
   defaultModel: string | null;
+  /**
+   * The names of the secrets this project holds, sorted, and never a value
+   * (#126). A name is not a secret and the sidebar needs it to paint the
+   * editor, so it rides on the record; the value stays in the daemon's
+   * database and reaches nothing but the environment of a session.
+   * Absent on a project written before secrets existed.
+   */
+  secretKeys?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -399,6 +407,56 @@ export interface ProjectGit {
   defaultBranch: string | null;
   /** False in a repo with no commits yet, where worktrees cannot be created. */
   hasCommits: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Secrets (#126)
+// ---------------------------------------------------------------------------
+
+/**
+ * One secret, as everything but the daemon may know it: a name and where it
+ * comes from. There is no field for the value here, and that is the whole
+ * design — a value leaves the daemon's database for one destination only, the
+ * environment of the Claude session that runs the thread.
+ */
+export interface SecretEntry {
+  /** The environment variable name, e.g. `STRIPE_KEY`. */
+  key: string;
+  /** `project` for the project's environment, `thread` for one thread's own. */
+  scope: SecretScope;
+  /** True on a thread entry that hides a project entry of the same name. */
+  overrides?: boolean;
+  updatedAt: string;
+}
+
+export type SecretScope = "project" | "thread";
+
+/** One change to make: a value to store, or `null` to take the name away. */
+export interface SecretWrite {
+  key: string;
+  value: string | null;
+}
+
+/**
+ * Names covey sets itself, or that the session needs as it found them. A
+ * secret may not take one of these: a thread whose `PATH` the reader replaced
+ * by hand would start no tools, and a thread whose `COVEY_THREAD_ID` was
+ * rewritten would file its work under somebody else's thread.
+ */
+export const RESERVED_SECRET_KEYS = ["PATH", "HOME", "USER", "SHELL", "PWD", "TMPDIR", "NODE_ENV"];
+
+/**
+ * Why this name cannot be a secret, or `null` when it can. Pure, and shared:
+ * the daemon refuses on it and the client says the same sentence before it
+ * sends anything.
+ */
+export function secretKeyError(key: string): string | null {
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+    return `${JSON.stringify(key)} is not an environment variable name: use letters, digits and underscore, and do not start with a digit`;
+  }
+  if (key.startsWith("COVEY_")) return `${key} belongs to covey: a name that starts with COVEY_ is covey's own`;
+  if (RESERVED_SECRET_KEYS.includes(key)) return `${key} is what the session needs to run: pick another name`;
+  return null;
 }
 
 export type PermissionMode =
@@ -525,6 +583,12 @@ export interface Thread {
   issue?: ThreadIssue | null;
   pullRequest?: ThreadPullRequest | null;
   watch?: PullRequestWatch | null;
+  /**
+   * The names of the secrets this thread sets for itself, sorted, and never a
+   * value (#126). A name here hides the project's name of the same spelling.
+   * Absent on a thread written before secrets existed.
+   */
+  secretKeys?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -1442,6 +1506,15 @@ export type Command =
       baseBranch?: string | null;
     }
   | { type: "project.delete"; projectId: ProjectId }
+  /**
+   * Set or remove secrets of a project (#126). Every write is applied; a
+   * `value` of `null` takes the name away. Refused, with code `bad_key`, on a
+   * name `secretKeyError` rejects.
+   *
+   * The values go into this command and no further: the daemon stores them and
+   * emits `project.upserted` carrying `secretKeys` alone.
+   */
+  | { type: "project.setSecrets"; projectId: ProjectId; secrets: SecretWrite[] }
   /** Machine-wide defaults. Omitted fields are left alone; `null` clears one. */
   | {
       type: "machine.settings";
@@ -1513,6 +1586,17 @@ export type Command =
    * for partial messages and decides here whether to forward them.
    */
   | { type: "thread.setStreaming"; threadId: ThreadId; streaming: boolean }
+  /**
+   * Set or remove secrets of one thread (#126), by the rules of
+   * `project.setSecrets`. A name here hides the project's name of the same
+   * spelling for this thread alone.
+   *
+   * The new environment reaches the thread's next session. A session that is
+   * idle is released here so the next turn starts with it; a session in the
+   * middle of a turn keeps the environment it started with, and the thread
+   * gets a note saying so.
+   */
+  | { type: "thread.setSecrets"; threadId: ThreadId; secrets: SecretWrite[] }
   | {
       type: "turn.send";
       threadId: ThreadId;
@@ -1700,6 +1784,26 @@ export interface RpcMethods {
   };
   /** Live branch state, asked for when offering where a new thread should run. */
   "project.git": { params: { projectId: ProjectId }; result: ProjectGit };
+  /**
+   * The names of the secrets in force, and where each comes from (#126). Give
+   * `threadId` for the thread's whole environment — its project's names with
+   * the thread's own on top — or `projectId` for a project's alone.
+   *
+   * No value comes back, from any connection. This is the call `covey env`
+   * makes, and the one an agent reads.
+   */
+  "secrets.list": {
+    params: { threadId?: ThreadId; projectId?: ProjectId };
+    result: { secrets: SecretEntry[] };
+  };
+  /**
+   * The environment of one thread, values and all, for `covey env exec`.
+   *
+   * Loopback only. A connection from anywhere else is refused with code
+   * `forbidden`, however good its token: a value belongs to the machine that
+   * runs the work, and a remote client has no use for one.
+   */
+  "secrets.env": { params: { threadId: ThreadId }; result: { env: Record<string, string> } };
   /** Full patch for a turn; `turnId` omitted = latest turn with a diff. */
   "turn.diff": { params: { threadId: ThreadId; turnId?: TurnId }; result: TurnDiff | null };
   /**

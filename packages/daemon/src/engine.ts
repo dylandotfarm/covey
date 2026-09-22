@@ -4,13 +4,15 @@ import { existsSync, statSync, rmSync, readdirSync, readFileSync } from "node:fs
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
-  ThreadOrigin,
+  ThreadOrigin, SecretEntry, SecretWrite,
 } from "@covey/protocol";
 import { isUserClient, KNOWN_MODELS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
+import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
+import { redactDeep, redactor } from "./redact.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
@@ -132,6 +134,13 @@ export class Engine {
   private threadListeners = new Set<ThreadListener>();
   /** Per-item throttle for streaming upserts. */
   private streamTimers = new Map<string, { latest: TimelineItem; timer: NodeJS.Timeout }>();
+  /**
+   * The redactor of each thread (#126), built on first use and thrown away
+   * when that thread's environment changes. `null` is an answer, not a miss:
+   * it says this thread has no secret long enough to look for, and every item
+   * it writes goes straight to the database.
+   */
+  private redactors = new Map<string, ((s: string) => string) | null>();
   /** Title queries in flight, so a requeue cannot start a second and a
    *  shutdown can cancel the one already running. */
   private titling = new Map<string, AbortController>();
@@ -295,7 +304,10 @@ export class Engine {
     return this.emitShell({ kind: "thread.upserted", thread: t });
   }
 
-  private persistItem(item: TimelineItem): number {
+  private persistItem(rawItem: TimelineItem): number {
+    // Before anything is written down or sent: a value the reader gave covey
+    // never goes into a transcript, however the session came to say it (#126).
+    const item = this.redact(rawItem.threadId, rawItem);
     const existing = this.db.getItem(item.id);
     const seq = existing ? existing.seq : this.db.nextThreadSeq(item.threadId);
     const stored = { ...item, seq, createdAt: existing?.createdAt ?? item.createdAt };
@@ -318,6 +330,86 @@ export class Engine {
     }
     if (pending) { clearTimeout(pending.timer); this.streamTimers.delete(key); }
     this.persistItem(item);
+  }
+
+  // ---- secrets (#126) -------------------------------------------------------
+
+  /**
+   * The environment one thread works in: its project's names and values, with
+   * the thread's own written over them. The only reader outside this file is
+   * `secrets.env`, which the server answers over loopback alone.
+   */
+  secretsEnv(threadId: string): Record<string, string> {
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    return threadEnv(this.db, t.projectId, t.id);
+  }
+
+  /** The names in force, and where each comes from. Never a value. */
+  secretsList(p: { threadId?: string; projectId?: string }): SecretEntry[] {
+    if (p.threadId) {
+      const t = this.db.getThread(p.threadId);
+      if (!t) throw new EngineError("not_found", "thread not found");
+      return threadSecretList(this.db, t.projectId, t.id);
+    }
+    if (p.projectId) {
+      if (!this.db.getProject(p.projectId)) throw new EngineError("not_found", "project not found");
+      return projectSecretList(this.db, p.projectId);
+    }
+    throw new EngineError("bad_request", "secrets.list needs a threadId or a projectId");
+  }
+
+  /**
+   * Store one scope's writes and answer with the names it holds afterwards. A
+   * name the rules refuse stops the whole command, before anything is written.
+   */
+  private writeSecrets(scope: "project" | "thread", ownerId: string, writes: SecretWrite[], at: string): string[] {
+    if (!Array.isArray(writes)) throw new EngineError("bad_request", "secrets must be a list");
+    try {
+      return applySecretWrites(this.db, scope, ownerId, writes, at);
+    } catch (e: any) {
+      throw new EngineError("bad_key", String(e?.message ?? e));
+    }
+  }
+
+  /**
+   * `value` with every secret of this thread replaced by `[secret NAME]`.
+   *
+   * The redactor is built once per thread and kept until that thread's
+   * environment moves. A thread with no secret long enough to look for gets
+   * `null`, and then this is the identity function — which is every thread on
+   * a machine that uses none.
+   */
+  private redact<T>(threadId: string, value: T): T {
+    let r = this.redactors.get(threadId);
+    if (r === undefined) {
+      const t = this.db.getThread(threadId);
+      // A thread the database does not hold yet is not cached: the answer
+      // would be "nothing to redact" for ever, and the row lands a moment
+      // later with an environment behind it.
+      if (!t) return value;
+      r = redactor(threadEnv(this.db, t.projectId, t.id));
+      this.redactors.set(threadId, r);
+    }
+    return r ? redactDeep(value, r) : value;
+  }
+
+  /**
+   * The environment of these threads has moved, so what covey knew about it
+   * has to go: the redactor it cached, and the session that already copied the
+   * old values. A session in the middle of a turn keeps what it started with —
+   * killing it would throw the turn away — and the thread is told so.
+   */
+  private refreshSecrets(threadIds: string[]) {
+    for (const id of threadIds) {
+      this.redactors.delete(id);
+      if (!this.sessions.has(id)) continue;
+      if (this.sessionBusy(id)) {
+        this.note(id, "info", "The secrets of this thread changed. Its Claude session is running, so it keeps the environment it started with; the new one reaches the next session, and `covey env exec` uses it now.");
+        continue;
+      }
+      this.release(id, "secrets changed", "Released this thread's Claude session so the next turn starts with the secrets you just set.");
+    }
   }
 
   // ---- commands -------------------------------------------------------------
@@ -452,6 +544,17 @@ export class Engine {
         this.db.putProject(p);
         return this.emitShell({ kind: "project.upserted", project: p });
       }
+      case "project.setSecrets": {
+        const p = this.db.getProject(cmd.projectId);
+        if (!p) throw new EngineError("not_found", "project not found");
+        p.secretKeys = this.writeSecrets("project", p.id, cmd.secrets, now);
+        p.updatedAt = now;
+        this.db.putProject(p);
+        // Every thread of the project reads these, so every one of them has a
+        // redactor to rebuild and perhaps a session to release.
+        this.refreshSecrets(this.db.listThreads().filter((t) => t.projectId === p.id).map((t) => t.id));
+        return this.emitShell({ kind: "project.upserted", project: p });
+      }
       case "project.delete": {
         for (const t of this.db.listThreads().filter((t) => t.projectId === cmd.projectId)) {
           await this.apply({ type: "thread.delete", threadId: t.id });
@@ -566,6 +669,7 @@ export class Engine {
         rmSync(attachmentsDir(t.id), { recursive: true, force: true });
         this.db.deleteThread(t.id);
         this.db.deleteTranscript(t.sessionId);
+        this.redactors.delete(t.id);
         return this.emitShell({ kind: "thread.removed", threadId: t.id });
       }
       case "thread.setPermissionMode": {
@@ -582,6 +686,16 @@ export class Engine {
         // on, so the next token of the turn in flight goes the new way.
         this.sessions.get(cmd.threadId)?.setStreaming(cmd.streaming);
         return this.mutateThread(cmd.threadId, (t) => { t.streaming = cmd.streaming; });
+      }
+      case "thread.setSecrets": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        const keys = this.writeSecrets("thread", t.id, cmd.secrets, now);
+        // The note this may write belongs after the thread's own names have
+        // changed, so `refreshSecrets` runs once the record is stored.
+        const seq = this.mutateThread(t.id, (x) => { x.secretKeys = keys; });
+        this.refreshSecrets([t.id]);
+        return seq;
       }
       case "turn.send": {
         const t = this.db.getThread(cmd.threadId);
@@ -1651,16 +1765,23 @@ export class Engine {
     // Fixed projectKey (= thread id) so the transcript key is cwd independent.
     const store = makeSessionStore(this.db);
     const storeForThread = {
-      append: (key: any, entries: any) => store.append({ ...key, projectKey: t.id }, entries),
+      // Redacted on the way in, like a timeline item: the SDK's own transcript
+      // is what a resumed session reads back, so a secret left in it would be
+      // fed to the model again on every resume (#126).
+      append: (key: any, entries: any) => store.append({ ...key, projectKey: t.id }, this.redact(t.id, entries)),
       load: (key: any) => store.load({ ...key, projectKey: t.id }),
       listSessions: (_: string) => store.listSessions!(t.id),
     };
+    // The project's environment with the thread's own on top. Read here, at
+    // the start, so it is the environment of every tool call the session makes.
+    const secrets = threadEnv(this.db, p.id, t.id);
     const session = new ClaudeSession(
       {
         threadId: t.id, sessionId: t.sessionId, projectId: p.id, cwd: t.worktreePath ?? p.workspaceRoot,
         model: t.model, permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
         streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
+        ...(Object.keys(secrets).length ? { secrets } : {}),
         ...(this.opts.plugins?.length ? { plugins: this.opts.plugins } : {}),
       },
       this.sinkFor(t.id),
@@ -2139,6 +2260,11 @@ export class Engine {
       worktreePath: tree.worktreePath, branch: tree.branch, movedTo: null, pendingApprovals: 0, queuedTurns: 0, updatedAt: now,
       latestTurn: exp.thread.latestTurn && exp.thread.latestTurn.state === "running" ? { ...exp.thread.latestTurn, state: "interrupted" } : exp.thread.latestTurn,
     };
+    // An export carries names, never values (#126), so the thread arrives with
+    // nothing behind them. Drop the names rather than keep a list that lies,
+    // and say which ones went — the reader sets them again here.
+    const lostSecrets = exp.thread.secretKeys ?? [];
+    delete t.secretKeys;
     this.db.transaction(() => {
       this.db.putThread(t);
       for (const item of exp.items) {
@@ -2164,6 +2290,9 @@ export class Engine {
     }
     this.persistItem({ id: `note:${randomUUID()}`, threadId, turnId: null, seq: 0, createdAt: noteNow, updatedAt: noteNow, kind: "note", tone: "info", text: `Moved here from ${exp.sourceMachineName} (${from}).${where}` });
     if (tree.cleanStart) this.note(threadId, ...cleanStartNote(tree.cleanStart));
+    if (lostSecrets.length) {
+      this.note(threadId, "warning", `This thread set ${lostSecrets.join(", ")} on ${exp.sourceMachineName}. A value never leaves the machine that holds it, so press e on this thread here to set them again.`);
+    }
     this.emitShell({ kind: "thread.upserted", thread: this.db.getThread(threadId)! });
     return { threadId, projectId: project.id };
   }

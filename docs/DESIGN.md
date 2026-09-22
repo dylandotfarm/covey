@@ -392,7 +392,47 @@ responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Meth
 `thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
 `run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`,
-`thread.commentPullRequest`, `github.item/act`.
+`thread.commentPullRequest`, `github.item/act`, `secrets.list/env`.
+
+## Secrets: an environment the agent uses and never reads
+
+An agent needs credentials to do real work. Paste one into the composer and it is in the
+transcript, in the database, in every export, and in the context of every later turn. So
+covey holds the value and hands the agent the name (#126).
+
+A **project** holds a set of names and values. A **thread** may hold its own, which hide the
+project's names of the same spelling. `e` on a sidebar row opens the editor: the project row
+for every thread of the project, the thread row for one thread. The value is typed masked and
+is never painted again — there is nothing to paint it from, because no client keeps one.
+
+A value goes to three places and no others:
+
+1. **The environment of the Claude session.** `Engine.startSession` merges the two scopes and
+   hands them to `ClaudeSession`, which puts them in `options.env`. A tool call reads
+   `$STRIPE_KEY` the way it reads `$PATH`. A secret may not take a name covey sets itself or
+   the session needs (`secretKeyError`): `PATH`, `HOME`, anything starting with `COVEY_`.
+2. **The redactor** (`redact.ts`). Every timeline item and every transcript line the daemon
+   stores passes through it first, and a value it finds becomes `[secret NAME]`. That covers
+   a stray `printenv`, a script that echoes its own command line, a library that logs the
+   header it sent. A value under eight characters is left alone: a short string turns up by
+   chance, and replacing every one of them would cost the reader more than it protects. The
+   SDK's own transcript is redacted too, because that is what a resumed session reads back.
+3. **`covey env exec`**, over loopback. `secrets.env` is the one call that answers with a
+   value and the one a token does not open — the server allows it on a loopback connection
+   alone, which is the only fact about a connection the daemon works out for itself.
+
+`covey env` lists the names and where each comes from. That is what the agent reads, and the
+`/covey` skill tells it so. Setting a secret releases the thread's session if it is idle, so
+the next turn starts with the new environment; a session in the middle of a turn keeps what
+it started with and the thread is told.
+
+This is not a secret manager and not a sandbox. An agent told to print a value can print it
+to the screen of the tool that runs it. The promise is narrower, and worth stating plainly:
+covey does not write the value down, and it takes the value back out when something else
+does. The database is `0600` and its directory `0700`, because that is where the values live.
+
+A moved thread arrives with its names dropped and a note that says which ones went: a value
+never leaves the machine that holds it.
 
 ## Runs
 

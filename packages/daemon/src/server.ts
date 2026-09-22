@@ -95,7 +95,7 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
       o.log(`client connected from ${req.socket.remoteAddress} via ${auth.via}`);
-      handleConnection(ws, o, self);
+      handleConnection(ws, o, self, auth.via === "loopback");
     });
   });
 
@@ -106,7 +106,13 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
   return { close: () => { wss.close(); http.close(); }, port: o.config.port };
 }
 
-function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSelf | null) {
+/**
+ * `loopback` says the connection came from this machine. It is the only fact
+ * here the daemon works out for itself rather than being told — `clientName`
+ * and `callerThread` below are self-declared — so it is the only one a
+ * permission may rest on. `secrets.env` does (#126).
+ */
+function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSelf | null, loopback: boolean) {
   const { engine } = o;
   const send = (m: WireFromDaemon) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
   const subs = new Map<string, () => void>();
@@ -204,6 +210,15 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return engine.listThreadDir(p.threadId, String(p.dir ?? ""));
       case "project.git":
         return engine.projectGit(p.projectId);
+      case "secrets.list":
+        return { secrets: engine.secretsList({ threadId: p.threadId, projectId: p.projectId }) };
+      case "secrets.env":
+        // The one call that answers with a value, and the one that a token
+        // does not open (#126). A secret belongs to the machine that runs the
+        // work; `covey env exec` speaks from there, over loopback, and nothing
+        // else has a use for it.
+        if (!loopback) throw new EngineError("forbidden", "secrets.env answers a connection from this machine only");
+        return { env: engine.secretsEnv(p.threadId) };
       case "turn.diff":
         return engine.turnDiff(p.threadId, p.turnId);
       case "usage.report":

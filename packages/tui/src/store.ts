@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { DEFAULT_PORT, isFinalMemberState, threadIsBusy } from "@covey/protocol";
 import WebSocket from "ws";
 import { MachineClient, projectPool, type ClientOptions, type ConnState } from "@covey/client";
@@ -113,7 +113,9 @@ export type Overlay =
     }
   /** `onCancel` lets esc go back where the input came from instead of closing
    *  everything — the folder prompt returns to the directory it was opened on. */
-  | { kind: "input"; title: string; placeholder?: string; initial?: string; onSubmit: (v: string) => void; onCancel?: () => void }
+  /** `mask` paints a bullet per character: a secret being typed or pasted must
+   *  not stand on the screen (#126). */
+  | { kind: "input"; title: string; placeholder?: string; initial?: string; mask?: boolean; onSubmit: (v: string) => void; onCancel?: () => void }
   /** Live progress of `machine.update`; closing it leaves the update running. */
   | { kind: "update"; machine: string }
   /** Token and estimated-cost totals, asked of every connected machine. */
@@ -131,6 +133,21 @@ export type Overlay =
    * A run and its members: task, thread, machine, branch, pull request, state.
    * `machine` is the machine that *stores* the run, not where its members work.
    */
+  /**
+   * The environment of a project or of one thread (#126): the names it holds.
+   * A value is never read back — there is nothing to read it from — so this
+   * panel adds, replaces and removes, and paints names alone.
+   *
+   * `targets` is every machine and owner a change is written to. A project row
+   * spans its whole pool, because the same repository on two machines should
+   * work the same on both.
+   */
+  | {
+      kind: "secrets";
+      scope: SecretScope;
+      title: string;
+      targets: SecretTarget[];
+    }
   | {
       kind: "run";
       machine: string;
@@ -140,6 +157,28 @@ export type Overlay =
       /** What the run is doing right now — dispatching, reading pull requests. */
       busy: string | null;
     };
+
+/** One record a secrets panel writes to: a project or a thread, on one machine. */
+export interface SecretTarget { machine: string; ownerId: string }
+
+/**
+ * The names the secrets panel paints: the union over every machine it writes
+ * to, sorted.
+ *
+ * A union, not one machine's list, because two machines of a pool can drift —
+ * a project added to a second machine after the first was given its keys. The
+ * panel shows every name, and a change goes to every machine, which is how the
+ * two come back together.
+ */
+export function secretPanelKeys(state: AppState, ov: Extract<Overlay, { kind: "secrets" }>): string[] {
+  const keys = new Set<string>();
+  for (const t of ov.targets) {
+    const m = state.machines.get(t.machine);
+    const rec = ov.scope === "project" ? m?.projects.get(t.ownerId) : m?.threads.get(t.ownerId);
+    for (const k of rec?.secretKeys ?? []) keys.add(k);
+  }
+  return [...keys].sort();
+}
 
 export interface PickOption { id: string; label: string; hint?: string; }
 
@@ -935,6 +974,23 @@ export class Store {
       }
     }
     if (moved) { this.config.prefs.expanded = this.state.expanded; this.persist(); }
+  }
+
+  /**
+   * Set or remove secrets, on every machine the panel names (#126).
+   *
+   * The values leave this process for one destination, the daemon that runs
+   * the work; nothing here keeps a copy, and the panel reads names alone
+   * afterwards.
+   */
+  async setSecrets(scope: SecretScope, targets: SecretTarget[], writes: SecretWrite[]): Promise<boolean> {
+    const errors = await Promise.all(targets.map((t) => this.threadCommand(
+      scope === "project"
+        ? { type: "project.setSecrets", projectId: t.ownerId, secrets: writes }
+        : { type: "thread.setSecrets", threadId: t.ownerId, secrets: writes },
+      t.machine,
+    )));
+    return errors.every((e) => e === null);
   }
 
   /** Take a machine out of a project's pool: the project and its threads go from that machine. */

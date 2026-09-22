@@ -119,6 +119,7 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `n` / `N` | sidebar | new thread (asks worktree vs. checkout in a repo) / straight to a worktree from HEAD |
 | `a` | sidebar | add a project: pick a repository, the branch it works from, and the machines that clone it |
 | `b` | sidebar | change the branch a project's threads start from and its pull requests target |
+| `e` | sidebar | secrets: the environment a project's threads work in, or one thread's own. The agent uses them by name and never reads a value |
 | `m` | sidebar | move thread to another machine |
 | `r` `x` `D` | sidebar | rename, archive, delete |
 | `enter` / `ctrl+j` | composer | send (a turn already running picks it up at its next tool call) / newline |
@@ -139,6 +140,20 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 The conversation is never focused — `cmd` is its modifier, so scrolling works mid-sentence.
 `cmd` needs a terminal that speaks the kitty keyboard protocol (kitty, Ghostty, WezTerm,
 iTerm2 ≥ 3.5); everywhere else use `pgup`/`pgdn`, the mouse wheel, and `d` in the sidebar.
+
+## Secrets
+
+An agent that has to call an API needs the credential, and a credential you paste into the
+composer is in the transcript for ever. So covey holds the value and gives the agent the
+name. Press `e` on a project and add `STRIPE_KEY`; every thread of that project then starts
+with it in its environment, and the agent writes `$STRIPE_KEY` into a script or a header.
+Press `e` on a thread to set one for that thread alone.
+
+`covey env` prints the names the thread can use. No client and no command prints a value:
+covey puts it in the session's environment, and takes it back out of anything the session
+says, so a stray `printenv` writes `[secret STRIPE_KEY]` in the transcript. It is not a
+sandbox — an agent told to print a value can still print it to its own screen — but covey
+does not write it down.
 
 ## Dependency policy: the 7-day rule
 
