@@ -175,12 +175,48 @@ test("project.update moves the base, fetches the branch first, and null returns 
   assert.equal("baseBranch" in back, false, "the row reads as it did before the field existed");
 });
 
-test("a second clone of the repository is refused whatever branch it names, and the message says which base the first has", async (t) => {
+test("one repository on two branches is two projects, sharing one clone, each thread on its own base", async (t) => {
+  const remote = await scratchRemote();
+  t.after(remote.drop);
+  const e = engineOn();
+  t.after(e.drop);
+  const onFeature = await remote.pushBranch("feature", "the feature so far");
+  const onMain = await remote.push("main moves on");
+  assert.notEqual(onFeature, onMain);
+
+  await e.send({ type: "project.create", url: remote.url, baseBranch: "feature" });
+  await e.send({ type: "project.create", url: remote.url });
+  const projects = e.engine.shellSnapshot().projects;
+  assert.equal(projects.length, 2, "the branch and the default branch are two projects");
+  const feature = projects.find((p) => p.baseBranch === "feature")!;
+  const main = projects.find((p) => p.baseBranch === undefined)!;
+  assert.equal(feature.workspaceRoot, main.workspaceRoot, "one bare clone serves both");
+
+  // Each project branches its threads from its own base, so the reader can
+  // build a feature over many threads and still open a thread on `main`.
+  const a = randomUUID();
+  const b = randomUUID();
+  await e.send({ type: "thread.create", projectId: feature.id, threadId: a, sessionId: randomUUID() });
+  await e.send({ type: "thread.create", projectId: main.id, threadId: b, sessionId: randomUUID() });
+  assert.equal(await head(e.db.getThread(a)!.worktreePath!), onFeature);
+  assert.equal(await head(e.db.getThread(b)!.worktreePath!), onMain);
+});
+
+test("a second project on a base another one already works from is refused, on create and on update", async (t) => {
   const remote = await scratchRemote();
   t.after(remote.drop);
   const e = engineOn();
   t.after(e.drop);
   await remote.pushBranch("feature", "x");
   await e.send({ type: "project.create", url: remote.url, baseBranch: "feature" });
-  await assert.rejects(e.send({ type: "project.create", url: remote.url }), (err: EngineError) => err.code === "exists" && / on feature$/.test(err.message));
+  await assert.rejects(e.send({ type: "project.create", url: remote.url, baseBranch: "feature" }), (err: EngineError) => err.code === "exists" && / on feature$/.test(err.message));
+
+  await e.send({ type: "project.create", url: remote.url });
+  await assert.rejects(e.send({ type: "project.create", url: remote.url }), (err: EngineError) => err.code === "exists");
+  assert.equal(e.engine.shellSnapshot().projects.length, 2);
+
+  // Moving one project onto the other's base would fold the two into one row.
+  const main = e.engine.shellSnapshot().projects.find((p) => p.baseBranch === undefined)!;
+  await assert.rejects(e.send({ type: "project.update", projectId: main.id, baseBranch: "feature" }), (err: EngineError) => err.code === "exists" && /already works from feature/.test(err.message));
+  assert.equal(e.db.getProject(main.id)!.baseBranch, undefined, "a refused move changes nothing");
 });

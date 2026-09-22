@@ -132,7 +132,7 @@ function twoMachines() {
 async function runOf(store: Store, tasks: string, runId?: string) {
   const id = await store.createRun({
     machine: MAC, name: "covey issues", goal: "close the backlog",
-    tasks: parseTaskList(tasks), repositoryIdentity: "github.com/dylandotfarm/covey", runId,
+    tasks: parseTaskList(tasks), pool: "github.com/dylandotfarm/covey", runId,
   });
   assert.ok(id, "the run was created");
   return id!;

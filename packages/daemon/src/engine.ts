@@ -392,12 +392,18 @@ export class Engine {
         const baseBranch = cmd.baseBranch?.trim() || undefined;
         if (baseBranch !== undefined && !(await isBranchName(baseBranch))) throw new EngineError("no_branch", `${baseBranch} is not a branch name`);
         const identity = normaliseRemote(url);
-        // One clone per repository. A `checkout` row of the same repository
-        // from before projects were clones does not count: the clone goes in
-        // beside it, the sidebar shows the two as one project, and new threads
-        // prefer the clone. The old row keeps its threads until the reader
-        // removes it.
-        const dup = this.db.listProjects().find((p) => p.repositoryIdentity === identity && p.kind === "clone");
+        // One clone per repository and base branch. Two projects of one
+        // repository that work from different branches are two projects: each
+        // branches its worktrees from its own base and targets it with every
+        // pull request, so the reader must be able to tell them apart. They
+        // share one bare clone on disk, which `cloneOnce` makes once.
+        //
+        // A `checkout` row of the same repository from before projects were
+        // clones does not count: the clone goes in beside it, the sidebar
+        // shows the two as one project, and new threads prefer the clone. The
+        // old row keeps its threads until the reader removes it.
+        const samePool = (p: Project) => p.repositoryIdentity === identity && p.kind === "clone" && (p.baseBranch ?? null) === (baseBranch ?? null);
+        const dup = this.db.listProjects().find(samePool);
         if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}${dup.baseBranch ? ` on ${dup.baseBranch}` : ""}`);
         const root = join(this.projectsDir, projectSlug(identity), "repo.git");
         const cloned = await this.cloneOnce(url, root);
@@ -405,8 +411,10 @@ export class Engine {
         // The clone fetched every branch, so the base is checked here, once,
         // and a project that would have nothing to branch from is never made.
         if (baseBranch !== undefined && !(await remoteHasBranch(root, baseBranch))) throw new EngineError("no_branch", `${identity} has no branch ${baseBranch}`);
-        // Two creates for one repository may have waited on the same clone.
-        const raced = this.db.listProjects().find((p) => p.repositoryIdentity === identity && p.kind === "clone");
+        // Two creates for one repository and base may have waited on the same
+        // clone. A create for another base of it is not a race: it is the
+        // second project, and it goes in.
+        const raced = this.db.listProjects().find(samePool);
         if (raced) return this.db.shellSeq();
         const p: Project = {
           id: randomUUID(), title: cmd.title ?? basename(identity), workspaceRoot: root,
@@ -424,6 +432,11 @@ export class Engine {
         if (cmd.defaultModel !== undefined) p.defaultModel = cmd.defaultModel;
         if (cmd.baseBranch !== undefined) {
           const base = cmd.baseBranch?.trim() || null;
+          // Two projects of one repository on one base are one row in the
+          // sidebar, and a new thread could land on either. Refuse the move
+          // and name the project that already holds the base.
+          const clash = p.repositoryIdentity !== null && this.db.listProjects().find((q) => q.id !== p.id && q.repositoryIdentity === p.repositoryIdentity && (q.baseBranch ?? null) === base);
+          if (clash) throw new EngineError("exists", `${clash.title} already works from ${base ?? "the remote's default branch"}`);
           if (base !== null) {
             if (!(await isBranchName(base))) throw new EngineError("no_branch", `${base} is not a branch name`);
             // Fetch it first: the branch may be newer than the last fetch. A

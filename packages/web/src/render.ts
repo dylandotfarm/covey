@@ -336,7 +336,12 @@ export class Renderer {
       this.list.append(h("div", { class: "project" },
         h("div", { class: "project-row", onclick: () => this.a.toggleFold(row.key) },
           h("span", { class: "chevron" }, folded ? "›" : "⌄"),
-          h("span", { class: "title" }, row.title, showMachine && row.homes.length ? h("small", { class: "homes" }, ` ${row.homes.map((x) => x.machineName).join(" · ")}`) : null),
+          // A row that works from a named branch says which. Two rows of one
+          // repository differ only in the base, and the reader has to see
+          // whether this thread starts from `main` or from a feature branch.
+          h("span", { class: "title" }, row.title,
+            row.base ? h("small", { class: "base" }, ` · ${row.base}`) : null,
+            showMachine && row.homes.length ? h("small", { class: "homes" }, ` ${row.homes.map((x) => x.machineName).join(" · ")}`) : null),
           count,
           homes.length === 0 ? null : h("button", { class: "new", type: "button", "aria-label": "New thread", onclick: (ev) => {
             ev.stopPropagation();

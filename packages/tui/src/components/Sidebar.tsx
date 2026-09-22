@@ -152,10 +152,19 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // then carry a machine each.
       const machines = poolMachines(row.pool ?? []);
       const pool = machines > 1 ? ` ${machines}⧉` : "";
+      // A project that works from a named branch says which. Two projects of
+      // one repository are one row each, one per base branch, and both carry
+      // the same title — the base is the only thing that tells the work on
+      // `main` from the work on a feature branch. It takes half the room at
+      // most, so the title still reads.
+      const room = Math.max(1, width - 5 - num.length - pool.length);
+      const branch = row.project!.baseBranch;
+      const base = branch ? ` · ${truncate(branch, Math.max(3, Math.floor(room / 2) - 3))}` : "";
       return (
         <Box paddingLeft={1} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
-          <Text color={T.text} bold> {truncate(row.project!.title, width - 5 - num.length - pool.length)}</Text>
+          <Text color={T.text} bold> {truncate(row.project!.title, Math.max(1, room - base.length))}</Text>
+          <Text color={T.subtle}>{base}</Text>
           <Text color={T.subtle}>{pool}</Text>
           <Text color={T.faint}> {num}</Text>
         </Box>

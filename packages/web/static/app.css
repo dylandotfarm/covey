@@ -45,6 +45,9 @@ a { color: var(--accent); }
 .project-row .chevron { width: 14px; color: var(--subtle); }
 .project-row .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-row .title .homes { color: var(--faint); text-transform: none; letter-spacing: 0; font-size: 12px; }
+/* The base branch of the project. Never uppercased: a branch name is what
+   git stores, and `Main` is not `main`. */
+.project-row .title .base { color: var(--subtle); text-transform: none; letter-spacing: 0; font-size: 12px; }
 .chooser { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 4px 16px 10px 40px; }
 .chooser .label { color: var(--subtle); font-size: 13px; }
 .chooser button { min-height: 34px; padding: 4px 12px; }

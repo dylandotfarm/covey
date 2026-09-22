@@ -255,3 +255,27 @@ test("two rows of one repository on one machine are one machine, not a pool of t
   const t = rows.find((r) => r.kind === "thread")!;
   assert.equal(t.tag, undefined, "so a thread carries no machine tag: there is no other machine to tell it from");
 });
+
+test("one repository on two base branches is two project rows, and each places its own threads", () => {
+  const identity = "github.com/dylandotfarm/covey";
+  const clone = { kind: "clone", remoteUrl: "git@github.com:dylandotfarm/covey.git" } as const;
+  const { store } = storeWith([machine(PI, "pi", "connected", [
+    project("p-main", "covey", identity, clone),
+    project("p-feat", "covey", identity, { ...clone, baseBranch: "ui-rework" }),
+  ], [thread("on-main", "p-main", "2026-01-03T00:00:00Z"), thread("on-feat", "p-feat", "2026-01-04T00:00:00Z")])]);
+
+  // The project on the remote's default branch keeps the key it always had,
+  // so a fold the reader made before base branches existed still applies.
+  const groups = projectGroups(store.state as AppState);
+  assert.deepEqual(groups.map((g) => [g.key, g.base]), [[identity, null], [`${identity}#ui-rework`, "ui-rework"]]);
+  assert.deepEqual(groups.map((g) => g.members.map((x) => x.projectId)), [["p-main"], ["p-feat"]]);
+
+  const projectRows = sidebarRows(store.state as AppState).filter((r) => r.kind === "project");
+  assert.equal(projectRows.length, 2, "the work on main and the work on the branch are two rows");
+  assert.deepEqual(projectRows.map((r) => r.project!.baseBranch), [undefined, "ui-rework"]);
+
+  // And neither pool can take the other's work: a thread must start from the
+  // base its own project names.
+  assert.deepEqual(store.placementMachines(identity).map((m) => m.projectId), ["p-main"]);
+  assert.deepEqual(store.placementMachines(`${identity}#ui-rework`).map((m) => m.projectId), ["p-feat"]);
+});

@@ -68,7 +68,13 @@
   each thread's worktree sits beside it. `projectsDir` is `COVEY_PROJECTS`, else
   `<COVEY_HOME>/projects` when `COVEY_HOME` is set, else `~/.covey/projects`. A test that makes a project clones a
   scratch remote from `packages/daemon/src/scratch.ts`; nothing in `pnpm test` reaches a
-  real remote.
+  real remote. What makes two projects one row is the repository *and* the base branch —
+  `projectPool` in `@covey/client`, which the TUI (`projectGroups`, `placementMachines`) and
+  the web client (`projectKey`) both key on. The same repository on `main` and on a feature
+  branch is two projects that share one bare clone, and the daemon refuses only a second
+  project on a base another one already holds. Never key any of this on
+  `repositoryIdentity` alone: a thread would start from the wrong commit and open its pull
+  request against the wrong base.
 - A covey session knows which thread it is: the daemon puts `COVEY_THREAD_ID` and
   `COVEY_PROJECT_ID` in the environment of every Claude session it starts. Pass the thread
   id back as `threadId` at `hello` and every thread and every run that connection creates

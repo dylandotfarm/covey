@@ -3,6 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { projectPool } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
@@ -485,14 +486,15 @@ export function App({ store }: { store: Store }) {
     const g = at.machine && at.projectId ? groupOfProject(state, at.machine, at.projectId) : null;
     const url = g?.members.map((x) => x.project.remoteUrl).find(Boolean);
     if (!g || !url) { store.notify("select a project that covey cloned from a URL", "error"); return; }
-    // Machines that hold a clone of it, and machines that will once they
-    // answer. A machine with only a checkout from before is offered: the
-    // clone goes in beside it.
-    const inPool = [...g.members.filter((x) => x.project.kind === "clone").map((x) => x.machine), ...store.pendingFor(url)];
-    const options = machineOptions(inPool);
-    if (options.length === 0) { store.notify("every machine already has this project"); return; }
     // The new clone works from the branch the pool does, so the pool agrees.
     const baseBranch = g.members.map((x) => x.project.baseBranch).find(Boolean);
+    // Machines that hold a clone of it on this base, and machines that will
+    // once they answer. A machine with only a checkout from before is
+    // offered: the clone goes in beside it. So is a machine that holds the
+    // repository on another base — that is another project.
+    const inPool = [...g.members.filter((x) => x.project.kind === "clone").map((x) => x.machine), ...store.pendingFor(url, baseBranch)];
+    const options = machineOptions(inPool);
+    if (options.length === 0) { store.notify("every machine already has this project"); return; }
     openPickMany(`Add ${g.title} to which machines?`, options, [], (ids) => {
       store.setOverlay(null);
       if (ids.length) void store.createProjectOn(ids, url, g.title, baseBranch);
@@ -535,15 +537,18 @@ export function App({ store }: { store: Store }) {
    */
   const newThread = async (machine = contextMachine, projectId = contextProject) => {
     if (!machine || !projectId) { store.notify("select a project first", "error"); return; }
-    const identity = project(machine, projectId)?.repositoryIdentity ?? null;
+    const p = project(machine, projectId);
+    const pool = p ? projectPool(p) : null;
     // A project with no remote is on one machine only; a pooled one is ranked
-    // the way a run's tasks are placed, fastest with room first.
-    if (!identity) {
+    // the way a run's tasks are placed, fastest with room first. A project of
+    // the same repository on another base branch is another pool: a thread
+    // must start from the base its own project names.
+    if (!pool) {
       if (state.machines.get(machine)?.conn !== "connected") { store.notify("that machine is not connected", "error"); return; }
       await store.createThread(machine, projectId);
       return;
     }
-    const ready = store.rankedPool(identity).filter((m) => m.projectId !== null);
+    const ready = store.rankedPool(pool).filter((m) => m.projectId !== null);
     if (ready.length === 0) { store.notify("no connected machine has this project", "error"); return; }
     if (ready.length === 1) { await store.createThread(ready[0]!.key, ready[0]!.projectId!); return; }
     const load = store.machineLoad();
@@ -567,10 +572,17 @@ export function App({ store }: { store: Store }) {
     openPick("Move thread to machine", targets.map((k) => ({ id: k, label: state.machines.get(k)!.info!.name, hint: state.machines.get(k)!.info!.os })), (mk) => {
       const m = state.machines.get(mk)!;
       const projects = [...m.projects.values()];
-      const same = srcProject?.repositoryIdentity ? projects.filter((p) => p.repositoryIdentity === srcProject.repositoryIdentity) : [];
+      // The destination pool first: the same repository on the same base, so
+      // the thread keeps the branch it started from. A project of the same
+      // repository on another base comes next, with that base named, because
+      // a move there changes what the thread's pull request targets.
+      const srcPool = srcProject ? projectPool(srcProject) : null;
+      const same = srcPool ? projects.filter((p) => projectPool(p) === srcPool) : [];
+      const kin = srcProject?.repositoryIdentity ? projects.filter((p) => !same.includes(p) && p.repositoryIdentity === srcProject.repositoryIdentity) : [];
       const opts: PickOption[] = [
         ...same.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: "same repo ✓" })),
-        ...projects.filter((p) => !same.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: p.workspaceRoot })),
+        ...kin.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: `same repo · from ${p.baseBranch ?? "the default branch"}` })),
+        ...projects.filter((p) => !same.includes(p) && !kin.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: p.workspaceRoot })),
         ...(same.length === 0 && srcProject?.repositoryIdentity ? [{ id: "clone", label: `Clone ${srcProject.repositoryIdentity} there`, hint: m.info?.projectsDir ?? "" }] : []),
       ];
       openPick(`Destination project on ${m.info!.name}`, opts, (pid) => {
@@ -768,7 +780,7 @@ export function App({ store }: { store: Store }) {
       if (error) store.notify(error, "error");
     }
     setOvCursor(0);
-    await store.createRun({ machine, name: truncate(goal, 48), goal, tasks: full, repositoryIdentity: p?.repositoryIdentity ?? null });
+    await store.createRun({ machine, name: truncate(goal, 48), goal, tasks: full, pool: p ? projectPool(p) : null });
   };
 
   /** Come back to the run panel after a pick, with the cursor where it was. */
@@ -908,12 +920,12 @@ export function App({ store }: { store: Store }) {
     }, "", "an issue number, or a line of text", () => backToRun(ov, at));
   };
 
-  /** The repository a run works in, from the project its first member is in. */
+  /** The pool a run works in, from the project its first member is in. */
   const runRepository = (run: Run): string | null => {
     for (const m of run.members) {
       const mk = store.machineKeyOf(m.machineId);
       const p = mk && m.projectId ? state.machines.get(mk)?.projects.get(m.projectId) : null;
-      if (p) return p.repositoryIdentity;
+      if (p) return projectPool(p);
     }
     return null;
   };

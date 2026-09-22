@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { DEFAULT_PORT, isFinalMemberState, threadIsBusy } from "@covey/protocol";
 import WebSocket from "ws";
-import { MachineClient, type ClientOptions, type ConnState } from "@covey/client";
+import { MachineClient, projectPool, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
@@ -834,7 +834,9 @@ export class Store {
     const name = machineLabel(this.state, machine);
     const extra = { ...(title ? { title } : {}), ...(baseBranch ? { baseBranch } : {}) };
     if (this.state.machines.get(machine)?.conn !== "connected") {
-      if (!this.pending.some((p) => p.machine === machine && p.url === url)) {
+      // Keyed by the base as well as the URL: one repository on two branches
+      // is two projects, so a machine can owe two clones of one URL.
+      if (!this.pending.some((p) => p.machine === machine && p.url === url && (p.baseBranch ?? null) === (baseBranch ?? null))) {
         this.pending.push({ machine, url, ...extra });
         this.persist();
       }
@@ -889,9 +891,9 @@ export class Store {
     this.persist();
   }
 
-  /** The machines a repository is still to be cloned on, by machine key. */
-  pendingFor(url: string): string[] {
-    return this.pending.filter((p) => p.url === url).map((p) => p.machine);
+  /** The machines a repository is still to be cloned on for a base, by machine key. */
+  pendingFor(url: string, baseBranch?: string): string[] {
+    return this.pending.filter((p) => p.url === url && (p.baseBranch ?? null) === (baseBranch ?? null)).map((p) => p.machine);
   }
 
   /**
@@ -916,15 +918,16 @@ export class Store {
 
   /**
    * Move the folds a project had under its old key, `<machine>:<project id>`,
-   * to the group key it has now, its repository identity. A fold the reader
-   * made before projects were pooled would otherwise open without a word,
-   * and the old key would sit in the config for ever.
+   * to the group key it has now, its pool key. A fold the reader made before
+   * projects were pooled would otherwise open without a word, and the old key
+   * would sit in the config for ever.
    */
   private adoptFolds(machine: string, projects: Project[]): void {
     let moved = false;
     for (const p of projects) {
-      if (!p.repositoryIdentity) continue;
-      for (const [from, to] of [[`${machine}:${p.id}`, p.repositoryIdentity], [`${machine}:${p.id}:archived`, archiveKey(p.repositoryIdentity)]] as const) {
+      const pool = projectPool(p);
+      if (!pool) continue;
+      for (const [from, to] of [[`${machine}:${p.id}`, pool], [`${machine}:${p.id}:archived`, archiveKey(pool)]] as const) {
         if (!(from in this.state.expanded)) continue;
         if (!(to in this.state.expanded)) this.state.expanded[to] = this.state.expanded[from]!;
         delete this.state.expanded[from];
@@ -1333,14 +1336,16 @@ export class Store {
    * counts as one core and one member at a time, because guessing bigger is
    * how a Pi ends up with ten agents on it.
    */
-  placementMachines(repositoryIdentity: string | null): PlacementMachine[] {
+  placementMachines(pool: string | null): PlacementMachine[] {
     const out: PlacementMachine[] = [];
     for (const key of this.state.order) {
       const m = this.state.machines.get(key);
       if (!m || m.conn !== "connected" || !m.info) continue;
       // A machine may hold the repository twice: a clone, and a checkout from
-      // before projects were clones. Work goes to the clone.
-      const held = [...m.projects.values()].filter((p) => repositoryIdentity ? p.repositoryIdentity === repositoryIdentity : false);
+      // before projects were clones. Work goes to the clone. A project of the
+      // same repository on another base branch is not in this pool at all —
+      // its threads start from another commit.
+      const held = [...m.projects.values()].filter((p) => pool ? projectPool(p) === pool : false);
       const project = held.find((p) => p.kind === "clone") ?? held[0];
       if (!project) continue;
       const r = m.info.resources;
@@ -1366,8 +1371,8 @@ export class Store {
    * first one unless the reader says otherwise, so a thread and a run land
    * by one rule.
    */
-  rankedPool(repositoryIdentity: string | null): PlacementMachine[] {
-    return rankMachines(this.placementMachines(repositoryIdentity), this.membersPerMachine());
+  rankedPool(pool: string | null): PlacementMachine[] {
+    return rankMachines(this.placementMachines(pool), this.membersPerMachine());
   }
 
   /** What each machine carries in run members, by machine id. */
@@ -1449,14 +1454,15 @@ export class Store {
     name: string;
     goal: string;
     tasks: RunTask[];
-    repositoryIdentity: string | null;
+    /** The pool its members work in — `projectPool` of the project. */
+    pool: string | null;
     briefTemplate?: string;
     /** The run's id. Supplied only by a test that needs a known one. */
     runId?: string;
   }): Promise<string | null> {
     const client = this.clients.get(o.machine);
     if (!client) { this.notify("start a run from a connected machine", "error"); return null; }
-    const machines = this.placementMachines(o.repositoryIdentity);
+    const machines = this.placementMachines(o.pool);
     if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return null; }
     const runId = o.runId ?? randomUUID();
     // Placed against what every other run's live members already hold, the same
@@ -1554,13 +1560,13 @@ export class Store {
     this.notify(`${m.task.key} → ${to.name}`, "success");
   }
 
-  /** The repository a run's members work in, from the project of its first member. */
+  /** The pool a run's members work in, from the project of its first member. */
   private runRepository(machine: string, runId: string): string | null {
     const run = this.run(machine, runId);
     for (const m of run?.members ?? []) {
       const key = this.machineKeyOf(m.machineId);
       const p = key && m.projectId ? this.state.machines.get(key)?.projects.get(m.projectId) : null;
-      if (p) return p.repositoryIdentity;
+      if (p) return projectPool(p);
     }
     return null;
   }
@@ -1860,18 +1866,26 @@ export function machineLabel(s: AppState, key: string): string {
 
 /**
  * A repository as the sidebar shows it: one row, however many machines hold
- * it. Projects with the same normalised remote are one group. A project with
+ * it. Projects with the same normalised remote *and* the same base branch are
+ * one group — `projectPool` in `@covey/client` holds that rule. A project with
  * no remote is a group of its own, keyed by machine and id, so it never
  * merges with another machine's directory of the same name.
+ *
+ * Two projects of one repository that work from different branches are two
+ * groups. They are different work: a thread in one branches from `main`, a
+ * thread in the other from a feature branch, and each opens its pull requests
+ * against its own base.
  */
 export interface ProjectGroup {
   /**
-   * The fold key of the project and of its archived folder: the repository
-   * identity, or `<machine>:<project id>` for a project with none, which is
-   * the key a project fold always had.
+   * The fold key of the project and of its archived folder: the pool key, or
+   * `<machine>:<project id>` for a project with no remote, which is the key a
+   * project fold always had.
    */
   key: string;
   title: string;
+  /** The branch its threads start from, or null for the remote's default. */
+  base: string | null;
   members: PoolMember[];
 }
 
@@ -1886,25 +1900,30 @@ export function projectGroups(s: AppState): ProjectGroup[] {
     const m = s.machines.get(key);
     if (!m) continue;
     for (const p of m.projects.values()) {
-      const gk = p.repositoryIdentity ?? `${key}:${p.id}`;
-      const g = groups.get(gk) ?? { key: gk, title: p.title, members: [] };
+      const gk = projectPool(p) ?? `${key}:${p.id}`;
+      const g = groups.get(gk) ?? { key: gk, title: p.title, base: p.baseBranch ?? null, members: [] };
       g.members.push({ machine: key, projectId: p.id, project: p });
       groups.set(gk, g);
     }
   }
-  return [...groups.values()].sort((a, b) => a.title.localeCompare(b.title));
+  // Two groups of one repository carry one title, so the base breaks the tie
+  // and the order of the sidebar is the same on every rebuild. The group on
+  // the remote's default branch sorts first.
+  return [...groups.values()].sort((a, b) => a.title.localeCompare(b.title) || (a.base ?? "").localeCompare(b.base ?? ""));
 }
 
 /** The group a project on a machine belongs to, or null when it is not there. */
 export function groupOfProject(s: AppState, machine: string, projectId: string): ProjectGroup | null {
   const p = s.machines.get(machine)?.projects.get(projectId);
   if (!p) return null;
-  if (!p.repositoryIdentity) return { key: `${machine}:${projectId}`, title: p.title, members: [{ machine, projectId, project: p }] };
+  const pool = projectPool(p);
+  const base = p.baseBranch ?? null;
+  if (!pool) return { key: `${machine}:${projectId}`, title: p.title, base, members: [{ machine, projectId, project: p }] };
   const members: PoolMember[] = [];
   for (const key of s.order) {
-    for (const q of s.machines.get(key)?.projects.values() ?? []) if (q.repositoryIdentity === p.repositoryIdentity) members.push({ machine: key, projectId: q.id, project: q });
+    for (const q of s.machines.get(key)?.projects.values() ?? []) if (projectPool(q) === pool) members.push({ machine: key, projectId: q.id, project: q });
   }
-  return { key: p.repositoryIdentity, title: members[0]!.project.title, members };
+  return { key: pool, title: members[0]!.project.title, base, members };
 }
 
 /** Add `value` to the list at `key`, making the list on the first add. */
