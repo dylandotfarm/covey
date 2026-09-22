@@ -6,9 +6,9 @@
  * thread for the paint and the keyboard.
  */
 import { MachineClient, uuid } from "@covey/client";
-import { WEB_CLIENT, type ApprovalItem, type FleetMember, type QuestionItem } from "@covey/protocol";
+import { WEB_CLIENT, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
-import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, emptyState, itemHash, openView, primaryMachine, routeOf, threadHash, type MachineSlot, type Route } from "./state.js";
+import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, emptyState, itemHash, openView, primaryMachine, routeOf, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
 
 const TOKEN_KEY = "covey.token";
 
@@ -151,6 +151,8 @@ function loadItem() {
 
 /** What the hash means, applied. */
 function applyRoute(r: Route) {
+  // The sheet belongs to the screen it was opened from. The screen is changing.
+  state.sheet = null;
   if (!r) { enteredFromList = false; enteredItem = false; state.item = null; leaveThread(); schedule(); return; }
   if (!clients.has(r.machine)) { pendingRoute = r; return; }
   if (r.kind === "thread") { state.item = null; showThread(r.machine, r.threadId); schedule(); return; }
@@ -225,7 +227,7 @@ const actions: Actions = {
   },
   retry() { for (const c of clients.values()) if (c.state === "offline" || c.state === "error") c.retry(); schedule(); },
   setDraft(machine, threadId, text) { state.drafts.set(`${machine}:${threadId}`, text); },
-  toggleAddresses() { state.showAddresses = !state.showAddresses; schedule(); },
+  toggleAddresses() { state.showAddresses = !state.showAddresses; state.sheet = null; schedule(); },
   updateMachine(machine) {
     const slot = state.machines.get(machine);
     const client = clients.get(machine);
@@ -248,7 +250,82 @@ const actions: Actions = {
   archiveThread(machine, threadId) {
     clients.get(machine)?.command({ type: "thread.archive", threadId, archived: true }).catch(fail);
   },
+  openSheet(target) { state.sheet = { target, page: "" }; schedule(); },
+  closeSheet() { state.sheet = null; schedule(); },
+  sheetPage(page) { if (state.sheet) { state.sheet.page = page; schedule(); } },
+  sheetChoose(id) {
+    const sh = state.sheet;
+    if (!sh) return;
+    const client = clients.get(sh.target.machine);
+    if (!client) return;
+    const cmd = sheetCommand(sh.target, sh.page, id);
+    if (!cmd) return;
+    // Turning the web server off on a machine takes the phone client with it.
+    if (cmd.type === "machine.settings" && cmd.webEnabled === false
+      && !confirm(`Stop the web server on ${state.machines.get(sh.target.machine)?.name ?? "that machine"}? Nothing serves the phone client from there afterwards.`)) return;
+    state.sheet = null;
+    schedule();
+    client.command(cmd).catch(fail);
+  },
+  sheetAct(id) {
+    const sh = state.sheet;
+    if (!sh || sh.target.kind !== "thread") return;
+    const { machine, threadId } = sh.target;
+    // A row that opens an issue or a pull request (#115). It needs no client:
+    // the item screen reads the item itself.
+    const number = viewRowNumber(id);
+    if (number !== null) {
+      const projectId = state.machines.get(machine)?.threads.get(threadId)?.projectId;
+      if (!projectId) return;
+      state.sheet = null;
+      actions.openItem(machine, projectId, number);
+      return;
+    }
+    const client = clients.get(machine);
+    if (!client) return;
+    if (id === "rename") {
+      const now = state.machines.get(machine)?.threads.get(threadId)?.title ?? "";
+      const title = prompt("Name this conversation", now)?.trim();
+      if (!title || title === now) return;
+      state.sheet = null;
+      schedule();
+      client.command({ type: "thread.rename", threadId, title }).catch(fail);
+      return;
+    }
+    if (id === "archive") {
+      if (!confirm("Archive this conversation? It leaves the list; the TUI brings it back.")) return;
+      state.sheet = null;
+      schedule();
+      client.command({ type: "thread.archive", threadId, archived: true }).catch(fail);
+      // Nothing is left on screen to archive, so the list comes back.
+      actions.back();
+    }
+  },
 };
+
+/**
+ * The command one choice on a sheet stands for, or null when the page names no
+ * setting. A model of `""` clears the setting, and the thread or the machine
+ * falls back to what the user's own Claude configuration says.
+ */
+function sheetCommand(target: SheetTarget, page: string, id: string): Command | null {
+  if (target.kind === "thread") {
+    const threadId = target.threadId;
+    switch (page) {
+      case "model": return { type: "thread.setModel", threadId, model: id || null };
+      case "mode": return { type: "thread.setPermissionMode", threadId, mode: id as PermissionMode };
+      case "streaming": return { type: "thread.setStreaming", threadId, streaming: id === "on" };
+      default: return null;
+    }
+  }
+  switch (page) {
+    case "model": return { type: "machine.settings", defaultModel: id || null };
+    case "mode": return { type: "machine.settings", defaultPermissionMode: (id || null) as PermissionMode | null };
+    case "streaming": return { type: "machine.settings", defaultStreaming: id === "on" };
+    case "web": return { type: "machine.settings", webEnabled: id === "on" };
+    default: return null;
+  }
+}
 
 const viewClient = () => (state.view ? clients.get(state.view.machine) : undefined);
 

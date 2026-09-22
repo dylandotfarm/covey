@@ -153,16 +153,6 @@ details.tool[open] .summary { white-space: normal; overflow-wrap: anywhere; }
 a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); }
 .thread-header .sub .refs button.ref { pointer-events: auto; }
 
-/* ---- the sheet a hold on a thread row raises (#115) ---- */
-.sheet { position: fixed; inset: 0; z-index: 9; display: flex; align-items: flex-end; background: rgba(0, 0, 0, .55); }
-.sheet-panel { width: 100%; display: flex; flex-direction: column; gap: 6px; padding: 6px 10px calc(10px + var(--sab)); background: var(--surface); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; box-shadow: 0 -8px 32px rgba(0, 0, 0, .5); }
-.sheet-title { padding: 8px 6px 2px; font-size: 13px; color: var(--subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.sheet-row { min-height: 48px; padding: 0 14px; text-align: left; font-size: 16px; border-radius: 12px; color: var(--accent); }
-.sheet-row.pull { color: var(--awaiting); }
-.sheet-row.archive { color: var(--warning); }
-.sheet-row.cancel { color: var(--muted); background: none; border-color: transparent; }
-.sheet-row:active { background: var(--border); }
-
 /* ---- one issue or pull request ---- */
 .item { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .item .thread-header .refresh { background: none; border: none; font-size: 22px; color: var(--accent); padding: 0 8px; min-height: 0; }
@@ -230,6 +220,38 @@ video.media { min-width: 160px; }
 .send, .stop { width: 40px; height: 40px; padding: 0; border-radius: 50%; flex: none; }
 .send { background: var(--accent); border-color: var(--accent); color: #fff; font-size: 20px; }
 .stop { border-color: var(--danger); color: var(--danger); font-size: 14px; }
+/* ---- the settings sheet (#117) ---- */
+/* One sheet for both: the conversation's own settings, and a machine's
+   defaults. It sits at the foot of the page, where a thumb reaches. */
+.opts { background: none; border: none; color: var(--muted); font-size: 22px; line-height: 1; padding: 0 12px; min-height: 40px; flex: none; }
+.opts:disabled { color: var(--faint); }
+.machine-card .opts { margin-left: 4px; padding: 0 4px; }
+.sheet { position: fixed; inset: 0; z-index: 6; background: rgba(0, 0, 0, .55); display: flex; align-items: flex-end; }
+.sheet-panel { width: 100%; max-height: 82dvh; overflow-y: auto; overscroll-behavior: contain; background: var(--surface); border-top: 1px solid var(--border); border-radius: 16px 16px 0 0; padding-bottom: calc(8px + var(--sab)); }
+@media (min-width: 900px) {
+  .sheet { align-items: center; justify-content: center; }
+  .sheet-panel { max-width: 460px; border-radius: 16px; border: 1px solid var(--border); }
+}
+.sheet-panel.opening { animation: sheet-up .16s ease-out; }
+@keyframes sheet-up { from { transform: translateY(16px); opacity: .4; } to { transform: none; opacity: 1; } }
+.sheet-head { display: flex; align-items: center; gap: 4px; padding: 8px 6px 8px 14px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); }
+.sheet-head .title { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-head .back, .sheet-head .close { background: none; border: none; color: var(--accent); padding: 0 10px; min-height: 36px; }
+.sheet-head .back { font-size: 26px; line-height: 1; margin-left: -8px; }
+.sheet-head .close { font-size: 17px; }
+.sheet-note { margin: 0; padding: 10px 14px 2px; font-size: 13px; color: var(--subtle); }
+.sheet-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: none; border: none; border-radius: 0; padding: 11px 14px; min-height: 54px; }
+.sheet-row + .sheet-row { border-top: 1px solid var(--surface-alt); }
+.sheet-row:active { background: var(--surface-alt); }
+.sheet-row .text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.sheet-row .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-row .hint { font-size: 13px; color: var(--subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-row .value { flex: 0 1 auto; color: var(--subtle); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sheet-row .chevron { flex: none; color: var(--faint); font-size: 18px; }
+.sheet-row .tick { flex: none; width: 18px; text-align: center; color: var(--accent); }
+.sheet-row.current .label { color: var(--accent); }
+.sheet-row.danger .label { color: #f8b4b4; }
+
 @media (min-width: 900px) {
   #app { max-width: 820px; margin: 0 auto; }
 }

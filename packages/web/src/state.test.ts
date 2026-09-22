@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import type { GitHubIssue, GitHubPullRequest, MachineInfo, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
-  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, threadHash, threadRefs, threadStatusLabel, threadTone,
+  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRowNumber,
+  threadHash, threadRefs, threadStatusLabel, threadTone,
 } from "./state.js";
 
 const info = (name: string): MachineInfo => ({
@@ -231,4 +232,140 @@ test("a GitHub attachment loads through the daemon with the page's token; anythi
   assert.equal(mediaKind("https://x.example/a.webm"), "video");
   assert.equal(mediaKind(a), "video", "a bare attachment is a video; an image comes in an image tag");
   assert.equal(mediaKind("https://x.example/page"), null);
+});
+
+// ---------------------------------------------------------------------------
+// The settings sheet (#117)
+// ---------------------------------------------------------------------------
+
+test("the conversation sheet says what the thread runs, and its pages tick what is in force", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [project("p", "alpha")], [
+    thread("t1", "p", { title: "fix the parser", model: "claude-opus-5", permissionMode: "acceptEdits", streaming: true }),
+  ]));
+  s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" };
+
+  assert.equal(sheetTitle(s, s.sheet), "fix the parser");
+  assert.deepEqual(sheetRows(s, s.sheet).map((r) => [r.id, r.value ?? ""]), [
+    ["model", "Opus 5"],
+    ["mode", "Auto"],
+    ["streaming", "On"],
+    ["rename", ""],
+    ["archive", ""],
+  ]);
+  // A row with no choices acts at once; the three settings open a page.
+  assert.deepEqual(sheetRows(s, s.sheet).filter((r) => r.choices).map((r) => r.id), ["model", "mode", "streaming"]);
+
+  s.sheet.page = "model";
+  assert.equal(sheetTitle(s, s.sheet), "Model");
+  const models = sheetChoices(s, s.sheet);
+  assert.equal(models[0]!.id, "", "the first row hands the choice back to Claude's own settings");
+  assert.deepEqual(models.filter((c) => c.current).map((c) => c.id), ["claude-opus-5"]);
+  assert.ok(models.some((c) => c.id === "claude-fable-5-1"), "every known model is offered");
+
+  // A thread always runs in one mode, so its page offers no "from Claude settings" row.
+  s.sheet.page = "mode";
+  const modes = sheetChoices(s, s.sheet);
+  assert.ok(modes.every((c) => c.id !== ""));
+  assert.deepEqual(modes.filter((c) => c.current).map((c) => c.id), ["acceptEdits"]);
+
+  s.sheet.page = "streaming";
+  assert.deepEqual(sheetChoices(s, s.sheet).filter((c) => c.current).map((c) => c.id), ["on"]);
+});
+
+test("the conversation sheet leads with the issue and the pull request a thread holds (#115)", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [project("p", "alpha")], [
+    thread("t1", "p", {
+      title: "fix the parser",
+      issue: { number: 94, title: null, url: null, takenAt: "2026-09-21T00:00:00Z" },
+      pullRequest: { number: 12, url: "u", branch: "b", base: "main", openedAt: "2026-09-21T00:00:00Z" },
+    }),
+  ]));
+  s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" };
+  const rows = sheetRows(s, s.sheet);
+  assert.deepEqual(rows.slice(0, 2).map((r) => [r.id, r.label]), [
+    ["view:94", "View issue #94"],
+    ["view:12", "View pull request #12"],
+  ]);
+  // Each one acts at once, and none of them opens a page of choices.
+  assert.ok(rows.slice(0, 2).every((r) => !r.choices));
+  assert.deepEqual(rows.slice(2).map((r) => r.id), ["model", "mode", "streaming", "rename", "archive"]);
+
+  assert.equal(viewRowNumber("view:94"), 94);
+  assert.equal(viewRowNumber("model"), null);
+  assert.equal(viewRowNumber("view:0"), null);
+  assert.equal(viewRowNumber("view:x"), null);
+});
+
+test("a thread with no model of its own reads as the machine's Claude settings, and streaming absent reads as off", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [project("p", "alpha")], [thread("t1", "p")]));
+  s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" };
+  const rows = sheetRows(s, s.sheet);
+  assert.equal(rows.find((r) => r.id === "model")!.value, "From Claude settings");
+  assert.equal(rows.find((r) => r.id === "streaming")!.value, "Off");
+  s.sheet.page = "streaming";
+  assert.deepEqual(sheetChoices(s, s.sheet).filter((c) => c.current).map((c) => c.id), ["off"]);
+});
+
+test("the machine sheet is the defaults new threads there inherit, and may hand each one back to Claude's settings", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  const m = info("box");
+  m.settings = { defaultModel: "claude-sonnet-5", defaultPermissionMode: null, defaultStreaming: true };
+  applyShellSnapshot(box, { seq: 1, machine: m, projects: [], threads: [] });
+  s.sheet = { target: { kind: "machine", machine: box.key }, page: "" };
+
+  assert.equal(sheetTitle(s, s.sheet), "box");
+  assert.deepEqual(sheetRows(s, s.sheet).map((r) => [r.id, r.value ?? ""]), [
+    ["model", "Sonnet 5"],
+    ["mode", "From Claude settings"],
+    ["streaming", "On"],
+  ]);
+  assert.match(sheetNote(s, s.sheet), /Every new thread on box/, "a default is not what a running thread has");
+  assert.equal(sheetNote(s, { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" }), "", "a conversation's own settings need no caption");
+
+  s.sheet.page = "mode";
+  const modes = sheetChoices(s, s.sheet);
+  assert.equal(modes[0]!.id, "", "a machine may hold no opinion on the mode");
+  assert.deepEqual(modes.filter((c) => c.current).map((c) => c.id), [""]);
+});
+
+test("the web server row is offered on a fleet machine and withheld from the one serving the page", () => {
+  const s = emptyState();
+  const here = addMachine(s, "ws://here:3790", "here", true);
+  const there = addMachine(s, "ws://there:3790", "there");
+  for (const [slot, name] of [[here, "here"], [there, "there"]] as const) {
+    const m = info(name);
+    m.settings = { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, webEnabled: name === "here" ? true : null };
+    applyShellSnapshot(slot, { seq: 1, machine: m, projects: [], threads: [] });
+  }
+  const ids = (key: string) => sheetRows(s, { target: { kind: "machine", machine: key }, page: "" }).map((r) => r.id);
+  assert.ok(!ids(here.key).includes("web"), "the page must not offer to close itself");
+  assert.deepEqual(ids(there.key), ["model", "mode", "streaming", "web"]);
+});
+
+test("the sheet's key changes with what the sheet says, and with nothing else", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [project("p", "alpha")], [thread("t1", "p", { model: "claude-opus-5" })]));
+  const sheet = { target: { kind: "thread" as const, machine: box.key, threadId: "t1" }, page: "" };
+  const before = sheetKey(s, sheet);
+  // A turn re-sending items changes nothing the sheet says.
+  assert.equal(sheetKey(s, sheet), before);
+  applyShellEvent(s, box, { kind: "thread.upserted", seq: 2, thread: thread("t1", "p", { model: "claude-haiku-4-5-20251001" }) });
+  assert.notEqual(sheetKey(s, sheet), before);
+});
+
+test("a sheet about a thread that is gone has nothing to show, and does not throw", () => {
+  const s = emptyState();
+  addMachine(s, "ws://box:3790", "box", true);
+  const sheet = { target: { kind: "thread" as const, machine: "ws://box:3790", threadId: "ghost" }, page: "model" };
+  assert.deepEqual(sheetRows(s, sheet), []);
+  assert.deepEqual(sheetChoices(s, sheet), []);
+  assert.equal(sheetTitle(s, sheet), "Conversation");
 });
