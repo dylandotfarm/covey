@@ -42,9 +42,21 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
       // A masked prompt paints one bullet per character (#126). The count is
       // the only feedback there is, and it is enough to see that a paste
       // arrived; the value itself never reaches the screen or a log.
-      const shown = overlay.mask ? "•".repeat(filter.length) : filter;
+      //
+      // A private key is thousands of characters, and thousands of bullets
+      // would wrap over the whole panel, so the row stops at the width of the
+      // frame and a line under it says how big the value is (#128).
+      const room = Math.max(8, w - 6);
+      const shown = overlay.mask ? "•".repeat(Math.min(filter.length, room)) : filter;
+      const lines = overlay.mask ? filter.split("\n").length : 1;
+      const size = overlay.mask && (filter.length > room || lines > 1)
+        ? `${filter.length} characters${lines > 1 ? ` on ${lines} lines` : ""}`
+        : null;
       return frame(overlay.title, (
-        <Box marginY={1}><Text color={T.text}>{shown}</Text><Text inverse> </Text>{filter.length === 0 && overlay.placeholder ? <Text color={T.subtle}>{overlay.placeholder}</Text> : null}</Box>
+        <Box marginY={1} flexDirection="column">
+          <Box><Text color={T.text}>{shown}</Text><Text inverse> </Text>{filter.length === 0 && overlay.placeholder ? <Text color={T.subtle}>{overlay.placeholder}</Text> : null}</Box>
+          {size && <Text color={T.subtle}>{size}</Text>}
+        </Box>
       ), "enter confirm · esc cancel");
     }
     case "secrets": {

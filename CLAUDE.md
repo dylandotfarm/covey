@@ -32,6 +32,13 @@
   `npm install` under `NODE_ENV=production` installs without the devDependencies and says
   nothing. `clientEnv.test.ts` and `nodeEnv.test.ts` hold both halves.
 - Ink 7 batches fast keystrokes and pastes into one `useInput` call; `App.tsx` splits them.
+  Two rules come out of that, and #128 is what happens without them. A handler that runs
+  inside one chunk sees state from the render before it, so the overlay's field is read from
+  `ovFilterRef`, never from `ovFilter` — write both, decide on the ref, paint the state. And
+  every key of a chunk but the last carries `pasted`, so a one-line prompt can tell a newline
+  inside a paste from the enter that ends the chunk; the last key of a chunk is never marked,
+  or a fast typist loses their enter. A masked prompt keeps a pasted newline, so a private
+  key pastes whole.
   Test the TUI in tmux with small delays between `send-keys`, and capture with
   `tmux capture-pane -p -e` to see colours.
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.

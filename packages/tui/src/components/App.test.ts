@@ -14,42 +14,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import React from "react";
 import { render } from "ink";
 import type { Project, Thread } from "@covey/protocol";
 import { App } from "./App.js";
 import type { AppState, MachineState, Store } from "../store.js";
-
-// ---- a terminal that is not a terminal --------------------------------------
-
-/** Ink writes frames here instead of to a tty. */
-class FakeStdout extends EventEmitter {
-  columns = 100;
-  rows = 30;
-  isTTY = true;
-  frames: string[] = [];
-  write(s: string) { this.frames.push(s); return true; }
-  get lastFrame() { return this.frames.at(-1) ?? ""; }
-}
-
-/**
- * Ink reads keys from here. It drives stdin the way node streams do — a
- * `readable` event, then `read()` until it returns null — so `type` queues the
- * keystroke and rings the bell.
- */
-class FakeStdin extends EventEmitter {
-  isTTY = true;
-  private queue: string[] = [];
-  setRawMode() { return this; }
-  setEncoding() { return this; }
-  resume() { return this; }
-  pause() { return this; }
-  read() { return this.queue.shift() ?? null; }
-  ref() { return this; }
-  unref() { return this; }
-  type(s: string) { this.queue.push(s); this.emit("readable"); }
-}
+import { FakeStdin, FakeStdout, settle, until } from "./testTerminal.js";
 
 // ---- the tree the sidebar paints --------------------------------------------
 
@@ -114,26 +84,6 @@ function fakeStore(initial: AppState) {
     opened,
     publish(next: AppState) { state = next; for (const l of listeners) l(); },
   };
-}
-
-const settle = (ms = 220) => new Promise((r) => setTimeout(r, ms));
-
-/**
- * Wait for the thing an assertion is about, rather than for a fixed spell.
- *
- * What these cases claim is *which* thread the preview opened, never how long
- * covey took to open it — and a fixed wait measures the runner. On this
- * project's Pi, with the rest of the suite painting Ink trees on the other
- * cores, a keystroke and the render it causes can take longer than any number
- * short enough to keep the file quick, and the case then fails a long way from
- * anything it covers. Waiting on the condition is both quicker and honest: it
- * returns as soon as the state is there, and the timeout only bounds a case
- * that is genuinely broken. A case that asserts nothing *happened* still has to
- * wait a spell — there is no condition to watch for that.
- */
-async function until(ready: () => boolean, ms = 4000) {
-  const deadline = Date.now() + ms;
-  while (!ready() && Date.now() < deadline) await settle(20);
 }
 
 // ---- the test ----------------------------------------------------------------
