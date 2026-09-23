@@ -987,6 +987,11 @@ export interface ErrorItem extends ItemBase {
 }
 
 export interface Attachment {
+  /**
+   * What the file is called. For a file inside a dropped directory this is the
+   * path the file had inside it, such as `shots/before.png`, so the name alone
+   * says where the file belongs.
+   */
   name: string;
   /**
    * Absolute path. On the wire this is the path on the machine the file was
@@ -1002,10 +1007,52 @@ export interface Attachment {
    * so snapshots never replay megabytes of base64.
    */
   data?: string;
+  /**
+   * How `data` is packed. Absent means the bytes of the file as they are;
+   * `gzip` means the client deflated them, because a log or a source tree goes
+   * over the wire many times smaller that way. The daemon unpacks before it
+   * writes, so nothing downstream of the store ever sees this.
+   */
+  packing?: "gzip";
+  /**
+   * The name of the directory this file was dropped inside, when a directory
+   * was dropped rather than a file. Every file of one directory carries the
+   * same `dir`, which makes them one chip in the composer and one folder in
+   * the thread's file store.
+   */
+  dir?: string;
 }
 
-/** Per-attachment cap. Matches the Anthropic API's 5 MB per-image limit. */
-export const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+/**
+ * What one drop may weigh, unpacked, across every file in it.
+ *
+ * A drop travels inline, as base64 in the `turn.send` command, so this bounds
+ * the websocket frame as well: 32 MB of bytes is about 43 MB of base64, under
+ * the 64 MB the daemon's socket accepts.
+ */
+export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * What one image may weigh and still be shown to the model. The Anthropic API
+ * refuses an image over 5 MB, so a bigger one is scaled down before it is sent
+ * (`shrinkImage`) and anything left over the limit reaches the agent as a file
+ * on disk instead of as an image block.
+ */
+export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Above this, the client tries `gzip` on a file before it sends it, and keeps
+ * the result when it saved anything worth the unpacking. Below it the saving
+ * is not worth a second copy of the bytes in memory.
+ */
+export const PACK_ATTACHMENT_BYTES = 1024 * 1024;
+
+/**
+ * How many files one dropped directory may carry. A drop is meant to be the
+ * files a person means to talk about; a whole `node_modules` is not, and a
+ * refusal that says the count is kinder than a minute of reading.
+ */
+export const MAX_DIRECTORY_FILES = 200;
 
 /** Image media types the model accepts. */
 export const IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;

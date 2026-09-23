@@ -4,7 +4,10 @@ import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, isDrop, readClipboard, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, type RunReader } from "./attachments.js";
+import { mkdirSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
+import { randomBytes } from "node:crypto";
+import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, isDrop, isDirectoryDrop, readClipboard, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, cutTag, tagSpanAt, type RunReader } from "./attachments.js";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -214,11 +217,60 @@ test("a non-image path only counts as a drop when the file is really there", () 
   assert.equal(readDroppedFiles("/nope/missing.pdf").failed.length, 0);
 });
 
-test("a dropped directory stays text", () => {
+test("a dropped directory attaches as its files, each keeping the path it had", () => {
+  const root = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const shots = join(root, "shots");
+  mkdirSync(join(shots, "old"), { recursive: true });
+  writeFileSync(join(shots, "after.png"), Buffer.from("89504e470d0a1a0a", "hex"));
+  writeFileSync(join(shots, "old", "before.png"), Buffer.from("89504e470d0a1a0a", "hex"));
+  const { attachments, failed } = readDroppedFiles(shots);
+  assert.deepEqual(failed, []);
+  assert.deepEqual(attachments.map((a) => a.name), ["after.png", "old/before.png"]);
+  assert.deepEqual([...new Set(attachments.map((a) => a.dir))], ["shots"], "every file of one drop names one directory");
+  assert.equal(attachments[0]!.mimeType, "image/png");
+});
+
+test("a dropped directory is one chip, however many files are under it", () => {
+  const root = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const shots = join(root, "shots");
+  mkdirSync(shots, { recursive: true });
+  for (const n of ["a.txt", "b.txt"]) writeFileSync(join(shots, n), n);
+  const drop = applyDrop("look at", 7, readDroppedFiles(shots).attachments, []);
+  assert.equal(drop.value, "look at [shots/] ");
+  assert.deepEqual([...new Set(drop.attachments.map((a) => a.tag))], ["[shots/]"]);
+  // Delete the one chip and both files go.
+  assert.deepEqual(keepTagged("look at ", drop.attachments), []);
+});
+
+test("an empty directory says so rather than attaching nothing", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const { attachments, failed } = readDroppedFiles(dir);
   assert.equal(attachments.length, 0);
-  assert.equal(failed.length, 0);
+  assert.equal(failed[0]!.chip, "no files in it");
+});
+
+test("a directory a terminal cut a path at is not a drop of that directory (#130)", () => {
+  // The front half of a screenshot path ends at the separator, and the
+  // directory it names is real. Taking it as a drop would attach the whole of
+  // a temporary folder and leave the file name in the draft as text.
+  const png = screenshot();
+  const cut = png.lastIndexOf("/") + 1;
+  assert.equal(isDrop(readDroppedFiles(png.slice(0, cut))), false);
+});
+
+test("a big file goes over the wire packed, and a picture goes as it is", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const log = join(dir, "run.log");
+  const body = Buffer.from("the same line, over and over\n".repeat(80_000));
+  writeFileSync(log, body);
+  const packed = readDroppedFiles(log).attachments[0]!;
+  assert.equal(packed.packing, "gzip", "a log deflates to a fraction of itself");
+  assert.deepEqual(gunzipSync(Buffer.from(packed.data!, "base64")), body);
+
+  // Random bytes stand in for a photograph: nothing to deflate, so nothing is.
+  const jpg = join(dir, "photo.jpg");
+  writeFileSync(jpg, randomBytes(2 * 1024 * 1024));
+  assert.equal(readDroppedFiles(jpg).attachments[0]!.packing, undefined);
 });
 
 test("a relative filename that exists is prose, not a drop", () => {
@@ -227,14 +279,18 @@ test("a relative filename that exists is prose, not a drop", () => {
   assert.equal(readDroppedFiles("package.json").attachments.length, 0);
 });
 
-test("an oversized file that is not an image reports its size instead of attaching", () => {
+test("a file the API would refuse still travels: only covey's own cap turns one away", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const six = join(dir, "run.log");
+  writeFileSync(six, Buffer.alloc(6 * 1024 * 1024));
+  assert.equal(readDroppedFiles(six).attachments.length, 1, "6 MB is nothing to a file the agent opens by path");
+
   const big = join(dir, "huge.log");
-  writeFileSync(big, Buffer.alloc(6 * 1024 * 1024));
+  writeFileSync(big, Buffer.alloc(33 * 1024 * 1024));
   const { attachments, failed } = readDroppedFiles(big);
   assert.equal(attachments.length, 0);
-  assert.equal(failed[0]!.chip, "6 MB, over the 5 MB limit");
-  assert.match(failed[0]!.message, /huge\.log is 6 MB, over the 5 MB limit/);
+  assert.equal(failed[0]!.chip, "33 MB, over the 32 MB limit");
+  assert.match(failed[0]!.message, /huge\.log is 33 MB, over the 32 MB limit/);
 });
 
 // --- clipboard -------------------------------------------------------------
@@ -378,7 +434,7 @@ test("an oversized clipboard image reports its size", () => {
 test("an oversized copied file gets the same chip a dropped one gets", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const big = join(dir, "huge.log");
-  writeFileSync(big, Buffer.alloc(6 * 1024 * 1024));
+  writeFileSync(big, Buffer.alloc(33 * 1024 * 1024));
   const { run } = fakeClipboard({
     "wl-paste --list-types": { stdout: "text/uri-list" },
     "wl-paste --no-newline --type text/uri-list": { stdout: `file://${encodeURI(big)}` },
@@ -386,7 +442,7 @@ test("an oversized copied file gets the same chip a dropped one gets", () => {
   const r = readClipboard(run, LINUX);
   assert.deepEqual(r.attachments, []);
   assert.deepEqual(r.failed.map((f) => f.name), ["huge.log"]);
-  assert.match(r.failed[0]!.message, /huge\.log is 6 MB, over the 5 MB limit/);
+  assert.match(r.failed[0]!.message, /huge\.log is 33 MB, over the 32 MB limit/);
 });
 
 // --- the macOS pasteboard --------------------------------------------------
@@ -502,14 +558,15 @@ const fail = (name: string, chip: string) => ({ name, chip, message: `${name}: $
 test("a file that did not attach gets a chip that says why, and no attachment", () => {
   const drop = applyDrop("look at", 7, [], [], [fail("shot.png", "not on this machine")]);
   assert.equal(drop.value, "look at [shot.png — not on this machine] ");
-  assert.deepEqual(drop.attachments, [], "a chip in an error state stands for no file");
+  assert.deepEqual(drop.attachments.filter((a) => !a.failed), [], "a chip in an error state stands for no file");
+  assert.deepEqual(drop.attachments.map((a) => a.failed), [true], "it is held only so one key can delete the whole chip");
   assert.doesNotMatch(drop.value, /\//, "the point of the chip is that no path reaches the screen (#85)");
 });
 
 test("a failed chip cannot take the tag a real file needs", () => {
   const drop = applyDrop("", 0, [att("shot.png")], [], [fail("shot.png", "no permission")]);
   assert.equal(drop.value, "[shot.png] [shot.png — no permission] ");
-  assert.deepEqual(drop.attachments.map((a) => a.tag), ["[shot.png]"]);
+  assert.deepEqual(drop.attachments.filter((a) => !a.failed).map((a) => a.tag), ["[shot.png]"]);
 });
 
 test("a drop forgets the file whose tag the user already deleted", () => {
@@ -549,16 +606,17 @@ test("an oversized image is shrunk under the cap and attaches", { skip: shrinker
   assert.ok(Buffer.from(a.data!, "base64").byteLength <= 5 * 1024 * 1024, "the bytes that go on the wire are under the cap");
 });
 
-test("an oversized image with no shrinker says so, and says what would have helped", () => {
+test("an image no shrinker could take under the API's limit still attaches, and says what that costs", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const big = join(dir, "shot.png");
   writeFileSync(big, Buffer.alloc(6 * 1024 * 1024));
   // Not a real PNG, so every shrinker refuses it — which is the same answer a
   // machine with no shrinker gives, and the branch under test.
-  const { attachments, failed } = readDroppedFiles(big);
-  assert.deepEqual(attachments, []);
-  assert.equal(failed[0]!.chip, "6 MB, over the 5 MB limit");
-  assert.match(failed[0]!.message, /sips, magick, convert or ffmpeg/);
+  const { attachments, failed, warnings } = readDroppedFiles(big);
+  assert.deepEqual(failed, [], "covey carries it: the file is well under covey's own cap");
+  assert.equal(attachments.length, 1);
+  assert.match(warnings[0]!, /sips, magick, convert or ffmpeg/);
+  assert.match(warnings[0]!, /the model cannot see an image over 5 MB/);
 });
 
 /** A PNG big enough to break the cap: random pixels do not compress. */
@@ -570,3 +628,62 @@ function hugePng(): Buffer {
   // is uncompressed, so the fixture is reliably over the cap.
   return Buffer.concat([Buffer.from(`P6\n${side} ${side}\n255\n`), raw]);
 }
+
+
+// --- deleting a chip -------------------------------------------------------
+
+/**
+ * A chip is one thing on the screen, so it is one key to delete. Without this
+ * the reader spells `[Screenshot 2026-09-22 at 8.48.31 PM.png]` out backwards,
+ * and a chip half deleted is a file dropped with nothing said.
+ */
+
+test("backspace at the end of a chip takes the whole chip, and the space beside it", () => {
+  const drop = applyDrop("look at", 7, [att("shot.png")], []);
+  assert.equal(drop.value, "look at [shot.png] ");
+  const span = tagSpanAt(drop.value, 18, ["[shot.png]"], true);
+  assert.deepEqual(span, { start: 8, end: 18 });
+  assert.deepEqual(cutTag(drop.value, span!), { value: "look at ", caret: 8 });
+});
+
+test("delete at the start of a chip takes it forwards", () => {
+  const v = "look at [shot.png] now";
+  const span = tagSpanAt(v, 8, ["[shot.png]"], false);
+  assert.deepEqual(cutTag(v, span!), { value: "look at now", caret: 8 });
+});
+
+test("the caret inside a chip deletes the chip, whichever key asked", () => {
+  const v = "[shot.png] now";
+  for (const back of [true, false]) {
+    assert.deepEqual(tagSpanAt(v, 5, ["[shot.png]"], back), { start: 0, end: 10 });
+  }
+  assert.deepEqual(cutTag(v, { start: 0, end: 10 }), { value: "now", caret: 0 });
+});
+
+test("a caret between two chips takes the one the key points at", () => {
+  const v = "[a.png][b.png]";
+  assert.deepEqual(tagSpanAt(v, 7, ["[a.png]", "[b.png]"], true), { start: 0, end: 7 });
+  assert.deepEqual(tagSpanAt(v, 7, ["[a.png]", "[b.png]"], false), { start: 7, end: 14 });
+});
+
+test("ordinary text is deleted a character at a time, as it always was", () => {
+  assert.equal(tagSpanAt("look at that", 5, ["[shot.png]"], true), null);
+  // The brackets have to be a chip covey knows, not any bracket the user typed.
+  assert.equal(tagSpanAt("a [note] here", 8, ["[shot.png]"], true), null);
+});
+
+test("cutting a chip never leaves a double space or eats a word", () => {
+  assert.deepEqual(cutTag("[a.png] tail", { start: 0, end: 7 }), { value: "tail", caret: 0 });
+  assert.deepEqual(cutTag("head [a.png]", { start: 5, end: 12 }), { value: "head", caret: 4 });
+  assert.deepEqual(cutTag("head[a.png]tail", { start: 4, end: 11 }), { value: "headtail", caret: 4 });
+});
+
+test("a directory drop is one chip and knows it", () => {
+  const root = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const shots = join(root, "shots");
+  mkdirSync(shots, { recursive: true });
+  writeFileSync(join(shots, "a.txt"), "a");
+  const drop = readDroppedFiles(shots);
+  assert.equal(isDirectoryDrop(drop), true);
+  assert.equal(isDirectoryDrop(readDroppedFiles("/nope/missing.png")), false, "a failure is not a directory drop");
+});

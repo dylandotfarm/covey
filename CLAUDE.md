@@ -42,17 +42,29 @@
   Test the TUI in tmux with small delays between `send-keys`, and capture with
   `tmux capture-pane -p -e` to see colours.
 - A dropped file is read on the machine the *client* runs on, and its bytes go inline over the
-  wire, so a TUI on a laptop can attach to a daemon anywhere. When that read fails, say which
-  of the four things went wrong — not there, no permission, over the cap, or anything else —
-  in the chip as well as the notice (#132); one word for four problems is what made a
-  screenshot read as "unreadable" for weeks. An image over `MAX_ATTACHMENT_BYTES` is shrunk,
-  not refused: `shrinkImage` scales the long edge to `SHRINK_LONG_EDGE` with `sips`, `magick`,
-  `convert` or `ffmpeg`, whichever the machine has. That constant is the API's own — it
-  downscales anything past it before the model reads it — so scaling to it costs nothing, and
-  scaling comes before quality because heavy JPEG is what makes a screenshot's text illegible.
+  wire, so a TUI on a laptop can attach to a daemon anywhere. The daemon writes them into the
+  thread's file store, `<cwd>/.covey/threads/<id>/files`, inside the worktree the session runs
+  in — so the agent opens a drop with a path it can guess, the files go when the worktree
+  goes, and `.covey/.gitignore` (`*`) keeps them out of `git status` and out of a checkpoint.
+  Everything from the wire is cut down first (`safeSegments`): a name must not write outside
+  that store. Two caps, and never one again: `MAX_ATTACHMENT_BYTES` is what covey carries on
+  one drop and bounds the socket frame with it; `MAX_IMAGE_BYTES` is what the model may be
+  shown. An image over the second is shrunk — `shrinkImage` scales the long edge to
+  `SHRINK_LONG_EDGE` with `sips`, `magick`, `convert` or `ffmpeg`, whichever the machine has,
+  and that constant is the API's own, so scaling to it costs nothing; scaling comes before
+  quality because heavy JPEG is what makes a screenshot's text illegible. An image no tool
+  could shrink still travels, with a warning that the model will read it as a file. Over 1 MB
+  a file goes `gzip`ped when that saves more than a tenth. A dropped *directory* goes as one
+  attachment per file, each with the path it had inside and all sharing one `dir`, so the tree
+  arrives whole and the composer shows one chip; never an archive, because the agent would
+  have to unpack it. When a read fails, say which of the four things went wrong — not there,
+  no permission, over the cap, or anything else — in the chip as well as the notice (#132);
+  one word for four problems is what made a screenshot read as "unreadable" for weeks.
   `pasteText` reads a chunk twice: whole, then joined onto the seam the last paste left
-  (`readSplitDrop`, #130), because a terminal can write one path in two goes. Both routes end
-  at the same `attach`, so a change to one wants the other.
+  (`readSplitDrop`, #130), because a terminal can write one path in two goes — and a path that
+  ends at a separator is never a directory drop, because that is exactly what the front half
+  of a cut path looks like. Both routes end at the same `attach`, so a change to one wants the
+  other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`).
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.
 - A paint is the client's dearest act — 30–45 ms of its one thread on this project's
   Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the

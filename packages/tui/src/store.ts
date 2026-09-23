@@ -182,7 +182,7 @@ export function secretPanelKeys(state: AppState, ov: Extract<Overlay, { kind: "s
 
 export interface PickOption { id: string; label: string; hint?: string; }
 
-export interface Notice { text: string; tone: "info" | "error" | "success"; at: number; }
+export interface Notice { text: string; tone: "info" | "warning" | "error" | "success"; at: number; }
 
 export interface AppState {
   machines: Map<string, MachineState>;
@@ -822,7 +822,9 @@ export class Store {
   notify(text: string, tone: Notice["tone"] = "info") {
     this.setFromMachine({ notice: { text, tone, at: Date.now() } });
     if (this.noticeTimer) clearTimeout(this.noticeTimer);
-    this.noticeTimer = setTimeout(() => this.setFromMachine({ notice: null }), tone === "error" ? 8000 : 4000);
+    // A warning says what covey did instead of what was asked, so it wants
+    // the same reading time a failure gets.
+    this.noticeTimer = setTimeout(() => this.setFromMachine({ notice: null }), tone === "error" || tone === "warning" ? 8000 : 4000);
   }
 
   private persist() { try { saveConfig(this.config); } catch { /* ignore */ } }
@@ -1182,7 +1184,9 @@ export class Store {
     if (!v || !client) return;
     // The tag in the text is the file. Whatever lost its tag does not go.
     const kept = this.syncAttachments(v.threadId, text);
-    const attachments = kept.map(({ tag: _tag, ...a }) => a);
+    // A chip for a file that did not attach is text in the draft and nothing
+    // else: it has no bytes, so nothing of it goes over the wire.
+    const attachments = kept.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, ...a }) => a);
     try {
       await client.command({ type: "turn.send", threadId: v.threadId, turnId: randomUUID(), text, ...(attachments.length ? { attachments } : {}) });
       this.clearAttachments(v.threadId);

@@ -28,7 +28,7 @@ import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, applyDrop, type DropResult, type FailedDrop } from "../attachments.js";
+import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, type DropResult, type FailedDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -1922,6 +1922,11 @@ export function App({ store }: { store: Store }) {
       const fwd = key.delete;
       if (key.super) return applyEdit(fwd ? Ed.deleteToLineEnd(st) : Ed.deleteToLineStart(st));
       if (key.meta) return applyEdit(fwd ? Ed.deleteWordForward(st) : Ed.deleteWordBack(st));
+      // A chip is one thing on the screen, so it is one key to delete. Without
+      // this the reader spells `[Screenshot 2026-09-22 at 8.48.31 PM.png]` out
+      // backwards, and a chip half deleted is a file silently dropped.
+      const span = tagSpanAt(draft, caret, chipTags(), !fwd);
+      if (span) return applyEdit(cutTag(draft, span));
       return applyEdit(fwd ? Ed.deleteForward(st) : Ed.deleteBack(st));
     }
     if (key.leftArrow) return setCaret(key.meta ? Ed.wordStart(draft, caret) : key.super ? Ed.lineStart(draft, caret) : Math.max(0, caret - 1));
@@ -1973,6 +1978,10 @@ export function App({ store }: { store: Store }) {
    *
    * @returns false when the drop held nothing at all.
    */
+  /** The tags standing in the draft for a drop, attached or not. */
+  function chipTags(): string[] {
+    return state.view ? [...new Set(store.attachments(state.view.threadId).map((a) => a.tag))] : [];
+  }
   function attach(attachments: Attachment[], failed: FailedDrop[] = [], base: Ed.EditState = { value: draft, caret }): boolean {
     if ((attachments.length === 0 && failed.length === 0) || !state.view) return false;
     const drop = applyDrop(base.value, base.caret, attachments, store.attachments(state.view.threadId), failed);
@@ -1997,9 +2006,15 @@ export function App({ store }: { store: Store }) {
   function pasteText(raw: string) {
     if (state.view) {
       const whole = readDroppedFiles(raw);
-      if (isDrop(whole)) { report(whole); if (attach(whole.attachments, whole.failed)) return; }
       const seam = openSeam();
       const split = seam ? readSplitDrop(seam.value.slice(0, seam.caret), raw) : null;
+      // A directory that exists is also what the front half of a cut path
+      // leaves behind, so a join that names a file beats it (#130). Anything
+      // else the chunk reads as on its own is what the reader dropped.
+      if (isDrop(whole) && !(split && isDirectoryDrop(whole))) {
+        report(whole);
+        if (attach(whole.attachments, whole.failed)) return;
+      }
       if (split) {
         report(split.drop);
         const cut = { value: seam!.value.slice(0, split.start) + seam!.value.slice(seam!.caret), caret: split.start };
@@ -2017,6 +2032,7 @@ export function App({ store }: { store: Store }) {
    */
   function report(drop: DropResult) {
     for (const f of drop.failed) store.notify(f.message, "error");
+    for (const w of drop.warnings) store.notify(w, "warning");
   }
   /**
    * The draft a split drop may join onto: the state the last pasted chunk left,
@@ -2036,9 +2052,10 @@ export function App({ store }: { store: Store }) {
    */
   function pasteClipboard() {
     if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
-    const { attachments, failed, errors, text } = readClipboard();
+    const { attachments, failed, warnings, errors, text } = readClipboard();
     for (const e of errors) store.notify(e, "error");
     for (const f of failed) store.notify(f.message, "error");
+    for (const w of warnings) store.notify(w, "warning");
     if (attach(attachments, failed)) return;
     if (text) pasteText(text);
   }
@@ -2102,7 +2119,7 @@ export function App({ store }: { store: Store }) {
               : header ? (<><Text color={T.text} bold>{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {headerProject?.title}</Text>{header.pullRequest && <Text color={T.awaiting}>  {HYPERLINKS ? osc8(header.pullRequest.url, `PR #${header.pullRequest.number}`) : `PR #${header.pullRequest.number}`}</Text>}{header.movedTo && <Text color={T.warning}>  moved</Text>}</>)
               : <Text color={T.subtle}>covey — multi-agent TUI</Text>}
           </Box>
-          <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
+          <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "warning" ? T.warning : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
         </Box>
         {/* Truncated because this is a length, not a box: laid out with a
             `mainW` from the terminal before last it would wrap onto a second row

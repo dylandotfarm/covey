@@ -14,8 +14,8 @@ import { makeSessionStore } from "./sessionStore.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
 import { redactDeep, redactor } from "./redact.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
-import { materialiseAttachments, attachmentsDir, keepAttachmentFile } from "./attachments.js";
-import { resolveDefaultPermissionMode, saveMachineSettings, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
+import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles } from "./attachments.js";
+import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { ClaudeModels } from "./models.js";
@@ -665,6 +665,9 @@ export class Engine {
         // The worktree goes with the thread; the branch stays, as it does on
         // archive. A worktree with unsaved work is kept, and nobody is told,
         // because the transcript that would carry the note is deleted below.
+        // The thread's dropped files live in its worktree, so they usually go
+        // with it; a thread that works in the project directory keeps its own.
+        if (proj) removeThreadFiles(t.worktreePath ?? proj.workspaceRoot, t.id);
         if (proj && t.worktreePath && existsSync(t.worktreePath)) await removeWorktree(proj.workspaceRoot, t.worktreePath);
         rmSync(attachmentsDir(t.id), { recursive: true, force: true });
         this.db.deleteThread(t.id);
@@ -709,7 +712,7 @@ export class Engine {
         // (and every snapshot that replays it) stays small.
         let attachments: Attachment[];
         try {
-          attachments = materialiseAttachments(t.id, cmd.attachments ?? []);
+          attachments = materialiseAttachments(this.threadCwd(t), t.id, cmd.attachments ?? []);
         } catch (e: any) {
           throw new EngineError("attachment", e?.message ?? String(e));
         }
@@ -1693,6 +1696,13 @@ export class Engine {
     const wt = await createWorktree(p.workspaceRoot, name, cleanStart.ref, path);
     if ("error" in wt) throw new EngineError("git", `could not create worktree from ${cleanStart.ref}: ${wt.error}`);
     return { worktreePath: wt.path, branch: wt.branch, cleanStart, carried: false };
+  }
+
+  /** Where a thread's session runs, and therefore where its dropped files go.
+   *  The same choice `startSession` makes, so `.covey/threads/<id>/files` is a
+   *  path the agent can use as it stands. */
+  private threadCwd(t: Thread): string {
+    return t.worktreePath ?? this.db.getProject(t.projectId)?.workspaceRoot ?? dataDir();
   }
 
   /** Where a thread's git lives right now: its worktree while that exists (an

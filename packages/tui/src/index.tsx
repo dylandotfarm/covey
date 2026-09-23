@@ -16,7 +16,7 @@ export interface RunTuiOptions {
   /** The CLI sets this when it can relaunch us after we exit. */
   canRelaunch?: boolean;
   /** A line to show on arrival, e.g. the result of the update we just did. */
-  notice?: { text: string; tone: "info" | "error" | "success" };
+  notice?: { text: string; tone: "info" | "warning" | "error" | "success" };
 }
 
 export interface RunTuiResult {

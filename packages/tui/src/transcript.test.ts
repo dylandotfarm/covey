@@ -94,3 +94,19 @@ test("a message from before tags existed keeps its footer line", () => {
   const out = text(layoutTranscript(view([old], "a"), 80, new Set()));
   assert.match(out, /⎘ shot\.png/);
 });
+
+test("a dropped directory was one tag, so it needs no footer line either", () => {
+  const files = [
+    { name: "a.md", path: "/d/notes/a.md", mimeType: "text/markdown", dir: "notes" },
+    { name: "deep/b.md", path: "/d/notes/deep/b.md", mimeType: "text/markdown", dir: "notes" },
+  ];
+  const named = base("user", "a", { text: "read [notes/] first", attachments: files });
+  assert.doesNotMatch(text(layoutTranscript(view([named], "a"), 80, new Set())), /⎘/);
+
+  // And when the text does not name it, the footer says the directory once —
+  // not a line that spells out every file under it.
+  const unnamed = base("user", "a", { text: "read this", attachments: files });
+  const out = text(layoutTranscript(view([unnamed], "a"), 80, new Set()));
+  assert.match(out, /⎘ notes\//);
+  assert.doesNotMatch(out, /a\.md/);
+});
