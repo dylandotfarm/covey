@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readClipboard, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, type RunReader } from "./attachments.js";
+import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, isDrop, readClipboard, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, type RunReader } from "./attachments.js";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -96,6 +96,81 @@ test("a file that cannot be read is named for a chip, not left to the path", () 
   assert.deepEqual(attachments, []);
   assert.deepEqual(unreadable, ["missing shot.png"], "the composer needs the name to put a chip in the draft");
   assert.equal(errors.length, 1);
+});
+
+// --- a drop the terminal wrote in two goes (#130) --------------------------
+
+/** A real PNG on disk, under a name with spaces in it. */
+function screenshot(name = "Screenshot 2026-09-22 at 6.36.33 PM.png"): string {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, name);
+  writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
+  return png;
+}
+
+test("half a dropped path is not a drop", () => {
+  // The half that arrives second is a bare name. Read on its own it used to
+  // pass for a drop and chip itself "unreadable", which is how one file became
+  // a path in the draft and an error beside it (#130).
+  const drop = readDroppedFiles("Screenshot 2026-09-22 at 6.36.33 PM.png");
+  assert.equal(isDrop(drop), false, "a name with no directory names no file");
+  assert.deepEqual(drop.unreadable, []);
+});
+
+test("a drop split at the last slash joins back into one file (#130)", () => {
+  const png = screenshot();
+  const cut = png.lastIndexOf("/") + 1;
+  // The terminal wrote the directory, the composer took it for prose, and then
+  // the name arrived.
+  assert.equal(isDrop(readDroppedFiles(png.slice(0, cut))), false, "this case tests nothing unless the first half is prose");
+  const split = readSplitDrop(png.slice(0, cut), png.slice(cut));
+  assert.ok(split, "the second half has to find the first in the draft");
+  assert.equal(split.start, 0, "the path starts at the start of the draft");
+  assert.deepEqual(split.drop.attachments.map((a) => a.name), ["Screenshot 2026-09-22 at 6.36.33 PM.png"]);
+  assert.deepEqual(split.drop.errors, []);
+});
+
+test("a drop split inside the name joins too, wherever the cut fell", () => {
+  const png = screenshot("shot of the bug.png");
+  for (let cut = 1; cut < png.length; cut++) {
+    const split = readSplitDrop(png.slice(0, cut), png.slice(cut));
+    assert.ok(split, `no join at cut ${cut}`);
+    assert.deepEqual(split.drop.attachments.map((a) => a.name), ["shot of the bug.png"], `wrong file at cut ${cut}`);
+  }
+});
+
+test("a split drop takes only its own path out of the sentence", () => {
+  const png = screenshot("shot.png");
+  const cut = png.lastIndexOf("/") + 1;
+  const head = `look at ${png.slice(0, cut)}`;
+  const split = readSplitDrop(head, png.slice(cut));
+  assert.ok(split);
+  assert.equal(head.slice(0, split.start), "look at ", "the words in front of the path are the person's own");
+});
+
+test("a split drop of a file this machine has not got is one chip, not a path", () => {
+  const split = readSplitDrop("/var/folders/19/T/TemporaryItems/", "Screenshot 2026-09-22 at 6.36.33 PM.png");
+  assert.ok(split);
+  assert.deepEqual(split.drop.attachments, []);
+  assert.deepEqual(split.drop.unreadable, ["Screenshot 2026-09-22 at 6.36.33 PM.png"], "one file, one chip");
+  assert.equal(split.drop.errors.length, 1);
+});
+
+test("a split drop joins a file:// URL as readily as a path", () => {
+  const png = screenshot("shot.png");
+  const cut = png.lastIndexOf("/") + 1;
+  const split = readSplitDrop(`file://${png.slice(0, cut)}`, png.slice(cut));
+  assert.ok(split);
+  assert.deepEqual(split.drop.attachments.map((a) => a.name), ["shot.png"]);
+});
+
+test("a draft with no path in it has nothing to join to", () => {
+  assert.equal(readSplitDrop("what do you make of ", "this.png"), null);
+  assert.equal(readSplitDrop("", "shot.png"), null);
+});
+
+test("a join that names no file leaves the paste alone", () => {
+  assert.equal(readSplitDrop("/etc/", "hosts, and say why"), null, "prose after a directory is still prose");
 });
 
 test("labels a non-image by extension, and anything unknown generically", () => {
