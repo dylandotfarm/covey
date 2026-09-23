@@ -41,6 +41,18 @@
   key pastes whole.
   Test the TUI in tmux with small delays between `send-keys`, and capture with
   `tmux capture-pane -p -e` to see colours.
+- A dropped file is read on the machine the *client* runs on, and its bytes go inline over the
+  wire, so a TUI on a laptop can attach to a daemon anywhere. When that read fails, say which
+  of the four things went wrong — not there, no permission, over the cap, or anything else —
+  in the chip as well as the notice (#132); one word for four problems is what made a
+  screenshot read as "unreadable" for weeks. An image over `MAX_ATTACHMENT_BYTES` is shrunk,
+  not refused: `shrinkImage` scales the long edge to `SHRINK_LONG_EDGE` with `sips`, `magick`,
+  `convert` or `ffmpeg`, whichever the machine has. That constant is the API's own — it
+  downscales anything past it before the model reads it — so scaling to it costs nothing, and
+  scaling comes before quality because heavy JPEG is what makes a screenshot's text illegible.
+  `pasteText` reads a chunk twice: whole, then joined onto the seam the last paste left
+  (`readSplitDrop`, #130), because a terminal can write one path in two goes. Both routes end
+  at the same `attach`, so a change to one wants the other.
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.
 - A paint is the client's dearest act — 30–45 ms of its one thread on this project's
   Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the

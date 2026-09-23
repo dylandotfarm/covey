@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, isDrop, readClipboard, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, type RunReader } from "./attachments.js";
@@ -36,18 +37,20 @@ test("reads a real dropped file into a base64 attachment", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const png = join(dir, "shot 1.png");
   writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
-  const { attachments, errors } = readDroppedFiles(`'${png}'`);
-  assert.equal(errors.length, 0);
+  const { attachments, failed } = readDroppedFiles(`'${png}'`);
+  assert.deepEqual(failed, []);
   assert.equal(attachments.length, 1);
   assert.equal(attachments[0]!.name, "shot 1.png");
   assert.equal(attachments[0]!.mimeType, "image/png");
   assert.equal(Buffer.from(attachments[0]!.data!, "base64").toString("hex"), "89504e470d0a1a0a");
 });
 
-test("a missing file reports an error rather than attaching", () => {
-  const { attachments, errors } = readDroppedFiles("/nope/missing.png");
+test("a missing file says it is not here rather than attaching", () => {
+  const { attachments, failed } = readDroppedFiles("/nope/missing.png");
   assert.equal(attachments.length, 0);
-  assert.equal(errors.length, 1);
+  assert.equal(failed.length, 1);
+  assert.equal(failed[0]!.chip, "not on this machine");
+  assert.match(failed[0]!.message, /covey reads a dropped file where the client runs/);
 });
 
 test("a screenshot whose name holds unescaped spaces is one drop, not prose (#85)", () => {
@@ -56,9 +59,8 @@ test("a screenshot whose name holds unescaped spaces is one drop, not prose (#85
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const png = join(dir, "Screenshot from 2026-09-18 at 6.38.45 PM.png");
   writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
-  const { attachments, unreadable, errors } = readDroppedFiles(png);
-  assert.deepEqual(errors, []);
-  assert.deepEqual(unreadable, []);
+  const { attachments, failed } = readDroppedFiles(png);
+  assert.deepEqual(failed, []);
   assert.deepEqual(attachments.map((a) => a.name), ["Screenshot from 2026-09-18 at 6.38.45 PM.png"]);
 });
 
@@ -88,14 +90,15 @@ test("a real path inside a sentence is still prose", () => {
   writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
   const drop = readDroppedFiles(`${png} is broken, fix it`);
   assert.deepEqual(drop.attachments, []);
-  assert.deepEqual(drop.errors, []);
+  assert.deepEqual(drop.failed, []);
 });
 
-test("a file that cannot be read is named for a chip, not left to the path", () => {
-  const { attachments, unreadable, errors } = readDroppedFiles("/nope/missing shot.png");
+test("a file that cannot be read is named for a chip, with the reason (#132)", () => {
+  const { attachments, failed } = readDroppedFiles("/nope/missing shot.png");
   assert.deepEqual(attachments, []);
-  assert.deepEqual(unreadable, ["missing shot.png"], "the composer needs the name to put a chip in the draft");
-  assert.equal(errors.length, 1);
+  // The composer needs the name for the chip, and the reader needs the reason:
+  // "unreadable" alone covered four different problems and named none of them.
+  assert.deepEqual(failed.map((f) => [f.name, f.chip]), [["missing shot.png", "not on this machine"]]);
 });
 
 // --- a drop the terminal wrote in two goes (#130) --------------------------
@@ -114,7 +117,7 @@ test("half a dropped path is not a drop", () => {
   // a path in the draft and an error beside it (#130).
   const drop = readDroppedFiles("Screenshot 2026-09-22 at 6.36.33 PM.png");
   assert.equal(isDrop(drop), false, "a name with no directory names no file");
-  assert.deepEqual(drop.unreadable, []);
+  assert.deepEqual(drop.failed, []);
 });
 
 test("a drop split at the last slash joins back into one file (#130)", () => {
@@ -127,7 +130,7 @@ test("a drop split at the last slash joins back into one file (#130)", () => {
   assert.ok(split, "the second half has to find the first in the draft");
   assert.equal(split.start, 0, "the path starts at the start of the draft");
   assert.deepEqual(split.drop.attachments.map((a) => a.name), ["Screenshot 2026-09-22 at 6.36.33 PM.png"]);
-  assert.deepEqual(split.drop.errors, []);
+  assert.deepEqual(split.drop.failed, []);
 });
 
 test("a drop split inside the name joins too, wherever the cut fell", () => {
@@ -152,8 +155,9 @@ test("a split drop of a file this machine has not got is one chip, not a path", 
   const split = readSplitDrop("/var/folders/19/T/TemporaryItems/", "Screenshot 2026-09-22 at 6.36.33 PM.png");
   assert.ok(split);
   assert.deepEqual(split.drop.attachments, []);
-  assert.deepEqual(split.drop.unreadable, ["Screenshot 2026-09-22 at 6.36.33 PM.png"], "one file, one chip");
-  assert.equal(split.drop.errors.length, 1);
+  // One file, one chip — and the chip now says which of the four it was (#132).
+  assert.deepEqual(split.drop.failed.map((f) => [f.name, f.chip]),
+    [["Screenshot 2026-09-22 at 6.36.33 PM.png", "not on this machine"]]);
 });
 
 test("a split drop joins a file:// URL as readily as a path", () => {
@@ -184,8 +188,8 @@ test("a dropped non-image attaches too", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const pdf = join(dir, "report 1.pdf");
   writeFileSync(pdf, "%PDF-1.7\n");
-  const { attachments, errors } = readDroppedFiles(`'${pdf}'`);
-  assert.equal(errors.length, 0);
+  const { attachments, failed } = readDroppedFiles(`'${pdf}'`);
+  assert.deepEqual(failed, []);
   assert.equal(attachments.length, 1);
   assert.equal(attachments[0]!.name, "report 1.pdf");
   assert.equal(attachments[0]!.mimeType, "application/pdf");
@@ -198,8 +202,8 @@ test("a drop of an image and a non-image together attaches both", () => {
   const log = join(dir, "run.log");
   writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
   writeFileSync(log, "boom\n");
-  const { attachments, errors } = readDroppedFiles(`${png} ${log}`);
-  assert.equal(errors.length, 0);
+  const { attachments, failed } = readDroppedFiles(`${png} ${log}`);
+  assert.deepEqual(failed, []);
   assert.deepEqual(attachments.map((a) => a.mimeType), ["image/png", "text/plain"]);
 });
 
@@ -207,14 +211,14 @@ test("a non-image path only counts as a drop when the file is really there", () 
   // An absolute path to nothing is prose, not a drop — unlike a missing image,
   // whose extension says a drop was meant.
   assert.equal(readDroppedFiles("/nope/missing.pdf").attachments.length, 0);
-  assert.equal(readDroppedFiles("/nope/missing.pdf").errors.length, 0);
+  assert.equal(readDroppedFiles("/nope/missing.pdf").failed.length, 0);
 });
 
 test("a dropped directory stays text", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
-  const { attachments, errors } = readDroppedFiles(dir);
+  const { attachments, failed } = readDroppedFiles(dir);
   assert.equal(attachments.length, 0);
-  assert.equal(errors.length, 0);
+  assert.equal(failed.length, 0);
 });
 
 test("a relative filename that exists is prose, not a drop", () => {
@@ -223,13 +227,14 @@ test("a relative filename that exists is prose, not a drop", () => {
   assert.equal(readDroppedFiles("package.json").attachments.length, 0);
 });
 
-test("an oversized drop reports its size instead of attaching", () => {
+test("an oversized file that is not an image reports its size instead of attaching", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const big = join(dir, "huge.log");
   writeFileSync(big, Buffer.alloc(6 * 1024 * 1024));
-  const { attachments, errors } = readDroppedFiles(big);
+  const { attachments, failed } = readDroppedFiles(big);
   assert.equal(attachments.length, 0);
-  assert.match(errors[0]!, /huge\.log is 6 MB \(limit 5 MB\)/);
+  assert.equal(failed[0]!.chip, "6 MB, over the 5 MB limit");
+  assert.match(failed[0]!.message, /huge\.log is 6 MB, over the 5 MB limit/);
 });
 
 // --- clipboard -------------------------------------------------------------
@@ -380,8 +385,8 @@ test("an oversized copied file gets the same chip a dropped one gets", () => {
   });
   const r = readClipboard(run, LINUX);
   assert.deepEqual(r.attachments, []);
-  assert.deepEqual(r.unreadable, ["huge.log"]);
-  assert.match(r.errors[0]!, /huge\.log is 6 MB \(limit 5 MB\)/);
+  assert.deepEqual(r.failed.map((f) => f.name), ["huge.log"]);
+  assert.match(r.failed[0]!.message, /huge\.log is 6 MB, over the 5 MB limit/);
 });
 
 // --- the macOS pasteboard --------------------------------------------------
@@ -491,16 +496,19 @@ test("two files with one name get two tags the user can tell apart", () => {
   assert.equal(second.value, "compare [shot.png] [shot.png 2] ");
 });
 
-test("a file that did not attach gets a chip that says so, and no attachment", () => {
-  const drop = applyDrop("look at", 7, [], [], ["shot.png"]);
-  assert.equal(drop.value, "look at [shot.png — unreadable] ");
+/** One file that did not attach, for the chip cases. */
+const fail = (name: string, chip: string) => ({ name, chip, message: `${name}: ${chip}` });
+
+test("a file that did not attach gets a chip that says why, and no attachment", () => {
+  const drop = applyDrop("look at", 7, [], [], [fail("shot.png", "not on this machine")]);
+  assert.equal(drop.value, "look at [shot.png — not on this machine] ");
   assert.deepEqual(drop.attachments, [], "a chip in an error state stands for no file");
   assert.doesNotMatch(drop.value, /\//, "the point of the chip is that no path reaches the screen (#85)");
 });
 
 test("a failed chip cannot take the tag a real file needs", () => {
-  const drop = applyDrop("", 0, [att("shot.png")], [], ["shot.png"]);
-  assert.equal(drop.value, "[shot.png] [shot.png — unreadable] ");
+  const drop = applyDrop("", 0, [att("shot.png")], [], [fail("shot.png", "no permission")]);
+  assert.equal(drop.value, "[shot.png] [shot.png — no permission] ");
   assert.deepEqual(drop.attachments.map((a) => a.tag), ["[shot.png]"]);
 });
 
@@ -510,3 +518,55 @@ test("a drop forgets the file whose tag the user already deleted", () => {
   const second = applyDrop("", 0, [att("shot.png")], first.attachments);
   assert.deepEqual(second.attachments.map((a) => a.tag), ["[shot.png]"], "the freed name is free to use again");
 });
+
+// --- an oversized image is shrunk, not refused (#132) ----------------------
+
+/**
+ * A screenshot off a retina display is routinely over the 5 MB cap, and covey
+ * used to answer that with the one word "unreadable". It now scales the image
+ * down instead — to the long edge past which the API downscales anyway, so
+ * nothing the model would have read is lost.
+ *
+ * These need a shrinker on the PATH. Skipped where there is none, because a
+ * machine without one is exactly the case `tooBig` is written for.
+ */
+const shrinker = ["sips", "magick", "convert", "ffmpeg"]
+  .find((c) => spawnSync("sh", ["-c", `command -v ${c}`], { stdio: "ignore" }).status === 0);
+
+test("an oversized image is shrunk under the cap and attaches", { skip: shrinker ? false : "no sips, magick, convert or ffmpeg on this machine" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const big = join(dir, "Screenshot 2026-09-22 at 6.54.34 PM.png");
+  writeFileSync(big, hugePng());
+  assert.ok(statSync(big).size > 5 * 1024 * 1024, "the fixture has to be over the cap to test the cap");
+
+  const { attachments, failed } = readDroppedFiles(big);
+  assert.deepEqual(failed, [], `it should have shrunk with ${shrinker}`);
+  assert.equal(attachments.length, 1);
+  const a = attachments[0]!;
+  // The name the reader dropped survives; the bytes are the smaller ones.
+  assert.equal(a.name, "Screenshot 2026-09-22 at 6.54.34 PM.png");
+  assert.equal(a.mimeType, "image/jpeg");
+  assert.ok(Buffer.from(a.data!, "base64").byteLength <= 5 * 1024 * 1024, "the bytes that go on the wire are under the cap");
+});
+
+test("an oversized image with no shrinker says so, and says what would have helped", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const big = join(dir, "shot.png");
+  writeFileSync(big, Buffer.alloc(6 * 1024 * 1024));
+  // Not a real PNG, so every shrinker refuses it — which is the same answer a
+  // machine with no shrinker gives, and the branch under test.
+  const { attachments, failed } = readDroppedFiles(big);
+  assert.deepEqual(attachments, []);
+  assert.equal(failed[0]!.chip, "6 MB, over the 5 MB limit");
+  assert.match(failed[0]!.message, /sips, magick, convert or ffmpeg/);
+});
+
+/** A PNG big enough to break the cap: random pixels do not compress. */
+function hugePng(): Buffer {
+  const side = 2600;
+  const raw = Buffer.alloc(side * side * 3);
+  for (let i = 0; i < raw.length; i++) raw[i] = (i * 2654435761) & 0xff;
+  // A PPM is what every one of the shrinkers reads without a library, and it
+  // is uncompressed, so the fixture is reliably over the cap.
+  return Buffer.concat([Buffer.from(`P6\n${side} ${side}\n255\n`), raw]);
+}

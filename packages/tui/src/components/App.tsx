@@ -28,7 +28,7 @@ import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, applyDrop, type DropResult } from "../attachments.js";
+import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, applyDrop, type DropResult, type FailedDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -1973,9 +1973,9 @@ export function App({ store }: { store: Store }) {
    *
    * @returns false when the drop held nothing at all.
    */
-  function attach(attachments: Attachment[], unreadable: string[] = [], base: Ed.EditState = { value: draft, caret }): boolean {
-    if ((attachments.length === 0 && unreadable.length === 0) || !state.view) return false;
-    const drop = applyDrop(base.value, base.caret, attachments, store.attachments(state.view.threadId), unreadable);
+  function attach(attachments: Attachment[], failed: FailedDrop[] = [], base: Ed.EditState = { value: draft, caret }): boolean {
+    if ((attachments.length === 0 && failed.length === 0) || !state.view) return false;
+    const drop = applyDrop(base.value, base.caret, attachments, store.attachments(state.view.threadId), failed);
     store.setAttachments(state.view.threadId, drop.attachments);
     applyEdit({ value: drop.value, caret: drop.caret });
     pasteSeam.current = null;
@@ -1997,13 +1997,13 @@ export function App({ store }: { store: Store }) {
   function pasteText(raw: string) {
     if (state.view) {
       const whole = readDroppedFiles(raw);
-      if (isDrop(whole)) { report(whole); if (attach(whole.attachments, whole.unreadable)) return; }
+      if (isDrop(whole)) { report(whole); if (attach(whole.attachments, whole.failed)) return; }
       const seam = openSeam();
       const split = seam ? readSplitDrop(seam.value.slice(0, seam.caret), raw) : null;
       if (split) {
         report(split.drop);
         const cut = { value: seam!.value.slice(0, split.start) + seam!.value.slice(seam!.caret), caret: split.start };
-        if (attach(split.drop.attachments, split.drop.unreadable, cut)) return;
+        if (attach(split.drop.attachments, split.drop.failed, cut)) return;
       }
     }
     // Normalise line endings and tabs, then insert.
@@ -2011,9 +2011,12 @@ export function App({ store }: { store: Store }) {
     applyEdit(next);
     pasteSeam.current = { at: Date.now(), ...next };
   }
-  /** Say what a drop could not read. */
+  /**
+   * Say what a drop could not attach. The chip in the draft carries the reason
+   * in a few words; this carries the path and the way out (#132).
+   */
   function report(drop: DropResult) {
-    for (const e of drop.errors) store.notify(e, "error");
+    for (const f of drop.failed) store.notify(f.message, "error");
   }
   /**
    * The draft a split drop may join onto: the state the last pasted chunk left,
@@ -2033,9 +2036,10 @@ export function App({ store }: { store: Store }) {
    */
   function pasteClipboard() {
     if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
-    const { attachments, unreadable, errors, text } = readClipboard();
+    const { attachments, failed, errors, text } = readClipboard();
     for (const e of errors) store.notify(e, "error");
-    if (attach(attachments, unreadable)) return;
+    for (const f of failed) store.notify(f.message, "error");
+    if (attach(attachments, failed)) return;
     if (text) pasteText(text);
   }
   function applyEdit(next: Ed.EditState) { setDraft(next.value); setCaret(next.caret); }
