@@ -790,7 +790,15 @@ export class Renderer {
       let row = this.rows.get(item.id);
       if (!row || row.item !== item) {
         const el = renderItem(item, this.a, this.markdown, this.fileSrc);
-        if (row) row.el.replaceWith(el); else this.timeline.insertBefore(el, cursor);
+        if (row) {
+          // The replacement takes the old node's place, so the walk follows it
+          // there. Without this the cursor holds a node that is no longer in
+          // the timeline, and the `insertBefore` below throws against it —
+          // which is the whole rest of the paint, the scroll to the bottom
+          // included, while a reply streams into the last row.
+          if (cursor === row.el) cursor = el;
+          row.el.replaceWith(el);
+        } else this.timeline.insertBefore(el, cursor);
         row = { item, el };
         this.rows.set(item.id, row);
       }
