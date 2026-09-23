@@ -1,0 +1,25 @@
+# The Rust desktop client (issue #142). A cargo workspace of its own, beside
+# the pnpm workspace and not inside it: `tsc -b` must never see these files,
+# and `cargo` must never need node.
+[workspace]
+resolver = "2"
+members = [
+  "crates/covey-protocol",
+  "crates/covey-client",
+  "crates/covey-grid",
+  "crates/covey-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[workspace.dependencies]
+covey-protocol = { path = "crates/covey-protocol" }
+covey-client = { path = "crates/covey-client" }
+covey-grid = { path = "crates/covey-grid" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

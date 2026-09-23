@@ -1,0 +1,11 @@
+[package]
+name = "covey-grid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "A styled character grid where a rectangle of cells can hold a picture."
+
+[dependencies]
+unicode-width = "0.2"
+unicode-segmentation = "1"

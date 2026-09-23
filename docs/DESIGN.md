@@ -144,7 +144,7 @@ gigabytes for conversations nobody was reading, and the machine went into swap.
 The engine therefore releases a session that nobody needs. Two rules, in this order:
 
 1. **The timer.** A thread idle longer than `MachineSettings.sessionIdleMinutes`
-   (default 15) loses its session. Idle means no command about that thread and no line from
+   (default 120) loses its session. Idle means no command about that thread and no line from
    the agent.
 2. **The budget.** While more sessions are live than `MachineSettings.maxLiveSessions`
    allows, the least recently used ones go. The default comes from the machine's own memory:
@@ -169,9 +169,22 @@ session, and a task that never reports holds it for ever — 300 MB costs less t
 Nothing is lost. The transcript lives in the session store, keyed by thread id, so the next
 message starts a new process with `resume` and the model reads the whole conversation back.
 Measured: a resume costs about 0.3 s of start time on a 458 KB transcript, against 5 ms for a
-process that is already up. A session quiet for longer than the prompt cache lives (about five
-minutes) has no advantage left to hold, which is why the default limit can be a quarter of an
-hour.
+process that is already up.
+
+The two rules are not the same rule with two numbers, and the timer is the one that has to
+justify itself. The budget is what bounds the memory: it releases a session as soon as the
+machine holds more than it allows, whatever the timer says. So the timer only gives memory
+back *under* that ceiling, and the section below is the price it pays for it — a session
+covey starts fresh refreshes its own token and can live all day, and the resumed session that
+replaces it holds a token it cannot replace and dies at that token's expiry. An idle release
+therefore trades a session that would have lived for one with a deadline.
+
+Two hours, because that is what the threads do. Measured over three days on one machine: of
+the 31 idle releases whose thread spoke again, 25 spoke again within two hours, and the 6 that
+did not came back after three hours or more. A limit of two hours keeps the session across the
+pause a person takes — a build, a review, a meeting — and still releases the thread that was
+left for the day. Fifteen minutes, the limit before this one, released a session 19 times in
+those three days for a thread that came back inside the hour.
 
 Both events are visible. The thread gets a note when its session goes, and another when a
 turn starts one again, so a slow first reply reads as a resume rather than as a thread that
@@ -221,25 +234,42 @@ Claude Code to, in `auth.ts` and the engine.
 1. **It knows this failure from a failure of the work.** The error text must name the
    credential *and* say that the credential was refused. `401` alone is a page a tool fetched,
    and `invalid` alone is most of what a model ever gets told.
-2. **It knows when the token runs out.** `credentialExpiry` reads `expiresAt` out of the store:
-   one number from `.credentials.json`, or from the keychain item on macOS, read the way the
-   SDK itself reads it at every resume. A resumed session is recorded with the expiry of the
-   token it copied. The sweep stops such a session once that time has passed, before a user
-   types into it, and a message to one starts a new process instead.
+2. **It knows when the token runs out, and it reads the last five minutes as gone.**
+   `credentialExpiry` reads `expiresAt` out of the store: one number from `.credentials.json`,
+   or from the keychain item on macOS, read the way the SDK itself reads it at every resume. A
+   resumed session is recorded with the expiry of the token it copied. The sweep stops such a
+   session once the token is inside the window, before a user types into it, and a message to
+   one starts a new process instead.
+
+   The window is `EXPIRY_MARGIN_MS`, and it is not a number covey chose. Claude Code refreshes
+   the store when, and only when, `Date.now() + 300000 >= expiresAt` — read out of the Claude
+   Code the SDK ships, 2.1.280. Ask earlier and the process answers without rotating anything;
+   ask later and the token is already dead. So five minutes is both the soonest a refresh can
+   be had and the least life worth giving a session that cannot refresh, and it moves only
+   when that number in Claude Code moves.
 3. **It refreshes before a session copies a dead token.** Before a process starts, the engine
-   reads the expiry. When the token is expired or within two minutes of it, or when a session
-   that read the store as it is now has failed on the credentials, `refreshCredentials` runs
-   one fresh one-turn Claude Code process against the real store — no resume, no temporary
-   directory, no tools, no transcript, one word from the cheapest model. That process holds
-   the refresh token, refreshes the pair, and saves it where every later session reads it,
-   exactly as under `claude -p`. Ten threads that fail at once wait on one refresh. The daemon
-   refreshes at no other time: a refresh revokes what every live session holds, so an early
-   one would be the fault itself.
-4. **It stops the processes that hold the dead token.** The thread that failed loses its
+   reads the expiry. When the token is inside the window, or when a session that read the
+   store as it is now has failed on the credentials, `refreshCredentials` runs one fresh
+   one-turn Claude Code process against the real store — no resume, no temporary directory, no
+   tools, no transcript, one word from the cheapest model. That process holds the refresh
+   token, refreshes the pair, and saves it where every later session reads it, exactly as
+   under `claude -p`. Ten threads that fail at once wait on one refresh.
+4. **It refreshes ahead of the expiry, when that costs nobody anything.** A refresh takes a
+   process and a second or two, and left to rule 3 that wait lands on whoever types first
+   after the token runs out. So the sweep does it instead (`refreshAhead`), on one condition:
+   the daemon holds **no live session at all**. A refresh is a rotation and a rotation revokes
+   what every live session holds, which covers the two cases covey must never break — a busy
+   session, whose turn the rotation would end, and a session covey started fresh, which reads
+   the real store and refreshes for itself and would be revoked for nothing. By then the
+   resumed sessions are already gone: rule 2 ran first, and the window that makes a refresh
+   due is the window that makes their copy spent. A refresh ahead of the expiry that fails is
+   a line in the log and is not tried again for half an hour, because a dead refresh token
+   fails every time and must not become a process every thirty seconds.
+5. **It stops the processes that hold the dead token.** The thread that failed loses its
    session at once. Every session that owes nobody an answer goes with it, because they hold
    the same token. A busy session stays: to kill a turn in flight costs more than the failure
    it saves, and that turn arrives here by itself if its own token is dead.
-5. **It restarts the work, once, on the refreshed store.** A turn that had already written
+6. **It restarts the work, once, on the refreshed store.** A turn that had already written
    something gets `Go on from the point where it stopped`, because the transcript holds that
    work. A turn that died before its first word is sent again word for word, because "go on"
    means nothing to a model that never started. The second failure in a row is a note that

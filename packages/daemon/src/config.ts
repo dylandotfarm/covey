@@ -78,14 +78,28 @@ export interface DaemonConfig {
 /**
  * The default idle limit, in minutes.
  *
- * A session costs about 300 MB and answers about 0.3 s faster than a resumed
- * one (measured on macOS with SDK 0.3.265, on a 458 KB transcript). The prompt
- * cache expires after about five minutes, so a session that has been quiet for
- * longer than that holds memory for almost no gain. Fifteen minutes is past
- * every ordinary pause — a read, a build, a meeting — and well inside the hour
- * a forgotten thread would otherwise hold.
+ * A session costs about 300 MB, and `defaultLiveSessionLimit` is what bounds
+ * that cost: the budget releases the least recently used session as soon as
+ * the machine holds more than it allows. So the idle limit never guards the
+ * memory ceiling. It only gives memory back *under* the ceiling, and it asks
+ * a price for it that the budget does not.
+ *
+ * The price is the credentials. A session covey starts fresh reads the real
+ * credential store and refreshes the token for itself, the way a Claude Code
+ * terminal does. A session covey resumes cannot: the SDK hands a resume a copy
+ * of the store with the refresh token taken out, so the token it starts with
+ * is the last one it will ever hold, and it dies at that token's expiry. Every
+ * idle release therefore turns a session that would have lived into one that
+ * has a deadline (`EXPIRY_MARGIN_MS` in `engine.ts` holds the other half).
+ *
+ * Two hours, because that is what the threads do. Measured over three days on
+ * one machine: of the 31 idle releases whose thread spoke again, 25 spoke
+ * again within two hours, and the 6 that did not came back after three hours
+ * or more. A limit of two hours therefore keeps the session for the pause a
+ * person takes — a build, a review, a meeting — and still releases the thread
+ * that was left for the day.
  */
-export const DEFAULT_SESSION_IDLE_MINUTES = 15;
+export const DEFAULT_SESSION_IDLE_MINUTES = 120;
 
 /** What one live session costs in resident memory. Measured: 271-363 MB. */
 const SESSION_MEMORY_BYTES = 300 * 1024 * 1024;
