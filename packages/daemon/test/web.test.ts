@@ -199,7 +199,17 @@ test("a file dropped on a thread comes back through /file, and nothing else does
   }
 });
 
-test("the file route is off with the web client", async () => {
+test("the file route answers on a machine whose own web client is off (#135)", async () => {
+  // One machine of a fleet serves the page; a thread runs on any of them. The
+  // daemon that holds the bytes is very often not the one that served the page,
+  // and it has no web client of its own — so this route may not be gated on it.
   const d = await startDaemon({ name: "shut" });
-  assert.equal((await fetch(`http://127.0.0.1:${d.port}/file?thread=x&path=/y`)).status, 404);
+  const base = `http://127.0.0.1:${d.port}`;
+  assert.equal((await fetch(`${base}/`)).status, 404, "the page itself is still off");
+  assert.equal((await fetch(`${base}/media?url=https://example.com/x.png`)).status, 404, "and so is the media route, which any daemon could answer");
+  // The route answers, and answers for itself: this daemon holds no such thread.
+  const r = await fetch(`${base}/file?thread=nobody&path=/y`);
+  assert.equal(r.status, 404);
+  assert.match(await r.text(), /no such thread on this machine/);
+  assert.equal((await fetch(`${base}/file`)).status, 404);
 });
