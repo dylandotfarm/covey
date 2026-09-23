@@ -1952,7 +1952,15 @@ export function App({ store }: { store: Store }) {
     // Terminals paste with cmd+v (macOS) or ctrl+shift+v (Linux) and send the
     // TUI nothing at all when the clipboard holds an image, so ctrl+v is free
     // for covey to read the clipboard itself.
-    if (key.ctrl && input === "v") return pasteClipboard();
+    //
+    // cmd+v does the same wherever the terminal hands it over. Most macOS
+    // terminals keep it for their own paste and covey never sees it, but the
+    // ones that speak the kitty keyboard protocol send it — the same route
+    // cmd+backspace already arrives by — and on a Mac cmd+v is the key a
+    // person reaches for. Taking it costs nothing where it never arrives, and
+    // covey's own read is the better answer where it does: the terminal's
+    // paste can only ever deliver text.
+    if ((key.ctrl || key.super) && input === "v") return pasteClipboard();
     if (input && !key.ctrl && !key.meta && !key.super) insert(input);
   }
   /**
