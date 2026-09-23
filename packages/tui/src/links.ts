@@ -1,18 +1,28 @@
 /**
  * Clickable paths and URLs in the transcript.
  *
- * Two routes, because no single one covers every terminal:
+ * The gesture is cmd+click on a Mac and ctrl+click elsewhere, the one Claude
+ * Code teaches, and a plain click never opens anything — it selects text, and
+ * a link the reader only meant to point at must not reach the browser.
+ *
+ * Two routes carry that gesture, because no single one covers every terminal:
  *
  * 1. An OSC 8 hyperlink. The terminal does the hit test and the open, the
- *    pointer changes shape, and no mouse plumbing is involved. The URI never
- *    enters `Span.text`, so `width()` in `lines.ts` keeps counting printable
- *    columns only. Ink measures with `string-width`, which also skips the
- *    sequence, and `slice-ansi` reopens the link after a wrap.
- * 2. alt+click and ctrl+click on the same span. SGR mouse reports carry a bit
- *    for alt (8) and one for ctrl (16), so `parseMouse` already decodes them.
- *    There is no bit for cmd, and shift is reserved: terminals bypass mouse
- *    reporting while it is held, which is the escape hatch for native
- *    selection.
+ *    pointer changes shape, and no mouse plumbing is involved. This is the
+ *    route cmd+click takes: macOS terminals keep cmd for themselves and hand
+ *    the app nothing, which is why `parseMouse` can never see that click. The
+ *    URI never enters `Span.text`, so `width()` in `lines.ts` keeps counting
+ *    printable columns only. Ink measures with `string-width`, which also
+ *    skips the sequence, and `slice-ansi` reopens the link after a wrap.
+ * 2. alt+click and ctrl+click on the same span, for a terminal that knows no
+ *    OSC 8. SGR mouse reports carry a bit for alt (8) and one for ctrl (16),
+ *    so `parseMouse` already decodes them. There is no bit for cmd, and shift
+ *    is reserved: terminals bypass mouse reporting while it is held, which is
+ *    the escape hatch for native selection.
+ *
+ * So covey cannot open a link on cmd+click itself. What it does instead is
+ * name the gesture: `openGesture` writes it in the reader's own words, and a
+ * plain click on a link says it rather than opening or staying silent.
  *
  * A path in the transcript is a path on the *daemon's* host, and the file
  * manager runs on the *client's* host. So a file link is drawn only when the
@@ -224,6 +234,22 @@ export function osc8(uri: string, text: string): string {
  */
 export function hyperlinksEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return !env.COVEY_NO_HYPERLINKS;
+}
+
+/**
+ * What the reader holds to open a link, in the words of their own machine.
+ *
+ * With OSC 8 the terminal owns the gesture, so covey must name the one that
+ * terminal answers to: cmd+click on macOS, ctrl+click on the VTE, kitty and
+ * WezTerm terminals of a Linux desktop. covey also opens a ctrl+click itself,
+ * so on Linux the one word is true whichever route runs.
+ *
+ * Without OSC 8 only covey's own route is left, and that route has no cmd bit
+ * to read. Then the gesture is alt+click, which every terminal forwards.
+ */
+export function openGesture(platform: string, hyperlinks: boolean = hyperlinksEnabled()): string {
+  if (!hyperlinks) return "alt+click";
+  return platform === "darwin" ? "cmd+click" : "ctrl+click";
 }
 
 // ---------------------------------------------------------------------------
