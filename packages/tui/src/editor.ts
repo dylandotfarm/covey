@@ -189,14 +189,20 @@ export function deleteForward(s: EditState): EditState {
   return s.caret >= s.value.length ? s : cut(s.value, s.caret, s.caret + 1);
 }
 
-/** cmd+backspace — delete to the start of the current line only. */
+/** cmd+backspace — delete to the start of the current line only.
+ *  When the caret is already at the start of the line, delete the newline
+ *  before it, so the line joins the line above (#47). */
 export function deleteToLineStart(s: EditState): EditState {
-  return cut(s.value, lineStart(s.value, s.caret), s.caret);
+  const start = lineStart(s.value, s.caret);
+  return start === s.caret ? deleteBack(s) : cut(s.value, start, s.caret);
 }
 
-/** cmd+delete — delete to the end of the current line only. */
+/** cmd+delete — delete to the end of the current line only.
+ *  When the caret is already at the end of the line, delete the newline
+ *  after it, so the line below joins this line (#47). */
 export function deleteToLineEnd(s: EditState): EditState {
-  return cut(s.value, s.caret, lineEnd(s.value, s.caret));
+  const end = lineEnd(s.value, s.caret);
+  return end === s.caret ? deleteForward(s) : cut(s.value, s.caret, end);
 }
 
 /** alt+backspace — delete the word before the caret. */
