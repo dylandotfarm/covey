@@ -17,6 +17,9 @@ A multi-agent terminal UI for Claude Code, built from scratch on the official
   and threads, one open at a time, to check on the work and start a new idea from anywhere.
 - Runs on Node 22+ with zero native dependencies (Linux, macOS; Windows-friendly paths and
   process handling, untested there).
+- An experimental **desktop client in Rust**, styled like the TUI but drawn in a window, so a
+  screenshot in a transcript is a screenshot and the mouse reports pixels. It runs beside the
+  TUI and replaces nothing — see [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ## Quick start
 
@@ -186,9 +189,13 @@ packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart
                     and `covey issue …` / `covey pr …` for an agent inside a thread
 bin/covey           launcher that setup links onto your PATH; runs its own checkout,
                     waits for it, and puts the terminal back however it died
+packages/web        the phone's client, served by the daemon
 plugin/             the covey plugin: the /covey skill, handed to every session the daemon starts
 scripts/setup.mjs   one command from a clone: install, build, link the launcher
+desktop/            the experimental Rust desktop client — its own cargo workspace,
+                    outside the pnpm one (issue #142)
 docs/DESIGN.md      architecture and the reasoning behind it
+docs/DESKTOP.md     why there is a second client, and how its cell grid holds a picture
 ```
 
 Data lives in `~/.local/share/covey` (Linux), `~/Library/Application Support/covey` (macOS),
