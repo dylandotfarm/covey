@@ -3,6 +3,12 @@
 A multi-agent terminal UI for Claude Code, built from scratch on the official
 [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
 
+![The covey TUI. Four threads across two projects take a message each and work
+at the same time, and the last panel is the diff of one turn.](docs/media/threads.gif)
+
+*Four threads, two projects, one machine. Each thread works in its own git
+worktree, so they never collide, and `d` shows what a turn changed.*
+
 - Left sidebar: machines → projects → threads. Many threads run concurrently.
 - One small daemon per machine. The TUI connects to any number of them at once.
 - Tailscale-native: a daemon bound to your tailnet accepts peers that `tailscale whois`
@@ -74,6 +80,14 @@ covey machines add ws://other-host.your-tailnet.ts.net:3790 --name other
 Outside Tailscale, append `--token <token from covey info>`.
 
 ### On a phone
+
+![The covey web client on a phone. The list follows two threads that start
+elsewhere, a tap opens a conversation, the composer sends a message, and the
+settings of that conversation come up from the foot of the
+page.](docs/media/phone.gif)
+
+*The same fleet from a phone. The list follows work that starts anywhere, and
+the composer sends from anywhere.*
 
 One machine in your fleet serves a web client at `http://<machine>:3790/`. Turn it on from
 the TUI: press enter on the machine row, then choose "Web server: off". The machine's info
@@ -189,6 +203,7 @@ bin/covey           launcher that setup links onto your PATH; runs its own check
 plugin/             the covey plugin: the /covey skill, handed to every session the daemon starts
 scripts/setup.mjs   one command from a clone: install, build, link the launcher
 docs/DESIGN.md      architecture and the reasoning behind it
+docs/media/         the demo recordings this page shows
 ```
 
 Data lives in `~/.local/share/covey` (Linux), `~/Library/Application Support/covey` (macOS),
