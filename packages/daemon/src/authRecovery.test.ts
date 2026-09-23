@@ -28,6 +28,13 @@ import { Engine } from "./engine.js";
  * revoked account, and a refresh is a count rather than a rotation.
  */
 
+/** `EXPIRY_MARGIN_MS` in the engine: the window Claude Code refreshes in, and
+ *  therefore the end of a token that covey reads as already gone. */
+const MARGIN_MS = 5 * 60_000;
+
+/** `SWEEP_INTERVAL_MS` in the engine. */
+const SWEEP_MS = 30_000;
+
 const AUTH_ERROR = "Failed to authenticate. API Error: 401 OAuth access token has been revoked.";
 const EXPIRED_ERROR = "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.";
 
@@ -375,7 +382,7 @@ test("a token about to expire counts as expired: a process takes seconds to star
   assert.deepEqual(s.refreshes, [0]);
 });
 
-test("the sweep stops an idle resumed session whose copied token ran out, before anyone types into it", async (t) => {
+test("the sweep stops an idle resumed session whose copied token is spent, before anyone types into it", async (t) => {
   let expiresAt = 0;
   const s = setup({ expiry: () => expiresAt });
   t.after(s.cleanup);
@@ -390,13 +397,15 @@ test("the sweep stops an idle resumed session whose copied token ran out, before
   await settle();
   assert.equal(s.engine.sessionCensus().live, 2);
 
-  s.tick(3_600_000 - 1);
+  // The last five minutes are the window Claude Code refreshes in, so covey
+  // reads the token as gone there rather than hand a reader the end of it.
+  s.tick(3_600_000 - MARGIN_MS - 1);
   assert.deepEqual(await s.engine.checkCredentials(), [], "not yet");
   s.tick(2);
   assert.deepEqual(await s.engine.checkCredentials(), ["t1"]);
   assert.equal(s.clis[0]!.aborted, true);
   assert.equal(s.clis[1]!.aborted, false, "a fresh process holds the refresh token and refreshes for itself");
-  assert.ok(s.notes("t1").some((n) => n.includes("has expired") && n.includes("stopped it before it failed")), s.notes("t1").join(" | "));
+  assert.ok(s.notes("t1").some((n) => n.includes("about to expire") && n.includes("stopped it before it failed")), s.notes("t1").join(" | "));
 
   // The next message refreshes the store — the stand-in's expiry has not
   // moved, so the daemon sees it still expired — and resumes.
@@ -504,4 +513,99 @@ test("a daemon that cannot refresh restarts once, as before, and then names the 
   await settle();
   assert.equal(s.clis.length, 2);
   assert.ok(s.notes("t1").some((n) => n.includes("twice in a row") && n.includes("claude auth login")), s.notes("t1").join(" | "));
+});
+
+// ---- the refresh nobody waited for ----------------------------------------
+
+test("covey refreshes the store on the sweep, so the next reader does not wait for it", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt, stamps: ["file:1", "file:2"] });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.withTranscript("t1");
+  expiresAt = s.now() + 3_600_000;
+  await s.send("t1", "hello");
+  s.clis[0]!.finish("hi");
+  await settle();
+
+  // The token enters the window: the resumed session goes, and the store is
+  // refreshed while nobody is asking for it.
+  s.tick(3_600_000 - MARGIN_MS + 1);
+  assert.deepEqual(await s.engine.checkCredentials(), ["t1"]);
+  assert.deepEqual(s.refreshes, [1], "one refresh, and no thread waited on it");
+
+  // The next message starts its process straight away. Nothing asks again:
+  // the store answered a process already.
+  expiresAt = s.now() + 8 * 3_600_000;
+  await s.send("t1", "again");
+  assert.deepEqual(s.refreshes, [1]);
+  assert.equal(s.clis.length, 2);
+  assert.deepEqual(s.clis[1]!.prompts, ["again"]);
+});
+
+test("the rotation covey made is not read back as somebody else's", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt, stamps: ["file:1", "file:2"] });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  expiresAt = s.now() + 60_000;
+  await s.engine.checkCredentials();          // records the stamp
+  await s.engine.checkCredentials();          // refreshes ahead of the expiry
+  assert.deepEqual(s.refreshes, [0]);
+
+  expiresAt = s.now() + 8 * 3_600_000;
+  await s.send("t1", "hello");
+  s.clis[0]!.finish("hi");
+  await settle();
+  assert.deepEqual(await s.engine.checkCredentials(), [], "the new stamp is covey's own work");
+  assert.equal(s.clis[0]!.aborted, false, "a session started on the new token keeps it");
+});
+
+test("a session that can refresh for itself is never revoked for nothing", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt });
+  t.after(s.cleanup);
+  s.newThread("t1");   // no transcript: a fresh process, which holds the refresh token
+  expiresAt = s.now() + 3_600_000;
+  await s.send("t1", "hello");
+  s.clis[0]!.finish("hi");
+  await settle();
+
+  s.tick(3_600_000 - MARGIN_MS + 1);
+  assert.deepEqual(await s.engine.checkCredentials(), []);
+  assert.deepEqual(s.refreshes, [], "the live session refreshes the store itself, in its own time");
+  assert.equal(s.clis[0]!.aborted, false);
+});
+
+test("a turn in flight is never ended by a refresh covey chose to make", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.withTranscript("t1");
+  expiresAt = s.now() + 3_600_000;
+  await s.send("t1", "a long job");   // left running
+  await settle();
+
+  s.tick(3_600_000 - MARGIN_MS + 1);
+  assert.deepEqual(await s.engine.checkCredentials(), [], "a busy session is left to finish or to fail");
+  assert.deepEqual(s.refreshes, []);
+  assert.equal(s.clis[0]!.aborted, false);
+});
+
+test("a refresh ahead of the expiry that fails is not tried again every half minute", async (t) => {
+  let expiresAt = 0;
+  const s = setup({ expiry: () => expiresAt, refresh: async () => { throw new Error(EXPIRED_ERROR); } });
+  t.after(s.cleanup);
+  expiresAt = s.now() + 60_000;
+
+  await s.engine.checkCredentials();
+  await s.engine.checkCredentials();
+  s.tick(SWEEP_MS * 10);
+  await s.engine.checkCredentials();
+  assert.deepEqual(s.refreshes, [0], "a dead refresh token fails every time; one process an hour, not two a minute");
+
+  s.tick(30 * 60_000);
+  await s.engine.checkCredentials();
+  assert.deepEqual(s.refreshes, [0, 0], "and it does ask again, so a login mends the machine without a restart");
 });
