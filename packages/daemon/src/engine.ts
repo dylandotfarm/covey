@@ -63,12 +63,31 @@ const SWEEP_INTERVAL_MS = 30_000;
 /** How often the daemon looks for a pull request watch that is due a poll. */
 const WATCH_TICK_MS = 15_000;
 
-/** A token this close to its expiry is refreshed before a session copies it:
- *  the copy cannot refresh, and a process takes seconds to start. */
-const EXPIRY_MARGIN_MS = 2 * 60_000;
+/**
+ * The last of a token's life, in which covey treats it as gone.
+ *
+ * Claude Code refreshes the store when, and only when, the access token is
+ * inside this window: `Date.now() + 300000 >= expiresAt`, read out of the
+ * Claude Code the SDK ships (2.1.280). Ask earlier and the process answers
+ * without rotating anything, so the session still starts on a token that is
+ * about to die; ask later and the token is already dead. Five minutes is
+ * therefore not a choice covey makes — it is the window Claude Code gives it,
+ * and it moves only when that number moves.
+ *
+ * So covey does two things with this one number. A refresh it asks for is due
+ * inside the window, where Claude Code will honour it. And a *resumed*
+ * session, which cannot refresh, is released inside the window rather than
+ * handed to a reader with minutes of life left in it.
+ */
+const EXPIRY_MARGIN_MS = 5 * 60_000;
 
-/** Why a session goes when the token it copied has run out. */
-const EXPIRED_NOTE = "This thread's session held an access token that has expired, and a resumed session cannot refresh one, so covey stopped it before it failed.";
+/** How long covey waits before it tries a refresh ahead of the expiry again.
+ *  A refresh token that only `claude auth login` mends fails every time, and
+ *  a failure must not become a process every half minute. */
+const AHEAD_RETRY_MS = 30 * 60_000;
+
+/** Why a session goes when the token it copied is spent. */
+const EXPIRED_NOTE = "This thread's session held an access token that is about to expire, and a resumed session cannot refresh one, so covey stopped it before it failed.";
 
 export interface EngineOptions {
   /** How a session reaches the SDK. A test hands in a stand-in, so nothing
@@ -172,6 +191,8 @@ export class Engine {
   private credRefreshedAt = 0;
   /** The refresh in flight, so ten threads that fail at once ask for one. */
   private refreshing: Promise<void> | null = null;
+  /** When covey last tried to refresh ahead of the expiry, in milliseconds. */
+  private aheadAt = 0;
   /** Session starts in flight, one per thread. */
   private starting = new Map<string, Promise<ClaudeSession>>();
   private watchTimer: NodeJS.Timeout | null = null;
@@ -1755,7 +1776,7 @@ export class Engine {
 
   private ensureSession(t: Thread): Promise<ClaudeSession> {
     const live = this.sessions.get(t.id);
-    if (live?.running && !this.tokenExpired(t.id)) { this.touch(t.id); return Promise.resolve(live); }
+    if (live?.running && !this.tokenSpent(t.id)) { this.touch(t.id); return Promise.resolve(live); }
     // A start waits on the credentials, and a second message in that time
     // must not start a second process for the same thread.
     let starting = this.starting.get(t.id);
@@ -1769,7 +1790,7 @@ export class Engine {
   private async startSession(t: Thread, live: ClaudeSession | undefined): Promise<ClaudeSession> {
     // A session that stopped answering still owns a subprocess until somebody
     // aborts it. Replacing it without that leaves a process no map names.
-    if (live?.running) this.release(t.id, "token expired", EXPIRED_NOTE);
+    if (live?.running) this.release(t.id, "token spent", EXPIRED_NOTE);
     else if (live) this.dropSession(t.id);
     const p = this.db.getProject(t.projectId);
     if (!p) throw new EngineError("not_found", "project not found");
@@ -1949,36 +1970,95 @@ export class Engine {
    */
   async checkCredentials(): Promise<string[]> {
     const expired = this.releaseExpired();
-    const stamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null);
-    if (!stamp) return expired;
-    const seen = this.credStamp;
-    this.credStamp = stamp;
-    if (seen === null || seen === stamp) return expired;
-    const cycled = this.cycleSessions(null, "Your Claude credentials changed while this session was live, so the token it holds no longer works.");
-    if (cycled.length) this.opts.log?.(`credentials rotated: cycled ${cycled.length} session${cycled.length === 1 ? "" : "s"}`);
+    const cycled = await this.watchRotation();
+    await this.refreshAhead();
     return [...expired, ...cycled];
   }
 
+  /** The stamp watch on its own: a rotation somebody else made, and the
+   *  sessions it left holding a token the server has revoked. */
+  private async watchRotation(): Promise<string[]> {
+    const stamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null);
+    if (!stamp) return [];
+    const seen = this.credStamp;
+    this.credStamp = stamp;
+    if (seen === null || seen === stamp) return [];
+    const cycled = this.cycleSessions(null, "Your Claude credentials changed while this session was live, so the token it holds no longer works.");
+    if (cycled.length) this.opts.log?.(`credentials rotated: cycled ${cycled.length} session${cycled.length === 1 ? "" : "s"}`);
+    return cycled;
+  }
+
   /**
-   * Stop every idle session whose copied token has run out, before a user
-   * types into one. Such a session cannot refresh, so its next request fails
+   * Refresh the store before a reader has to wait for it.
+   *
+   * A refresh is Claude Code's, and it takes a process and a second or two.
+   * Left to `freshenCredentials`, that wait lands on whoever types first
+   * after the token runs out. This does it on the sweep instead, so the store
+   * is whole again before anybody asks.
+   *
+   * Two conditions, and both are about doing no harm. A refresh is a rotation,
+   * and a rotation revokes the token every live session holds — so covey
+   * refreshes only when it holds no session at all. That covers the two cases
+   * it must never break: a busy session, whose turn a rotation would end, and
+   * a session covey started fresh, which reads the real store and refreshes
+   * for itself, and which covey would only be revoking for nothing. The
+   * resumed sessions are gone by now — `releaseExpired` ran first, and the
+   * same window that makes a refresh due makes their copy spent.
+   *
+   * A session start in flight counts as a session. It has read the expiry
+   * already and may be a moment from copying it, and the token this would
+   * rotate away is the one it is about to hold.
+   */
+  private async refreshAhead(): Promise<void> {
+    if (!this.opts.refreshCredentials || this.sessions.size > 0 || this.starting.size > 0) return;
+    const now = this.now();
+    if (now - this.aheadAt < AHEAD_RETRY_MS) return;
+    const expiry = await this.readExpiry();
+    if (expiry === null || expiry - now > EXPIRY_MARGIN_MS) return;
+    this.aheadAt = now;
+    try {
+      await this.refreshStore();
+      // The rotation is covey's own, so the watch must not read it as
+      // somebody else's and cycle what starts on the new token.
+      this.credStamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null) ?? this.credStamp;
+      this.opts.log?.("credentials refreshed ahead of the expiry");
+    } catch (e: any) {
+      // Nobody is waiting on this one, and no thread owns it, so it is a line
+      // in the log. A reader who types meets `freshenCredentials`, which asks
+      // again and writes what went wrong in the thread that asked.
+      this.opts.log?.(`refresh ahead of the expiry failed: ${(e?.message ?? String(e)).slice(0, 200)}`);
+    }
+  }
+
+  /**
+   * Stop every idle session whose copied token is spent, before a user types
+   * into one. Such a session cannot refresh, so its next request fails
    * whatever the store holds; a busy one is left to fail on its own and land
    * in `onAuthFailure`, which restarts its work.
    */
   private releaseExpired(): string[] {
     const released: string[] = [];
     for (const threadId of [...this.sessions.keys()]) {
-      if (!this.tokenExpired(threadId) || this.sessionBusy(threadId)) continue;
-      this.release(threadId, "token expired", EXPIRED_NOTE);
+      if (!this.tokenSpent(threadId) || this.sessionBusy(threadId)) continue;
+      this.release(threadId, "token spent", EXPIRED_NOTE);
       released.push(threadId);
     }
     return released;
   }
 
-  /** Does this session hold a copied token that the API no longer takes? */
-  private tokenExpired(threadId: string): boolean {
+  /**
+   * Is this session's copy of the token spent?
+   *
+   * Only a resumed session has an entry, because only a resumed session holds
+   * a token it cannot replace. The last `EXPIRY_MARGIN_MS` of that token
+   * counts as gone: what is left is too little to answer a turn with, and it
+   * is the window in which Claude Code refreshes the store, so the process
+   * that takes this one's place starts on a whole token rather than on the
+   * end of this one.
+   */
+  private tokenSpent(threadId: string): boolean {
     const at = this.sessionExpiry.get(threadId);
-    return at !== undefined && this.now() >= at;
+    return at !== undefined && this.now() + EXPIRY_MARGIN_MS >= at;
   }
 
   /**
@@ -2000,14 +2080,11 @@ export class Engine {
    */
   private async freshenCredentials(threadId: string): Promise<number | null> {
     let expiry = await this.readExpiry();
-    const due = this.credStale || (expiry !== null && expiry - this.now() < EXPIRY_MARGIN_MS);
+    const due = this.credStale || (expiry !== null && expiry - this.now() <= EXPIRY_MARGIN_MS);
     if (!due) return expiry;
     if (!this.opts.refreshCredentials) return expiry;
-    this.refreshing ??= this.opts.refreshCredentials().then(
-      () => { this.credStale = false; this.credRefreshedAt = this.now(); this.opts.log?.("credentials refreshed"); },
-    ).finally(() => { this.refreshing = null; });
     try {
-      await this.refreshing;
+      await this.refreshStore();
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       this.opts.log?.(`credential refresh failed: ${msg.slice(0, 200)}`);
@@ -2019,6 +2096,14 @@ export class Engine {
     }
     expiry = await this.readExpiry();
     return expiry;
+  }
+
+  /** One refresh at a time, whoever asked: ten threads that fail together,
+   *  and the sweep that asks ahead of the expiry, all wait on the same one. */
+  private refreshStore(): Promise<void> {
+    return this.refreshing ??= this.opts.refreshCredentials!().then(
+      () => { this.credStale = false; this.credRefreshedAt = this.now(); this.opts.log?.("credentials refreshed"); },
+    ).finally(() => { this.refreshing = null; });
   }
 
   private async readExpiry(): Promise<number | null> {

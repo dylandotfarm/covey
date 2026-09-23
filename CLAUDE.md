@@ -127,8 +127,12 @@
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
 - A thread's session is a subprocess of about 300 MB. The engine releases one after
-  `sessionIdleMinutes` (default 15) and holds at most `maxLiveSessions`; the next message
-  resumes it from the transcript. Never release a session that runs a turn, waits on an
+  `sessionIdleMinutes` (default 120) and holds at most `maxLiveSessions`; the next message
+  resumes it from the transcript. `maxLiveSessions` is what bounds the memory, so the idle
+  timer only gives memory back under that ceiling — and it charges for it, because the
+  resumed session that replaces a fresh one cannot refresh its own token (below). Measured
+  over three days: 25 of the 31 released threads came back within two hours, which is the
+  number. Never release a session that runs a turn, waits on an
   approval, or still owns a background task — `Engine.sessionBusy` decides, and a background
   task dies with its session. `/health` reports `sessions.live`.
 - Every session on a machine reads one credential store and then holds its access token in
@@ -144,6 +148,14 @@
   add one at another time. `credentialExpiry` reads when the token runs out, `auth.ts` tells
   this failure from a failure of the work, and the engine drops the session, cycles the idle
   ones, refreshes, and restarts the turn once (`authRecovery.test.ts`).
+  `EXPIRY_MARGIN_MS` is five minutes because Claude Code refreshes inside
+  `Date.now() + 300000 >= expiresAt` and nowhere else: ask earlier and it rotates nothing, so
+  never widen that window to win more life. covey reads those last five minutes as gone — it
+  releases a resumed session there rather than hand a reader the end of a token — and the
+  sweep refreshes there *ahead* of a reader (`refreshAhead`), on the one condition that the
+  daemon holds no live session at all. That condition is the whole safety of it: a rotation
+  revokes every live token, so a busy turn would end and a fresh session, which refreshes for
+  itself, would be revoked for nothing.
 - The model picker is read from the Claude Code covey runs, not from a list covey ships:
   the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
   no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The
