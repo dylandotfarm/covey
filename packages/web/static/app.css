@@ -199,6 +199,20 @@ a.ref { color: var(--accent); text-decoration: none; border-bottom: 1px dotted v
 .item-bar select { font: inherit; color: inherit; background: var(--surface-alt); border: 1px solid var(--border); border-radius: 10px; padding: 6px 8px; min-height: 36px; }
 .item-bar .who { font-size: 12px; color: var(--subtle); text-align: right; }
 
+/* ---- a table in a reply or in an issue body ---- */
+/* The table keeps its columns and scrolls inside its own box. A phone is
+   narrower than most tables, and the page itself must never move sideways.
+   A cell breaks at a space and not inside a word: the timeline sets
+   `overflow-wrap: anywhere` above it, which would give every column the
+   width of one letter. */
+.table-wrap { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; margin: 0 0 8px; }
+.table-wrap table { border-collapse: collapse; font-size: 14px; }
+.table-wrap th, .table-wrap td { padding: 5px 9px; border: 1px solid var(--border); text-align: left; vertical-align: top; overflow-wrap: normal; word-break: normal; }
+.table-wrap th { background: var(--surface); color: var(--text); font-weight: 600; }
+.table-wrap td { color: var(--muted); }
+.table-wrap .right { text-align: right; }
+.table-wrap .center { text-align: center; }
+
 /* ---- media inline, and full size over the page (#110) ---- */
 .media { display: block; max-width: 100%; max-height: 40vh; width: auto; height: auto; border-radius: 8px; background: var(--surface); margin: 6px 0; }
 img.media { cursor: zoom-in; object-fit: contain; }
