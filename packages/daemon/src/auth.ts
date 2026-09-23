@@ -22,8 +22,11 @@ const run = promisify(execFile);
  * A resumed session cannot refresh at all. The SDK resumes from covey's store
  * into a temporary config directory, and the copy of the credentials it writes
  * there carries the access token and *no refresh token* (`wnt` in `sdk.mjs`
- * deletes it; measured on 2026-09-22 on six such copies). So a resumed session
- * dies when the access token expires, whatever else happens:
+ * deletes it; measured on 2026-09-22 on six such copies, and read again in the
+ * SDK 0.3.280 bundle on 2026-09-23, where the minifier calls it `Oit`). It is
+ * the pair `(resume, sessionStore)` that sends a session down that path, and
+ * covey passes both on every resume. So a resumed session dies when the access
+ * token expires, whatever else happens:
  * `Failed to authenticate. API Error: 401 OAuth access token has expired.`
  * And a daemon that has run for a day holds only resumed sessions, so nothing
  * on the machine refreshes the store. A new session copies the same expired
@@ -34,10 +37,17 @@ const run = promisify(execFile);
  * fresh one-turn process against the real store, the way `claude -p` does;
  * that process holds the refresh token, refreshes the pair, and saves it where
  * every later session reads it. The daemon never touches the token itself and
- * never talks to the OAuth server. It refreshes only when the token is
- * expired, or about to be, or when a session that read it failed — a refresh
- * *is* the rotation that revokes what the other sessions hold, so an early
- * one would cause the fault it means to prevent.
+ * never talks to the OAuth server.
+ *
+ * When it asks is not covey's choice either. Claude Code refreshes the store
+ * inside one window — `Date.now() + 300000 >= expiresAt`, read out of the
+ * Claude Code the SDK ships (2.1.280) — and a process started outside it
+ * rotates nothing. So covey asks inside those five minutes, and only there:
+ * before a session copies the end of a token, when a session that read the
+ * store has failed, and on the sweep when the daemon holds no live session at
+ * all, which is the one moment a rotation revokes nothing
+ * (`Engine.refreshAhead`). A refresh *is* the rotation that revokes what every
+ * live session holds, so covey asks for one at no other time.
  *
  * The rest is knowing: `credentialExpiry` reads when the token runs out,
  * `credentialStamp` sees a rotation, and `isAuthFailure` tells a failure of
