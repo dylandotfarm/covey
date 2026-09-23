@@ -1041,6 +1041,21 @@ export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /**
+ * The long edge covey shrinks an oversized image to.
+ *
+ * The model never sees more than this: the API scales an image past its
+ * resolution tier down before it reads it — 2576 px on the current models,
+ * 1568 px on the standard tier — so taking a 5120 px screenshot down to 2576 px
+ * costs nothing the model would have read, and takes a 12 MB PNG under the cap.
+ * Scaling comes first and quality second, because heavy JPEG compression is
+ * what makes the text in a screenshot hard to read.
+ *
+ * Every client that shrinks reads it: the TUI shells out to `sips` or
+ * `magick`, and the page draws the image on a canvas (#135).
+ */
+export const SHRINK_LONG_EDGE = 2576;
+
+/**
  * Above this, the client tries `gzip` on a file before it sends it, and keeps
  * the result when it saved anything worth the unpacking. Below it the saving
  * is not worth a second copy of the bytes in memory.

@@ -14,7 +14,7 @@ import { makeSessionStore } from "./sessionStore.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
 import { redactDeep, redactor } from "./redact.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
-import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles } from "./attachments.js";
+import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, threadFilesDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
@@ -1696,6 +1696,16 @@ export class Engine {
     const wt = await createWorktree(p.workspaceRoot, name, cleanStart.ref, path);
     if ("error" in wt) throw new EngineError("git", `could not create worktree from ${cleanStart.ref}: ${wt.error}`);
     return { worktreePath: wt.path, branch: wt.branch, cleanStart, carried: false };
+  }
+
+  /**
+   * Where a thread keeps the files that were dropped on it, or null when this
+   * daemon holds no such thread. The `/file` route reads it, so the page can
+   * show an image somebody attached (#135).
+   */
+  threadFilesRoot(threadId: string): string | null {
+    const t = this.db.getThread(threadId);
+    return t ? threadFilesDir(this.threadCwd(t), t.id) : null;
   }
 
   /** Where a thread's session runs, and therefore where its dropped files go.

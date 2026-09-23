@@ -9,6 +9,7 @@ import { listRepos, createRepo, GH_CWD } from "./repos.js";
 import { listRemoteBranches } from "./git.js";
 import { findWebRoots, serveWeb } from "./web.js";
 import { serveMedia } from "./media.js";
+import { serveThreadFile } from "./threadFiles.js";
 import { webAddresses } from "./addresses.js";
 
 const STARTED_AT = new Date().toISOString();
@@ -72,6 +73,15 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
         void authenticate(req, o.config, selfUserId).then((auth) => {
           if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`media: ${auth.reason}\n`); return; }
           return serveMedia(req, res);
+        }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+        return;
+      }
+      // A file dropped on a thread, so the page can show it (#135). Gated the
+      // same way: the bytes are the reader's own work, not a static asset.
+      if (req.url?.startsWith("/file?") || req.url === "/file") {
+        void authenticate(req, o.config, selfUserId).then((auth) => {
+          if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`file: ${auth.reason}\n`); return; }
+          serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id));
         }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
         return;
       }

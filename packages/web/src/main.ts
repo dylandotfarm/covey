@@ -5,10 +5,12 @@
  * re-sends an item every few tens of milliseconds and the phone has one
  * thread for the paint and the keyboard.
  */
-import { MachineClient, uuid } from "@covey/client";
+import { applyDrop, MachineClient, uuid } from "@covey/client";
 import { WEB_CLIENT, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
-import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, emptyState, itemHash, openView, primaryMachine, routeOf, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
+import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState, itemHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
+import { attachingLabel, readPicked, sendingLabel } from "./attach.js";
+import { picked, shrinkInBrowser } from "./shrink.js";
 
 const TOKEN_KEY = "covey.token";
 
@@ -96,7 +98,7 @@ function dialMember(m: FleetMember) {
   let key: string;
   try { key = new URL(m.url).toString().replace(/\/$/, ""); } catch { return; }
   if (state.machines.has(key)) return;
-  dial(addMachine(state, key, m.name), m.token);
+  dial(addMachine(state, key, m.name, false, m.token), m.token);
 }
 
 /** Put a thread on screen. The URL already names it; this is what the URL means. */
@@ -200,8 +202,54 @@ const actions: Actions = {
   send(text) {
     const v = state.view;
     if (!v) return;
-    state.drafts.delete(`${v.machine}:${v.threadId}`);
-    clients.get(v.machine)?.command({ type: "turn.send", threadId: v.threadId, turnId: uuid(), text }).catch(fail);
+    const { machine, threadId } = v;
+    // The tag in the text is the file. Whatever lost its tag does not go.
+    const attachments = sendableAttachments(syncAttachments(state, machine, threadId, text));
+    state.drafts.delete(composerKey(machine, threadId));
+    setPendingAttachments(state, machine, threadId, []);
+    const bytes = pendingBytes(attachments);
+    // A phone on a mobile link takes seconds over a photograph, and the socket
+    // says nothing meanwhile, so the composer holds the line until the daemon
+    // acknowledges the command.
+    if (bytes > 0) state.attaching = sendingLabel(bytes);
+    schedule();
+    clients.get(machine)?.command({ type: "turn.send", threadId, turnId: uuid(), text, ...(attachments.length ? { attachments } : {}) })
+      .catch(fail)
+      .finally(() => { if (bytes > 0) { state.attaching = null; schedule(); } });
+  },
+  attachTags() {
+    const v = state.view;
+    return v ? [...new Set(pendingAttachments(state, v.machine, v.threadId).map((a) => a.tag))] : [];
+  },
+  async attachFiles(files, draft) {
+    const v = state.view;
+    if (!v) return null;
+    const { machine, threadId } = v;
+    const held = pendingAttachments(state, machine, threadId);
+    state.attaching = attachingLabel(files);
+    schedule();
+    let read;
+    try {
+      read = await readPicked(files.map(picked), shrinkInBrowser, pendingBytes(held));
+    } finally {
+      state.attaching = null;
+      schedule();
+    }
+    // The reader may have left the thread while a photograph was scaling.
+    if (state.view?.machine !== machine || state.view.threadId !== threadId) return null;
+    // A file that did not attach, and a file that attached but not the way the
+    // reader meant, each say so where every other failure on this page says it.
+    for (const w of read.warnings) fail(new Error(w));
+    for (const f of read.failed) fail(new Error(f.message));
+    if (read.attachments.length === 0 && read.failed.length === 0) return null;
+    // The caret belongs to the renderer, so the tags are worked out here and
+    // put into the draft there. `draft` is only what they must be unique
+    // against — the text of it at the moment the reader picked.
+    const drop = applyDrop(draft, draft.length, read.attachments, held, read.failed);
+    setPendingAttachments(state, machine, threadId, drop.attachments);
+    schedule();
+    const before = new Set(held.map((a) => a.tag));
+    return [...new Set(drop.attachments.map((a) => a.tag))].filter((t) => !before.has(t));
   },
   interrupt() {
     const v = state.view;
@@ -226,7 +274,13 @@ const actions: Actions = {
     schedule();
   },
   retry() { for (const c of clients.values()) if (c.state === "offline" || c.state === "error") c.retry(); schedule(); },
-  setDraft(machine, threadId, text) { state.drafts.set(`${machine}:${threadId}`, text); },
+  setDraft(machine, threadId, text) {
+    state.drafts.set(composerKey(machine, threadId), text);
+    // Deleting the chip drops the file. Only a change in the count repaints:
+    // a paint per keystroke is what the frame budget cannot afford.
+    const before = pendingAttachments(state, machine, threadId).length;
+    if (syncAttachments(state, machine, threadId, text).length !== before) schedule();
+  },
   toggleAddresses() { state.showAddresses = !state.showAddresses; state.sheet = null; schedule(); },
   updateMachine(machine) {
     const slot = state.machines.get(machine);
@@ -347,5 +401,5 @@ addEventListener("hashchange", () => applyRoute(routeOf(location.hash)));
 addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") actions.retry(); });
 
 const origin = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}`;
-dial(addMachine(state, origin, location.hostname, true), token);
+dial(addMachine(state, origin, location.hostname, true, token), token);
 schedule();

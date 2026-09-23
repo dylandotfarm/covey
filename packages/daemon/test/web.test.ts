@@ -4,7 +4,12 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { startDaemon, stopAll } from "./daemons.js";
+import { threadFilesDir } from "../src/attachments.js";
+import { scratchRemote } from "../src/scratch.js";
 
 after(stopAll);
 
@@ -148,4 +153,53 @@ test("bind changes while the daemon runs, the socket that asked stays open, and 
   assert.equal(back.ok, true, JSON.stringify(back));
   assert.equal((await rpc(d.port, "hello", { protocolVersion: 1, client: "covey-tui" })).result.settings.bind, "loopback");
   ws.close();
+});
+
+test("a file dropped on a thread comes back through /file, and nothing else does (#135)", async () => {
+  const remote = await scratchRemote("covey-web-file-");
+  try {
+    const d = await startDaemon({ name: "files", env: { COVEY_WEB: "1" } });
+    const base = `http://127.0.0.1:${d.port}`;
+    await rpc(d.port, "command", { commandId: randomUUID(), type: "project.create", url: remote.url });
+    const projectId = (await rpc(d.port, "shell.snapshot", {})).result.projects[0]!.id;
+    const threadId = randomUUID();
+    await rpc(d.port, "command", { commandId: randomUUID(), type: "thread.create", projectId, threadId, sessionId: randomUUID() });
+    const thread = (await rpc(d.port, "shell.snapshot", {})).result.threads.find((t: { id: string }) => t.id === threadId);
+    assert.ok(thread?.worktreePath, "the thread works in a worktree of its own");
+
+    // What `materialiseAttachments` writes when the page sends a photograph.
+    const store = threadFilesDir(thread.worktreePath, threadId);
+    mkdirSync(store, { recursive: true });
+    const bytes = Buffer.from("0123456789");
+    writeFileSync(join(store, "shot.png"), bytes);
+    const src = (path: string, thread = threadId) => `${base}/file?thread=${encodeURIComponent(thread)}&path=${encodeURIComponent(path)}`;
+
+    const got = await fetch(src(join(store, "shot.png")));
+    assert.equal(got.status, 200);
+    assert.equal(got.headers.get("content-type"), "image/png");
+    assert.equal(got.headers.get("accept-ranges"), "bytes");
+    assert.equal(Buffer.from(await got.arrayBuffer()).toString(), "0123456789");
+
+    // A video seeks by asking for a range, and Safari plays nothing without it.
+    const part = await fetch(src(join(store, "shot.png")), { headers: { range: "bytes=2-5" } });
+    assert.equal(part.status, 206);
+    assert.equal(part.headers.get("content-range"), "bytes 2-5/10");
+    assert.equal(await part.text(), "2345");
+
+    // Everything the route must refuse, before it opens anything.
+    assert.equal((await fetch(src("/etc/passwd"))).status, 400, "a path outside the thread's own store");
+    assert.equal((await fetch(src(`${store}/../../../../../etc/passwd`))).status, 400, "and one that climbs out of it");
+    assert.equal((await fetch(src(join(store, "shot.png"), randomUUID()))).status, 404, "a thread this daemon does not hold");
+    assert.equal((await fetch(`${base}/file`)).status, 404);
+    assert.equal((await fetch(src(join(store, "gone.png")))).status, 404);
+    assert.equal((await fetch(src(store))).status, 400, "the store itself is a directory");
+    assert.equal((await fetch(src(join(store, "shot.png")), { method: "POST" })).status, 405);
+  } finally {
+    remote.drop();
+  }
+});
+
+test("the file route is off with the web client", async () => {
+  const d = await startDaemon({ name: "shut" });
+  assert.equal((await fetch(`http://127.0.0.1:${d.port}/file?thread=x&path=/y`)).status, 404);
 });
