@@ -113,7 +113,24 @@ export function App({ store }: { store: Store }) {
   /** The index that key was on, for when the row it names goes away. */
   const lastCursor = useRef(0);
   const [ovCursor, setOvCursor] = useState(0);
-  const [ovFilter, setOvFilter] = useState("");
+  const [ovFilter, paintFilter] = useState("");
+  /**
+   * What the overlay's field holds *now*, which is not always what the last
+   * paint showed (#128).
+   *
+   * Ink gives `useInput` a whole paste in one call, and App replays it
+   * character by character, so every character queues a state update against
+   * one render. A handler that ran inside that batch and read `ovFilter` read
+   * the text the paste started from — usually the empty string — and a paste
+   * that submitted dropped what the reader pasted without a word.
+   *
+   * So: write both, read this one to decide and the state to paint.
+   */
+  const ovFilterRef = useRef("");
+  const setOvFilter = (next: string | ((f: string) => string)) => {
+    ovFilterRef.current = typeof next === "function" ? next(ovFilterRef.current) : next;
+    paintFilter(ovFilterRef.current);
+  };
   const [ovToggle, setOvToggle] = useState(false);
   const [draft, setDraft] = useState("");
   const [caret, setCaret] = useState(0);
@@ -835,7 +852,7 @@ export function App({ store }: { store: Store }) {
         if (!v) { backToSecrets(ov, at); return store.notify(`${k} is unchanged: a secret needs a value`, "error"); }
         write(k, v, Math.max(0, keys.includes(k) ? keys.indexOf(k) : keys.filter((x) => x < k).length));
       },
-      "paste it — the characters stay hidden",
+      "paste it whole — the characters stay hidden, newlines and all",
       () => backToSecrets(ov, at),
     );
     if (key.upArrow || input === "k") return setOvCursor(() => Math.max(0, at - 1));
@@ -1479,11 +1496,19 @@ export function App({ store }: { store: Store }) {
     const special = rawKey.upArrow || rawKey.downArrow || rawKey.leftArrow || rawKey.rightArrow || rawKey.return || rawKey.escape || rawKey.tab || rawKey.backspace || rawKey.delete || rawKey.pageUp || rawKey.pageDown || rawKey.ctrl || rawKey.meta || rawKey.super;
     const editing = state.focus === "composer" && !state.overlay && !pending;
     if (rawInput.length > 1 && !special && !(editing && !/^[\r\n]+$/.test(rawInput))) {
-      for (const ch of rawInput) {
-        if (ch === "\r" || ch === "\n") handleKey("", { ...rawKey, return: true });
-        else if (ch === "\t") handleKey("", { ...rawKey, tab: true });
-        else if (ch === "\x1b") handleKey("", { ...rawKey, escape: true });
-        else handleKey(ch, rawKey);
+      // `pasted` marks a key with more of its chunk behind it. The last
+      // character of a chunk is never marked: whatever ends a chunk is the
+      // last thing the reader did, whether they pasted it or typed it, and a
+      // rule that dropped it would eat the enter of a fast typist. Only the
+      // one-line prompts read this (#128).
+      const chars = [...rawInput];
+      for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i]!;
+        const k = { ...rawKey, pasted: i < chars.length - 1 };
+        if (ch === "\r" || ch === "\n") handleKey("", { ...k, return: true });
+        else if (ch === "\t") handleKey("", { ...k, tab: true });
+        else if (ch === "\x1b") handleKey("", { ...k, escape: true });
+        else handleKey(ch, k);
       }
       return;
     }
@@ -1584,14 +1609,30 @@ export function App({ store }: { store: Store }) {
       return;
     }
     if (ov.kind === "input") {
+      // One rule, and it is the whole of #128: a newline with more of its
+      // chunk behind it does not confirm. The newline that *ends* a chunk
+      // does, so a paste with a trailing newline still confirms, and so does
+      // the enter of a typist quick enough to share a chunk with their text.
+      //
+      // In a masked field the newline is content — a private key is a real
+      // secret and has to paste whole. In a one-line field it is dropped, the
+      // way a browser drops it, so the paste lands in the field entire instead
+      // of submitting at its first line and again at its second.
+      if (key.return && key.pasted) {
+        if (ov.mask) setOvFilter((f) => f + "\n");
+        return;
+      }
+      // Read the ref, not the state: inside a paste the state is a render old.
       // Trimmed, masked or not: a value pasted from a password manager often
       // carries a newline, and no credential wants the space around it.
-      if (key.return) { ov.onSubmit(ovFilter.trim()); setOvFilter(""); return; }
+      if (key.return) { ov.onSubmit(ovFilterRef.current.trim()); setOvFilter(""); return; }
       if (key.backspace || key.delete) { setOvFilter((f) => f.slice(0, -1)); return; }
       if (input && !key.ctrl && !key.meta) setOvFilter((f) => f + input);
       return;
     }
-    const list = ov.kind === "pick" ? filterOptions(ov.options, ovFilter) : [];
+    // The ref again, and for the same reason: a paste that ends in a newline
+    // would otherwise pick a row out of a list filtered by a render-old string.
+    const list = ov.kind === "pick" ? filterOptions(ov.options, ovFilterRef.current) : [];
     const len = list.length;
     if (key.upArrow) return setOvCursor((c) => Math.max(0, c - 1));
     if (key.downArrow) return setOvCursor((c) => Math.min(len - 1, c + 1));
