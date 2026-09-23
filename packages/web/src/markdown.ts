@@ -1,8 +1,9 @@
 /**
- * Markdown-lite to HTML: fences, headers, bullets, numbered lists, inline
- * code, bold, and links. The same subset the TUI paints. Everything is
+ * Markdown-lite to HTML: fences, headers, bullets, numbered lists, tables,
+ * inline code, bold, and links. The same subset the TUI paints. Everything is
  * escaped first, so a reply cannot put markup on the page.
  */
+import { tableAt, type Table } from "@covey/client";
 import { REF, mediaKind } from "./state.js";
 
 /**
@@ -81,6 +82,12 @@ export function markdownToHtml(text: string, o: MarkdownOptions = {}): string {
       out.push(`<pre${lang}><code>${escapeHtml(body.join("\n"))}</code></pre>`);
       continue;
     }
+    const table = tableAt(lines, i);
+    if (table) {
+      flushPara(); closeList();
+      out.push(tableToHtml(table, o));
+      i = table.end; continue;
+    }
     const header = /^(#{1,6})\s+(.*)$/.exec(line);
     if (header) {
       flushPara(); closeList();
@@ -114,4 +121,19 @@ export function markdownToHtml(text: string, o: MarkdownOptions = {}): string {
   }
   flushPara(); closeList();
   return out.join("");
+}
+
+/**
+ * A real `<table>`, inside a box of its own. The TUI gives a narrow pane
+ * narrow columns; the page cannot, so the box scrolls sideways and the page
+ * does not move with it. The style sheet holds that.
+ */
+function tableToHtml(t: Table, o: MarkdownOptions): string {
+  const cell = (tag: "th" | "td") => (text: string, j: number) => {
+    const a = t.align[j] ?? "left";
+    return `<${tag}${a === "left" ? "" : ` class="${a}"`}>${inline(text, o)}</${tag}>`;
+  };
+  const head = `<tr>${t.header.map(cell("th")).join("")}</tr>`;
+  const body = t.rows.map((r) => `<tr>${r.map(cell("td")).join("")}</tr>`).join("");
+  return `<div class="table-wrap"><table><thead>${head}</thead><tbody>${body}</tbody></table></div>`;
 }

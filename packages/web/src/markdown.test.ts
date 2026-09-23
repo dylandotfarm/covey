@@ -60,3 +60,46 @@ test("an image and a video are inline, through the mapper the renderer hands in 
   // An image inside a code span is text.
   assert.equal(inline("`![a](https://x.example/a.png)`"), "<code>![a](https://x.example/a.png)</code>");
 });
+
+test("a pipe table is a table, with the alignment the rule row gives", () => {
+  const html = markdownToHtml("before\n\n| a | b | c |\n| :-- | :-: | --: |\n| 1 | 2 | 3 |\n\nafter");
+  assert.equal(html,
+    "<p>before</p>" +
+    '<div class="table-wrap"><table>' +
+    '<thead><tr><th>a</th><th class="center">b</th><th class="right">c</th></tr></thead>' +
+    '<tbody><tr><td>1</td><td class="center">2</td><td class="right">3</td></tr></tbody>' +
+    "</table></div>" +
+    "<p>after</p>");
+});
+
+test("a cell is inline markdown, and a row is padded or cut to the header", () => {
+  const html = markdownToHtml("| what | note |\n| --- | --- |\n| `code` | **bold** and #12 |\n| short |\n| a | b | dropped |");
+  assert.equal(html,
+    '<div class="table-wrap"><table>' +
+    "<thead><tr><th>what</th><th>note</th></tr></thead>" +
+    "<tbody>" +
+    '<tr><td><code>code</code></td><td><strong>bold</strong> and <a class="ref" href="#" data-number="12">#12</a></td></tr>' +
+    "<tr><td>short</td><td></td></tr>" +
+    "<tr><td>a</td><td>b</td></tr>" +
+    "</tbody></table></div>");
+});
+
+test("a table without border pipes is one, and an escaped pipe stays in its cell", () => {
+  assert.equal(markdownToHtml("a | b\n--- | ---\nx \\| y | z"),
+    '<div class="table-wrap"><table><thead><tr><th>a</th><th>b</th></tr></thead>' +
+    "<tbody><tr><td>x | y</td><td>z</td></tr></tbody></table></div>");
+});
+
+test("a line of pipes without a rule row under it is a paragraph, not a table", () => {
+  assert.equal(markdownToHtml("| a | b |\nnot a rule"), "<p>| a | b |<br>not a rule</p>");
+  // The rule must have the header's columns, the way GitHub reads one.
+  assert.equal(markdownToHtml("| a | b |\n| --- |"), "<p>| a | b |<br>| --- |</p>");
+  // Markup in a cell is text, like everywhere else.
+  assert.equal(markdownToHtml("| a |\n| --- |\n| <b>x</b> |"),
+    '<div class="table-wrap"><table><thead><tr><th>a</th></tr></thead>' +
+    "<tbody><tr><td>&lt;b&gt;x&lt;/b&gt;</td></tr></tbody></table></div>");
+});
+
+test("a table inside a fence stays code", () => {
+  assert.equal(markdownToHtml("```\n| a |\n| --- |\n```"), "<pre><code>| a |\n| --- |</code></pre>");
+});
