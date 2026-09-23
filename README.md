@@ -58,6 +58,16 @@ an agent inside a covey thread knows how to take an issue to a merged pull reque
 `covey issue take` and `covey pr open`. A brief is then one line: `/covey take issue 94 to
 completion, automerge when done`.
 
+![Two covey threads take an issue each at the same time. A brief goes into the
+composer, the agent runs covey issue take, reads the issue with gh, edits the
+code, runs the tests, and covey pr open puts the pull request
+up.](docs/media/issues.gif)
+
+*Two threads, two issues, one brief each. The second one works on covey itself:
+it takes issue #47, fixes the editor, runs the suite, and opens the pull
+request. covey then watches that pull request and sends every checks verdict,
+review and comment back to the thread as a turn.*
+
 After that first build you never have to quit to update: `ctrl+k → "Update covey"` pulls,
 rebuilds, restarts the local daemon and relaunches the client in place. `covey update` does
 the same from a terminal.
