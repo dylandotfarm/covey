@@ -28,7 +28,7 @@ import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboard, readDroppedFiles, applyDrop } from "../attachments.js";
+import { readClipboard, readDroppedFiles, applyDrop, type FailedDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -1959,9 +1959,9 @@ export function App({ store }: { store: Store }) {
    *
    * @returns false when the drop held nothing at all.
    */
-  function attach(attachments: Attachment[], unreadable: string[] = []): boolean {
-    if ((attachments.length === 0 && unreadable.length === 0) || !state.view) return false;
-    const drop = applyDrop(draft, caret, attachments, store.attachments(state.view.threadId), unreadable);
+  function attach(attachments: Attachment[], failed: FailedDrop[] = []): boolean {
+    if ((attachments.length === 0 && failed.length === 0) || !state.view) return false;
+    const drop = applyDrop(draft, caret, attachments, store.attachments(state.view.threadId), failed);
     store.setAttachments(state.view.threadId, drop.attachments);
     applyEdit({ value: drop.value, caret: drop.caret });
     return true;
@@ -1973,9 +1973,11 @@ export function App({ store }: { store: Store }) {
    */
   function pasteText(raw: string) {
     if (state.view) {
-      const { attachments, unreadable, errors } = readDroppedFiles(raw);
-      for (const e of errors) store.notify(e, "error");
-      if (attach(attachments, unreadable)) return;
+      const { attachments, failed } = readDroppedFiles(raw);
+      // The chip says which file and why; the notice says where it was and
+      // what to do about it. A reader who missed the notice still has the chip.
+      for (const f of failed) store.notify(f.message, "error");
+      if (attach(attachments, failed)) return;
     }
     // Normalise line endings and tabs, then insert.
     insert(Ed.normalisePaste(raw));
@@ -1987,9 +1989,10 @@ export function App({ store }: { store: Store }) {
    */
   function pasteClipboard() {
     if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
-    const { attachments, unreadable, errors, text } = readClipboard();
+    const { attachments, failed, errors, text } = readClipboard();
     for (const e of errors) store.notify(e, "error");
-    if (attach(attachments, unreadable)) return;
+    for (const f of failed) store.notify(f.message, "error");
+    if (attach(attachments, failed)) return;
     if (text) pasteText(text);
   }
   function applyEdit(next: Ed.EditState) { setDraft(next.value); setCaret(next.caret); }

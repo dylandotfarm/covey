@@ -138,46 +138,141 @@ function longestRun(tokens: string[], i: number): { path: string; end: number } 
   return null;
 }
 
+/**
+ * A file the drop could not attach, and why — issue #132.
+ *
+ * Four different problems used to reach the composer as the one word
+ * "unreadable": a file that is not there, a file the terminal may not read, a
+ * file over the size cap, and everything else. They want four different
+ * answers from the reader, so the chip carries the reason and the notice
+ * carries the path and what to do about it.
+ */
+export interface FailedDrop {
+  name: string;
+  /** What the chip says after the name. Short: it sits in the draft. */
+  chip: string;
+  /** The notice line: the path, the reason, and the way out. */
+  message: string;
+}
+
 export interface DropResult {
   attachments: Attachment[];
   /**
-   * The names of the files this drop could not read, in drop order. The
-   * composer puts each in the draft as a chip in an error state, because a
-   * path on the screen helps nobody (#85).
+   * The files this drop could not attach, in drop order. The composer puts
+   * each in the draft as a chip in an error state, because a path on the
+   * screen helps nobody (#85).
    */
-  unreadable: string[];
-  errors: string[];
+  failed: FailedDrop[];
 }
 
 /**
  * Read one file into an attachment. A drop and a clipboard paste both come
  * through here, so the size cap, the media type and the name are one rule and
  * cannot drift apart (#124).
+ *
+ * An image over the cap is shrunk rather than refused (#132): a screenshot off
+ * a retina display carries megabytes the model never sees, because the API
+ * scales anything past its long edge down before it reads it.
  */
-export function readFileAttachment(path: string): { attachment?: Attachment; error?: string } {
+export function readFileAttachment(path: string): { attachment?: Attachment; failure?: FailedDrop } {
+  const name = basename(path);
+  let size: number;
   try {
-    const size = statSync(path).size;
-    if (size > MAX_ATTACHMENT_BYTES) return { error: `${basename(path)} is ${mb(size)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)` };
-    return { attachment: { name: basename(path), path, mimeType: fileMime(path), data: readFileSync(path).toString("base64") } };
-  } catch {
-    return { error: `could not read ${path}` };
+    size = statSync(path).size;
+  } catch (e: any) {
+    return { failure: statFailure(name, path, e) };
+  }
+  let read = path;
+  let mimeType = fileMime(path);
+  if (size > MAX_ATTACHMENT_BYTES) {
+    const smaller = imageMime(path) ? shrinkImage(path) : null;
+    if (!smaller) return { failure: tooBig(name, path, size) };
+    read = smaller.path;
+    mimeType = smaller.mimeType;
+  }
+  try {
+    return { attachment: { name, path: read, mimeType, data: readFileSync(read).toString("base64") } };
+  } catch (e: any) {
+    return { failure: statFailure(name, path, e) };
   }
 }
 
-/** Read every path into attachments, and name the ones that failed. */
+/** The reason a `stat` or a `read` of a dropped path failed, in the reader's words. */
+function statFailure(name: string, path: string, e: NodeJS.ErrnoException): FailedDrop {
+  if (e?.code === "ENOENT") {
+    return { name, chip: "not on this machine", message: `${path} is not on this machine. covey reads a dropped file where the client runs, so the file has to be there too.` };
+  }
+  if (e?.code === "EACCES" || e?.code === "EPERM") {
+    return {
+      name, chip: "no permission",
+      message: process.platform === "darwin"
+        ? `${path} cannot be read: macOS withholds it from this terminal. Grant it the folder under System Settings → Privacy & Security → Files and Folders, then drop the file again.`
+        : `${path} cannot be read: this user has no permission for it.`,
+    };
+  }
+  return { name, chip: "unreadable", message: `could not read ${path}: ${e?.message ?? e}` };
+}
+
+function tooBig(name: string, path: string, size: number): FailedDrop {
+  const limit = `${mb(MAX_ATTACHMENT_BYTES)} MB`;
+  return {
+    name, chip: `${mb(size)} MB, over the ${limit} limit`,
+    message: imageMime(path)
+      ? `${name} is ${mb(size)} MB, over the ${limit} limit, and covey found no tool to shrink it (it looks for sips, magick, convert or ffmpeg on the PATH). Scale it down and drop it again.`
+      : `${name} is ${mb(size)} MB, over the ${limit} limit.`,
+  };
+}
+
+/** Read every path into attachments, and say why each failure failed. */
 function readFiles(paths: string[]): DropResult {
   const attachments: Attachment[] = [];
-  const unreadable: string[] = [];
-  const errors: string[] = [];
+  const failed: FailedDrop[] = [];
   for (const path of paths) {
-    const { attachment, error } = readFileAttachment(path);
+    const { attachment, failure } = readFileAttachment(path);
     if (attachment) attachments.push(attachment);
-    else {
-      errors.push(error!);
-      unreadable.push(basename(path));
+    else failed.push(failure!);
+  }
+  return { attachments, failed };
+}
+
+/**
+ * The long edge covey shrinks an oversized image to.
+ *
+ * The model never sees more than this: the API scales an image past its
+ * resolution tier down before it reads it — 2576 px on the current models,
+ * 1568 px on the standard tier — so taking a 5120 px screenshot down to 2576 px
+ * costs nothing the model would have read, and takes a 12 MB PNG under the cap.
+ * Scaling comes first and quality second, because heavy JPEG compression is
+ * what makes the text in a screenshot hard to read.
+ */
+export const SHRINK_LONG_EDGE = 2576;
+
+/** One way to shrink an image, in the order covey tries them. */
+const SHRINKERS: { cmd: string; args: (src: string, dst: string, edge: number, quality: number) => string[] }[] = [
+  // macOS ships `sips`, which covey already uses to read the clipboard.
+  { cmd: "sips", args: (src, dst, edge, q) => ["-Z", String(edge), "-s", "format", "jpeg", "-s", "formatOptions", String(q), src, "--out", dst] },
+  { cmd: "magick", args: (src, dst, edge, q) => [src, "-resize", `${edge}x${edge}>`, "-quality", String(q), dst] },
+  { cmd: "convert", args: (src, dst, edge, q) => [src, "-resize", `${edge}x${edge}>`, "-quality", String(q), dst] },
+  { cmd: "ffmpeg", args: (src, dst, edge, q) => ["-y", "-loglevel", "error", "-i", src, "-vf", `scale='min(${edge},iw)':-2`, "-q:v", String(Math.max(2, Math.round((100 - q) / 8))), dst] },
+];
+
+/**
+ * Bring an oversized image under the cap, or answer null when this machine has
+ * nothing to do it with. Two passes at most: the second only runs when scaling
+ * alone was not enough, and it is the one that costs quality.
+ */
+export function shrinkImage(path: string, limit = MAX_ATTACHMENT_BYTES): { path: string; mimeType: string } | null {
+  for (const s of SHRINKERS) {
+    for (const [edge, quality] of [[SHRINK_LONG_EDGE, 85], [Math.round(SHRINK_LONG_EDGE / 2), 70]] as const) {
+      const dst = join(tmpdir(), `covey-shrunk-${randomUUID()}.jpg`);
+      const r = spawnSync(s.cmd, s.args(path, dst, edge, quality), { stdio: "ignore" });
+      if (r.error || r.status !== 0) break; // this tool is not here, or cannot do it: try the next
+      let size: number;
+      try { size = statSync(dst).size; } catch { break; }
+      if (size <= limit) return { path: dst, mimeType: "image/jpeg" };
     }
   }
-  return { attachments, unreadable, errors };
+  return null;
 }
 
 /**
@@ -186,7 +281,7 @@ function readFiles(paths: string[]): DropResult {
  */
 export function readDroppedFiles(raw: string): DropResult {
   const paths = groupDroppedPaths(parseDroppedPaths(raw));
-  if (!paths) return { attachments: [], unreadable: [], errors: [] };
+  if (!paths) return { attachments: [], failed: [] };
   return readFiles(paths);
 }
 
@@ -423,8 +518,8 @@ export function clipboardReadersFor(platform: NodeJS.Platform): ClipboardReader[
 
 export interface ClipboardResult {
   attachments: Attachment[];
-  /** The names of the files the clipboard named but covey could not read. */
-  unreadable: string[];
+  /** The files the clipboard named but covey could not attach, and why. */
+  failed: FailedDrop[];
   errors: string[];
   /** Text, when that is all the clipboard held. The caller pastes it. */
   text?: string;
@@ -436,7 +531,7 @@ export interface ClipboardResult {
  * composer can say one line and carry on.
  */
 export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platform = process.platform): ClipboardResult {
-  const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], unreadable: [], errors });
+  const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], failed: [], errors });
   const readers = clipboardReadersFor(platform);
   if (readers.length === 0) return nothing([`covey cannot read the clipboard on ${platform}`]);
   const absent: string[] = [];
@@ -446,15 +541,15 @@ export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platf
     if ("absent" in r) { absent.push(reader.install); continue; }
     if ("error" in r) return nothing([r.error]);
     if ("empty" in r) { holds = r.holds ?? holds; continue; }
-    if (r.found.paths) return readFiles(r.found.paths);
+    if (r.found.paths) return { ...readFiles(r.found.paths), errors: [] };
     if (r.found.image) {
       try {
-        return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], unreadable: [], errors: [] };
+        return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], failed: [], errors: [] };
       } catch {
         return nothing(["could not write the clipboard image to a temporary file"]);
       }
     }
-    return { attachments: [], unreadable: [], errors: [], text: r.found.text };
+    return { attachments: [], failed: [], errors: [], text: r.found.text };
   }
   if (absent.length === readers.length) return nothing([`to paste an image: ${absent.join(", or ")}`]);
   return nothing([holds.length > 0 ? `the clipboard holds ${holds.join(", ")}, which is not a file or an image` : "the clipboard has no file and no image"]);
@@ -530,8 +625,8 @@ export function keepTagged<T extends TaggedAttachment>(text: string, atts: T[]):
   return atts.filter((a) => text.includes(a.tag));
 }
 
-/** What a chip says about a file the drop could not read. */
-export const UNREADABLE_SUFFIX = " — unreadable";
+/** What a chip says about a file that did not attach: the name, then why. */
+export const chipLabel = (f: FailedDrop): string => `${f.name} — ${f.chip}`;
 
 /**
  * Work out what a drop does to the composer: the tags go into the draft at the
@@ -541,16 +636,16 @@ export const UNREADABLE_SUFFIX = " — unreadable";
  * that is free again is free to use, and the count the composer holds matches
  * what the draft says.
  *
- * `unreadable` names the files the drop recognised but could not read. Each
- * gets a chip too, marked as the failure it is, so the reader sees which file
- * did not attach. The chip is text alone: no file stands behind it.
+ * `failed` names the files the drop recognised but could not attach. Each gets
+ * a chip too, carrying the reason it failed, so the reader sees which file did
+ * not attach and why (#132). The chip is text alone: no file stands behind it.
  */
-export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[], unreadable: string[] = []): { value: string; caret: number; attachments: TaggedAttachment[] } {
+export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[], unattached: FailedDrop[] = []): { value: string; caret: number; attachments: TaggedAttachment[] } {
   const live = keepTagged(draft, pending);
   const tagged = tagAttachments(dropped, [draft, ...live.map((a) => a.tag)].join("\n"));
   let taken = [draft, ...live.map((a) => a.tag), ...tagged.map((a) => a.tag)].join("\n");
-  const failed = unreadable.map((name) => {
-    const tag = makeTag(`${name}${UNREADABLE_SUFFIX}`, taken);
+  const failed = unattached.map((f) => {
+    const tag = makeTag(chipLabel(f), taken);
     taken += `\n${tag}`;
     return tag;
   });
