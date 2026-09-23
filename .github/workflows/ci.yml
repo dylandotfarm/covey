@@ -14,8 +14,14 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: dependency age policy (7 days)
+      - name: dependency age policy (7 days), npm
         run: node scripts/pkg-age.mjs check
+      # The crate audit lives here rather than in the `desktop` job because it
+      # reads desktop/Cargo.lock and needs node, not cargo. On a stable
+      # toolchain below Rust 1.100 it is the only thing enforcing the rule for
+      # crates — see scripts/crate-age.mjs.
+      - name: dependency age policy (7 days), crates
+        run: node scripts/crate-age.mjs check
       - run: pnpm run build
       - run: pnpm test
   # The Rust desktop client (issue #142). Its own job because it is its own
@@ -38,7 +44,9 @@ jobs:
       # them, so a build needs no display and no development packages. The
       # tests need neither: every one of them works on a grid, and the two that
       # want a font or `ffmpeg` step aside when the machine has none.
+      # `--locked` everywhere: CI must never resolve a dependency. A version
+      # that entered without the age audit seeing it is the hole this closes.
       - run: cargo fmt --all --check
-      - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo build --release --bin covey-desktop
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked --bin covey-desktop

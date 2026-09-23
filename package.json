@@ -24,8 +24,9 @@
     "watch": "tsc -b --watch",
     "typecheck": "tsc -b",
     "test": "node --import tsx --test --test-timeout=420000 \"packages/*/src/**/*.test.ts\" \"packages/*/test/**/*.test.ts\"",
-    "check": "pnpm run check:age && pnpm run typecheck && pnpm test",
+    "check": "pnpm run check:age && pnpm run check:crate-age && pnpm run typecheck && pnpm test",
     "check:age": "node scripts/pkg-age.mjs check",
+    "check:crate-age": "node scripts/crate-age.mjs check",
     "deps:refresh": "rm -rf node_modules pnpm-lock.yaml && pnpm install",
     "dev": "node --import tsx packages/cli/src/index.ts",
     "daemon": "node --import tsx packages/daemon/src/main.ts"

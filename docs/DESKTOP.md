@@ -226,6 +226,34 @@ Run both clients against the same daemon for a week and answer three questions.
 If the answer is no, this is four crates to delete and the TUI has lost
 nothing. If it is yes, the port order is the "does not, yet" list above.
 
+## Dependencies
+
+The crates follow covey's 7-day rule, the same one pnpm enforces for npm. Cargo
+has its own setting for it — `registry.global-min-publish-age` and
+`resolver.incompatible-publish-age`, both in `desktop/.cargo/config.toml` — but
+it became stable only in **Rust 1.100**, and an older cargo warns that it is
+ignoring both keys and resolves whatever it likes.
+
+So until the toolchain moves, `scripts/crate-age.mjs` is the only thing holding
+the rule. It reads `desktop/Cargo.lock` and fails on any version younger than a
+week — or on any it could not date, because a crate nothing checked is exactly
+what the rule exists to stop.
+
+Publish dates are cached in `desktop/crate-publish-times.json`. A version's
+publish date never changes, so the cache cannot go stale, and the check normally
+makes no network requests at all: 436 crates in about 30 ms. That is not only
+speed. Asking crates.io for four hundred versions on every push met its rate
+limit, and a rate limit read as a failure is a red build with nothing wrong
+behind it. The committed file also puts each new crate and its publish date in
+the diff, next to the lockfile change that brought it in, where a reviewer can
+see it.
+
+After `cargo add`: `node scripts/crate-age.mjs refresh` to cache the new dates,
+and `… pin` for the `cargo update --precise` lines if anything is too young.
+
+Adding this check to the first lockfile caught six transitive crates published
+five and six days earlier, which is the whole argument for having it.
+
 ## Rules for changing this code
 
 - **The palette is a copy.** `covey-grid/src/theme.rs` is carried over from
