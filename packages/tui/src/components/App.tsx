@@ -7,10 +7,12 @@ import { projectPool } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
-import { hyperlinksEnabled, openCommand, osc8, repoUrlOf, type LinkContext } from "../links.js";
+import { hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
 
 const HYPERLINKS = hyperlinksEnabled();
+/** The words for the gesture that opens a link, read once like HYPERLINKS. */
+const OPEN_GESTURE = openGesture(process.platform, HYPERLINKS);
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
@@ -1255,8 +1257,9 @@ export function App({ store }: { store: Store }) {
    *
    * alt+click and ctrl+click, because an SGR mouse report has a bit for each
    * of those and none for cmd, and shift is the escape hatch that gives the
-   * terminal its own selection back. The OSC 8 links do the same job through
-   * the terminal, so this is the route for a terminal without them.
+   * terminal its own selection back. The reader's gesture is cmd+click, which
+   * the terminal answers over OSC 8 and covey never sees; this is the route
+   * for a terminal that knows no OSC 8.
    */
   function openLink(uri: string) {
     const cmd = openCommand(uri, process.platform);
@@ -1436,8 +1439,19 @@ export function App({ store }: { store: Store }) {
           // A modified click that lands on no link starts no selection
           // either: it asked to open something, and nothing was there.
           if (uri) openLink(uri);
-          else store.notify("no link here — alt+click a path or a URL");
+          else store.notify(`no link here — ${OPEN_GESTURE} a path or a URL`);
           return;
+        }
+        // A plain click selects, and says what the reader had to hold. The
+        // terminal keeps cmd for itself, so a reader who clicks a #N and
+        // sees nothing happen has no other way to learn the gesture.
+        //
+        // The words, not the target: the notice shares its row with the title
+        // bar, which already crowds it below about 94 columns (#87), and the
+        // reader is pointing at the target as they read this.
+        if (hit?.exact && run.count === 1 && !state.diffView) {
+          const uri = linkAt(layout.lines[hit.line] ?? [], hit.col);
+          if (uri) store.notify(`${OPEN_GESTURE} to ${uri.startsWith("file://") ? "reveal this file" : "open this link"}`);
         }
         // A second or a third press selects instead of starting a drag, and
         // must not fold what the first press already toggled underneath it.

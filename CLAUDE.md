@@ -221,7 +221,12 @@
   built for that one write (`allowReview`, `allowClose`, `allowComment`, `allowMerge`), so
   `pnpm test` still changes nothing on GitHub (`githubItem.test.ts`). The TUI has no such
   screen: `links.ts` makes a `#N` an OSC 8 hyperlink when the project is on GitHub, and
-  the palette opens the issue or the pull request in the browser.
+  the palette opens the issue or the pull request in the browser. The gesture is
+  `cmd+click`, and covey never sees it: a mouse report has a bit for alt and one for
+  ctrl and none for cmd, so the terminal itself opens the hyperlink. covey only names
+  the gesture (`openGesture`, in the help overlay and in the notice a plain click on a
+  link raises) and keeps `alt+click` as its own route for a terminal without OSC 8.
+  Never make a plain click open a link; a plain click selects text.
 - A setting in the web client is a sheet at the foot of the page (#117). The `⋮`
   in the conversation nav bar opens that thread's model, permission mode,
   streaming, rename and archive, and a hold on its row in the list opens the same

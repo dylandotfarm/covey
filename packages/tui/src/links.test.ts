@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findTargets, hyperlinksEnabled, linkSpans, openCommand, osc8, repoUrlOf, safeUri, targetUri, toolLink, type LinkContext } from "./links.js";
+import { findTargets, hyperlinksEnabled, linkSpans, openCommand, openGesture, osc8, repoUrlOf, safeUri, targetUri, toolLink, type LinkContext } from "./links.js";
 import { linkAt, markdownToLines, renderItem, wrapSpans, width } from "./lines.js";
 import type { TimelineItem } from "@covey/protocol";
 
@@ -81,6 +81,16 @@ test("a link that the wrap cuts in two keeps both halves pointing at the file", 
 
 test("osc8 wraps the text and closes the link", () => {
   assert.equal(osc8("file:///a/b", "b"), ESC + "]8;;file:///a/b" + ESC + "\\b" + ESC + "]8;;" + ESC + "\\");
+});
+
+test("openGesture names the gesture the reader's own terminal answers to", () => {
+  assert.equal(openGesture("darwin", true), "cmd+click", "macOS keeps cmd for the terminal, and the terminal opens the OSC 8 link");
+  assert.equal(openGesture("linux", true), "ctrl+click");
+  assert.equal(openGesture("win32", true), "ctrl+click");
+  // No OSC 8 leaves only covey's own route, and that route cannot read a cmd
+  // bit that no mouse report carries.
+  assert.equal(openGesture("darwin", false), "alt+click");
+  assert.equal(openGesture("linux", false), "alt+click");
 });
 
 test("hyperlinksEnabled is an opt-out", () => {

@@ -127,7 +127,7 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `ctrl+k` → Revert | anywhere | restore files and conversation to before a chosen turn |
 | `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode |
 | `ctrl+k` → Update covey | anywhere | pull, rebuild and relaunch the client itself (and, if you want, restart the local daemon) |
-| `ctrl+k` → Open issue / pull request | in a thread | open the thread's issue or pull request in the browser; a `#N` in the transcript is a hyperlink too |
+| `ctrl+k` → Open issue / pull request | in a thread | open the thread's issue or pull request in the browser; a `#N` in the transcript is a hyperlink too — `cmd+click` it |
 | `esc` | composer | interrupt the running turn |
 | `y` `a` `n` | composer | allow / always allow / deny a pending tool approval |
 | `1..9` or text | composer | answer a question from Claude |
@@ -136,6 +136,7 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `cmd+g` / `cmd+shift+g` | anywhere | jump to the oldest loaded line / back to the newest |
 | `cmd+o` | anywhere | expand/collapse the last tool call |
 | click | conversation | on a `▸` or `>_` row: fold or unfold it |
+| `cmd+click` | conversation | open a link: a URL, an issue or pull request `#N`, or reveal a file. `ctrl+click` on Linux — the terminal opens it, so a plain click still selects text. A terminal that knows no OSC 8 takes `alt+click` from covey instead |
 
 The conversation is never focused — `cmd` is its modifier, so scrolling works mid-sentence.
 `cmd` needs a terminal that speaks the kitty keyboard protocol (kitty, Ghostty, WezTerm,

@@ -348,8 +348,13 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
   URL names it, `#/gh/<machine>/<project>/<number>`, so back and reload work. The daemon
   of that machine reads it with `github.item` and acts with `github.act`, each act on a
   host built for that one write (see *The loop*). The TUI has no such screen: a `#N`
-  there is an OSC 8 hyperlink to GitHub, and the palette opens the issue or the pull
-  request in the browser.
+  there is an OSC 8 hyperlink to GitHub, `cmd+click` opens it in the browser, and the
+  palette opens the thread's own issue or pull request. The gesture is the terminal's,
+  not covey's: a mouse report carries a bit for alt and one for ctrl and none for cmd,
+  and a macOS terminal keeps cmd for itself, so covey never sees that click. A plain
+  click therefore keeps selecting text and names the gesture in the status line
+  (`openGesture`), and `alt+click` stays as covey's own route for a terminal that knows
+  no OSC 8.
 - **Media is inline, and a private attachment loads (#110).** `markdown.ts` makes an
   `![name](url)` and GitHub's own `<img src>` an image, and a video URL or a bare user
   attachment on a line of its own a video with its controls; the style sheet caps both at

@@ -5,9 +5,11 @@ import { sumUsage, usageRows, fmtTokens, fmtCost, USAGE_WINDOWS, type Overlay } 
 import { PLACEMENT_RULE } from "../run.js";
 import { T } from "../theme.js";
 import { truncate, SPINNER } from "../lines.js";
-import { hyperlinksEnabled, osc8 } from "../links.js";
+import { hyperlinksEnabled, openGesture, osc8 } from "../links.js";
 
 const HYPERLINKS = hyperlinksEnabled();
+/** cmd+click on a Mac, ctrl+click elsewhere — see `openGesture`. */
+const OPEN_GESTURE = openGesture(process.platform, HYPERLINKS);
 
 export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick, run, machineNameOf, secretKeys }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number; run?: Run | null; machineNameOf?: (id: string) => string; secretKeys?: string[] }) {
   const w = Math.min(width - 4, 80);
@@ -378,6 +380,6 @@ const HELP: [string, string][] = [
   ["mouse", ""],
   ["  click", "sidebar: open that row, as enter would"],
   ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
-  ["  alt+click", "reveal the file, or open the URL (ctrl+click does it too)"],
+  [`  ${OPEN_GESTURE}`, "open a link: a URL, a #N, or reveal a file (alt+click too)"],
   ["  wheel", "scroll the conversation · +alt a page · over a list, move in it"],
 ];
