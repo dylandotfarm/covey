@@ -61,6 +61,19 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
       res.end(JSON.stringify({ ok: true, machineId: o.config.machineId, name: o.config.name, pid: process.pid, startedAt: STARTED_AT, sessions: o.engine.sessionCensus() }));
       return;
     }
+    // A file dropped on a thread of this daemon (#135), so a page anywhere can
+    // show it. `authenticate` is the whole gate, as it is for the socket, and
+    // the web client's own setting says nothing here: the page is served by one
+    // machine of a fleet and a thread runs on any of them, so the daemon that
+    // holds the bytes is very often not the daemon that served the page. Gating
+    // this on `webEnabled` made every image on a second machine a broken image.
+    if (req.url?.startsWith("/file?") || req.url === "/file") {
+      void authenticate(req, o.config, selfUserId).then((auth) => {
+        if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`file: ${auth.reason}\n`); return; }
+        serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id));
+      }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+      return;
+    }
     // The phone's client: static files only, and the WebSocket above stays the
     // one gate. See `web.ts` for what is reachable. Read per request, because
     // the control panel turns it on and off while the daemon runs.
@@ -73,15 +86,6 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
         void authenticate(req, o.config, selfUserId).then((auth) => {
           if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`media: ${auth.reason}\n`); return; }
           return serveMedia(req, res);
-        }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
-        return;
-      }
-      // A file dropped on a thread, so the page can show it (#135). Gated the
-      // same way: the bytes are the reader's own work, not a static asset.
-      if (req.url?.startsWith("/file?") || req.url === "/file") {
-        void authenticate(req, o.config, selfUserId).then((auth) => {
-          if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`file: ${auth.reason}\n`); return; }
-          serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id));
         }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
         return;
       }
