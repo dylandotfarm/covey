@@ -359,7 +359,7 @@ const HELP: [string, string][] = [
   ["  cmd+⌫ / ⌦", "delete to start / end of line"],
   ["  alt+⌫ / ⌦", "delete word back / forward"],
   ["  ctrl+u / w", "delete to line start / word back"],
-  ["  ctrl+v", "attach the clipboard: a file, an image, or a path (Linux needs wl-paste / xclip)"],
+  ["  ctrl+v", "attach the clipboard: a file, an image, or a path (cmd+v too, where the terminal sends it; Linux needs wl-paste / xclip)"],
   ["", "  drag a file onto the window to attach it — any type"],
   ["  alt+← / →", "move the caret by word (esc b / esc f too)"],
   ["  cmd+← / →", "start / end of line"],

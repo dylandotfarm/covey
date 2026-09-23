@@ -20,6 +20,62 @@ test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("file:///home/me/shot%201.png"), ["/home/me/shot 1.png"]);
 });
 
+test("a space inside a name that is not a separator stays in the name", () => {
+  // macOS writes U+202F NARROW NO-BREAK SPACE before AM and PM in the name of
+  // every screenshot it takes. `\s` matches it, so covey used to cut the name
+  // there and rejoin the pieces with an ordinary space — a path one invisible
+  // character away from the real one, reported as "not on this machine".
+  const NB = "\u202f";
+  assert.deepEqual(
+    parseDroppedPaths(String.raw`/d/Screenshot\ 2026-09-15\ at\ 11.16.27` + NB + "PM.png"),
+    [`/d/Screenshot 2026-09-15 at 11.16.27${NB}PM.png`],
+  );
+  // The same holds for a terminal that escapes nothing: the ordinary spaces
+  // split, and `longestRun` puts them back; the narrow one never split.
+  assert.deepEqual(
+    parseDroppedPaths(`/d/Screenshot 2026-09-15 at 11.16.27${NB}PM.png`),
+    ["/d/Screenshot", "2026-09-15", "at", `11.16.27${NB}PM.png`],
+  );
+  // And a non-breaking space, which is what a name copied off a web page has.
+  assert.deepEqual(parseDroppedPaths("/d/a\u00a0b.png"), ["/d/a\u00a0b.png"]);
+});
+
+test("a real macOS screenshot attaches, narrow space and all", () => {
+  const NB = "\u202f";
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const name = `Screenshot 2026-09-15 at 11.16.27${NB}PM.png`;
+  writeFileSync(join(dir, name), Buffer.from("89504e470d0a1a0a", "hex"));
+  // What a terminal pastes on the drag: the ordinary spaces escaped, the
+  // narrow one left exactly as it is.
+  const pasted = join(dir, "Screenshot\\ 2026-09-15\\ at\\ 11.16.27") + NB + "PM.png";
+  const { attachments, failed } = readDroppedFiles(pasted);
+  assert.deepEqual(failed, [], "this is the file that reported itself missing from the machine it was on");
+  assert.deepEqual(attachments.map((a) => a.name), [name]);
+});
+
+test("a multi-file drop still splits on the spaces that are separators", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  for (const n of ["one.png", "two.png"]) writeFileSync(join(dir, n), Buffer.from("89504e470d0a1a0a", "hex"));
+  const drop = readDroppedFiles(`${join(dir, "one.png")} ${join(dir, "two.png")}`);
+  assert.deepEqual(drop.attachments.map((a) => a.name), ["one.png", "two.png"]);
+  // A tab and a newline separate too, because a terminal may use either.
+  assert.deepEqual(readDroppedFiles(`${join(dir, "one.png")}\t${join(dir, "two.png")}`).attachments.length, 2);
+});
+
+test("a split drop joins a path whose name holds a narrow space", () => {
+  const NB = "\u202f";
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const name = `Screenshot 2026-09-15 at 11.16.27${NB}PM.png`;
+  const png = join(dir, name);
+  writeFileSync(png, Buffer.from("89504e470d0a1a0a", "hex"));
+  // The terminal cut the path right at the narrow space: the head ends with
+  // the time and the chunk starts with PM.
+  const cut = png.indexOf(NB);
+  const split = readSplitDrop(png.slice(0, cut), png.slice(cut));
+  assert.ok(split, "the seam has to find the head, which no longer ends at a token boundary");
+  assert.deepEqual(split.drop.attachments.map((a) => a.name), [name]);
+});
+
 test("parses a multi-file drop", () => {
   assert.deepEqual(parseDroppedPaths("/a/one.png /a/two.png"), ["/a/one.png", "/a/two.png"]);
 });

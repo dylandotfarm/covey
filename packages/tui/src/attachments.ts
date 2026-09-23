@@ -48,9 +48,32 @@ const FILE_EXT: Record<string, string> = {
   ".zip": "application/zip",
 };
 
+/**
+ * The whitespace that separates one dropped path from the next.
+ *
+ * Deliberately not `\s`. JavaScript's `\s` is every space character Unicode
+ * has, and macOS writes U+202F NARROW NO-BREAK SPACE before AM and PM in the
+ * name of every screenshot it takes:
+ *
+ *   Screenshot 2026-09-15 at 11.16.27<U+202F>PM.png
+ *
+ * Splitting there cut the name in two, and `longestRun` rejoined the pieces
+ * with an ordinary space — so covey looked for a file whose name differs from
+ * the real one by one invisible character, and reported a screenshot sitting
+ * on the desktop as "not on this machine". Nothing on the screen said which
+ * character was wrong, because the two look the same.
+ *
+ * A terminal separates the paths of a multi-file drop with an ordinary space,
+ * and escapes or quotes every space inside a name, so these four characters
+ * are the separators and every other space belongs to the name.
+ */
+const PATH_SEPARATOR = /[ \t\r\n]/;
+
 /** Split a pasted chunk into candidate paths, honouring quotes and escapes. */
 export function parseDroppedPaths(raw: string): string[] {
-  const s = raw.trim();
+  // Trim the separators alone, for the same reason: a name may open or close
+  // with a space character that is not one.
+  const s = raw.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "");
   if (!s) return [];
   const out: string[] = [];
   let cur = "";
@@ -64,7 +87,7 @@ export function parseDroppedPaths(raw: string): string[] {
     }
     if (c === '"' || c === "'") { quote = c; continue; }
     if (c === "\\" && i + 1 < s.length) { cur += s[++i]; continue; }
-    if (/\s/.test(c)) { if (cur) { out.push(cur); cur = ""; } continue; }
+    if (PATH_SEPARATOR.test(c)) { if (cur) { out.push(cur); cur = ""; } continue; }
     cur += c;
   }
   if (cur) out.push(cur);
@@ -454,7 +477,7 @@ export function isDrop(d: DropResult): boolean {
  */
 function lastPathStart(head: string): number {
   let start = -1;
-  for (const m of head.matchAll(/\S+/g)) {
+  for (const m of head.matchAll(/[^ \t\r\n]+/g)) {
     if (/^["']?(?:\/|file:\/\/)/.test(m[0])) start = m.index;
   }
   return start;
