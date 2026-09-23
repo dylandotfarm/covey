@@ -65,6 +65,17 @@
   ends at a separator is never a directory drop, because that is exactly what the front half
   of a cut path looks like. Both routes end at the same `attach`, so a change to one wants the
   other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`).
+- `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
+  the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
+  and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled
+  cells that also carries *media placements*, a rectangle of cells a picture is painted over
+  instead of glyphs, so the layout stays row-and-column and the scroll stays a count of
+  lines. A placement owns its cells. `covey-grid/src/theme.rs` is a copy of
+  `packages/tui/src/theme.ts`; move a colour in both or neither. It fetches a dropped file
+  over the daemon's existing `/file` route and decodes a video by piping `ffmpeg`, the same
+  rule `shrinkImage` follows. With no display, `cargo run --bin covey-desktop -- --render
+  f.png` draws one frame and `--probe ws://…` dials a daemon and prints what came back; both
+  run under an agent. `docs/DESKTOP.md` holds the reasoning and the rules.
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.
 - A paint is the client's dearest act — 30–45 ms of its one thread on this project's
   Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the
@@ -183,6 +194,19 @@
 - Dependencies: `pnpm add <pkg>`; pnpm refuses versions younger than 7 days
   (`minimumReleaseAge` in pnpm-workspace.yaml). Keep `pnpm run check:age` green. Install
   scripts are blocked (`onlyBuiltDependencies: []`); never use npm in this repo.
+- The same 7-day rule covers the crates in `desktop/`, but cargo cannot hold it yet:
+  `registry.global-min-publish-age` and `resolver.incompatible-publish-age` are set in
+  `desktop/.cargo/config.toml` and became stable only in Rust 1.100, so an older cargo warns
+  that it ignores them and resolves whatever it likes. Until then `scripts/crate-age.mjs` is
+  the only thing holding the rule — keep `pnpm run check:crate-age` green. After `cargo add`
+  run `node scripts/crate-age.mjs refresh` to add the new publish dates to
+  `desktop/crate-publish-times.json`, and `… pin` to get the `cargo update --precise` lines
+  that put a young lockfile back. That file is a cache of immutable facts, which is why the
+  check normally makes no network requests; asking crates.io for four hundred versions per
+  push met its rate limit and turned clean crates into "lookup failed" violations. A crate
+  the script cannot date counts as a violation, never as a pass. CI passes `--locked` to
+  every cargo command so it never resolves a version the audit has not seen. Keep the two
+  ignore warnings: they name the flag and say the rule waits on the toolchain.
 - `packages/daemon/src/integrate/` reaches `gh` and `git` through one `GhHost`
   (`integrate/gh.ts`); everything else there is pure. Tests use `fakeHost`, so nothing
   merges and nothing opens a pull request during `pnpm test`. The read path calls

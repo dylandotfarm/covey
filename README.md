@@ -17,6 +17,9 @@ A multi-agent terminal UI for Claude Code, built from scratch on the official
   and threads, one open at a time, to check on the work and start a new idea from anywhere.
 - Runs on Node 22+ with zero native dependencies (Linux, macOS; Windows-friendly paths and
   process handling, untested there).
+- An experimental **desktop client in Rust**, styled like the TUI but drawn in a window, so a
+  screenshot in a transcript is a screenshot and the mouse reports pixels. It runs beside the
+  TUI and replaces nothing — see [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ## Quick start
 
@@ -173,8 +176,28 @@ uses package versions that have been public for at least 7 days, enforced by pnp
   Any pnpm ≥ 10 honours that field and switches to the pinned version automatically, so no
   corepack is needed (corepack is deprecated and gone from Node 25).
 
-Override the window with `COVEY_PKG_MIN_DAYS` for the audit script; the pnpm setting is the
-source of truth.
+The Rust client in `desktop/` follows the same rule, with one difference that matters.
+
+- `desktop/.cargo/config.toml` sets `registry.global-min-publish-age = "7 days"` and
+  `resolver.incompatible-publish-age = "deny"`. That is cargo's own equivalent of
+  `minimumReleaseAge`, and it became stable in **Rust 1.100**. On an older toolchain cargo
+  warns that it is ignoring both keys and resolves whatever it likes.
+- So on today's stable, `node scripts/crate-age.mjs check` (also `pnpm run check:crate-age`)
+  is not a second opinion — it is the only thing holding the rule for crates. It audits every
+  version in `desktop/Cargo.lock`, and CI runs it on every push. A crate it cannot date counts
+  as a violation, never as a pass.
+- Publish dates live in `desktop/crate-publish-times.json`, because when a version was
+  published never changes. So the check normally makes no network requests at all and takes
+  about 30 ms, and a reviewer sees each new crate and its publish date in the diff beside the
+  lockfile change that brought it in. After changing dependencies, run
+  `node scripts/crate-age.mjs refresh` to add the new entries.
+- `node scripts/crate-age.mjs pin` prints the `cargo update --precise` lines that move a
+  young lockfile back to compliant versions.
+- The desktop CI job passes `--locked` to every cargo command, so CI never resolves a version
+  the audit has not seen. To enforce the rule locally today: `cargo +nightly -Zmin-publish-age build`.
+
+Override the window with `COVEY_PKG_MIN_DAYS` for the npm audit and `COVEY_CRATE_MIN_DAYS`
+for the crate audit; the pnpm and cargo settings are the source of truth.
 
 ## Layout
 
@@ -186,9 +209,14 @@ packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart
                     and `covey issue …` / `covey pr …` for an agent inside a thread
 bin/covey           launcher that setup links onto your PATH; runs its own checkout,
                     waits for it, and puts the terminal back however it died
+packages/web        the phone's client, served by the daemon
 plugin/             the covey plugin: the /covey skill, handed to every session the daemon starts
 scripts/setup.mjs   one command from a clone: install, build, link the launcher
+desktop/            the experimental Rust desktop client — its own cargo workspace,
+                    outside the pnpm one (issue #142)
+scripts/crate-age.mjs  the 7-day rule for crates; cargo cannot hold it below Rust 1.100
 docs/DESIGN.md      architecture and the reasoning behind it
+docs/DESKTOP.md     why there is a second client, and how its cell grid holds a picture
 ```
 
 Data lives in `~/.local/share/covey` (Linux), `~/Library/Application Support/covey` (macOS),
