@@ -15,9 +15,9 @@
 import {
   KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy,
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
-  type ThreadSnapshot, type TimelineItem, type WebAddress,
+  type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
-import { projectPool, type ConnState } from "@covey/client";
+import { keepTagged, projectPool, type ConnState, type TaggedAttachment } from "@covey/client";
 
 export interface MachineSlot {
   /** The `ws://` URL the page dials. */
@@ -32,6 +32,12 @@ export interface MachineSlot {
   primary: boolean;
   /** The update in flight on that machine, or the last one it reported. */
   update: MachineUpdate | null;
+  /**
+   * The token this machine's addresses need, when they need one. The socket
+   * takes it at the dial; `/file` and `/media` take it on the URL, because an
+   * `<img>` carries no header (#135).
+   */
+  token?: string;
 }
 
 export interface View {
@@ -75,6 +81,20 @@ export interface State {
   item: ItemView | null;
   /** Draft text per `machine:thread`, kept while the reader browses. */
   drafts: Map<string, string>;
+  /**
+   * The files waiting to go with a draft, per `machine:thread` (#135).
+   *
+   * Each carries the tag that stands for it in the draft, and the tag is the
+   * only record: delete the word and the file does not go. The same rule the
+   * TUI keeps, in the same code — `@covey/client` holds it.
+   */
+  attachments: Map<string, TaggedAttachment[]>;
+  /**
+   * What the composer says while it is busy with files: reading them, or
+   * sending them. A phone on a mobile link takes seconds over 4 MB, and a
+   * composer that looks idle meanwhile is a composer the reader taps again.
+   */
+  attaching: string | null;
   /** The token and the other addresses of the primary daemon, once asked for. */
   access: MachineAccess | null;
   /** The settings panel is open over the list. */
@@ -86,11 +106,11 @@ export interface State {
 }
 
 export function emptyState(): State {
-  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), access: null, showAddresses: false, choosing: null, sheet: null };
+  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), attachments: new Map(), attaching: null, access: null, showAddresses: false, choosing: null, sheet: null };
 }
 
-export function addMachine(s: State, key: string, name: string, primary = false): MachineSlot {
-  const slot: MachineSlot = { key, name, conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), primary, update: null };
+export function addMachine(s: State, key: string, name: string, primary = false, token?: string): MachineSlot {
+  const slot: MachineSlot = { key, name, conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), primary, update: null, token };
   s.machines.set(key, slot);
   return slot;
 }
@@ -499,6 +519,99 @@ export function mediaKind(url: string): "image" | "video" | null {
   // GitHub puts an image in `![]()` or `<img>`, and a video as a bare URL.
   if (isGitHubAttachment(url) && new URL(url).hostname === "github.com") return "video";
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// The files waiting on a draft (#135)
+// ---------------------------------------------------------------------------
+
+/** The key a draft and its files are held under. One thread on one machine. */
+export function composerKey(machine: string, threadId: string): string {
+  return `${machine}:${threadId}`;
+}
+
+/** The files waiting to go with a thread's draft. */
+export function pendingAttachments(s: State, machine: string, threadId: string): TaggedAttachment[] {
+  return s.attachments.get(composerKey(machine, threadId)) ?? [];
+}
+
+export function setPendingAttachments(s: State, machine: string, threadId: string, atts: TaggedAttachment[]): void {
+  const key = composerKey(machine, threadId);
+  if (atts.length === 0) s.attachments.delete(key);
+  else s.attachments.set(key, atts);
+}
+
+/**
+ * Drop the files whose tag the reader deleted from the draft. The tag is the
+ * only record of a file in the text, so no tag means no attachment.
+ */
+export function syncAttachments(s: State, machine: string, threadId: string, text: string): TaggedAttachment[] {
+  const cur = pendingAttachments(s, machine, threadId);
+  if (cur.length === 0) return cur;
+  const kept = keepTagged(text, cur);
+  if (kept.length !== cur.length) setPendingAttachments(s, machine, threadId, kept);
+  return kept;
+}
+
+/**
+ * What of a pending list goes over the wire: the files, without the tag that
+ * named them in the draft, and without the chips that stand for a file that
+ * never attached — those have no bytes behind them.
+ */
+export function sendableAttachments(atts: TaggedAttachment[]): Attachment[] {
+  return atts.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, ...a }) => a);
+}
+
+/** How many bytes a list of attachments would send, base64 counted back to bytes. */
+export function pendingBytes(atts: Attachment[]): number {
+  return atts.reduce((n, a) => n + Math.floor(((a.data ?? "").length * 3) / 4), 0);
+}
+
+/** A machine's `ws://` key as the `http://` origin its routes answer on. */
+export function httpBase(key: string): string {
+  return key.replace(/^ws/, "http");
+}
+
+/**
+ * Where the bytes of a file dropped on a thread are (#135).
+ *
+ * The daemon that holds the thread serves them, which need not be the daemon
+ * that served the page, so the URL is absolute and carries that machine's own
+ * token: an `<img>` sends no header.
+ */
+export function threadFileSrc(m: MachineSlot | undefined, threadId: string, path: string): string {
+  if (!m) return "";
+  const q = new URLSearchParams({ thread: threadId, path });
+  if (m.token) q.set("token", m.token);
+  return `${httpBase(m.key)}/file?${q.toString()}`;
+}
+
+/** What a dropped file is on the screen: a picture, a video, or a name to tap. */
+export function attachmentKind(a: Attachment): "image" | "video" | "file" {
+  if (a.dir) return "file";
+  if (isImageMime(a.mimeType)) return "image";
+  if (a.mimeType.startsWith("video/")) return "video";
+  return "file";
+}
+
+/**
+ * The attachments of a user message, one row each, with a dropped directory
+ * folded back into the one thing the reader dropped.
+ */
+export function attachmentRows(atts: Attachment[]): { key: string; label: string; kind: "image" | "video" | "file"; att: Attachment }[] {
+  const out: { key: string; label: string; kind: "image" | "video" | "file"; att: Attachment }[] = [];
+  const dirs = new Map<string, number>();
+  for (const a of atts) {
+    if (a.dir) {
+      dirs.set(a.dir, (dirs.get(a.dir) ?? 0) + 1);
+      continue;
+    }
+    out.push({ key: a.path || a.name, label: a.name, kind: attachmentKind(a), att: a });
+  }
+  for (const [dir, n] of dirs) {
+    out.push({ key: `dir:${dir}`, label: `${dir}/ (${n} file${n === 1 ? "" : "s"})`, kind: "file", att: { name: dir, path: "", mimeType: "" } });
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

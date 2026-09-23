@@ -1,10 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
+import type { TaggedAttachment } from "@covey/client";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
   isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
+  attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
 } from "./state.js";
 
 // The model rows as a daemon sends them: its own Claude Code's list, aliases
@@ -436,4 +438,72 @@ test("a sheet about a thread that is gone has nothing to show, and does not thro
   assert.deepEqual(sheetRows(s, sheet), []);
   assert.deepEqual(sheetChoices(s, sheet), []);
   assert.equal(sheetTitle(s, sheet), "Conversation");
+});
+
+// ---------------------------------------------------------------------------
+// A file on the draft (#135)
+// ---------------------------------------------------------------------------
+
+/** One file waiting on a draft, as `applyDrop` leaves it. */
+const pending = (name: string, tag: string, extra: Partial<TaggedAttachment> = {}): TaggedAttachment =>
+  ({ name, path: name, mimeType: "image/png", tag, data: "AAAA", ...extra });
+
+test("the files waiting on a draft are held per conversation, and a draft that lost a tag drops its file (#135)", () => {
+  const s = emptyState();
+  const key = "ws://box:3790";
+  assert.deepEqual(pendingAttachments(s, key, "t1"), []);
+  setPendingAttachments(s, key, "t1", [pending("a.png", "[a.png]"), pending("b.png", "[b.png]")]);
+  setPendingAttachments(s, key, "t2", [pending("c.png", "[c.png]")]);
+  assert.equal(composerKey(key, "t1"), "ws://box:3790:t1");
+  assert.equal(pendingAttachments(s, key, "t1").length, 2);
+
+  // The tag is the only record of a file. Delete the word, lose the file.
+  assert.deepEqual(syncAttachments(s, key, "t1", "look at [a.png]").map((a) => a.name), ["a.png"]);
+  assert.deepEqual(pendingAttachments(s, key, "t1").map((a) => a.name), ["a.png"]);
+  assert.deepEqual(pendingAttachments(s, key, "t2").map((a) => a.name), ["c.png"], "the other conversation is untouched");
+  assert.deepEqual(syncAttachments(s, key, "t1", "never mind"), []);
+  assert.equal(s.attachments.has(composerKey(key, "t1")), false, "nothing left is no entry");
+});
+
+test("what goes over the wire is the files, without their tag and without the chips that stand for nothing (#135)", () => {
+  const good = pending("a.png", "[a.png]");
+  const bad: TaggedAttachment = { name: "big.bin", path: "", mimeType: "", tag: "[big.bin — over the limit]", failed: true };
+  const sendable = sendableAttachments([good, bad]);
+  assert.equal(sendable.length, 1, "a chip for a file that did not attach has no bytes behind it");
+  assert.deepEqual(Object.keys(sendable[0]!).sort(), ["data", "mimeType", "name", "path"]);
+  assert.equal("tag" in sendable[0]!, false, "the tag never reaches the wire");
+  assert.equal(pendingBytes(sendable), 3, "four characters of base64 are three bytes");
+  assert.equal(pendingBytes([]), 0);
+});
+
+test("a file dropped on a thread loads from the daemon that holds the thread, with that machine's token (#135)", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  const lan = addMachine(s, "ws://10.0.0.9:3790", "lan", false, "tok");
+  assert.equal(httpBase("ws://box:3790"), "http://box:3790");
+  assert.equal(httpBase("wss://box.tail.ts.net"), "https://box.tail.ts.net");
+
+  const mine = threadFileSrc(box, "t1", "/w/.covey/threads/t1/files/shot.png");
+  assert.equal(mine, "http://box:3790/file?thread=t1&path=%2Fw%2F.covey%2Fthreads%2Ft1%2Ffiles%2Fshot.png");
+  // An `<img>` sends no header, so the token rides on the URL — and it is the
+  // token of the machine that holds the thread, not the one that served the page.
+  assert.match(threadFileSrc(lan, "t2", "/w/f.png"), /^http:\/\/10\.0\.0\.9:3790\/file\?thread=t2&path=%2Fw%2Ff\.png&token=tok$/);
+  assert.equal(threadFileSrc(undefined, "t1", "/w/f.png"), "");
+});
+
+test("what a message's attachments are on the screen, with a dropped directory folded back into one (#135)", () => {
+  const rows = attachmentRows([
+    { name: "shot.png", path: "/f/shot.png", mimeType: "image/png" },
+    { name: "clip.mp4", path: "/f/clip.mp4", mimeType: "video/mp4" },
+    { name: "run.log", path: "/f/run.log", mimeType: "text/plain" },
+    { name: "src/a.ts", path: "/f/tree/src/a.ts", mimeType: "text/plain", dir: "tree" },
+    { name: "src/b.ts", path: "/f/tree/src/b.ts", mimeType: "text/plain", dir: "tree" },
+  ]);
+  assert.deepEqual(rows.map((r) => [r.kind, r.label]), [
+    ["image", "shot.png"],
+    ["video", "clip.mp4"],
+    ["file", "run.log"],
+    ["file", "tree/ (2 files)"],
+  ]);
+  assert.deepEqual(attachmentRows([]), []);
 });

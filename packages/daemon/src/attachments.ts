@@ -55,7 +55,9 @@ export function materialiseAttachments(cwd: string, threadId: string, atts: Atta
   const dirs = new Map<string, string>();
   let total = 0;
   return atts.map((a) => {
-    if (!a.data) {
+    // An empty string is a file of no bytes, which a client may well send, so
+    // the question is whether the field is there and not whether it is truthy.
+    if (a.data === undefined) {
       // No inline bytes: only usable if the path happens to be on this machine.
       if (!existsSync(a.path)) throw new AttachmentError(`attachment ${a.name} has no data and ${a.path} does not exist on this machine`);
       return { ...a };

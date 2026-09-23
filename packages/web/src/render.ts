@@ -8,12 +8,12 @@
  * so the skeleton is built once and kept, and each timeline row is keyed by
  * item id and rebuilt only when the daemon re-sent that item.
  */
-import { acceptCommand, commandLabel } from "@covey/client";
-import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem } from "@covey/protocol";
+import { acceptCommand, commandLabel, cutTag, spliceTags, tagSpanAt } from "@covey/client";
+import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, attachmentRows, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
 
 export interface Actions {
   openThread(machine: string, threadId: string): void;
@@ -28,6 +28,19 @@ export interface Actions {
   toggleFold(rowKey: string): void;
   retry(): void;
   setDraft(machine: string, threadId: string, text: string): void;
+  /**
+   * Read the files the reader picked and answer the tag of each (#135), or
+   * null when nothing attached and nothing failed.
+   *
+   * The renderer owns the composer, so it puts the tags in the draft itself
+   * and nothing else writes there. That matters because the reading takes
+   * seconds over a photograph, and a reader who goes on typing meanwhile must
+   * not lose what they typed. `draft` is the text as it was when they picked,
+   * which is what a tag has to be unique against.
+   */
+  attachFiles(files: File[], draft: string): Promise<string[] | null>;
+  /** The tags of the files waiting on the open thread's draft. */
+  attachTags(): string[];
   toggleAddresses(): void;
   /** Pull, rebuild and restart the daemon on `machine`. Asks first. */
   updateMachine(machine: string): void;
@@ -74,6 +87,12 @@ export class Renderer {
   private composer: HTMLTextAreaElement;
   private sendBtn: HTMLButtonElement;
   private stopBtn: HTMLButtonElement;
+  /** The file picker, never shown: the `+` beside the composer opens it (#135). */
+  private fileInput: HTMLInputElement;
+  /** The chips over the composer, one per file waiting to go. */
+  private attachStrip: HTMLElement;
+  /** What the strip was built from, so a paint mid-turn leaves it alone. */
+  private shownAttach: string | null = null;
   private banner: HTMLElement;
   /** The `/` popover over the bottom of the timeline. */
   private menuEl: HTMLElement;
@@ -111,6 +130,12 @@ export class Renderer {
   private lightboxImg: HTMLImageElement;
   /** How markdown loads its media: a GitHub attachment through the daemon, with the page's token. */
   private markdown: { media: (url: string) => string };
+  /**
+   * Where the bytes of a file dropped on the open thread are (#135). Set at
+   * each paint, because it names the daemon that holds the thread on screen,
+   * which is not always the daemon that served the page.
+   */
+  private fileSrc: (threadId: string, path: string) => string = () => "";
   /** The settings sheet over the page (#117): a scrim, and a panel at the foot. */
   private sheet: HTMLElement;
   private sheetPanel: HTMLElement;
@@ -134,7 +159,16 @@ export class Renderer {
     this.stopBtn = h("button", { class: "stop", type: "button", "aria-label": "Stop" }, "■");
     // A tap on a row must not take the focus, and with it the keyboard, off the composer.
     this.menuEl = h("div", { class: "cmd-menu hidden", role: "listbox", onmousedown: (ev) => ev.preventDefault() });
-    this.threadScreen = h("main", { class: "thread hidden" }, this.header, this.timeline, h("div", { class: "composer-bar" }, this.menuEl, this.composer, this.stopBtn, this.sendBtn));
+    // One button, not two. A phone's own picker already offers the camera
+    // beside the photo roll, and it offers a file from anywhere else as well;
+    // two buttons would be covey deciding which of those the reader wanted.
+    // No `accept`: a log or a patch is as much use to the agent as a photo.
+    this.fileInput = h("input", { type: "file", multiple: true, class: "file-input", "aria-hidden": "true", tabindex: "-1" });
+    const attachBtn = h("button", { class: "attach", type: "button", "aria-label": "Attach a file", onclick: () => this.fileInput.click() }, "+");
+    this.attachStrip = h("div", { class: "attach-strip hidden" });
+    this.threadScreen = h("main", { class: "thread hidden" }, this.header, this.timeline,
+      h("div", { class: "composer-bar" }, this.menuEl, this.attachStrip,
+        h("div", { class: "composer-row" }, attachBtn, this.composer, this.stopBtn, this.sendBtn), this.fileInput));
     this.itemHeader = h("header", { class: "thread-header" });
     this.itemBody = h("div", { class: "item-body" });
     this.itemDraft = h("textarea", { class: "composer", rows: "2", placeholder: "Comment, or the text of a review" });
@@ -179,21 +213,133 @@ export class Renderer {
           }
         }
       }
+      // A chip is one key to delete, not one key per character: backspace owns
+      // the end of a chip and the inside of it, delete owns the start and the
+      // inside, and a selection means the reader asked for something else.
+      if (ev.key === "Backspace" || ev.key === "Delete") {
+        const c = this.composer;
+        if (c.selectionStart !== c.selectionEnd) return;
+        const span = tagSpanAt(c.value, c.selectionStart, this.a.attachTags(), ev.key === "Backspace");
+        if (!span) return;
+        ev.preventDefault();
+        const cut = cutTag(c.value, span);
+        c.value = cut.value;
+        c.setSelectionRange(cut.caret, cut.caret);
+        this.draftChanged();
+        return;
+      }
       if (ev.key !== "Enter") return;
       const sends = (ev.ctrlKey || ev.metaKey) || (!ev.shiftKey && !coarse());
       if (sends) { ev.preventDefault(); this.submit(); }
     });
     this.sendBtn.addEventListener("click", () => this.submit());
     this.stopBtn.addEventListener("click", () => this.a.interrupt());
+
+    // Three ways to hand the page a file, and all three end at `attach` (#135):
+    // the picker on a phone, a paste on a desktop, and a drag onto the page.
+    this.fileInput.addEventListener("change", () => {
+      this.attach([...this.fileInput.files ?? []]);
+      // The picker keeps the last choice, and then picking it again fires no
+      // change event, so the reader cannot attach the same photograph twice.
+      this.fileInput.value = "";
+    });
+    this.composer.addEventListener("paste", (ev) => {
+      const files = [...(ev as ClipboardEvent).clipboardData?.files ?? []];
+      // A paste that carries text as well is a paste of text: a copied cell or
+      // a copied line of HTML brings an image along that nobody asked for.
+      if (files.length === 0 || (ev as ClipboardEvent).clipboardData?.types.includes("text/plain")) return;
+      ev.preventDefault();
+      this.attach(files);
+    });
+    for (const kind of ["dragover", "dragenter"]) {
+      this.threadScreen.addEventListener(kind, (ev) => {
+        if (!(ev as DragEvent).dataTransfer?.types.includes("Files")) return;
+        ev.preventDefault();
+        this.threadScreen.classList.add("dropping");
+      });
+    }
+    for (const kind of ["dragleave", "dragend"]) {
+      this.threadScreen.addEventListener(kind, (ev) => { if (ev.target === this.threadScreen) this.threadScreen.classList.remove("dropping"); });
+    }
+    this.threadScreen.addEventListener("drop", (ev) => {
+      const files = [...(ev as DragEvent).dataTransfer?.files ?? []];
+      this.threadScreen.classList.remove("dropping");
+      if (files.length === 0) return;
+      ev.preventDefault();
+      this.attach(files);
+    });
   }
 
   private submit() {
+    // Set by the paint: the page is still reading the files, or still sending.
+    if (this.sendBtn.disabled) return;
     const text = this.composer.value.trim();
     if (!text) return;
     this.a.send(text);
     this.composer.value = "";
     this.draftChanged();
     this.atBottom = true;
+  }
+
+  /**
+   * Read the files the reader handed over and put a chip for each in the draft.
+   *
+   * The reading and the scaling happen off the main thread's next paint, and on
+   * a phone they take real time — seconds over a 12 MP photograph — so the
+   * composer says what it is doing and the send waits for it.
+   */
+  private async attach(files: File[]) {
+    if (files.length === 0) return;
+    const c = this.composer;
+    const tags = await this.a.attachFiles(files, c.value);
+    if (!tags?.length) return;
+    // `c.value` is read again here, and not carried across the await: scaling a
+    // 12 MP photograph takes seconds, and the reader types through them.
+    const next = spliceTags(c.value, c.selectionStart, tags);
+    c.value = next.value;
+    c.setSelectionRange(next.caret, next.caret);
+    this.draftChanged();
+    // A picker on a phone took the focus with it; the reader goes on typing.
+    if (!coarse()) c.focus();
+  }
+
+  /** Take one chip out of the draft, for the × on it. The file goes with it. */
+  private cutChip(tag: string) {
+    const c = this.composer;
+    const span = tagSpanAt(c.value, c.value.indexOf(tag) + tag.length, [tag], true);
+    if (!span) return;
+    const cut = cutTag(c.value, span);
+    c.value = cut.value;
+    c.setSelectionRange(cut.caret, cut.caret);
+    this.draftChanged();
+  }
+
+  /**
+   * The chips over the composer: one per file waiting to go, and the line the
+   * composer says while it reads or sends.
+   *
+   * A chip is the word in the draft as well, and deleting either drops the
+   * file. The strip is here because a thumb cannot put a caret inside
+   * `[shot.png]`, and because it is where a failure gets room to say what went
+   * wrong.
+   */
+  private paintAttachStrip(s: State, machine: string, threadId: string) {
+    const atts = pendingAttachments(s, machine, threadId);
+    const tags = [...new Set(atts.map((a) => a.tag))];
+    const key = `${s.attaching ?? ""}\n${tags.join("\n")}`;
+    if (this.shownAttach === key) return;
+    this.shownAttach = key;
+    clear(this.attachStrip);
+    this.attachStrip.classList.toggle("hidden", tags.length === 0 && !s.attaching);
+    if (s.attaching) this.attachStrip.append(h("span", { class: "attach-busy" }, h("span", { class: "spinner" }), " ", s.attaching));
+    for (const tag of tags) {
+      const first = atts.find((a) => a.tag === tag)!;
+      const label = tag.slice(1, -1);
+      this.attachStrip.append(h("span", { class: `attach-chip${first.failed ? " failed" : ""}` },
+        h("span", { class: "name" }, label),
+        h("button", { type: "button", class: "x", "aria-label": `Remove ${first.name}`, onclick: () => this.cutChip(tag) }, "×"),
+      ));
+    }
   }
 
   /** The draft is different: size the box, keep the text, and refilter the popover. */
@@ -625,8 +771,14 @@ export class Renderer {
       this.atBottom = true;
       this.composer.value = s.drafts.get(key) ?? "";
       this.menuClosedFor = null;
+      this.shownAttach = null;
       this.grow();
     }
+    // The send waits while the page is reading a photograph or pushing one up
+    // the link: the message is not whole until its files are.
+    this.sendBtn.disabled = !!s.attaching;
+    this.paintAttachStrip(s, v.machine, v.threadId);
+    this.fileSrc = (threadId, path) => threadFileSrc(s.machines.get(v.machine), threadId, path);
     // A draft kept from before may be a command name, and the list may have changed.
     if (switched || this.commands !== v.commands) { this.commands = v.commands; this.paintMenu(); }
     // Keyed rows: only an item the daemon re-sent is rebuilt.
@@ -637,8 +789,16 @@ export class Renderer {
       seen.add(item.id);
       let row = this.rows.get(item.id);
       if (!row || row.item !== item) {
-        const el = renderItem(item, this.a, this.markdown);
-        if (row) row.el.replaceWith(el); else this.timeline.insertBefore(el, cursor);
+        const el = renderItem(item, this.a, this.markdown, this.fileSrc);
+        if (row) {
+          // The replacement takes the old node's place, so the walk follows it
+          // there. Without this the cursor holds a node that is no longer in
+          // the timeline, and the `insertBefore` below throws against it —
+          // which is the whole rest of the paint, the scroll to the bottom
+          // included, while a reply streams into the last row.
+          if (cursor === row.el) cursor = el;
+          row.el.replaceWith(el);
+        } else this.timeline.insertBefore(el, cursor);
         row = { item, el };
         this.rows.set(item.id, row);
       }
@@ -808,10 +968,13 @@ function splitKey(key: string): [string, string] {
   return [key.slice(0, i), key.slice(i + 1)];
 }
 
-function renderItem(item: TimelineItem, a: Actions, markdown: { media: (url: string) => string }): HTMLElement {
+function renderItem(item: TimelineItem, a: Actions, markdown: { media: (url: string) => string }, fileSrc: (threadId: string, path: string) => string): HTMLElement {
   switch (item.kind) {
     case "user":
-      return h("div", { class: `msg user${item.queued ? " queued" : ""}` }, h("div", { class: "body" }, ...refNodes(item.text)), item.queued ? h("span", { class: "tag" }, "queued") : null);
+      return h("div", { class: `msg user${item.queued ? " queued" : ""}` },
+        h("div", { class: "body" }, ...refNodes(item.text)),
+        userAttachments(item, fileSrc),
+        item.queued ? h("span", { class: "tag" }, "queued") : null);
     case "assistant": {
       const el = h("div", { class: `msg assistant${item.streaming ? " streaming" : ""}` });
       el.innerHTML = markdownToHtml(item.text, markdown);
@@ -830,6 +993,31 @@ function renderItem(item: TimelineItem, a: Actions, markdown: { media: (url: str
     case "error":
       return h("div", { class: "note error" }, item.text);
   }
+}
+
+/**
+ * What was attached to a message, under it (#135).
+ *
+ * The timeline item carries a name and the daemon's path and nothing else —
+ * the bytes were stripped when the daemon wrote them into the thread's file
+ * store — so each one loads through `/file` on the machine that holds the
+ * thread. That route, and not a copy the page keeps, because it survives a
+ * reload and it works for a file somebody dropped from another client.
+ *
+ * An image shows, a video plays, and anything else is a name that opens.
+ */
+function userAttachments(item: UserMessageItem, fileSrc: (threadId: string, path: string) => string): HTMLElement | null {
+  const rows = attachmentRows(item.attachments ?? []);
+  if (rows.length === 0) return null;
+  const el = h("div", { class: "attached" });
+  for (const r of rows) {
+    const src = r.att.path ? fileSrc(item.threadId, r.att.path) : "";
+    if (!src) { el.append(h("span", { class: "attach-file" }, r.label)); continue; }
+    if (r.kind === "image") { el.append(h("img", { class: "media", src, alt: r.label, "data-full": src, loading: "lazy" })); continue; }
+    if (r.kind === "video") { el.append(h("video", { class: "media", src, controls: true, playsinline: true, preload: "metadata" })); continue; }
+    el.append(h("a", { class: "attach-file", href: src, target: "_blank", rel: "noreferrer" }, r.label));
+  }
+  return el;
 }
 
 function toolRow(item: ToolCallItem): HTMLElement {
