@@ -117,6 +117,30 @@ test("cmd+delete deletes to end of the current line only", () => {
   assert.deepEqual(r, { value: "first\n", caret: 6 });
 });
 
+test("cmd+backspace at the start of a line joins it to the line above (#47)", () => {
+  assert.deepEqual(deleteToLineStart({ value: "one\ntwo", caret: 4 }), { value: "onetwo", caret: 3 });
+  // The caret goes to the end of the line above, not to its start.
+  assert.deepEqual(deleteToLineStart({ value: "first\n", caret: 6 }), { value: "first", caret: 5 });
+  // An empty line joins at the first press: the caret is already at its start.
+  assert.deepEqual(deleteToLineStart({ value: "one\n\ntwo", caret: 4 }), { value: "one\ntwo", caret: 3 });
+  // The press that clears a line, then the press that joins it.
+  const cleared = deleteToLineStart({ value: "one\ntwo", caret: 7 });
+  assert.deepEqual(cleared, { value: "one\n", caret: 4 });
+  assert.deepEqual(deleteToLineStart(cleared), { value: "one", caret: 3 });
+  // Nothing above the first line: nothing changes.
+  const top = { value: "one\ntwo", caret: 0 };
+  assert.equal(deleteToLineStart(top), top);
+  assert.deepEqual(deleteToLineStart({ value: "", caret: 0 }), { value: "", caret: 0 });
+});
+
+test("cmd+delete at the end of a line pulls the next line up (#47)", () => {
+  assert.deepEqual(deleteToLineEnd({ value: "one\ntwo", caret: 3 }), { value: "onetwo", caret: 3 });
+  assert.deepEqual(deleteToLineEnd({ value: "one\n\ntwo", caret: 4 }), { value: "one\ntwo", caret: 4 });
+  // Nothing below the last line: nothing changes.
+  const end = { value: "one\ntwo", caret: 7 };
+  assert.equal(deleteToLineEnd(end), end);
+});
+
 test("alt+backspace deletes a word, alt+delete deletes the next word", () => {
   assert.deepEqual(deleteWordBack({ value: "alpha beta", caret: 10 }), { value: "alpha ", caret: 6 });
   assert.deepEqual(deleteWordForward({ value: "alpha beta", caret: 5 }), { value: "alpha", caret: 5 });

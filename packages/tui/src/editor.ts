@@ -189,14 +189,23 @@ export function deleteForward(s: EditState): EditState {
   return s.caret >= s.value.length ? s : cut(s.value, s.caret, s.caret + 1);
 }
 
-/** cmd+backspace — delete to the start of the current line only. */
+/** cmd+backspace — delete to the start of the current line. When the caret is
+ *  already at the start, delete the newline before it, so the line joins the
+ *  one above and the caret goes to the end of that line (#47). At the start of
+ *  the draft there is no line above, and the key does nothing. */
 export function deleteToLineStart(s: EditState): EditState {
-  return cut(s.value, lineStart(s.value, s.caret), s.caret);
+  const start = lineStart(s.value, s.caret);
+  if (start < s.caret) return cut(s.value, start, s.caret);
+  return s.caret === 0 ? s : cut(s.value, s.caret - 1, s.caret);
 }
 
-/** cmd+delete — delete to the end of the current line only. */
+/** cmd+delete — delete to the end of the current line. When the caret is
+ *  already at the end, delete the newline after it, so the next line joins
+ *  this one. At the end of the draft the key does nothing. */
 export function deleteToLineEnd(s: EditState): EditState {
-  return cut(s.value, s.caret, lineEnd(s.value, s.caret));
+  const end = lineEnd(s.value, s.caret);
+  if (end > s.caret) return cut(s.value, s.caret, end);
+  return s.caret >= s.value.length ? s : cut(s.value, s.caret, s.caret + 1);
 }
 
 /** alt+backspace — delete the word before the caret. */
