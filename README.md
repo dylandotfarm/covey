@@ -3,6 +3,12 @@
 A multi-agent terminal UI for Claude Code, built from scratch on the official
 [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
 
+![The covey TUI. Four threads across two projects take a message each and work
+at the same time, and the last panel is the diff of one turn.](docs/media/threads.gif)
+
+*Four threads, two projects, one machine. Each thread works in its own git
+worktree, so they never collide, and `d` shows what a turn changed.*
+
 - Left sidebar: machines → projects → threads. Many threads run concurrently.
 - One small daemon per machine. The TUI connects to any number of them at once.
 - Tailscale-native: a daemon bound to your tailnet accepts peers that `tailscale whois`
@@ -55,6 +61,16 @@ an agent inside a covey thread knows how to take an issue to a merged pull reque
 `covey issue take` and `covey pr open`. A brief is then one line: `/covey take issue 94 to
 completion, automerge when done`.
 
+![Two covey threads take an issue each at the same time. A brief goes into the
+composer, the agent runs covey issue take, reads the issue with gh, edits the
+code, runs the tests, and covey pr open puts the pull request
+up.](docs/media/issues.gif)
+
+*Two threads, two issues, one brief each. The second one works on covey itself:
+it takes issue #47, fixes the editor, runs the suite, and opens the pull
+request. covey then watches that pull request and sends every checks verdict,
+review and comment back to the thread as a turn.*
+
 After that first build you never have to quit to update: `ctrl+k → "Update covey"` pulls,
 rebuilds, restarts the local daemon and relaunches the client in place. `covey update` does
 the same from a terminal.
@@ -77,6 +93,14 @@ covey machines add ws://other-host.your-tailnet.ts.net:3790 --name other
 Outside Tailscale, append `--token <token from covey info>`.
 
 ### On a phone
+
+![The covey web client on a phone. The list follows two threads that start
+elsewhere, a tap opens a conversation, the composer sends a message, and the
+settings of that conversation come up from the foot of the
+page.](docs/media/phone.gif)
+
+*The same fleet from a phone. The list follows work that starts anywhere, and
+the composer sends from anywhere.*
 
 One machine in your fleet serves a web client at `http://<machine>:3790/`. Turn it on from
 the TUI: press enter on the machine row, then choose "Web server: off". The machine's info
@@ -217,6 +241,7 @@ desktop/            the experimental Rust desktop client — its own cargo works
 scripts/crate-age.mjs  the 7-day rule for crates; cargo cannot hold it below Rust 1.100
 docs/DESIGN.md      architecture and the reasoning behind it
 docs/DESKTOP.md     why there is a second client, and how its cell grid holds a picture
+docs/media/         the demo recordings this page shows
 ```
 
 Data lives in `~/.local/share/covey` (Linux), `~/Library/Application Support/covey` (macOS),
