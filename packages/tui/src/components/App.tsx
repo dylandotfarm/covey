@@ -28,7 +28,7 @@ import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboard, readDroppedFiles, applyDrop, type FailedDrop } from "../attachments.js";
+import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, applyDrop, type DropResult, type FailedDrop } from "../attachments.js";
 import { T } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -45,6 +45,16 @@ const SIDEBAR_TOP = 2;
  * stop where the reader means it to.
  */
 export const DRAG_SCROLL_MS = 60;
+/**
+ * How long a pasted chunk waits for the rest of itself.
+ *
+ * A terminal may write one dropped path in two goes, and the halves come back
+ * to back — a write apart, a paint apart, not a thought apart. A second is far
+ * longer than that and still far shorter than the pause before a person pastes
+ * a second, unrelated thing, so the seam covers the split without ever joining
+ * two pastes a person meant to keep apart.
+ */
+export const PASTE_SEAM_MS = 1000;
 /**
  * How long the sidebar cursor has to sit still before the thread under it is
  * opened. Long enough that holding ↓ through a list costs one subscription
@@ -134,6 +144,10 @@ export function App({ store }: { store: Store }) {
   const [ovToggle, setOvToggle] = useState(false);
   const [draft, setDraft] = useState("");
   const [caret, setCaret] = useState(0);
+  // Where the last pasted chunk left the draft, and when. A terminal can write
+  // one drop in two goes, and `pasteText` joins the halves back up while the
+  // seam is open — see `readSplitDrop`.
+  const pasteSeam = useRef<{ at: number; value: string; caret: number } | null>(null);
   // Answering a question uses its own buffer and cursor so the composer draft
   // is preserved across the interruption.
   const [answerDraft, setAnswerDraft] = useState("");
@@ -1959,28 +1973,61 @@ export function App({ store }: { store: Store }) {
    *
    * @returns false when the drop held nothing at all.
    */
-  function attach(attachments: Attachment[], failed: FailedDrop[] = []): boolean {
+  function attach(attachments: Attachment[], failed: FailedDrop[] = [], base: Ed.EditState = { value: draft, caret }): boolean {
     if ((attachments.length === 0 && failed.length === 0) || !state.view) return false;
-    const drop = applyDrop(draft, caret, attachments, store.attachments(state.view.threadId), failed);
+    const drop = applyDrop(base.value, base.caret, attachments, store.attachments(state.view.threadId), failed);
     store.setAttachments(state.view.threadId, drop.attachments);
     applyEdit({ value: drop.value, caret: drop.caret });
+    pasteSeam.current = null;
     return true;
   }
   /**
    * Put a pasted chunk into the draft. A drag-and-drop arrives as a paste of
    * the file's path, so a chunk that names files becomes attachments; anything
    * else is ordinary text.
+   *
+   * A chunk that is not a drop may still be the *rest* of one: a terminal is
+   * free to write one dropped path in two goes, and the first go is already in
+   * the draft as text. So the chunk is tried again against that text while the
+   * seam is open, and a join that names a file takes the text back out of the
+   * draft (#130). The seam is open only for the moment after a paste that
+   * nothing has edited since, so a path a person typed an hour ago cannot eat
+   * the next paste.
    */
   function pasteText(raw: string) {
     if (state.view) {
-      const { attachments, failed } = readDroppedFiles(raw);
-      // The chip says which file and why; the notice says where it was and
-      // what to do about it. A reader who missed the notice still has the chip.
-      for (const f of failed) store.notify(f.message, "error");
-      if (attach(attachments, failed)) return;
+      const whole = readDroppedFiles(raw);
+      if (isDrop(whole)) { report(whole); if (attach(whole.attachments, whole.failed)) return; }
+      const seam = openSeam();
+      const split = seam ? readSplitDrop(seam.value.slice(0, seam.caret), raw) : null;
+      if (split) {
+        report(split.drop);
+        const cut = { value: seam!.value.slice(0, split.start) + seam!.value.slice(seam!.caret), caret: split.start };
+        if (attach(split.drop.attachments, split.drop.failed, cut)) return;
+      }
     }
     // Normalise line endings and tabs, then insert.
-    insert(Ed.normalisePaste(raw));
+    const next = Ed.insert({ value: draft, caret }, Ed.normalisePaste(raw));
+    applyEdit(next);
+    pasteSeam.current = { at: Date.now(), ...next };
+  }
+  /**
+   * Say what a drop could not attach. The chip in the draft carries the reason
+   * in a few words; this carries the path and the way out (#132).
+   */
+  function report(drop: DropResult) {
+    for (const f of drop.failed) store.notify(f.message, "error");
+  }
+  /**
+   * The draft a split drop may join onto: the state the last pasted chunk left,
+   * when it is still what the composer holds. Any key, any other edit and any
+   * wait closes the seam, so the join can only ever finish a paste that is still
+   * arriving.
+   */
+  function openSeam(): { value: string; caret: number } | null {
+    const seam = pasteSeam.current;
+    if (!seam || Date.now() - seam.at > PASTE_SEAM_MS) return null;
+    return seam.value === draft && seam.caret === caret ? seam : null;
   }
   /**
    * ctrl+v: attach whatever the clipboard holds (#124). A file and an image

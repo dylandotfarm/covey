@@ -97,9 +97,14 @@ function isLocalFile(path: string): boolean {
  * A name that says a file was meant even though this machine does not hold it.
  * An image extension is the one such promise: the drop then reports "could not
  * read" instead of putting a path in the composer as text.
+ *
+ * The path must be absolute, like every other drop. A bare `shot.png` is what
+ * the *second half* of a split drop looks like, and a half is not a drop: it
+ * chipped the name and left the directory in the draft as text. `readSplitDrop`
+ * is what puts the two halves back together.
  */
 function looksLikeImage(path: string): boolean {
-  return imageMime(path) !== null;
+  return isAbsolute(path) && imageMime(path) !== null;
 }
 
 /**
@@ -283,6 +288,51 @@ export function readDroppedFiles(raw: string): DropResult {
   const paths = groupDroppedPaths(parseDroppedPaths(raw));
   if (!paths) return { attachments: [], failed: [] };
   return readFiles(paths);
+}
+
+/** True when the drop read nothing at all: no file, and no name to chip. */
+export function isDrop(d: DropResult): boolean {
+  return d.attachments.length > 0 || d.failed.length > 0;
+}
+
+/**
+ * The start of the last path in `head`, or -1.
+ *
+ * A path begins at a token that begins with `/`, with `file://`, or with the
+ * quote a terminal wrapped it in. Everything from there to the end of `head`
+ * belongs to that path, spaces and all, because a name may hold spaces.
+ */
+function lastPathStart(head: string): number {
+  let start = -1;
+  for (const m of head.matchAll(/\S+/g)) {
+    if (/^["']?(?:\/|file:\/\/)/.test(m[0])) start = m.index;
+  }
+  return start;
+}
+
+/**
+ * A drop the terminal wrote in two goes.
+ *
+ * A drop is a paste of a path, and nothing makes a terminal write that path in
+ * one go: a screenshot dropped on a Mac arrives as `…/TemporaryItems/` and then
+ * `Screenshot 2026-09-22 at 6.36.33 PM.png`. Each half on its own is not a
+ * drop, so the directory landed in the draft as text and the name became a chip
+ * that said "unreadable" — one file, shown as two wrong things.
+ *
+ * So a chunk that fails to be a drop gets one more try: join it to the tail of
+ * the draft that starts a path, and read that. The rule needs no clock and no
+ * count of halves, so a drop split three ways joins on the third chunk as
+ * readily as on the second. The caller decides how long a seam stays open.
+ *
+ * @param head the draft in front of the caret
+ * @param raw the chunk that just arrived
+ * @returns where in `head` the path starts, and what the join reads as
+ */
+export function readSplitDrop(head: string, raw: string): { start: number; drop: DropResult } | null {
+  const start = lastPathStart(head);
+  if (start < 0) return null;
+  const drop = readDroppedFiles(head.slice(start) + raw);
+  return isDrop(drop) ? { start, drop } : null;
 }
 
 // ---------------------------------------------------------------------------

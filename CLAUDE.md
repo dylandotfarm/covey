@@ -50,6 +50,9 @@
   `convert` or `ffmpeg`, whichever the machine has. That constant is the API's own — it
   downscales anything past it before the model reads it — so scaling to it costs nothing, and
   scaling comes before quality because heavy JPEG is what makes a screenshot's text illegible.
+  `pasteText` reads a chunk twice: whole, then joined onto the seam the last paste left
+  (`readSplitDrop`, #130), because a terminal can write one path in two goes. Both routes end
+  at the same `attach`, so a change to one wants the other.
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.
 - A paint is the client's dearest act — 30–45 ms of its one thread on this project's
   Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the
