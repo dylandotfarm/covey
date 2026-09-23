@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, extname, isAbsolute, join } from "node:path";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
-import { IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, type Attachment } from "@covey/protocol";
+import {
+  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_DIRECTORY_FILES, MAX_IMAGE_BYTES,
+  PACK_ATTACHMENT_BYTES, type Attachment,
+} from "@covey/protocol";
 
 /**
  * Terminals do not deliver file *data* on drag-and-drop — they paste a path.
@@ -85,12 +89,25 @@ export function fileMime(path: string): string {
 }
 
 /**
- * A file that is really on this machine. A drop always pastes an absolute
- * path, so the rule keeps prose such as "see README.md and fix it" as text.
+ * A file or a directory that is really on this machine. A drop always pastes
+ * an absolute path, so the rule keeps prose such as "see README.md and fix it"
+ * as text.
+ *
+ * A directory counts because a person drags one as readily as a file, and
+ * covey now carries the tree (`readDirectoryAttachments`). Only a paste
+ * reaches this: a directory path somebody *types* stays text.
  */
-function isLocalFile(path: string): boolean {
+function isLocalPath(path: string): boolean {
   if (!isAbsolute(path)) return false;
-  try { return statSync(path).isFile(); } catch { return false; }
+  try {
+    const s = statSync(path);
+    if (s.isFile()) return true;
+    // A path that ends at a separator is half of one: a terminal writing a
+    // dropped path in two goes cuts it there more often than anywhere else,
+    // and the directory it leaves behind is real (#130). A drop of a directory
+    // pastes its name without the separator, so this costs that case nothing.
+    return s.isDirectory() && !/[\\/]$/.test(path);
+  } catch { return false; }
 }
 
 /**
@@ -134,7 +151,7 @@ export function groupDroppedPaths(tokens: string[]): string[] | null {
 function longestRun(tokens: string[], i: number): { path: string; end: number } | null {
   // A file that is there beats a longer run that only promises to be one, so a
   // missing `/a/one.png` after a real `/a/two.png` cannot swallow both.
-  for (const names of [isLocalFile, looksLikeImage]) {
+  for (const names of [isLocalPath, looksLikeImage]) {
     for (let end = tokens.length; end > i; end--) {
       const path = tokens.slice(i, end).join(" ");
       if (names(path)) return { path, end };
@@ -168,6 +185,13 @@ export interface DropResult {
    * screen helps nobody (#85).
    */
   failed: FailedDrop[];
+  /**
+   * What attached, but not the way the reader meant. An image covey could not
+   * bring under the API's own limit is the one case: it goes, and the agent
+   * opens it as a file, but the model does not see the picture. A drop that
+   * quietly changes what the agent gets has to say so (#132).
+   */
+  warnings: string[];
 }
 
 /**
@@ -179,7 +203,7 @@ export interface DropResult {
  * a retina display carries megabytes the model never sees, because the API
  * scales anything past its long edge down before it reads it.
  */
-export function readFileAttachment(path: string): { attachment?: Attachment; failure?: FailedDrop } {
+export function readFileAttachment(path: string): { attachment?: Attachment; failure?: FailedDrop; warning?: string } {
   const name = basename(path);
   let size: number;
   try {
@@ -189,17 +213,98 @@ export function readFileAttachment(path: string): { attachment?: Attachment; fai
   }
   let read = path;
   let mimeType = fileMime(path);
-  if (size > MAX_ATTACHMENT_BYTES) {
-    const smaller = imageMime(path) ? shrinkImage(path) : null;
-    if (!smaller) return { failure: tooBig(name, path, size) };
-    read = smaller.path;
-    mimeType = smaller.mimeType;
+  let warning: string | undefined;
+  // Two limits, not one. An image over `MAX_IMAGE_BYTES` is scaled down,
+  // because that is all the model would have read anyway; every other file
+  // travels whole up to `MAX_ATTACHMENT_BYTES`, which is what covey carries.
+  if (imageMime(path) && size > MAX_IMAGE_BYTES) {
+    const smaller = shrinkImage(path);
+    if (smaller) { read = smaller.path; mimeType = smaller.mimeType; size = statSync(read).size; }
+    else warning = `${name} is ${mb(size)} MB and covey found no tool to shrink it (it looks for sips, magick, convert or ffmpeg on the PATH). It goes as a file the agent can open, but the model cannot see an image over ${mb(MAX_IMAGE_BYTES)} MB.`;
   }
+  if (size > MAX_ATTACHMENT_BYTES) return { failure: tooBig(name, path, size) };
   try {
-    return { attachment: { name, path: read, mimeType, data: readFileSync(read).toString("base64") } };
+    return { attachment: { name, path: read, mimeType, ...packBytes(readFileSync(read)) }, warning };
   } catch (e: any) {
     return { failure: statFailure(name, path, e) };
   }
+}
+
+/**
+ * Pack the bytes for the wire.
+ *
+ * A log, a source tree or a CSV goes over many times smaller deflated, which
+ * is most of what makes a big drop bearable on a slow link. An image, a video
+ * or an archive is already compressed and gains nothing, so the raw bytes go
+ * whenever gzip saved less than a tenth — the unpacking is not worth it, and
+ * base64 of a slightly larger buffer is slower than base64 of the file.
+ */
+export function packBytes(buf: Buffer): { data: string; packing?: "gzip" } {
+  if (buf.byteLength < PACK_ATTACHMENT_BYTES) return { data: buf.toString("base64") };
+  const packed = gzipSync(buf, { level: 6 });
+  if (packed.byteLength > buf.byteLength * 0.9) return { data: buf.toString("base64") };
+  return { data: packed.toString("base64"), packing: "gzip" };
+}
+
+/**
+ * Read a dropped directory: one attachment per file, each carrying the path it
+ * had inside the directory, so the daemon can lay the tree down again.
+ *
+ * covey sends the files rather than an archive because the point is for the
+ * agent to *read* them. An archive in the store is one more thing to unpack
+ * before anybody can open anything.
+ *
+ * `.git` never goes: it is large, it is binary, and an agent that wants the
+ * history has the repository. A symbolic link never goes either, so a link
+ * that points back up the tree cannot make the walk run forever.
+ */
+export function readDirectoryAttachments(path: string): { attachments: Attachment[]; failure?: FailedDrop } {
+  const dir = basename(path) || path;
+  const rels = walkDirectory(path, MAX_DIRECTORY_FILES + 1);
+  if (rels.length === 0) {
+    return { attachments: [], failure: { name: dir, chip: "no files in it", message: `${path} holds no files covey can send.` } };
+  }
+  if (rels.length > MAX_DIRECTORY_FILES) {
+    return {
+      attachments: [], failure: {
+        name: dir, chip: `over ${MAX_DIRECTORY_FILES} files`,
+        message: `${path} holds more than ${MAX_DIRECTORY_FILES} files. Drop the files you mean, or an archive of the directory.`,
+      },
+    };
+  }
+  const attachments: Attachment[] = [];
+  let total = 0;
+  for (const rel of rels) {
+    const file = join(path, rel);
+    let buf: Buffer;
+    try {
+      buf = readFileSync(file);
+    } catch (e: any) {
+      return { attachments: [], failure: statFailure(`${dir}/${rel}`, file, e) };
+    }
+    total += buf.byteLength;
+    if (total > MAX_ATTACHMENT_BYTES) return { attachments: [], failure: tooBigDirectory(dir, path, total) };
+    attachments.push({ name: rel, path: file, mimeType: fileMime(file), dir, ...packBytes(buf) });
+  }
+  return { attachments };
+}
+
+/** Every file under `root`, as paths relative to it, sorted, up to `limit`. */
+function walkDirectory(root: string, limit: number): string[] {
+  const out: string[] = [];
+  const todo = [""];
+  while (todo.length > 0 && out.length < limit) {
+    const rel = todo.shift()!;
+    let entries;
+    try { entries = readdirSync(join(root, rel), { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      if (e.name === ".git" || e.isSymbolicLink()) continue;
+      const child = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) todo.push(child);
+      else if (e.isFile()) { out.push(child); if (out.length >= limit) break; }
+    }
+  }
+  return out.sort();
 }
 
 /** The reason a `stat` or a `read` of a dropped path failed, in the reader's words. */
@@ -228,16 +333,50 @@ function tooBig(name: string, path: string, size: number): FailedDrop {
   };
 }
 
-/** Read every path into attachments, and say why each failure failed. */
+function tooBigDirectory(name: string, path: string, size: number): FailedDrop {
+  const limit = `${mb(MAX_ATTACHMENT_BYTES)} MB`;
+  return {
+    name, chip: `over the ${limit} limit`,
+    message: `${path} comes to more than ${limit}, the limit on one drop. Drop the files you mean instead.`,
+  };
+}
+
+/**
+ * Read every dropped path into attachments, and say why each failure failed.
+ *
+ * A directory gives one attachment per file under it, all sharing one `dir`,
+ * so the composer shows one chip for it. Two directories of one name in the
+ * same drop get told apart here, before the name becomes a folder.
+ */
 function readFiles(paths: string[]): DropResult {
   const attachments: Attachment[] = [];
   const failed: FailedDrop[] = [];
+  const warnings: string[] = [];
+  const dirs = new Set<string>();
   for (const path of paths) {
-    const { attachment, failure } = readFileAttachment(path);
-    if (attachment) attachments.push(attachment);
-    else failed.push(failure!);
+    let isDir = false;
+    try { isDir = statSync(path).isDirectory(); } catch { /* the read below reports it */ }
+    if (!isDir) {
+      const { attachment, failure, warning } = readFileAttachment(path);
+      if (attachment) attachments.push(attachment);
+      else failed.push(failure!);
+      if (warning) warnings.push(warning);
+      continue;
+    }
+    const read = readDirectoryAttachments(path);
+    if (read.failure) { failed.push(read.failure); continue; }
+    const dir = uniqueDir(basename(path) || path, dirs);
+    for (const a of read.attachments) attachments.push({ ...a, dir });
   }
-  return { attachments, failed };
+  return { attachments, failed, warnings };
+}
+
+/** A directory name no other directory in this drop already took. */
+function uniqueDir(name: string, taken: Set<string>): string {
+  let out = name;
+  for (let n = 2; taken.has(out); n++) out = `${name} ${n}`;
+  taken.add(out);
+  return out;
 }
 
 /**
@@ -266,7 +405,7 @@ const SHRINKERS: { cmd: string; args: (src: string, dst: string, edge: number, q
  * nothing to do it with. Two passes at most: the second only runs when scaling
  * alone was not enough, and it is the one that costs quality.
  */
-export function shrinkImage(path: string, limit = MAX_ATTACHMENT_BYTES): { path: string; mimeType: string } | null {
+export function shrinkImage(path: string, limit = MAX_IMAGE_BYTES): { path: string; mimeType: string } | null {
   for (const s of SHRINKERS) {
     for (const [edge, quality] of [[SHRINK_LONG_EDGE, 85], [Math.round(SHRINK_LONG_EDGE / 2), 70]] as const) {
       const dst = join(tmpdir(), `covey-shrunk-${randomUUID()}.jpg`);
@@ -286,8 +425,19 @@ export function shrinkImage(path: string, limit = MAX_ATTACHMENT_BYTES): { path:
  */
 export function readDroppedFiles(raw: string): DropResult {
   const paths = groupDroppedPaths(parseDroppedPaths(raw));
-  if (!paths) return { attachments: [], failed: [] };
+  if (!paths) return { attachments: [], failed: [], warnings: [] };
   return readFiles(paths);
+}
+
+/**
+ * True when a drop held nothing but directories.
+ *
+ * The composer asks because a directory that exists is also what half a
+ * dropped path looks like once the terminal has cut it (#130): the seam gets
+ * the first say, and the directory is taken only when no join reads better.
+ */
+export function isDirectoryDrop(d: DropResult): boolean {
+  return d.failed.length === 0 && d.attachments.length > 0 && d.attachments.every((a) => !!a.dir);
 }
 
 /** True when the drop read nothing at all: no file, and no name to chip. */
@@ -370,7 +520,7 @@ export type RunReader = (bin: string, args: string[]) => {
 };
 
 /** Headroom over the limit, so an oversized image reports a size, not ENOBUFS. */
-const CLIPBOARD_BUFFER_BYTES = MAX_ATTACHMENT_BYTES + 1024 * 1024;
+const CLIPBOARD_BUFFER_BYTES = MAX_IMAGE_BYTES + 1024 * 1024;
 
 const runReader: RunReader = (bin, args) => {
   const r = spawnSync(bin, args, { maxBuffer: CLIPBOARD_BUFFER_BYTES });
@@ -424,15 +574,15 @@ interface ClipboardReader {
 function readImageBytes(run: RunReader, bin: string, args: string[]): ReaderResult {
   const r = run(bin, args);
   if (r.error?.code === "ENOENT") return { absent: true };
-  if (r.error?.code === "ENOBUFS") return { error: `the clipboard image is over the ${mb(MAX_ATTACHMENT_BYTES)} MB limit` };
+  if (r.error?.code === "ENOBUFS") return { error: `the clipboard image is over the ${mb(MAX_IMAGE_BYTES)} MB limit` };
   if (r.error) return { error: `${bin} failed: ${r.error.message}` };
   const buf = r.stdout;
   // A reader that has no image exits non-zero, or exits 0 with nothing.
   if (r.status !== 0 || !buf || buf.byteLength === 0) return { empty: true };
   const mime = imageMimeOfBytes(buf);
   if (!mime) return { empty: true };
-  if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
-    return { error: `the clipboard image is ${mb(buf.byteLength)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)` };
+  if (buf.byteLength > MAX_IMAGE_BYTES) {
+    return { error: `the clipboard image is ${mb(buf.byteLength)} MB (limit ${mb(MAX_IMAGE_BYTES)} MB)` };
   }
   return { found: { image: { buf, mime } } };
 }
@@ -542,8 +692,8 @@ function macImageViaSips(run: RunReader): ReaderResult {
   if (made.error || made.status !== 0) return { empty: true };
   try {
     const buf = readFileSync(png);
-    if (buf.byteLength > MAX_ATTACHMENT_BYTES) {
-      return { error: `the clipboard image is ${mb(buf.byteLength)} MB (limit ${mb(MAX_ATTACHMENT_BYTES)} MB)` };
+    if (buf.byteLength > MAX_IMAGE_BYTES) {
+      return { error: `the clipboard image is ${mb(buf.byteLength)} MB (limit ${mb(MAX_IMAGE_BYTES)} MB)` };
     }
     const mime = imageMimeOfBytes(buf);
     return mime ? { found: { image: { buf, mime } } } : { empty: true };
@@ -570,6 +720,8 @@ export interface ClipboardResult {
   attachments: Attachment[];
   /** The files the clipboard named but covey could not attach, and why. */
   failed: FailedDrop[];
+  /** What attached, but not the way the reader meant. See `DropResult`. */
+  warnings: string[];
   errors: string[];
   /** Text, when that is all the clipboard held. The caller pastes it. */
   text?: string;
@@ -581,7 +733,7 @@ export interface ClipboardResult {
  * composer can say one line and carry on.
  */
 export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platform = process.platform): ClipboardResult {
-  const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], failed: [], errors });
+  const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], failed: [], warnings: [], errors });
   const readers = clipboardReadersFor(platform);
   if (readers.length === 0) return nothing([`covey cannot read the clipboard on ${platform}`]);
   const absent: string[] = [];
@@ -594,12 +746,12 @@ export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platf
     if (r.found.paths) return { ...readFiles(r.found.paths), errors: [] };
     if (r.found.image) {
       try {
-        return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], failed: [], errors: [] };
+        return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], failed: [], warnings: [], errors: [] };
       } catch {
         return nothing(["could not write the clipboard image to a temporary file"]);
       }
     }
-    return { attachments: [], failed: [], errors: [], text: r.found.text };
+    return { attachments: [], failed: [], warnings: [], errors: [], text: r.found.text };
   }
   if (absent.length === readers.length) return nothing([`to paste an image: ${absent.join(", or ")}`]);
   return nothing([holds.length > 0 ? `the clipboard holds ${holds.join(", ")}, which is not a file or an image` : "the clipboard has no file and no image"]);
@@ -626,6 +778,12 @@ function saveClipboardImage(buf: Buffer, mime: string): Attachment {
  */
 export interface TaggedAttachment extends Attachment {
   tag: string;
+  /**
+   * True when the chip stands for a file that did not attach. Nothing goes
+   * over the wire for one: it is in the list so that backspace can take the
+   * whole chip out in one key, and so that a later drop cannot take its tag.
+   */
+  failed?: true;
 }
 
 /**
@@ -643,13 +801,24 @@ export function makeTag(name: string, taken: string): string {
   return tag;
 }
 
-/** Give each attachment a tag that is unique against `taken` and the others. */
+/**
+ * Give each attachment a tag that is unique against `taken` and the others.
+ *
+ * Every file of one dropped directory shares one tag, and that tag names the
+ * directory: a person dropped one thing, so the draft shows one chip and
+ * deleting it drops the whole tree.
+ */
 export function tagAttachments(atts: Attachment[], taken: string): TaggedAttachment[] {
   const out: TaggedAttachment[] = [];
+  const byDir = new Map<string, string>();
   let seen = taken;
   for (const a of atts) {
-    const tag = makeTag(a.name, seen);
-    seen += `\n${tag}`;
+    let tag = a.dir ? byDir.get(a.dir) : undefined;
+    if (!tag) {
+      tag = makeTag(a.dir ? `${a.dir}/` : a.name, seen);
+      seen += `\n${tag}`;
+      if (a.dir) byDir.set(a.dir, tag);
+    }
     out.push({ ...a, tag });
   }
   return out;
@@ -694,11 +863,45 @@ export function applyDrop(draft: string, caret: number, dropped: Attachment[], p
   const live = keepTagged(draft, pending);
   const tagged = tagAttachments(dropped, [draft, ...live.map((a) => a.tag)].join("\n"));
   let taken = [draft, ...live.map((a) => a.tag), ...tagged.map((a) => a.tag)].join("\n");
-  const failed = unattached.map((f) => {
+  const failed: TaggedAttachment[] = unattached.map((f) => {
     const tag = makeTag(chipLabel(f), taken);
     taken += `\n${tag}`;
-    return tag;
+    return { name: f.name, path: "", mimeType: "", tag, failed: true };
   });
-  const text = spliceTags(draft, caret, [...tagged.map((a) => a.tag), ...failed]);
-  return { ...text, attachments: [...live, ...tagged] };
+  // One tag per chip: a directory gave every file under it the same one.
+  const tags = [...new Set([...tagged, ...failed].map((a) => a.tag))];
+  const text = spliceTags(draft, caret, tags);
+  return { ...text, attachments: [...live, ...tagged, ...failed] };
+}
+
+/**
+ * The chip that covers `caret`, or null.
+ *
+ * A chip is ordinary text and nothing protects it, so the caret can sit inside
+ * one. `back` says which key asked: backspace owns the end of a chip and the
+ * inside of it, delete owns the start and the inside, so a caret between two
+ * chips takes the one the key points at.
+ */
+export function tagSpanAt(text: string, caret: number, tags: string[], back: boolean): { start: number; end: number } | null {
+  for (const tag of tags) {
+    for (let from = 0; from <= text.length;) {
+      const start = text.indexOf(tag, from);
+      if (start < 0) break;
+      const end = start + tag.length;
+      if (back ? caret > start && caret <= end : caret >= start && caret < end) return { start, end };
+      from = start + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Take a chip out of the draft in one edit, with the space the drop put beside
+ * it, so `see [shot.png] this` becomes `see this` and not `see  this`.
+ */
+export function cutTag(value: string, span: { start: number; end: number }): { value: string; caret: number } {
+  let { start, end } = span;
+  if (value[end] === " " && (start === 0 || /\s/.test(value[start - 1]!))) end++;
+  else if (value[start - 1] === " " && (end === value.length || /\s/.test(value[end]!))) start--;
+  return { value: value.slice(0, start) + value.slice(end), caret: start };
 }

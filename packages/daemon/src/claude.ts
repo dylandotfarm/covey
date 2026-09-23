@@ -237,7 +237,7 @@ export class ClaudeSession {
     // Images go in as real image blocks (and first — the API prefers images
     // ahead of the text that refers to them); everything else is referenced by
     // path so the agent can open it itself.
-    const { blocks, noteLines } = attachmentBlocks(attachments);
+    const { blocks, noteLines } = attachmentBlocks(attachments, this.params.cwd);
     const parts: any[] = [...blocks];
     const body = noteLines.length ? `${text}\n\n${noteLines.join("\n")}` : text;
     parts.push({ type: "text", text: body });

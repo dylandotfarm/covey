@@ -591,9 +591,10 @@ before the push, so a refusal leaves no branch on the remote and no pull request
 in its body. Anything but 201 is shown whole, with the by-hand fallback, because the route is
 undocumented and the answer is the only clue. A video goes into the body as a bare URL on its
 own line and an image as an image, at the end in the order the flags were given, or where a
-`{{attach:NAME}}` stands. Each file is copied into the thread's attachment store first, the
-place #85 keeps a dropped file, and a note names the file, its URL and the copy, so a person
-can re-upload by hand when the URL dies.
+`{{attach:NAME}}` stands. Each file is copied into `<data dir>/attachments/<thread id>` first
+— the daemon's own dir, not the thread's file store, because the copy has to outlive the
+worktree — and a note names the file, its URL and the copy, so a person can re-upload by hand
+when the URL dies.
 
 **The daemon that holds the branch watches.** A poll runs on a timer, thirty seconds after
 the last one and half as long again after every quiet poll, up to five minutes. It reads the
@@ -1169,6 +1170,63 @@ old branch's commits are. A branch the destination held from an earlier visit is
 what `origin` has. The source gives its worktree back when the move is marked; the branch
 stays. A machine with no project for the repository clones it first, from the URL the
 export carries.
+
+## Dropped files: read on the client, carried to the machine that works
+
+A terminal does not hand a program the bytes of a dropped file. It pastes a path, and that
+path names a file on the machine the **client** runs on. The daemon may be somewhere else, so
+covey reads the file where the drop happened and carries the bytes inline, in `turn.send`.
+
+`packages/tui/src/attachments.ts` does the reading. A pasted chunk becomes a drop when every
+token of it rejoins into a path that names a file or a directory here; a chunk that names
+nothing stays prose, and a chunk a terminal wrote in two goes joins onto the seam the last
+paste left (`readSplitDrop`). A path that ends at a separator is never a directory drop,
+because that is what the front half of a cut path looks like and the directory it names is
+real.
+
+Three shapes go over the wire, all as one `Attachment`:
+
+- **A file.** The bytes, base64. Over 1 MB covey tries `gzip` and keeps the result when it
+  saved more than a tenth, so a log or a source file costs a fraction of its size and a
+  photograph costs nothing extra. `packing` says which.
+- **An image over the API's own limit.** Scaled to `SHRINK_LONG_EDGE` with `sips`, `magick`,
+  `convert` or `ffmpeg`, whichever the machine has, because the API scales anything past that
+  down before it reads it. When no tool is there the image still goes, and a warning says the
+  model will read it as a file rather than see it.
+- **A directory.** One attachment per file under it, each carrying the path it had inside and
+  all sharing one `dir`. Not an archive: the point is for the agent to open the files, and an
+  archive is one more step before anybody can. `.git` and symbolic links never go, and a
+  directory over `MAX_DIRECTORY_FILES` is refused by count rather than read for a minute.
+
+Two limits, not one. `MAX_ATTACHMENT_BYTES` (32 MB) is what covey carries on one drop, and it
+bounds the websocket frame too: 32 MB of bytes is about 43 MB of base64, under the 64 MB the
+socket accepts. `MAX_IMAGE_BYTES` (5 MB) is what the model may be shown. They used to be one
+number, which is why a 6 MB screenshot was refused outright instead of travelling as a file.
+
+The daemon writes what arrives into the thread's **file store**, `<cwd>/.covey/threads/<thread
+id>/files`, where `cwd` is the worktree the thread's session runs in
+(`materialiseAttachments`). The file keeps the name it was dropped under, a second file of
+that name becomes `shot-2.png`, and a directory becomes a folder. Three things follow from
+the store being in the worktree rather than in the daemon's data dir: the agent opens a
+dropped file with a path it can guess, the files go when the worktree goes, and
+`.covey/.gitignore` — one line, `*` — keeps every one of them out of `git status`, out of a
+diff, and out of a turn checkpoint. Nothing off the wire reaches the filesystem unchecked:
+`..`, a leading separator and a drive letter are cut out of every name first, and the bytes
+are counted against the same limit the client applies.
+
+`attachmentBlocks` then builds the turn. An image under the API's limit becomes a real
+`image` block; everything else is a line that names the file and its path relative to the
+agent's own cwd, and a dropped directory is one line with the count, not one line per file.
+
+In the composer a drop is a **chip** — `[shot.png]`, `[notes/]`, or `[shot.png — not on this
+machine]` when it failed — spliced into the draft at the caret. The chip is ordinary text and
+nothing protects it: delete it and the file goes with it on send (`keepTagged`). Backspace and
+delete take a whole chip in one key, because a chip is one thing on the screen and a chip half
+deleted is a file dropped with nothing said. Every file of one directory shares one chip.
+
+**Not yet:** the bytes live on exactly one machine. A thread that moves takes its timeline but
+not its files, and no client can ask for a file back. #85 has the shape of the content-addressed
+store that would fix both.
 
 ## Thread titles
 
