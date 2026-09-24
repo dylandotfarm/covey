@@ -2037,6 +2037,10 @@ export class Engine {
   /** The stamp watch on its own: a rotation somebody else made, and the
    *  sessions it left holding a token the server has revoked. */
   private async watchRotation(): Promise<string[]> {
+    // A refresh of covey's own rotates the token too, and the stamp it leaves
+    // is recorded when it lands. To read the store in the middle of one is to
+    // read covey's own rotation as somebody else's.
+    if (this.refreshing) return [];
     const stamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null);
     if (!stamp) return [];
     const seen = this.credStamp;
@@ -2077,9 +2081,6 @@ export class Engine {
     this.aheadAt = now;
     try {
       await this.refreshStore();
-      // The rotation is covey's own, so the watch must not read it as
-      // somebody else's and cycle what starts on the new token.
-      this.credStamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null) ?? this.credStamp;
       this.opts.log?.("credentials refreshed ahead of the expiry");
     } catch (e: any) {
       // Nobody is waiting on this one, and no thread owns it, so it is a line
@@ -2157,11 +2158,26 @@ export class Engine {
     return expiry;
   }
 
-  /** One refresh at a time, whoever asked: ten threads that fail together,
-   *  and the sweep that asks ahead of the expiry, all wait on the same one. */
+  /**
+   * One refresh at a time, whoever asked: ten threads that fail together, and
+   * the sweep that asks ahead of the expiry, all wait on the same one.
+   *
+   * The new stamp is read here, inside the promise, because a refresh *is* a
+   * rotation and `watchRotation` must not take covey's own for somebody
+   * else's. Read it anywhere but here and the watch cycles the sessions that
+   * hold the new token — measured on 2026-09-24, where covey refreshed the
+   * store to start a session, and seventeen seconds later stopped that very
+   * session, mid-answer, as stale (#151). The read is inside the promise, so
+   * `this.refreshing` still stands while it runs and the watch waits for it.
+   */
   private refreshStore(): Promise<void> {
     return this.refreshing ??= this.opts.refreshCredentials!().then(
-      () => { this.credStale = false; this.credRefreshedAt = this.now(); this.opts.log?.("credentials refreshed"); },
+      async () => {
+        this.credStale = false;
+        this.credRefreshedAt = this.now();
+        this.credStamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null) ?? this.credStamp;
+        this.opts.log?.("credentials refreshed");
+      },
     ).finally(() => { this.refreshing = null; });
   }
 

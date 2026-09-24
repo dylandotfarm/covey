@@ -95,6 +95,23 @@ export class ClaudeSession {
    */
   private backgrounded = new Set<string>();
   /**
+   * The CLI has written something since its last result, so this process is
+   * answering somebody right now.
+   *
+   * `currentTurnId` is covey's own bookkeeping, and the CLI can end a turn
+   * covey never started: a resumed session is handed the notifications of the
+   * tasks its predecessor left, answers those first, and reports a result for
+   * them. covey reads that result as the end of its turn, and from there the
+   * thread looks idle while the process works. Measured on 2026-09-24: a
+   * resumed session reported a result 0.7 seconds in, wrote two more items,
+   * and the credential sweep stopped it mid-answer (#151).
+   *
+   * So the output itself is the second half of `busy`. It says nothing about
+   * whose work it is, which is the point — a process that is writing is a
+   * process covey must not stop.
+   */
+  private answering = false;
+  /**
    * Commands the session reported as bound to the terminal that runs the CLI.
    * The init message names them; `supportedCommands()` and the
    * `commands_changed` push both need them to filter their answer.
@@ -133,6 +150,9 @@ export class ClaudeSession {
    * task still runs. Such a session is never released for idleness, however
    * long the user takes to read it.
    *
+   * A session that is writing counts too, whatever covey thinks its turn is
+   * doing; `answering` says why.
+   *
    * A background task counts because the thread looks idle while it runs. The
    * turn that started the task ended, so the status says idle and no turn is
    * in flight, but the work is a child of this subprocess and only this
@@ -144,7 +164,7 @@ export class ClaudeSession {
    * build the user waits for.
    */
   get busy(): boolean {
-    return this.currentTurnId !== null || this.pending.size > 0 || this.backgrounded.size > 0;
+    return this.currentTurnId !== null || this.answering || this.pending.size > 0 || this.backgrounded.size > 0;
   }
 
   start() {
@@ -276,6 +296,7 @@ export class ClaudeSession {
     // this the session would count as busy for ever after an interrupt, and the
     // idle sweep would never release it.
     this.currentTurnId = null;
+    this.answering = false;
     this.sink.onStatus("interrupted");
   }
 
@@ -462,6 +483,9 @@ export class ClaudeSession {
     } finally {
       this.q = null;
       this.closed = true;
+      // The query is over, so nothing more is coming. A session left
+      // `answering` here would be busy for ever and never released.
+      this.answering = false;
     }
   }
 
@@ -525,6 +549,11 @@ export class ClaudeSession {
   private handle(msg: SDKMessage) {
     const now = this.sink.now();
     const base = { threadId: this.params.threadId, turnId: this.currentTurnId, seq: 0, createdAt: now, updatedAt: now };
+    // Model output, a tool result and a command the CLI answered itself all
+    // mean the same thing here: this process is in the middle of something.
+    // The `result` case below is the only one that takes it back.
+    if (msg.type === "assistant" || msg.type === "stream_event" || msg.type === "user"
+      || (msg.type === "system" && msg.subtype === "local_command_output")) this.answering = true;
     switch (msg.type) {
       case "system": {
         if (msg.subtype === "init") {
@@ -697,6 +726,7 @@ export class ClaudeSession {
           this.sink.upsertItem({ ...base, id: this.newItemId(), kind: "error", text: String(r.result) });
         }
         this.currentTurnId = null;
+        this.answering = false;
         return;
       }
       default:
