@@ -1350,17 +1350,52 @@ and every later message (`task_updated` with `patch.is_backgrounded`, then
 waiting, so `background.state` is what tracks the work itself. A notification for a task
 with no row here becomes a plain note instead, unless the CLI marked it ambient.
 
-## Folding tool calls away
+## Folding a chain of tool calls away (#149)
 
-The transcript collapses the tool calls of every turn *except the newest* into one
-`>_ N tool calls` row, drawn where the first of them was. Only the calls fold — the prose
-between them stays, so a turn still reads as what the agent said with one row where the
-machinery used to be. Clicking the row (or any `▸` row) unfolds it; ctrl+o overrides the
-lot and is remembered in `prefs.toolsExpanded`.
+A *chain* is the run of tool calls and thoughts the agent made between two things it
+said. The transcript folds one into a single row that says, in a sentence, what the
+chain was for — and the rest of the turn reads as what the agent said, with one row
+where the machinery used to be.
 
-`layoutTranscript` owns this, and returns a `toggles` map of line index → fold key beside
-the lines themselves — for the same reason `sidebar.ts` returns painted cells: the click
-hit test and the painter have to agree on which row is where.
+The daemon marks the chains. `ChainTracker` in `activity.ts` decides which chain an
+item joins and `Engine.persistItem` writes the answer to `ItemBase.groupId`, the id of
+the chain's first item. Prose, a user message, a question and an approval close the
+chain and join none: a reader must not lose one of those to a fold. A chain never spans
+two turns. An item already on disk keeps the chain it was filed under, because a
+streaming item is written many times and must never move.
+
+The sentence comes from a weak model, exactly as a thread title does
+(`summariseActivity`, beside `title.ts` in shape and in reasoning): one throwaway query,
+no tools, no settings files, `persistSession: false`, and `COVEY_ACTIVITY_MODEL=off`
+turns it off. It runs when the chain closes and lands on the head item's `groupSummary`,
+which reaches the clients as an ordinary `item.upserted`. **Only the tool calls go to
+the model** — their names and the one-line summaries `toolSummary.ts` wrote. A thought
+folds away but its text is never read and never sent. Until the sentence lands, and for
+good when the model is off or failed, the client paints one it derived from the calls
+themselves (`chainLabel`), so a folded row always says something.
+
+Three depths, and the reader moves between them one tap at a time: a chain row opens
+into the items it holds, and an item opens into what went in and what came back.
+
+A **level of detail** says which of those are open before anybody taps. `Lod` in
+`@covey/protocol` names the four — `minimal`, `compact` (the default), `steps` and
+`full` — and `timelineRows` in `@covey/client` is the fold itself: pure, node-tested,
+and read by the TUI and the web client both, so a chain starts and ends in the same
+place on a phone as on a laptop. The rows a reader has changed from the level's default
+travel in a `toggled` set rather than a list of open rows, because at `full` a tap
+shuts a row instead of opening one.
+
+The level is a preference of the *device*, not of the machine: it travels in no command
+and no event. The TUI keeps it in `prefs.lod` and cycles it with ctrl+o; the web client
+keeps it in `localStorage` and offers it as **Detail** at the head of the settings page.
+`startingLod` reads the `prefs.toolsExpanded` this replaced, so a reader who had every
+call showing keeps `full`.
+
+`layoutTranscript` turns those rows into lines, and returns a `toggles` map of line
+index → fold key beside the lines themselves — for the same reason `sidebar.ts` returns
+painted cells: the click hit test and the painter have to agree on which row is where.
+No two rows share a key: a chain's is `chain:` and then its id, never the head item's
+own id, or one tap would open both.
 
 ## Archiving threads
 

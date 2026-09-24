@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { projectPool } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
@@ -250,7 +250,7 @@ export function App({ store }: { store: Store }) {
   // and a wrapper allocated thousands of times a session for no effect.
   const itemLines = useRef<ItemLines>(undefined);
   itemLines.current ??= new ItemLines();
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded, linkCtx, itemLines.current), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded, linkCtx]);
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.toggledRows, questionUi, state.lod, linkCtx, itemLines.current), [state.view, mainW, state.toggledRows, questionUi, state.lod, linkCtx]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
@@ -1082,7 +1082,7 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "updateclient", label: "Update covey — pull, rebuild, relaunch this client", hint: store.clientSource?.commit ?? "" });
     opts.push({ id: "addmachine", label: "Add machine (ws://host:port)" });
     opts.push({ id: "rmmachine", label: "Remove machine" });
-    opts.push({ id: "tools", label: state.toolsExpanded ? "Fold old tool calls into >_ rows" : "Show every tool call", hint: "ctrl+o" });
+    opts.push({ id: "lod", label: `Detail: ${LOD_LABEL[state.lod].label}`, hint: "ctrl+o" });
     opts.push({ id: "help", label: "Keyboard help", hint: "?" });
     openPick("Commands", opts, (id) => {
       store.setOverlay(null);
@@ -1119,7 +1119,10 @@ export function App({ store }: { store: Store }) {
         case "updateclient": return updateClient();
         case "addmachine": return openInput("Machine URL", (v) => { store.setOverlay(null); const [url, token] = v.split(/\s+/); if (url) store.addMachine({ name: new URL(url).hostname, url, token }); }, "ws://", "ws://host.tailnet.ts.net:3790 [token]");
         case "rmmachine": return openPick("Remove machine", state.order.map((k) => ({ id: k, label: state.machines.get(k)!.saved.name, hint: k })), (k) => { store.setOverlay(null); store.removeMachine(k); });
-        case "tools": return store.toggleAllTools();
+        case "lod": return openPick("Detail", LOD_ORDER.map((l) => ({ id: l, label: LOD_LABEL[l].label, hint: LOD_LABEL[l].hint })), (id) => {
+          store.setOverlay(null);
+          store.setLod(id as Lod);
+        });
         case "help": return store.setOverlay({ kind: "help" });
       }
     });
@@ -1596,7 +1599,7 @@ export function App({ store }: { store: Store }) {
     }
     if (key.ctrl && input === "k") return palette();
     if (key.ctrl && input === "t") return store.toggleSidebar();
-    if (key.ctrl && input === "o") return store.toggleAllTools();
+    if (key.ctrl && input === "o") return store.cycleLod();
     // ctrl+b, as in the Claude Code CLI: stop waiting on a tool call that is
     // taking too long. It keeps running and reports back when it is done.
     if (key.ctrl && input === "b") { void store.background(); return; }

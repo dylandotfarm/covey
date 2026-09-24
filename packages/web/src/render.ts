@@ -9,11 +9,12 @@
  * item id and rebuilt only when the daemon re-sent that item.
  */
 import { acceptCommand, commandLabel, cutTag, spliceTags, tagSpanAt } from "@covey/client";
-import { questionAnswers, questionAsks, threadIsBusy, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
+import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, attachmentRows, bindLabel, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
+import type { ChainRow, TimelineRow } from "@covey/client";
 
 export interface Actions {
   openThread(machine: string, threadId: string): void;
@@ -65,6 +66,10 @@ export interface Actions {
   sheetChoose(id: string): void;
   /** Take a row that acts instead of opening choices: rename, archive. */
   sheetAct(id: string): void;
+  /** Open a folded transcript row, or shut an open one (#149). */
+  toggleRow(key: string): void;
+  /** Read transcripts at this level of detail from now on (#149). */
+  setLod(lod: Lod): void;
 }
 
 /** How far a row slides to show the button under it, in CSS pixels. Matches `.swipe .archive` in app.css. */
@@ -103,7 +108,8 @@ export class Renderer {
   private menuClosedFor: string | null = null;
   /** The open thread's commands, as of the last paint. */
   private commands: ThreadCommands = null;
-  private rows = new Map<string, { item: TimelineItem; el: HTMLElement }>();
+  /** One painted transcript row, by its key. `sig` says when to rebuild it. */
+  private rows = new Map<string, { sig: string; el: HTMLElement }>();
   private activity: HTMLElement;
   /** `machine:thread` of the view the skeleton holds. */
   private shownThread: string | null = null;
@@ -517,7 +523,9 @@ export class Renderer {
    * from the tailnet page, and the LAN address keeps the token from then on.
    */
   private settingsPanel(s: State): HTMLElement {
-    const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"), h("h3", {}, "Machines"));
+    const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"));
+    panel.append(h("h3", {}, "Detail"), this.lodPanel(s));
+    panel.append(h("h3", {}, "Machines"));
     for (const m of s.machines.values()) panel.append(this.machineCard(m));
     if (s.machines.size === 1) panel.append(h("p", { class: "hint" }, "Other machines appear here once the TUI starts the web server on this one; it hands over the list."));
     panel.append(h("h3", {}, "Get LAN address"));
@@ -534,6 +542,25 @@ export class Renderer {
       panel.append(row);
     }
     if (s.access.addresses.length === 0) panel.append(h("p", { class: "empty" }, "This machine has no tailnet and no LAN address."));
+    return panel;
+  }
+
+  /**
+   * How much of a transcript this device paints before the reader taps (#149).
+   *
+   * A preference of the device and not of the machine, so it sits above the
+   * machines rather than on one of their cards: the phone reads at `compact`
+   * while the laptop that runs the same thread reads at `full`.
+   */
+  private lodPanel(s: State): HTMLElement {
+    const panel = h("div", { class: "lod" });
+    for (const l of LOD_ORDER) {
+      panel.append(h("button", {
+        type: "button",
+        class: l === s.lod ? "chosen" : "",
+        onclick: () => this.a.setLod(l),
+      }, LOD_LABEL[l].label, h("small", {}, LOD_LABEL[l].hint)));
+    }
     return panel;
   }
 
@@ -781,15 +808,18 @@ export class Renderer {
     this.fileSrc = (threadId, path) => threadFileSrc(s.machines.get(v.machine), threadId, path);
     // A draft kept from before may be a command name, and the list may have changed.
     if (switched || this.commands !== v.commands) { this.commands = v.commands; this.paintMenu(); }
-    // Keyed rows: only an item the daemon re-sent is rebuilt.
+    // Keyed rows: only a row whose signature changed is rebuilt. The fold
+    // that decides which rows there are is `@covey/client`'s, the same one
+    // the TUI lays out, so a chain starts and ends in the same place (#149).
     const items = orderedItems(v);
     const seen = new Set<string>();
     let cursor: Node | null = this.timeline.firstChild;
-    for (const item of items) {
-      seen.add(item.id);
-      let row = this.rows.get(item.id);
-      if (!row || row.item !== item) {
-        const el = renderItem(item, this.a, this.markdown, this.fileSrc);
+    for (const tr of viewRows(s, v)) {
+      seen.add(tr.key);
+      const sig = rowSignature(tr);
+      let row = this.rows.get(tr.key);
+      if (!row || row.sig !== sig) {
+        const el = this.renderRow(tr);
         if (row) {
           // The replacement takes the old node's place, so the walk follows it
           // there. Without this the cursor holds a node that is no longer in
@@ -799,13 +829,13 @@ export class Renderer {
           if (cursor === row.el) cursor = el;
           row.el.replaceWith(el);
         } else this.timeline.insertBefore(el, cursor);
-        row = { item, el };
-        this.rows.set(item.id, row);
+        row = { sig, el };
+        this.rows.set(tr.key, row);
       }
       if (row.el !== cursor) this.timeline.insertBefore(row.el, cursor);
       else cursor = cursor.nextSibling;
     }
-    for (const [id, row] of this.rows) if (!seen.has(id)) { row.el.remove(); this.rows.delete(id); }
+    for (const [key, row] of this.rows) if (!seen.has(key)) { row.el.remove(); this.rows.delete(key); }
     // A turn that runs with nothing streaming yet shows that it runs.
     const last = items[items.length - 1];
     const streaming = last && (last.kind === "assistant" || last.kind === "thinking") && last.streaming;
@@ -813,6 +843,40 @@ export class Renderer {
     this.activity.remove();
     if (showActivity) this.timeline.append(this.activity);
     if (this.atBottom) this.timeline.scrollTop = this.timeline.scrollHeight;
+  }
+
+  /**
+   * One row of the fold, as an element (#149).
+   *
+   * A chain and a run of messages are `<details>` like a tool call, so the
+   * browser owns the open state of the element and a tap needs no listener —
+   * but the level of detail owns what `open` starts as, so each one reports a
+   * change back to the state and the next paint agrees with the finger.
+   */
+  private renderRow(row: TimelineRow): HTMLElement {
+    if (row.kind === "chain") return this.foldRow(row.key, row.open, chainSummary(row), row.items);
+    if (row.kind === "said") {
+      const n = row.items.length;
+      return this.foldRow(row.key, row.open, [h("span", { class: "summary" }, `${n} more message${n === 1 ? "" : "s"}`)], row.items);
+    }
+    const el = renderItem(row.item, this.a, this.markdown, this.fileSrc);
+    if (row.item.kind === "tool" || row.item.kind === "thinking") {
+      // `renderItem` builds a `<details>` that starts shut; the level decides.
+      (el as HTMLDetailsElement).open = row.open;
+      el.addEventListener("toggle", () => this.a.toggleRow(row.key));
+    }
+    if (row.live) el.classList.add("live");
+    return el;
+  }
+
+  /** A `<details>` whose head is `head` and whose body is the items it hides. */
+  private foldRow(key: string, open: boolean, head: Child[], items: TimelineItem[]): HTMLElement {
+    const body = h("div", { class: "body" });
+    for (const it of items) body.append(renderItem(it, this.a, this.markdown, this.fileSrc));
+    const el = h("details", { class: "chain" }, h("summary", {}, ...head), body) as HTMLDetailsElement;
+    el.open = open;
+    el.addEventListener("toggle", () => this.a.toggleRow(key));
+    return el;
   }
 
   // ---- one issue or pull request (#108) --------------------------------
@@ -1018,6 +1082,28 @@ function userAttachments(item: UserMessageItem, fileSrc: (threadId: string, path
     el.append(h("a", { class: "attach-file", href: src, target: "_blank", rel: "noreferrer" }, r.label));
   }
   return el;
+}
+
+/**
+ * What a folded chain's head says.
+ *
+ * The sentence, and what a reader must not have to open the row to learn: how
+ * many calls ran, how long they took, and whether any of them failed. A
+ * sentence the daemon's model wrote reads plainly; one the page derived from
+ * the calls is dimmer, so a reader can tell the two apart.
+ */
+function chainSummary(row: ChainRow): Child[] {
+  const calls = row.items.filter((i) => i.kind === "tool").length;
+  const out: Child[] = [
+    h("span", { class: "glyph" }, ">_"),
+    " ",
+    h("span", { class: `summary${row.written ? "" : " derived"}` }, row.label),
+    h("span", { class: "meta" }, `${calls} call${calls === 1 ? "" : "s"}`),
+  ];
+  if (row.durationMs != null) out.push(h("span", { class: "meta" }, `${(row.durationMs / 1000).toFixed(1)}s`));
+  if (row.failed > 0) out.push(h("span", { class: "meta bad" }, `${row.failed} failed`));
+  if (row.running > 0) out.push(h("span", { class: "meta busy" }, `${row.running} running`));
+  return out;
 }
 
 function toolRow(item: ToolCallItem): HTMLElement {

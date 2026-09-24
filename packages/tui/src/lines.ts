@@ -1,5 +1,5 @@
 import { questionAnswers, questionAsks, type TimelineItem, type ToolCallItem } from "@covey/protocol";
-import { tableAt, type Table } from "@covey/client";
+import { tableAt, type ChainRow, type SaidRow, type Table } from "@covey/client";
 import { linkSpans, targetUri, toolLink, wordAt, type LinkContext } from "./links.js";
 import { T } from "./theme.js";
 
@@ -420,24 +420,46 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
  * as well as closed; open, the calls follow in their original places rather
  * than bunched underneath it.
  */
-export function renderToolGroupHead(items: ToolCallItem[], open: boolean, o: RenderOpts): Line[] {
+/**
+ * The row a folded chain of tool calls shows (#149).
+ *
+ * One sentence saying what the run was for, and what a reader must not have to
+ * open the row to learn: how many calls, how long they took, and whether any
+ * of them failed. A sentence the daemon's model wrote reads plainly; one the
+ * client derived from the calls is dimmer, so a reader can tell the two apart.
+ */
+export function renderChainHead(row: ChainRow, o: { width: number; links?: LinkContext }): Line[] {
   const w = Math.max(20, o.width);
-  const failed = items.filter((i) => i.status === "error" || i.background?.state === "failed").length;
-  const running = items.filter((i) => i.status === "running" || i.background?.state === "running").length;
-  const names: string[] = [];
-  for (const i of items) if (!names.includes(i.toolName)) names.push(i.toolName);
+  const calls = row.items.filter((i) => i.kind === "tool").length;
   const head: Line = [
     { text: "  " },
-    { text: open ? "▾" : "▸", color: T.subtle },
+    { text: row.open ? "▾" : "▸", color: T.subtle },
     { text: " >_ ", color: T.accent },
-    { text: `${items.length} tool call${items.length === 1 ? "" : "s"}`, color: T.muted },
+    { text: row.label, color: row.written ? T.muted : T.subtle, italic: !row.written },
   ];
-  if (failed > 0) head.push({ text: `  ${failed} failed`, color: T.danger });
-  if (running > 0) head.push({ text: `  ${running} in the background`, color: T.info });
-  const shown = names.slice(0, 4).join(", ") + (names.length > 4 ? ", …" : "");
-  head.push({ text: "  " + shown, color: T.faint });
+  head.push({ text: `  ${calls} call${calls === 1 ? "" : "s"}`, color: T.faint });
+  if (row.durationMs != null) head.push({ text: `  ${fmtMs(row.durationMs)}`, color: T.faint });
+  // A failure and a call still running are the two things worth colour: one
+  // says go and look, the other says the sentence is not the final word.
+  if (row.failed > 0) head.push({ text: `  ${row.failed} failed`, color: T.danger });
+  if (row.running > 0) head.push({ text: `  ${row.running} running`, color: T.working });
   const lines = wrapSpans(head, w);
-  return open ? lines : [...lines, []];
+  return row.open ? lines : [...lines, []];
+}
+
+/**
+ * The row that holds what the agent said in the middle of a turn, at
+ * `minimal`. The first thing it said and the last one keep their own rows.
+ */
+export function renderSaidHead(row: SaidRow, o: { width: number }): Line[] {
+  const n = row.items.length;
+  const head: Line = [
+    { text: "  " },
+    { text: row.open ? "▾" : "▸", color: T.subtle },
+    { text: ` ${n} more message${n === 1 ? "" : "s"}`, color: T.subtle, italic: true },
+  ];
+  const lines = wrapSpans(head, Math.max(20, o.width));
+  return row.open ? lines : [...lines, []];
 }
 
 export function fmtMs(ms: number): string {

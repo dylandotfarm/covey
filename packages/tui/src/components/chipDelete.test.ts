@@ -35,7 +35,7 @@ function appState(): AppState {
   } as unknown as ThreadView;
   return {
     machines: new Map([["pi", m]]), order: ["pi"], selected: { machine: "pi", threadId: "t" }, view, focus: "composer",
-    sidebarCollapsed: true, expanded: {}, expandedItems: new Set(), toolsExpanded: false,
+    sidebarCollapsed: true, expanded: {}, toggledRows: new Set(), lod: "compact",
     overlay: null, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(),
     pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
     selection: null, relaunch: null, clientBuild: null, clientStale: false,

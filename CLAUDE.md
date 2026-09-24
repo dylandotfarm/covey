@@ -124,6 +124,28 @@
   asked for it, which is what made some agent threads nest and some stand alone.
 - Timeline streaming re-sends whole items (same id, accumulated text); there is no delta
   channel. Keep it that way; it makes replay and reconnect trivial.
+- A *chain* is the run of tool calls and thoughts the agent made between two things it
+  said, and the transcript folds one into a row that says what it was for (#149). The
+  daemon marks it: `ChainTracker` in `daemon/src/activity.ts` decides, `persistItem`
+  writes `ItemBase.groupId` — the id of the chain's first item — and prose, a user
+  message, a question and an approval close the chain and join none, because a reader
+  must not lose one of those to a fold. A chain never spans two turns, and an item
+  already on disk keeps the chain it was filed under or a streaming item would move
+  between chains as it is re-sent. The sentence is `summariseActivity`, which is
+  `title.ts` in another hat — one throwaway weak-model query, no tools, no settings
+  files, `COVEY_ACTIVITY_MODEL=off` to turn it off — and it lands on the head item's
+  `groupSummary` as an ordinary `item.upserted`. **Only the tool calls go to the model.**
+  A thought folds away but its text is never read and never sent; keep it that way.
+  Until the sentence lands, and for good when the model is off, the client paints
+  `chainLabel`, which counts the calls rather than reading them.
+  The fold itself is `timelineRows` in `@covey/client`: pure, node-tested, and read by
+  the TUI and the web client both, so a chain starts and ends in the same place on a
+  phone. Four levels (`Lod`: `minimal`, `compact`, `steps`, `full`), and `compact` is
+  the default. The level is the *device's* preference and travels in no command —
+  `prefs.lod` and ctrl+o in the TUI, `localStorage` and the Detail rows at the head of
+  the settings page in the web client. The rows a reader changed are a `toggled` set,
+  never a list of open rows, because at `full` a tap shuts a row. No two rows share a
+  key: a chain's is `chain:<id>`, never its head item's own id, or one tap opens both.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
 - A thread's session is a subprocess of about 300 MB. The engine releases one after
