@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { DEFAULT_PORT, isFinalMemberState, threadIsBusy } from "@covey/protocol";
+import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
 import { MachineClient, projectPool, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
@@ -195,9 +195,16 @@ export interface AppState {
    *  a run by `runKey`, a thread group by `threadGroupKey`, the machines
    *  section by `MACHINES_KEY`. */
   expanded: Record<string, boolean>;
-  expandedItems: Set<string>;
-  /** ctrl+o: show every tool call, overriding the per-turn folds. */
-  toolsExpanded: boolean;
+  /**
+   * Transcript rows the reader changed from what `lod` gives them (#149).
+   *
+   * A *toggle*, not a list of open rows: at `full` every call starts open, so
+   * a key in here shuts one. Per session, never persisted — which row you
+   * opened five days ago is not a preference.
+   */
+  toggledRows: Set<string>;
+  /** ctrl+o: how much of a transcript is open before the reader taps (#149). */
+  lod: Lod;
   overlay: Overlay | null;
   notice: Notice | null;
   scrollFromBottom: number; // lines scrolled up from bottom (0 = follow)
@@ -374,8 +381,8 @@ export class Store {
     this.state = {
       machines: new Map(), order: [], selected: null, view: null, focus: "sidebar",
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
-      expanded: this.config.prefs.expanded ?? {}, expandedItems: new Set(),
-      toolsExpanded: this.config.prefs.toolsExpanded ?? false, overlay: null, notice: null,
+      expanded: this.config.prefs.expanded ?? {}, toggledRows: new Set(),
+      lod: startingLod(this.config.prefs), overlay: null, notice: null,
       scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
       selection: null, relaunch: null,
       clientBuild: opts.build ?? null, clientStale: false,
@@ -737,19 +744,31 @@ export class Store {
   // projects start open, the archived folder starts furled.
   toggleExpanded(key: string, defaultOpen = true) { this.state.expanded[key] = !(this.state.expanded[key] ?? defaultOpen); this.config.prefs.expanded = this.state.expanded; this.persist(); this.touch(); }
   isExpanded(key: string, defaultOpen = true) { return this.state.expanded[key] ?? defaultOpen; }
-  toggleItem(id: string) { const s = new Set(this.state.expandedItems); s.has(id) ? s.delete(id) : s.add(id); this.set({ expandedItems: s }); }
+  /** Open a folded row, or shut an open one. Either way, the reader has now
+   *  said something about this row that the level of detail does not. */
+  toggleItem(id: string) { const s = new Set(this.state.toggledRows); s.has(id) ? s.delete(id) : s.add(id); this.set({ toggledRows: s }); }
   /**
-   * Unfold every tool call at once, or fold them all back. Sticky across
-   * restarts: whether you read transcripts with the machinery showing is a
-   * preference, not a per-thread decision.
+   * Move to the next level of detail, which is what ctrl+o does (#149).
+   *
+   * Sticky across restarts: how much machinery you read a transcript with is a
+   * preference, not a per-thread decision. The rows the reader opened by hand
+   * go with it — they were answers to the old level, and at the new one half
+   * of them would mean the opposite of what the reader meant.
    */
-  toggleAllTools() {
-    const next = !this.state.toolsExpanded;
-    this.set({ toolsExpanded: next });
-    this.config.prefs.toolsExpanded = next;
-    this.persist();
-    this.notify(next ? "showing every tool call" : "tool calls folded into >_ rows");
+  cycleLod(step = 1) {
+    const at = LOD_ORDER.indexOf(this.state.lod);
+    const next = LOD_ORDER[(at + step + LOD_ORDER.length) % LOD_ORDER.length]!;
+    this.setLod(next);
   }
+
+  /** Read transcripts at `lod` from now on. */
+  setLod(lod: Lod) {
+    this.set({ lod, toggledRows: new Set() });
+    this.config.prefs.lod = lod;
+    this.persist();
+    this.notify(`${LOD_LABEL[lod].label.toLowerCase()} — ${LOD_LABEL[lod].hint}`);
+  }
+
   /** `anchor` is the line under the top row at `n`; App measures it against the layout it drew. */
   setScroll(n: number, anchor: ScrollAnchor | null = null) { this.set({ scrollFromBottom: Math.max(0, n), scrollAnchor: n > 0 ? anchor : null }); }
   setDraft(threadId: string, text: string) { this.state.drafts.set(threadId, text); }
@@ -2529,4 +2548,16 @@ export function fmtCost(usd: number): string {
   if (usd === 0) return "~$0";
   if (usd < 0.01) return "~$0.01";
   return `~$${usd < 100 ? usd.toFixed(2) : Math.round(usd)}`;
+}
+
+/**
+ * The level a client starts at (#149).
+ *
+ * `toolsExpanded` was the switch this replaced — two levels rather than four —
+ * so a reader who had it on keeps every call open, and everybody else gets the
+ * default. The old key is left where it is: a covey that is rolled back must
+ * still find it.
+ */
+export function startingLod(prefs: { lod?: string; toolsExpanded?: boolean }): Lod {
+  return asLod(prefs.lod) ?? (prefs.toolsExpanded ? "full" : DEFAULT_LOD);
 }

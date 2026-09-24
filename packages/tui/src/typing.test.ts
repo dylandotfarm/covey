@@ -352,9 +352,9 @@ test("leaving a thread lets go of the lines it was holding", () => {
   const { store } = storeWithRun(200);
   const view = store.getState().view!;
   const cache = new ItemLines();
-  layoutTranscript(view, 118, new Set(), { cursor: 0, answered: [] }, false, undefined, cache);
+  layoutTranscript(view, 118, new Set(), { cursor: 0, answered: [] }, "steps", undefined, cache);
   assert.ok(cache.size > 100);
-  layoutTranscript(null, 118, new Set(), { cursor: 0, answered: [] }, false, undefined, cache);
+  layoutTranscript(null, 118, new Set(), { cursor: 0, answered: [] }, "steps", undefined, cache);
   assert.equal(cache.size, 0, "escaping out of a thread left its lines held");
 });
 
@@ -367,7 +367,7 @@ test("one item changing lays out one item, not the two hundred around it", () =>
   const cache = new ItemLines();
   const opts = { width: 118, expanded: new Set<string>(), question: { cursor: 0, answered: [] } };
 
-  const first = layoutTranscript(view, 118, opts.expanded, opts.question, false, undefined, cache);
+  const first = layoutTranscript(view, 118, opts.expanded, opts.question, "steps", undefined, cache);
   // Not two hundred: the tool calls of finished turns are folded into one row
   // each, and a folded call is never drawn. What is drawn is what is held.
   const drawn = first.itemStarts.filter((i) => view.items.has(i.id)).length;
@@ -377,19 +377,19 @@ test("one item changing lays out one item, not the two hundred around it", () =>
   // Count what a second layout actually renders by watching for new arrays:
   // a cached item hands back the very array it handed back before.
   const before = first.lines.length;
-  const again = layoutTranscript(view, 118, opts.expanded, opts.question, false, undefined, cache);
+  const again = layoutTranscript(view, 118, opts.expanded, opts.question, "steps", undefined, cache);
   assert.equal(again.lines.length, before, "the same transcript lays out the same");
 
   // Now one item changes, the way a streamed reply does.
   const grown = { ...(view.items.get("i7") as any), text: PROSE.repeat(4), updatedAt: "2026-01-02T00:00:00Z" };
   view.items.set("i7", grown);
-  const third = layoutTranscript(view, 118, opts.expanded, opts.question, false, undefined, cache);
+  const third = layoutTranscript(view, 118, opts.expanded, opts.question, "steps", undefined, cache);
   assert.ok(third.lines.length > before, "the item that changed was laid out again");
   assert.equal(cache.render(view.items.get("i9")!, opts), cache.render(view.items.get("i9")!, opts),
     "and an item that did not change hands back the lines it had");
 
   // A width change is not something a cache can survive, so it empties.
-  layoutTranscript(view, 60, opts.expanded, opts.question, false, undefined, cache);
+  layoutTranscript(view, 60, opts.expanded, opts.question, "steps", undefined, cache);
   const narrow = cache.render(view.items.get("i9")!, { ...opts, width: 60 });
   const wide = cache.render(view.items.get("i9")!, { ...opts, width: 118 });
   assert.notEqual(narrow, wide, "a resize re-lays-out rather than painting the old width");

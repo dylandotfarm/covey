@@ -4,7 +4,7 @@ import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project,
 import type { TaggedAttachment } from "@covey/client";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
-  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRowNumber,
+  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
   attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
 } from "./state.js";
@@ -506,4 +506,62 @@ test("what a message's attachments are on the screen, with a dropped directory f
     ["file", "tree/ (2 files)"],
   ]);
   assert.deepEqual(attachmentRows([]), []);
+});
+
+// ---- the transcript's rows (#149) ------------------------------------------
+
+const lodItem = (id: string, extra: Record<string, unknown> = {}): TimelineItem =>
+  ({ id, threadId: "t", turnId: "a", seq: Number(id.slice(1)), createdAt: "", updatedAt: "u1", kind: "tool", toolUseId: id, toolName: "Read", input: {}, summary: `Read ${id}`, status: "completed", output: null, isError: false, parentToolUseId: null, durationMs: 10, ...extra }) as TimelineItem;
+
+const lodView = (items: TimelineItem[]): View =>
+  ({ machine: "m", threadId: "t", thread: null, items: new Map(items.map((i) => [i.id, i])), loading: false, error: null, hasMore: false, loadingOlder: false, seq: 0, commands: null, dirs: new Map() }) as unknown as View;
+
+test("a new page reads transcripts compact", () => {
+  assert.equal(emptyState().lod, "compact");
+});
+
+test("the level decides which rows the open thread paints", () => {
+  const s = emptyState();
+  const v = lodView([lodItem("c1", { groupId: "c1" }), lodItem("c2", { groupId: "c1" })]);
+  assert.deepEqual(viewRows(s, v).map((r) => r.kind), ["chain"]);
+  s.lod = "steps";
+  assert.deepEqual(viewRows(s, v).map((r) => r.kind), ["item", "item"]);
+});
+
+test("a chain's signature changes when anything under it does", () => {
+  const s = emptyState();
+  const one = viewRows(s, lodView([lodItem("c1", { groupId: "c1" }), lodItem("c2", { groupId: "c1" })]))[0]!;
+  const two = viewRows(s, lodView([lodItem("c1", { groupId: "c1" }), lodItem("c2", { groupId: "c1" }), lodItem("c3", { groupId: "c1" })]))[0]!;
+  assert.notEqual(rowSignature(one), rowSignature(two));
+});
+
+test("a chain's signature holds still when nothing under it changed", () => {
+  const s = emptyState();
+  const items = [lodItem("c1", { groupId: "c1" }), lodItem("c2", { groupId: "c1" })];
+  assert.equal(rowSignature(viewRows(s, lodView(items))[0]!), rowSignature(viewRows(s, lodView(items))[0]!));
+});
+
+test("the sentence a model wrote changes the signature, so the row repaints", () => {
+  const s = emptyState();
+  const plain = [lodItem("c1", { groupId: "c1" }), lodItem("c2", { groupId: "c1" })];
+  const named = [lodItem("c1", { groupId: "c1", groupSummary: "Read the parser" }), lodItem("c2", { groupId: "c1" })];
+  assert.notEqual(rowSignature(viewRows(s, lodView(plain))[0]!), rowSignature(viewRows(s, lodView(named))[0]!));
+});
+
+test("a tapped row and the row it sits in have different keys", () => {
+  const s = emptyState();
+  const v = lodView([lodItem("c1", { groupId: "c1" }), lodItem("c2", { groupId: "c1" })]);
+  s.toggledRows = new Set(["chain:c1"]);
+  const rows = viewRows(s, v);
+  assert.deepEqual(rows.map((r) => r.kind), ["chain", "item", "item"]);
+  assert.equal(rows[0]!.key, "chain:c1");
+  assert.equal(rows[1]!.key, "c1");
+});
+
+test("an item's signature follows the daemon's last write of it", () => {
+  const s = emptyState();
+  s.lod = "steps";
+  const a = viewRows(s, lodView([lodItem("c1", { updatedAt: "u1" })]))[0]!;
+  const b = viewRows(s, lodView([lodItem("c1", { updatedAt: "u2" })]))[0]!;
+  assert.notEqual(rowSignature(a), rowSignature(b));
 });

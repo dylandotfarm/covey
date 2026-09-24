@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { TimelineItem, Thread } from "@covey/protocol";
-import { layoutTranscript, toolGroupKey } from "./components/Transcript.js";
+import { layoutTranscript } from "./components/Transcript.js";
 import { lineText } from "./lines.js";
 import type { ThreadView } from "./store.js";
 
@@ -13,6 +13,9 @@ const say = (turnId: string, text: string) => base("assistant", turnId, { text, 
 const tool = (turnId: string, summary: string, extra: Record<string, unknown> = {}) =>
   base("tool", turnId, { toolUseId: `u${seq}`, toolName: "Bash", input: {}, summary, status: "completed", output: null, isError: false, parentToolUseId: null, durationMs: 5, ...extra });
 
+/** Mark a run of items as one chain, the way the daemon's `persistItem` does. */
+const chain = (items: TimelineItem[]) => items.map((i) => ({ ...i, groupId: items[0]!.id }) as TimelineItem);
+
 function view(items: TimelineItem[], latestTurn: string | null): ThreadView {
   const thread = { latestTurn: latestTurn ? { turnId: latestTurn, state: "completed", startedAt: "", completedAt: "" } : null } as Thread;
   return { machine: "m", threadId: "t", thread, items: new Map(items.map((i) => [i.id, i])), loading: false, error: null, hasMore: false, loadingOlder: false, seq: items.length, commands: null, dirs: new Map() };
@@ -20,66 +23,86 @@ function view(items: TimelineItem[], latestTurn: string | null): ThreadView {
 
 const text = (l: ReturnType<typeof layoutTranscript>) => l.lines.map(lineText).join("\n");
 
-test("an older turn's tool calls fold into one >_ row, keeping what was said between them", () => {
+test("a chain of tool calls folds into one row, keeping what was said between them", () => {
   const items = [
-    user("a", "do it"), say("a", "looking"), tool("a", "ls"), say("a", "now editing"), tool("a", "sed"), tool("a", "cat"), say("a", "done"),
-    user("b", "thanks"), say("b", "sure"),
+    user("a", "do it"), say("a", "looking"),
+    ...chain([tool("a", "ls"), tool("a", "sed"), tool("a", "cat")]),
+    say("a", "done"),
   ];
-  const out = text(layoutTranscript(view(items, "b"), 80, new Set()));
-  assert.match(out, />_ 3 tool calls/);
+  const out = text(layoutTranscript(view(items, "a"), 80, new Set()));
+  assert.match(out, />_ Ran 3 commands/);
   assert.doesNotMatch(out, /\bls\b/, "the calls themselves are folded away");
-  assert.match(out, /now editing/, "but the prose around them is not");
+  assert.match(out, /looking/, "but the prose around them is not");
+  assert.match(out, /done/);
 });
 
-test("the newest turn keeps its tool calls in full — that is the part being read", () => {
-  const items = [user("a", "go"), tool("a", "ls"), tool("a", "cat"), say("a", "done")];
+test("the running turn folds too — that is where the noise is (#149)", () => {
+  // The fold this replaced skipped the live turn, and a covey turn runs for
+  // many minutes, so nothing folded until it ended.
+  const items = [user("a", "go"), ...chain([tool("a", "ls"), tool("a", "cat")]), say("a", "done")];
   const out = text(layoutTranscript(view(items, "a"), 80, new Set()));
-  assert.doesNotMatch(out, />_/);
-  assert.match(out, /ls/);
+  assert.match(out, />_ Ran 2 commands/);
+  assert.doesNotMatch(out, /\bls\b/);
 });
 
 test("a lone tool call is left alone: folding it would hide more than it saves", () => {
-  const items = [user("a", "go"), tool("a", "ls"), say("a", "done"), user("b", "ok")];
-  const out = text(layoutTranscript(view(items, "b"), 80, new Set()));
-  assert.doesNotMatch(out, />_/);
+  const items = [user("a", "go"), ...chain([tool("a", "ls")]), say("a", "done")];
+  const out = text(layoutTranscript(view(items, "a"), 80, new Set()));
+  assert.doesNotMatch(out, />_ /);
   assert.match(out, /ls/);
 });
 
-test("unfolding a group puts the calls back where they were, under an open header", () => {
-  const items = [user("a", "go"), tool("a", "first-call"), say("a", "mid"), tool("a", "second-call"), say("a", "done"), user("b", "ok")];
-  const out = text(layoutTranscript(view(items, "b"), 80, new Set([toolGroupKey("a")])));
-  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
-  const at = (needle: string) => lines.findIndex((l) => l.includes(needle));
-  assert.ok(at(">_ 2 tool calls") >= 0 && at(">_ 2 tool calls") < at("first-call"), "the header stays where the first call was");
-  assert.ok(at("first-call") < at("mid"), "and the calls sit among the prose, not bunched under it");
-  assert.ok(at("mid") < at("second-call"));
+test("the sentence the daemon's model wrote is what the row says", () => {
+  const items = chain([tool("a", "ls"), tool("a", "cat")]);
+  items[0]!.groupSummary = "Checked the build output";
+  assert.match(text(layoutTranscript(view(items, "a"), 80, new Set())), />_ Checked the build output/);
 });
 
-test("ctrl+o overrides every fold at once", () => {
-  const items = [user("a", "go"), tool("a", "ls"), tool("a", "cat"), say("a", "done"), user("b", "ok")];
-  const out = text(layoutTranscript(view(items, "b"), 80, new Set(), undefined, true));
-  assert.doesNotMatch(out, />_/);
+test("unfolding a chain puts its calls back under an open header", () => {
+  const items = [user("a", "go"), ...chain([tool("a", "first-call"), tool("a", "second-call")]), say("a", "done")];
+  const out = text(layoutTranscript(view(items, "a"), 80, new Set([`chain:${items[1]!.id}`])));
+  const lines = out.split("\n").map((l) => l.trim()).filter(Boolean);
+  const at = (needle: string) => lines.findIndex((l) => l.includes(needle));
+  assert.ok(at(">_ Ran 2 commands") >= 0 && at(">_ Ran 2 commands") < at("first-call"), "the header stays where the first call was");
+  assert.ok(at("first-call") < at("second-call"));
+});
+
+test("steps puts every call back on a row of its own", () => {
+  const items = [user("a", "go"), ...chain([tool("a", "ls"), tool("a", "cat")]), say("a", "done")];
+  const out = text(layoutTranscript(view(items, "a"), 80, new Set(), undefined, "steps"));
+  assert.doesNotMatch(out, />_ Ran/);
   assert.match(out, /ls/);
   assert.match(out, /cat/);
 });
 
+test("minimal folds the middle of what the agent said, keeping the ends", () => {
+  const items = [user("a", "go"), say("a", "starting"), say("a", "halfway"), say("a", "nearly"), say("a", "done")];
+  const out = text(layoutTranscript(view(items, "a"), 80, new Set(), undefined, "minimal"));
+  assert.match(out, /starting/);
+  assert.match(out, /done/);
+  assert.doesNotMatch(out, /halfway/);
+  assert.match(out, /2 more messages/);
+});
+
 test("every foldable row is a click target, at the line it starts on", () => {
-  const items = [user("a", "go"), tool("a", "ls"), tool("a", "cat"), say("a", "done"), user("b", "ok"), base("thinking", "b", { text: "hmm", streaming: false })];
-  const layout = layoutTranscript(view(items, "b"), 80, new Set());
-  const groupLine = [...layout.toggles].find(([, id]) => id === toolGroupKey("a"));
-  assert.ok(groupLine, "the >_ row toggles its group");
-  assert.match(lineText(layout.lines[groupLine![0]]!), />_ 2 tool calls/);
-  assert.ok([...layout.toggles.values()].some((id) => id.startsWith("thinking-")), "a thought folds too");
+  const items = [user("a", "go"), ...chain([tool("a", "ls"), tool("a", "cat")]), base("thinking", "a", { text: "hmm", streaming: false })];
+  const layout = layoutTranscript(view(items, "a"), 80, new Set());
+  const chainLine = [...layout.toggles].find(([, id]) => id.startsWith("chain:"));
+  assert.ok(chainLine, "the >_ row toggles its chain");
+  assert.match(lineText(layout.lines[chainLine![0]]!), />_ Ran 2 commands/);
+  assert.ok([...layout.toggles.values()].some((id) => id.startsWith("thinking-")), "a thought outside a chain folds too");
 });
 
 test("a failed call is called out on the folded row, so nothing hides a problem", () => {
-  const items = [user("a", "go"), tool("a", "ls"), tool("a", "boom", { status: "error", isError: true }), user("b", "ok")];
-  assert.match(text(layoutTranscript(view(items, "b"), 80, new Set())), />_ 2 tool calls\s+1 failed/);
+  const items = chain([tool("a", "ls"), tool("a", "boom", { status: "error", isError: true })]);
+  assert.match(text(layoutTranscript(view(items, "a"), 80, new Set())), />_ Ran 2 commands.*1 failed/);
 });
 
-test("a call still running in the background is counted on the folded row", () => {
-  const items = [user("a", "go"), tool("a", "ls"), tool("a", "npm test", { background: { taskId: "k", state: "running", summary: null } }), user("b", "ok")];
-  assert.match(text(layoutTranscript(view(items, "b"), 80, new Set())), /1 in the background/);
+test("a call still running is shown under the folded row, not hidden by it", () => {
+  const items = chain([tool("a", "ls"), tool("a", "npm test", { status: "running", durationMs: null })]);
+  const out = text(layoutTranscript(view(items, "a"), 80, new Set()));
+  assert.match(out, /1 running/);
+  assert.match(out, /npm test/, "a reader watching a turn must see what it is doing now");
 });
 
 test("an attachment the text names inline needs no footer line", () => {

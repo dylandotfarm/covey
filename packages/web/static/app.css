@@ -293,3 +293,25 @@ video.media { min-width: 160px; }
 @media (min-width: 900px) {
   #app { max-width: 820px; margin: 0 auto; }
 }
+
+/* A folded chain of tool calls, and the messages `minimal` hides (#149). */
+details.chain { font-size: 14px; color: var(--muted); }
+details.chain summary { display: flex; gap: 6px; align-items: baseline; list-style: none; cursor: pointer; }
+details.chain summary::-webkit-details-marker { display: none; }
+details.chain .glyph { color: var(--accent); font-family: ui-monospace, monospace; }
+details.chain .summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A sentence the page counted rather than one a model wrote. */
+details.chain .summary.derived { color: var(--subtle); font-style: italic; }
+details.chain .meta { color: var(--subtle); font-size: 12px; flex: none; }
+details.chain .meta.bad { color: var(--danger); }
+details.chain .meta.busy { color: var(--working); }
+details.chain[open] .summary { white-space: normal; overflow-wrap: anywhere; }
+details.chain > .body { padding-left: 12px; border-left: 1px solid var(--border); margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
+/* The one call running under a folded chain: what the turn is doing now. */
+details.tool.live .glyph { color: var(--working); }
+
+/* The level of detail, on the settings page (#149). */
+.settings .lod { display: flex; flex-direction: column; gap: 6px; }
+.settings .lod button { text-align: left; display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; }
+.settings .lod button small { color: var(--subtle); font-size: 12px; font-weight: normal; }
+.settings .lod button.chosen { border-color: var(--accent); color: var(--accent); }

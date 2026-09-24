@@ -139,7 +139,7 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `ctrl+k` | anywhere | command palette |
 | `ctrl+n` | anywhere | new thread in the current project |
 | `ctrl+t` | anywhere | toggle sidebar |
-| `ctrl+o` | anywhere | show every tool call, or fold them back into `>_` rows |
+| `ctrl+o` | anywhere | detail: chains folded into one `>_` sentence, every call, or every call open |
 | `ctrl+b` | anywhere | background the running tool calls — the turn moves on, they report back |
 | `ctrl+c` ×2 | anywhere | quit |
 | `j/k` `enter` | sidebar | move, open thread / fold project / machine control panel |

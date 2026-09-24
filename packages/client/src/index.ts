@@ -4,6 +4,10 @@ export { acceptCommand, commandLabel, commandMenu, commandToken } from "./comman
 export { projectPool } from "./projects.js";
 export { tableAt, tableCells, type Align, type Table } from "./markdown.js";
 export {
+  chainLabel, chainsOf, foldsChains, timelineRows,
+  type ChainRow, type FoldOpts, type ItemRow, type SaidRow, type TimelineRow,
+} from "./timeline.js";
+export {
   applyDrop, chipLabel, cutTag, keepTagged, makeTag, megabytes, spliceTags, tagAttachments, tagSpanAt,
   type FailedDrop, type TaggedAttachment,
 } from "./attach.js";

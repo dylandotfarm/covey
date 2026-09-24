@@ -1,8 +1,9 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
-import type { TimelineItem, ToolCallItem } from "@covey/protocol";
+import { DEFAULT_LOD, type Lod, type TimelineItem } from "@covey/protocol";
+import { timelineRows } from "@covey/client";
 import { selectionBounds, type Selection, type ThreadView } from "../store.js";
-import { ItemLines, renderItem, renderToolGroupHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
+import { ItemLines, renderItem, renderChainHead, renderSaidHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
 import { hyperlinksEnabled, osc8, type LinkContext } from "../links.js";
 import { T } from "../theme.js";
 
@@ -29,20 +30,16 @@ export interface TranscriptLayout {
 /** Nothing at all, for a layout with no thread open. */
 const EMPTY_ITEMS: Map<string, TimelineItem> = new Map();
 
-/** A turn with fewer than this many calls is shorter left alone than folded. */
-const MIN_GROUP = 2;
-
-/** The fold key for a turn's tool calls; shares the store's expandedItems set. */
-export const toolGroupKey = (turnId: string) => `tools:${turnId}`;
-
 /**
- * Lay the transcript out, folding away the tool calls of turns the
- * conversation has already moved past.
+ * Lay the transcript out at one level of detail (#149).
  *
- * The newest turn is left intact — that is the part being read, and watching
- * its calls is the point. Every turn before it keeps its prose and collapses
- * its calls into one `>_ N tool calls` row, placed where the first of them
- * was. `toolsExpanded` (ctrl+o) overrides the lot.
+ * `timelineRows` in `@covey/client` decides what folds into what; this turns
+ * each row it gives back into painted lines. The web client reads the same
+ * function, so a chain starts and ends in the same place on a phone.
+ *
+ * `toggled` holds the rows the reader changed from what the level gives them.
+ * It is a toggle rather than a list of open rows, because at `full` a tap
+ * shuts a row instead of opening one.
  *
  * `links` marks the paths and the URLs. It is the caller's job because whether
  * a path is openable depends on which machine the thread runs on.
@@ -52,7 +49,7 @@ export const toolGroupKey = (turnId: string) => `tools:${turnId}`;
  * laid out afresh — which is what a test wants, and what the first layout of a
  * thread does anyway.
  */
-export function layoutTranscript(view: ThreadView | null, width: number, expanded: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, toolsExpanded = false, links?: LinkContext, cache?: ItemLines): TranscriptLayout {
+export function layoutTranscript(view: ThreadView | null, width: number, toggled: Set<string>, question: QuestionUi = { cursor: 0, answered: [] }, lod: Lod = DEFAULT_LOD, links?: LinkContext, cache?: ItemLines): TranscriptLayout {
   const lines: Line[] = [];
   const itemStarts: TranscriptLayout["itemStarts"] = [];
   const toggles = new Map<number, string>();
@@ -61,55 +58,33 @@ export function layoutTranscript(view: ThreadView | null, width: number, expande
   cache?.prune(view?.items ?? EMPTY_ITEMS);
   if (!view) return { lines, itemStarts, toggles };
   const items = [...view.items.values()].sort((a, b) => a.seq - b.seq);
-  const opts = { width, expanded, question, links };
-  const draw = cache ? (it: TimelineItem) => cache.render(it, opts) : (it: TimelineItem) => renderItem(it, opts);
 
-  const liveTurn = view.thread?.latestTurn?.turnId ?? null;
-  const groups = new Map<string, ToolCallItem[]>();
-  if (!toolsExpanded) {
-    for (const it of items) {
-      if (it.kind !== "tool" || !it.turnId || it.turnId === liveTurn) continue;
-      const g = groups.get(it.turnId) ?? [];
-      g.push(it);
-      groups.set(it.turnId, g);
-    }
-    for (const [turnId, g] of groups) if (g.length < MIN_GROUP) groups.delete(turnId);
-  }
-
-  for (const it of items) {
-    const group = it.kind === "tool" && it.turnId ? groups.get(it.turnId) : undefined;
-    if (group) {
-      const key = toolGroupKey(it.turnId!);
-      const open = expanded.has(key);
-      // One row per turn, drawn at its first call; the rest of the turn's
-      // calls are already accounted for by it.
-      if (group[0] !== it) {
-        if (!open) continue;
-        const start = lines.length;
-        lines.push(...draw(it));
-        itemStarts.push({ id: it.id, start, end: lines.length });
-        toggles.set(start, it.id);
-        continue;
-      }
-      const start = lines.length;
-      lines.push(...renderToolGroupHead(group, open, opts));
-      toggles.set(start, key);
-      itemStarts.push({ id: key, start, end: lines.length });
-      if (open) {
-        const from = lines.length;
-        lines.push(...draw(it));
-        itemStarts.push({ id: it.id, start: from, end: lines.length });
-        toggles.set(from, it.id);
-      }
+  for (const row of timelineRows(items, { lod, toggled })) {
+    const start = lines.length;
+    if (row.kind === "chain") {
+      lines.push(...renderChainHead(row, { width, links }));
+      toggles.set(start, row.key);
+      itemStarts.push({ id: row.key, start, end: lines.length });
       continue;
     }
-    const start = lines.length;
-    lines.push(...draw(it));
-    itemStarts.push({ id: it.id, start, end: lines.length });
-    if (it.kind === "tool" || it.kind === "thinking") toggles.set(start, it.id);
+    if (row.kind === "said") {
+      lines.push(...renderSaidHead(row, { width }));
+      toggles.set(start, row.key);
+      itemStarts.push({ id: row.key, start, end: lines.length });
+      continue;
+    }
+    // `expanded` carries one id and `renderItem` asks whether it holds this
+    // one, so the fold above stays the only thing that decides what is open.
+    const opts = { width, expanded: row.open ? new Set([row.item.id]) : EMPTY_EXPANDED, question, links };
+    lines.push(...(cache ? cache.render(row.item, opts) : renderItem(row.item, opts)));
+    itemStarts.push({ id: row.item.id, start, end: lines.length });
+    if (row.item.kind === "tool" || row.item.kind === "thinking") toggles.set(start, row.item.id);
   }
   return { lines, itemStarts, toggles };
 }
+
+/** Shared by every folded row, so no set is built for one that is shut. */
+const EMPTY_EXPANDED: Set<string> = new Set();
 
 export function Transcript({ view, layout, height, scrollFromBottom, width, selection }: { view: ThreadView | null; layout: TranscriptLayout; height: number; scrollFromBottom: number; width: number; selection: Selection | null }) {
   const { lines } = layout;
