@@ -561,6 +561,54 @@ test("the rotation covey made is not read back as somebody else's", async (t) =>
   assert.equal(s.clis[0]!.aborted, false, "a session started on the new token keeps it");
 });
 
+test("a refresh covey made to start a session is not read back as somebody else's", async (t) => {
+  let expiresAt = 0;
+  const s = setup({
+    expiry: () => expiresAt,
+    stamps: ["file:1", "file:2"],
+    // What a refresh leaves behind: a token with hours on it, under a
+    // fingerprint the store did not have before.
+    refresh: async () => { expiresAt = s.now() + 8 * 3_600_000; },
+  });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.withTranscript("t1");
+  expiresAt = s.now() + 8 * 3_600_000;
+  await s.engine.checkCredentials();   // the first read only records the stamp
+  assert.deepEqual(s.refreshes, []);
+
+  // The token is inside the window Claude Code refreshes in, so covey asks for
+  // a refresh to start the session — a rotation of its own, made while a
+  // thread waits on it rather than on the quiet sweep.
+  expiresAt = s.now() + MARGIN_MS - 1;
+  await s.send("t1", "reproduce the bug");
+  assert.deepEqual(s.refreshes, [0], "the store was refreshed to start the session");
+  s.clis[0]!.finish("here you go");
+  await settle();
+
+  assert.deepEqual(await s.engine.checkCredentials(), [], "covey's own refresh is not a rotation to cycle for");
+  assert.equal(s.clis[0]!.aborted, false, "the session covey started on the new token keeps it");
+  assert.equal(s.notes("t1").some((n) => n.includes("credentials changed")), false, s.notes("t1").join(" | "));
+});
+
+test("a process that is writing is never stopped, whatever covey thinks its turn is doing", async (t) => {
+  const s = setup({ stamps: ["file:1", "file:2"] });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.send("t1", "reproduce the bug");
+  assert.deepEqual(await s.engine.checkCredentials(), [], "the first read only records the stamp");
+
+  // The CLI reports a result for work covey never asked for — the tasks a
+  // resumed session inherits from the one before it — so covey's turn reads as
+  // over. The process then answers the message covey did send.
+  s.clis[0]!.finish("2 background shells stopped");
+  s.clis[0]!.say("New report: let me reproduce it.");
+  await settle();
+
+  assert.deepEqual(await s.engine.checkCredentials(), [], "a rotation leaves a process that is writing alone");
+  assert.equal(s.clis[0]!.aborted, false);
+});
+
 test("a session that can refresh for itself is never revoked for nothing", async (t) => {
   let expiresAt = 0;
   const s = setup({ expiry: () => expiresAt });

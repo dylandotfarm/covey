@@ -177,7 +177,13 @@
   sweep refreshes there *ahead* of a reader (`refreshAhead`), on the one condition that the
   daemon holds no live session at all. That condition is the whole safety of it: a rotation
   revokes every live token, so a busy turn would end and a fresh session, which refreshes for
-  itself, would be revoked for nothing.
+  itself, would be revoked for nothing. Every refresh covey makes is a rotation, so
+  `refreshStore` records the stamp it leaves, inside the promise the callers share, and
+  `watchRotation` stands aside while one runs. Read that stamp anywhere else and the watch
+  cycles the sessions holding the *new* token (#151). And a process that writes is a process
+  covey never stops: `ClaudeSession.answering` is the second half of `busy`, because the CLI
+  ends turns covey never started — a resumed session answers the background-task
+  notifications it inherits, and covey reads that result as the end of its own turn.
 - The model picker is read from the Claude Code covey runs, not from a list covey ships:
   the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
   no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The
