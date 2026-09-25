@@ -258,7 +258,10 @@ five and six days earlier, which is the whole argument for having it.
 
 - **The palette is a copy.** `covey-grid/src/theme.rs` is carried over from
   `packages/tui/src/theme.ts`. A colour that changes there changes here, in the
-  same pull request. A person will run the two side by side.
+  same pull request. A person will run the two side by side. What it copies is
+  covey's *own* theme, which is the TUI's default: the TUI can also be painted
+  in Gruvbox, Nord and six others, and this app cannot yet. Those palettes are
+  plain data and a picker here reads the same list.
 - **The painted line list and the hit test read one array.** `Screen::cells` is
   that array. Keep two copies of it and a click lands on the row above the one
   under the pointer — the same rule `App.tsx` follows for the sidebar.

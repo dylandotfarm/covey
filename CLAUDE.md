@@ -71,7 +71,8 @@
   cells that also carries *media placements*, a rectangle of cells a picture is painted over
   instead of glyphs, so the layout stays row-and-column and the scroll stays a count of
   lines. A placement owns its cells. `covey-grid/src/theme.rs` is a copy of
-  `packages/tui/src/theme.ts`; move a colour in both or neither. It fetches a dropped file
+  covey's own palette in `packages/tui/src/theme.ts`; move a colour in both or neither.
+  The other seven themes are not copied — this client has no picker yet. It fetches a dropped file
   over the daemon's existing `/file` route and decodes a video by piping `ffmpeg`, the same
   rule `shrinkImage` follows. With no display, `cargo run --bin covey-desktop -- --render
   f.png` draws one frame and `--probe ws://…` dials a daemon and prints what came back; both
@@ -93,6 +94,22 @@
   And don't lay out two hundred timeline items to follow one of them changing
   (`ItemLines` in `lines.ts`, keyed on item identity — sound only while the daemon keeps
   re-sending items whole).
+- The palette is one object every pane reads (`T` in `packages/tui/src/theme.ts`), and
+  `setTheme` rewrites it *in place* — so a module that imported `T` never holds a stale
+  theme and nothing has to be re-imported. A theme is the *device's* preference, like the
+  level of detail: `prefs.theme`, no command carries it, no daemon hears it. Two things
+  follow. Never read a colour into a module-level constant; it would freeze at the theme
+  the process started in. And anything that memoises painted lines — `ItemLines`, the
+  `useMemo`s in `App.tsx` — has to watch `themeGeneration()`, because an item does not
+  change when the colours do, and a frame repainted around a stale transcript is what that
+  number exists to prevent. `theme.test.ts` measures every theme, not just the default:
+  a palette that fails the contrast rules is one a reader cannot use.
+- A message covey wrote itself is marked (`UserMessageItem.system`, set by the daemon for
+  the pull-request news and the turn it restarts after an authentication failure) and the
+  wire refuses the claim from a client (`server.ts`). The TUI paints it as its own block
+  with a rail, on the left; the reader's own messages go to the right edge. `lines.ts`
+  keeps `isSystemMessage`, whose text-prefix fallback is what makes a transcript already
+  on disk read right — keep it in step with `integrate/news.ts`.
 - The transcript's scroll is a count of lines from the bottom, and a streaming item is
   re-sent whole and longer, so the bottom moves under it. `setScroll` therefore also takes
   an anchor — the item under the top row and the offset into it — and App resolves the

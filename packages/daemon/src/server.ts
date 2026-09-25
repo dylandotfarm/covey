@@ -208,6 +208,10 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         subs.delete(p.subscriptionId);
         return null;
       case "command": {
+        // `system` marks a message covey wrote itself, and the wire is where
+        // that claim is refused: a client that set it would be dressing what
+        // its reader typed up as news from the daemon.
+        if (p.type === "turn.send" && p.system) delete (p as { system?: boolean }).system;
         const seq = await engine.dispatch(p, clientName, callerThread);
         return { commandId: p.commandId, ok: true, seq };
       }

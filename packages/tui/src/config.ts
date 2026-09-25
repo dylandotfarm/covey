@@ -41,6 +41,10 @@ export interface TuiConfig {
     /** What `lod` replaced: two levels rather than four. Read once, by
      *  `startingLod`, and never written — a rollback must still find it. */
     toolsExpanded?: boolean;
+    /** Which palette the TUI paints in. A `Theme` id, held as a string so a
+     *  name written by a newer covey reads back as "the default" rather than
+     *  breaking the whole config. */
+    theme?: string;
     defaultPermissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
     /** Disable the terminal bell for background thread events. */
     quiet?: boolean;
