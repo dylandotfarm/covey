@@ -807,6 +807,7 @@ export class Engine {
           turnId: fold ? t.latestTurn!.turnId : cmd.turnId,
           seq: 0, createdAt: now, updatedAt: now,
           kind: "user", text: cmd.text, attachments,
+          ...(cmd.system ? { system: true } : {}),
           ...(fold ? { folded: true } : running ? { queued: true } : {}),
         };
         this.persistItem(userItem);
@@ -1460,7 +1461,7 @@ export class Engine {
       this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
       // A turn, not a note: a note is read by a person, and a turn resumes a
       // session the engine released. This is the whole reason the watch exists.
-      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text })
+      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text, system: true })
         .catch((e: any) => this.note(fresh.id, "warning", `Could not deliver the news on pull request #${w.number} as a turn: ${e?.message ?? String(e)}`));
     } finally {
       this.polling.delete(t.id);
@@ -2260,29 +2261,33 @@ export class Engine {
     const t = this.db.getThread(threadId);
     if (!t || t.movedTo || t.latestTurn?.state === "running") return;
     if ((this.queues.get(threadId)?.length ?? 0) > 0) return;
-    const text = this.restartText(threadId, turnId);
-    if (!text) return;
-    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text })
+    const said = this.restartText(threadId, turnId);
+    if (!said) return;
+    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text: said.text, ...(said.system ? { system: true } : {}) })
       // A refresh that failed has already said so, and named the command.
       .catch((e: any) => { if (e?.code !== "auth") this.note(threadId, "warning", `Could not start a new session after the authentication error: ${e?.message ?? String(e)}`); });
   }
 
   /**
-   * What to say to the new session. A turn that had already written something
-   * carries on, because the transcript holds that work and the model can read
-   * it. A turn that died before its first word is sent again instead: "go on"
-   * means nothing to a model that never started.
+   * What to say to the new session, and whose words they are.
+   *
+   * A turn that had already written something carries on, because the
+   * transcript holds that work and the model can read it — covey's own
+   * sentence, so `system` marks it. A turn that died before its first word is
+   * sent again instead: "go on" means nothing to a model that never started,
+   * and what goes back is the reader's own message, which covey must not
+   * dress up as its own.
    */
-  private restartText(threadId: string, turnId: string | null): string | null {
+  private restartText(threadId: string, turnId: string | null): { text: string; system: boolean } | null {
     if (!turnId) return null;
     const started = this.db.sql.prepare(
       "SELECT 1 FROM items WHERE thread_id = ? AND json_extract(json,'$.turnId') = ? AND json_extract(json,'$.kind') IN ('assistant','thinking','tool') LIMIT 1",
     ).get(threadId, turnId);
-    if (started) return "Your last session could not authenticate and stopped part way through that turn. This is a new session on the same transcript. Go on from the point where it stopped.";
+    if (started) return { text: "Your last session could not authenticate and stopped part way through that turn. This is a new session on the same transcript. Go on from the point where it stopped.", system: true };
     const item = this.db.getItem(`u:${turnId}`);
     // Text alone: the CLI already mirrored the attachments of that message
     // into the transcript, and the new session reads them from there.
-    return item && item.kind === "user" ? item.text : null;
+    return item && item.kind === "user" ? { text: item.text, system: item.system === true } : null;
   }
 
   /** One line in a thread's timeline, from the daemon rather than the model. */

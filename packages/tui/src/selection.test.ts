@@ -58,11 +58,13 @@ test("the same selection at two pane widths gives the same clipboard text", () =
 
 test("a user message copies the same at two pane widths, padding and all", () => {
   // The user block rebuilds every row to draw its background, so it is the
-  // item type where a carried wrap marker is easiest to lose.
+  // item type where a carried wrap marker is easiest to lose. It is also the
+  // one whose indent is not content: the block is pushed to the right edge,
+  // and neither the run that places it nor its own padding is in the message.
   const narrow = copyAll(paint("user", PARAGRAPH, 44));
   const wide = copyAll(paint("user", PARAGRAPH, 120));
   assert.equal(narrow, wide);
-  assert.equal(narrow, IND + PARAGRAPH);
+  assert.equal(narrow, PARAGRAPH);
 });
 
 test("a wrapped paragraph copies as its own words, not as rows", () => {

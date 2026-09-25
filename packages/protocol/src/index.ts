@@ -927,6 +927,18 @@ export interface UserMessageItem extends ItemBase {
    * boundary rather than after the turn ends. Cleared when the turn finishes.
    */
   folded?: boolean;
+  /**
+   * True for a message covey wrote rather than the reader: the news from a
+   * watched pull request, the line that restarts a turn after an
+   * authentication failure.
+   *
+   * The agent reads it as any other message, because that is the whole point
+   * of it — a turn resumes a session the engine released. A *reader* must be
+   * able to tell the two apart at a glance, so a client paints it as its own
+   * kind of block. A client older than this field simply shows it as a message
+   * the reader did not write, which is what it did before.
+   */
+  system?: boolean;
 }
 
 export interface AssistantMessageItem extends ItemBase {
@@ -1728,6 +1740,12 @@ export type Command =
       turnId: TurnId;
       text: string;
       attachments?: Attachment[];
+      /**
+       * The daemon sent this turn itself, so the item it writes is marked
+       * (`UserMessageItem.system`). Only the daemon sets it: a client that
+       * asked for it would be claiming a message it typed was covey's.
+       */
+      system?: boolean;
     }
   | { type: "turn.interrupt"; threadId: ThreadId }
   /**

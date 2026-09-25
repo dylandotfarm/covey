@@ -152,7 +152,8 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `enter` / `ctrl+j` | composer | send (a turn already running picks it up at its next tool call) / newline |
 | `cmd+d` / `d` | anywhere / sidebar | show the last turn's diff; `j/k` scroll, `d` or `esc` close |
 | `ctrl+k` → Revert | anywhere | restore files and conversation to before a chosen turn |
-| `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode |
+| `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode, this client's settings |
+| `ctrl+k` → Settings | anywhere | theme (eight palettes), detail, the bell — this client, not the daemon |
 | `ctrl+k` → Update covey | anywhere | pull, rebuild and relaunch the client itself (and, if you want, restart the local daemon) |
 | `ctrl+k` → Open issue / pull request | in a thread | open the thread's issue or pull request in the browser; a `#N` in the transcript is a hyperlink too — `cmd+click` it |
 | `esc` | composer | interrupt the running turn |

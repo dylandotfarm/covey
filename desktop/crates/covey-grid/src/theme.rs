@@ -3,6 +3,12 @@
 //! Same discipline: near-black greys, three text tiers, one accent. The two
 //! clients must not drift, because a person will run them side by side. When a
 //! colour changes there, change it here in the same pull request.
+//!
+//! What is *not* carried over is the rest of that module: the TUI can be
+//! painted in Gruvbox, Nord and six others, and this app cannot yet. These
+//! constants are covey's own theme, which is the TUI's default, so the two
+//! agree until a reader picks another one. A theme picker here reads the same
+//! palettes; nothing about them is TypeScript.
 
 /// A colour, as the palette writes them. Kept as three bytes rather than a
 /// float triple so a hex from the TypeScript can be pasted in unchanged.
@@ -67,6 +73,12 @@ pub const WORKING: Rgb = Rgb::hex(0x7dd3fc);
 pub const AWAITING: Rgb = Rgb::hex(0x818cf8);
 pub const CODE: Rgb = Rgb::hex(0xe5c07b);
 pub const USER_BG: Rgb = Rgb::hex(0x202020);
+/// A message covey wrote itself — the news from a watched pull request, the
+/// line that restarts a turn after an authentication failure. It is a message,
+/// so it takes a block like the reader's; it is not the reader's, so it takes
+/// its own colour and stays on the left while the reader's goes to the right.
+pub const SYSTEM: Rgb = Rgb::hex(0x5eead4);
+pub const SYSTEM_BG: Rgb = Rgb::hex(0x132523);
 pub const DIFF_ADD: Rgb = Rgb::hex(0xb5e8b0);
 pub const DIFF_ADD_BG: Rgb = Rgb::hex(0x173124);
 pub const DIFF_DEL: Rgb = Rgb::hex(0xf2b8b5);
@@ -165,6 +177,17 @@ mod tests {
     #[test]
     fn selected_text_clears_the_bar_against_its_own_background() {
         assert!(contrast_ratio(SELECTION_TEXT, SELECTION_BG) >= 4.5);
+    }
+
+    #[test]
+    fn a_message_covey_wrote_reads_as_its_own_block() {
+        // The same three numbers `theme.test.ts` measures for every theme it
+        // offers: covey's block is not the reader's, it is not the window, and
+        // what is written on it can be read.
+        assert_ne!(SYSTEM_BG, USER_BG);
+        assert_ne!(SYSTEM_BG, BACKGROUND);
+        assert!(contrast_ratio(SYSTEM, SYSTEM_BG) >= 3.0);
+        assert!(contrast_ratio(TEXT, SYSTEM_BG) >= 4.5);
     }
 
     #[test]

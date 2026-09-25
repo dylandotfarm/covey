@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wrapSpans, markdownToLines, renderItem, truncate, width, selectedText, highlightLine, colToIndex, lineText } from "./lines.js";
+import { wrapSpans, markdownToLines, renderItem, truncate, width, selectedText, highlightLine, colToIndex, isSystemMessage, lineText, lineWidth } from "./lines.js";
+import { T } from "./theme.js";
 
 const text = (l: { text: string }[]) => l.map((s) => s.text).join("");
 
@@ -151,4 +152,75 @@ test("a row with a pipe and no rule row under it is text, not a table", () => {
 test("a table ends at a blank line and a short row is padded", () => {
   const texts = markdownToLines("| a | b |\n|---|---|\n| 1 |\n\nafter", 80).map(text);
   assert.deepEqual(texts, ["a  b", "─  ─", "1", "", "after"]);
+});
+
+/** A message, with whatever the case at hand needs written over the top. */
+const msg = (over: Partial<{ text: string; system: boolean; queued: boolean; attachments: unknown[] }> = {}) => ({
+  id: "u", threadId: "x", turnId: "t", seq: 1, createdAt: "", updatedAt: "",
+  kind: "user", text: "hello", attachments: [], ...over,
+} as any);
+
+/** The columns before the first painted character, which is where a block sits. */
+const indentOf = (l: { text: string }[]) => lineText(l as any).length - lineText(l as any).trimStart().length;
+
+test("the reader's message is a block against the right edge, hugging its longest row", () => {
+  const lines = renderItem(msg({ text: "yes" }), { width: 80, expanded: new Set() });
+  const row = lines[0]!;
+  assert.equal(lineText(row).trim(), "yes");
+  // Two blanks of block padding each side of the word, and the right edge of
+  // the block is the right edge of the pane.
+  assert.equal(lineWidth(row), 80);
+  assert.equal(indentOf(row), 80 - 3 - 4 + 2, "a three-letter message is a three-letter block, not a bar");
+  // Every painted column carries the block's ground; the blanks placing it do not.
+  assert.equal(row.filter((s) => s.bg).length > 0, true);
+  assert.equal(row.find((s) => s.pad)!.bg, undefined, "the run that places the block is not part of it");
+});
+
+test("a long message stops at four fifths of the pane and still ends at the right edge", () => {
+  const lines = renderItem(msg({ text: "word ".repeat(60).trim() }), { width: 80, expanded: new Set() });
+  for (const l of lines.filter((x) => x.length)) assert.equal(lineWidth(l), 80, "every row of a block ends on the same column");
+  assert.ok(indentOf(lines[0]!) > 0 && indentOf(lines[0]!) < 20, "the block is wide, and still not flush with the left edge");
+});
+
+test("a narrow pane gives the whole width to the message rather than to the margin", () => {
+  const lines = renderItem(msg({ text: "a short one" }), { width: 24, expanded: new Set() });
+  assert.ok(lineWidth(lines[0]!) <= 24);
+  assert.ok(indentOf(lines[0]!) >= 0);
+});
+
+test("a message covey wrote keeps the left edge, says who wrote it, and takes its own ground", () => {
+  const news = msg({ text: "covey watch: news on pull request #152 (https://example.com).", system: true });
+  const lines = renderItem(news, { width: 80, expanded: new Set() });
+  assert.equal(lineText(lines[0]!).replace("▌", "").trim(), "covey", "the block names its author on its first row");
+  assert.equal(lineText(lines[0]!)[0], "▌", "a rail says whose block it is even where two near-black grounds round to one colour");
+  assert.equal(lines[0]![0]!.color, T.system);
+  assert.equal(lineText(lines[0]!).indexOf("covey"), 2, "and stays on the left, where the reader's message is not");
+  assert.equal(lines[0]!.some((s) => s.bg === T.systemBg), true);
+  assert.equal(lines[0]!.some((s) => s.bg === T.userBg), false, "covey's block is not the reader's block");
+  // The reader's own message, same words, is still the reader's.
+  const mine = renderItem(msg({ text: "covey watch: news on pull request #152 (https://example.com)." , system: false }), { width: 80, expanded: new Set() });
+  assert.equal(lineText(mine[0]!)[0], "▌", "…which is why the prefix alone decides it for an item written before the flag");
+});
+
+test("the prefix stands in for a daemon too old to mark its own news", () => {
+  const old = msg({ text: "covey watch: the checks passed." });
+  delete (old as { system?: boolean }).system;
+  assert.equal(isSystemMessage(old), true);
+  assert.equal(isSystemMessage(msg({ text: "please watch the covey watch: prefix" })), false, "the prefix is a prefix, not a search");
+  assert.equal(isSystemMessage(msg({ text: "anything", system: true })), true);
+  assert.equal(isSystemMessage({ ...msg(), kind: "assistant" }), false);
+});
+
+test("a copy of a right-aligned message carries the words and not the margin", () => {
+  const lines = renderItem(msg({ text: "one two three" }), { width: 60, expanded: new Set() });
+  const body = lines.filter((l) => l.length);
+  // A drag from the left edge of the pane to its right edge, over the row.
+  assert.equal(selectedText(body, { line: 0, col: 0 }, { line: 0, col: 60 }), "one two three");
+});
+
+test("a queued message keeps its note under the block, not under the pane", () => {
+  const lines = renderItem(msg({ text: "hi", queued: true }), { width: 80, expanded: new Set() });
+  const note = lines.find((l) => lineText(l).includes("queued"))!;
+  assert.equal(lineWidth(note), 80, "the note ends where the block ends");
+  assert.ok(indentOf(note) > 20, "so it reads with the message rather than with the margin");
 });

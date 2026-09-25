@@ -10,6 +10,7 @@ import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { ViewCache } from "./viewCache.js";
 import { Frames, type FrameOptions } from "./frames.js";
 import type { ScrollAnchor } from "./scroll.js";
+import { DEFAULT_THEME, THEMES, asThemeId, setTheme, themeFor, themeId } from "./theme.js";
 
 /**
  * How many timeline items a thread opens with when the reader means it. Big
@@ -180,7 +181,17 @@ export function secretPanelKeys(state: AppState, ov: Extract<Overlay, { kind: "s
   return [...keys].sort();
 }
 
-export interface PickOption { id: string; label: string; hint?: string; }
+export interface PickOption {
+  id: string;
+  label: string;
+  hint?: string;
+  /**
+   * A few of the colours this row stands for, painted as blocks in front of
+   * the label. The theme picker uses it: a name tells a reader nothing about a
+   * palette they have not seen, and five blocks tell them most of it.
+   */
+  swatch?: string[];
+}
 
 export interface Notice { text: string; tone: "info" | "warning" | "error" | "success"; at: number; }
 
@@ -373,6 +384,10 @@ export class Store {
 
   constructor(machines: SavedMachine[], opts: StoreOptions = {}) {
     this.config = loadConfig();
+    // Before the first paint, and before any component has read a colour: the
+    // palette is one object, so a theme set later would repaint anyway, but
+    // arriving in the reader's own colours is the point of storing it.
+    setTheme(asThemeId(this.config.prefs.theme) ?? DEFAULT_THEME);
     this.clientSource = opts.source ?? null;
     this.canRelaunch = opts.canRelaunch ?? false;
     // The `ws` package, for its handshake timeout: a host that swallows the
@@ -767,6 +782,46 @@ export class Store {
     this.config.prefs.lod = lod;
     this.persist();
     this.notify(`${LOD_LABEL[lod].label.toLowerCase()} — ${LOD_LABEL[lod].hint}`);
+  }
+
+  /** Which palette the client paints in. */
+  get theme(): string { return themeId(); }
+
+  /**
+   * Paint in `id` from now on.
+   *
+   * The palette is this device's, like the level of detail: no command carries
+   * it and no daemon hears about it. `setTheme` rewrites the one object every
+   * pane reads, so the repaint here is all that is left to do.
+   */
+  setTheme(id: string) {
+    if (!setTheme(id)) { this.notify(`no theme called ${id}`, "error"); return; }
+    this.config.prefs.theme = id;
+    this.persist();
+    this.set({});
+    const t = themeFor(id);
+    this.notify(`${t.label} — ${t.hint}`);
+  }
+
+  /**
+   * Whether a thread the reader is not reading rings the terminal bell.
+   *
+   * Stored the other way round (`prefs.quiet`), because that is the name it
+   * was written under and a rollback must still find it.
+   */
+  get bell(): boolean { return !this.config.prefs.quiet; }
+
+  setBell(on: boolean) {
+    this.config.prefs.quiet = !on;
+    this.persist();
+    this.set({});
+    this.notify(on ? "the bell rings when a thread needs approval, finishes or fails" : "the bell is off");
+  }
+
+  /** The next theme in the list, which is what a key that cycles them wants. */
+  cycleTheme(step = 1) {
+    const at = THEMES.findIndex((t) => t.id === themeId());
+    this.setTheme(THEMES[(at + step + THEMES.length) % THEMES.length]!.id);
   }
 
   /** `anchor` is the line under the top row at `n`; App measures it against the layout it drew. */
