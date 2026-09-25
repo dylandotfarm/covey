@@ -34,8 +34,17 @@ export interface TuiConfig {
     sidebarCollapsed?: boolean;
     lastSelected?: { machine: string; threadId: string } | null;
     expanded?: Record<string, boolean>;
-    /** ctrl+o: whether tool calls show in full or fold into `>_` rows. */
+    /** ctrl+o: how much of a transcript is open before the reader taps (#149).
+     *  A `Lod`, held as a string so a value written by a newer covey reads
+     *  back as "no opinion" rather than breaking the whole config. */
+    lod?: string;
+    /** What `lod` replaced: two levels rather than four. Read once, by
+     *  `startingLod`, and never written — a rollback must still find it. */
     toolsExpanded?: boolean;
+    /** Which palette the TUI paints in. A `Theme` id, held as a string so a
+     *  name written by a newer covey reads back as "the default" rather than
+     *  breaking the whole config. */
+    theme?: string;
     defaultPermissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
     /** Disable the terminal bell for background thread events. */
     quiet?: boolean;

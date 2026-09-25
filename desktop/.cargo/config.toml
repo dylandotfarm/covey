@@ -1,0 +1,28 @@
+# --- supply-chain policy ------------------------------------------------------
+# The crate half of the 7-day rule (see the README). Only resolve crate versions
+# that have been public for at least a week, which is most of the protection
+# against a compromised release for none of the cost.
+#
+# This is cargo's own setting and it matches `minimumReleaseAge` in
+# pnpm-workspace.yaml. It became stable in Rust 1.100. On an older toolchain
+# cargo prints
+#
+#   warning: ignoring `registry.global-min-publish-age` without -Zmin-publish-age
+#
+# on every command and resolves whatever it likes, so until the toolchain moves,
+# `scripts/crate-age.mjs` is not a second opinion — it is the only thing holding
+# the rule. CI runs it on every push, and `cargo ... --locked` there stops CI
+# resolving anything the audit has not seen. To enforce it locally today:
+# `cargo +nightly -Zmin-publish-age build`.
+#
+# Keep the two warning lines. They name the flag and they say the rule is
+# waiting on the toolchain, which is better than a policy nobody remembers to
+# turn on.
+[registry]
+global-min-publish-age = "7 days"
+
+# Versions younger than that are refused rather than merely preferred. A version
+# already written into Cargo.lock still resolves, so this never breaks a build
+# that worked — it only stops a new one entering.
+[resolver]
+incompatible-publish-age = "deny"

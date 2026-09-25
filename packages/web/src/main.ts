@@ -6,13 +6,27 @@
  * thread for the paint and the keyboard.
  */
 import { applyDrop, MachineClient, uuid } from "@covey/client";
-import { WEB_CLIENT, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
+import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
 import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState, itemHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
 import { attachingLabel, readPicked, sendingLabel } from "./attach.js";
 import { picked, shrinkInBrowser } from "./shrink.js";
 
 const TOKEN_KEY = "covey.token";
+/** Where this device keeps its level of detail (#149). */
+const LOD_KEY = "covey.lod";
+
+/**
+ * The level this device reads transcripts at, from the last time it was set.
+ *
+ * A preference of the device rather than of the machine, so it lives here and
+ * travels in no command: the phone reads a thread at `compact` while the
+ * laptop that runs the same thread reads it at `full`. A value written by a
+ * newer covey reads back as "no opinion", and the default stands.
+ */
+function readLod(): Lod {
+  return asLod(localStorage.getItem(LOD_KEY)) ?? DEFAULT_LOD;
+}
 
 /** The token from `?token=` on the URL, kept for the next visit, or the kept one. */
 function readToken(): string | undefined {
@@ -28,6 +42,7 @@ function readToken(): string | undefined {
 }
 
 const state = emptyState();
+state.lod = readLod();
 const clients = new Map<string, MachineClient>();
 /** Read once: the page's token, if this address needs one. The media route takes it too (#110). */
 const token = readToken();
@@ -162,6 +177,21 @@ function applyRoute(r: Route) {
 }
 
 const actions: Actions = {
+  toggleRow(key) {
+    const next = new Set(state.toggledRows);
+    next.has(key) ? next.delete(key) : next.add(key);
+    state.toggledRows = next;
+    // No `schedule()`: the browser has already opened or shut the `<details>`,
+    // and a paint here would rebuild the row under the finger that did it.
+  },
+  setLod(lod) {
+    state.lod = lod;
+    // The taps go with it: each was an answer to the level it was made at, and
+    // at the new one half of them would mean the opposite.
+    state.toggledRows = new Set();
+    localStorage.setItem(LOD_KEY, lod);
+    schedule();
+  },
   openThread(machine, threadId) {
     const hash = threadHash(machine, threadId);
     enteredFromList = true;

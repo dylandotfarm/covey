@@ -65,6 +65,18 @@
   ends at a separator is never a directory drop, because that is exactly what the front half
   of a cut path looks like. Both routes end at the same `attach`, so a change to one wants the
   other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`).
+- `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
+  the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
+  and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled
+  cells that also carries *media placements*, a rectangle of cells a picture is painted over
+  instead of glyphs, so the layout stays row-and-column and the scroll stays a count of
+  lines. A placement owns its cells. `covey-grid/src/theme.rs` is a copy of
+  covey's own palette in `packages/tui/src/theme.ts`; move a colour in both or neither.
+  The other seven themes are not copied — this client has no picker yet. It fetches a dropped file
+  over the daemon's existing `/file` route and decodes a video by piping `ffmpeg`, the same
+  rule `shrinkImage` follows. With no display, `cargo run --bin covey-desktop -- --render
+  f.png` draws one frame and `--probe ws://…` dials a daemon and prints what came back; both
+  run under an agent. `docs/DESKTOP.md` holds the reasoning and the rules.
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.
 - A paint is the client's dearest act — 30–45 ms of its one thread on this project's
   Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the
@@ -82,6 +94,22 @@
   And don't lay out two hundred timeline items to follow one of them changing
   (`ItemLines` in `lines.ts`, keyed on item identity — sound only while the daemon keeps
   re-sending items whole).
+- The palette is one object every pane reads (`T` in `packages/tui/src/theme.ts`), and
+  `setTheme` rewrites it *in place* — so a module that imported `T` never holds a stale
+  theme and nothing has to be re-imported. A theme is the *device's* preference, like the
+  level of detail: `prefs.theme`, no command carries it, no daemon hears it. Two things
+  follow. Never read a colour into a module-level constant; it would freeze at the theme
+  the process started in. And anything that memoises painted lines — `ItemLines`, the
+  `useMemo`s in `App.tsx` — has to watch `themeGeneration()`, because an item does not
+  change when the colours do, and a frame repainted around a stale transcript is what that
+  number exists to prevent. `theme.test.ts` measures every theme, not just the default:
+  a palette that fails the contrast rules is one a reader cannot use.
+- A message covey wrote itself is marked (`UserMessageItem.system`, set by the daemon for
+  the pull-request news and the turn it restarts after an authentication failure) and the
+  wire refuses the claim from a client (`server.ts`). The TUI paints it as its own block
+  with a rail, on the left; the reader's own messages go to the right edge. `lines.ts`
+  keeps `isSystemMessage`, whose text-prefix fallback is what makes a transcript already
+  on disk read right — keep it in step with `integrate/news.ts`.
 - The transcript's scroll is a count of lines from the bottom, and a streaming item is
   re-sent whole and longer, so the bottom moves under it. `setScroll` therefore also takes
   an anchor — the item under the top row and the offset into it — and App resolves the
@@ -113,6 +141,28 @@
   asked for it, which is what made some agent threads nest and some stand alone.
 - Timeline streaming re-sends whole items (same id, accumulated text); there is no delta
   channel. Keep it that way; it makes replay and reconnect trivial.
+- A *chain* is the run of tool calls and thoughts the agent made between two things it
+  said, and the transcript folds one into a row that says what it was for (#149). The
+  daemon marks it: `ChainTracker` in `daemon/src/activity.ts` decides, `persistItem`
+  writes `ItemBase.groupId` — the id of the chain's first item — and prose, a user
+  message, a question and an approval close the chain and join none, because a reader
+  must not lose one of those to a fold. A chain never spans two turns, and an item
+  already on disk keeps the chain it was filed under or a streaming item would move
+  between chains as it is re-sent. The sentence is `summariseActivity`, which is
+  `title.ts` in another hat — one throwaway weak-model query, no tools, no settings
+  files, `COVEY_ACTIVITY_MODEL=off` to turn it off — and it lands on the head item's
+  `groupSummary` as an ordinary `item.upserted`. **Only the tool calls go to the model.**
+  A thought folds away but its text is never read and never sent; keep it that way.
+  Until the sentence lands, and for good when the model is off, the client paints
+  `chainLabel`, which counts the calls rather than reading them.
+  The fold itself is `timelineRows` in `@covey/client`: pure, node-tested, and read by
+  the TUI and the web client both, so a chain starts and ends in the same place on a
+  phone. Four levels (`Lod`: `minimal`, `compact`, `steps`, `full`), and `compact` is
+  the default. The level is the *device's* preference and travels in no command —
+  `prefs.lod` and ctrl+o in the TUI, `localStorage` and the Detail rows at the head of
+  the settings page in the web client. The rows a reader changed are a `toggled` set,
+  never a list of open rows, because at `full` a tap shuts a row. No two rows share a
+  key: a chain's is `chain:<id>`, never its head item's own id, or one tap opens both.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
 - A thread's session is a subprocess of about 300 MB. The engine releases one after
@@ -144,7 +194,13 @@
   sweep refreshes there *ahead* of a reader (`refreshAhead`), on the one condition that the
   daemon holds no live session at all. That condition is the whole safety of it: a rotation
   revokes every live token, so a busy turn would end and a fresh session, which refreshes for
-  itself, would be revoked for nothing.
+  itself, would be revoked for nothing. Every refresh covey makes is a rotation, so
+  `refreshStore` records the stamp it leaves, inside the promise the callers share, and
+  `watchRotation` stands aside while one runs. Read that stamp anywhere else and the watch
+  cycles the sessions holding the *new* token (#151). And a process that writes is a process
+  covey never stops: `ClaudeSession.answering` is the second half of `busy`, because the CLI
+  ends turns covey never started — a resumed session answers the background-task
+  notifications it inherits, and covey reads that result as the end of its own turn.
 - The model picker is read from the Claude Code covey runs, not from a list covey ships:
   the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
   no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The
@@ -183,6 +239,19 @@
 - Dependencies: `pnpm add <pkg>`; pnpm refuses versions younger than 7 days
   (`minimumReleaseAge` in pnpm-workspace.yaml). Keep `pnpm run check:age` green. Install
   scripts are blocked (`onlyBuiltDependencies: []`); never use npm in this repo.
+- The same 7-day rule covers the crates in `desktop/`, but cargo cannot hold it yet:
+  `registry.global-min-publish-age` and `resolver.incompatible-publish-age` are set in
+  `desktop/.cargo/config.toml` and became stable only in Rust 1.100, so an older cargo warns
+  that it ignores them and resolves whatever it likes. Until then `scripts/crate-age.mjs` is
+  the only thing holding the rule — keep `pnpm run check:crate-age` green. After `cargo add`
+  run `node scripts/crate-age.mjs refresh` to add the new publish dates to
+  `desktop/crate-publish-times.json`, and `… pin` to get the `cargo update --precise` lines
+  that put a young lockfile back. That file is a cache of immutable facts, which is why the
+  check normally makes no network requests; asking crates.io for four hundred versions per
+  push met its rate limit and turned clean crates into "lookup failed" violations. A crate
+  the script cannot date counts as a violation, never as a pass. CI passes `--locked` to
+  every cargo command so it never resolves a version the audit has not seen. Keep the two
+  ignore warnings: they name the flag and say the rule waits on the toolchain.
 - `packages/daemon/src/integrate/` reaches `gh` and `git` through one `GhHost`
   (`integrate/gh.ts`); everything else there is pure. Tests use `fakeHost`, so nothing
   merges and nothing opens a pull request during `pnpm test`. The read path calls

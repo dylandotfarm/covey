@@ -94,8 +94,10 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
             // One column of gutter before the hint, or a label that fills the
             // row runs straight into it.
             const mark = many ? (many.marked.has(o.id) ? "[x] " : "[ ] ") : "";
-            const avail = w - 6 - mark.length - (o.hint ? o.hint.length + 1 : 0);
-            return <Text key={o.id} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>{" "}<Text color={many?.marked.has(o.id) ? T.accent : T.subtle}>{mark}</Text>{truncate(o.label, avail).padEnd(avail)}<Text color={T.subtle}>{o.hint ? " " + o.hint : ""}</Text></Text>;
+            // A swatch is one column per colour and one of gutter after it.
+            const swatch = o.swatch ?? [];
+            const avail = w - 6 - mark.length - (swatch.length ? swatch.length + 1 : 0) - (o.hint ? o.hint.length + 1 : 0);
+            return <Text key={o.id} backgroundColor={sel ? T.selection : undefined} color={sel ? T.text : T.muted}>{" "}<Text color={many?.marked.has(o.id) ? T.accent : T.subtle}>{mark}</Text>{swatch.map((c, j) => <Text key={j} color={c}>█</Text>)}{swatch.length ? " " : ""}{truncate(o.label, avail).padEnd(avail)}<Text color={T.subtle}>{o.hint ? " " + o.hint : ""}</Text></Text>;
           })}
           {filtered.length === 0 && <Text color={T.subtle} italic> no matches</Text>}
           {toggle && <Text color={checked ? T.accent : T.subtle}> {checked ? "[x]" : "[ ]"} {truncate(toggle, w - 10)}</Text>}

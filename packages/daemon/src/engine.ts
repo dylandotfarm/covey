@@ -6,7 +6,7 @@ import type {
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite,
 } from "@covey/protocol";
-import { isUserClient, KNOWN_MODELS } from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS, MIN_CHAIN } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
@@ -17,6 +17,7 @@ import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree,
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, threadFilesDir } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
+import { ChainTracker, summariseActivity } from "./activity.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { ClaudeModels } from "./models.js";
 import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod, GitHubAction, GitHubItem } from "@covey/protocol";
@@ -163,6 +164,10 @@ export class Engine {
   /** Title queries in flight, so a requeue cannot start a second and a
    *  shutdown can cancel the one already running. */
   private titling = new Map<string, AbortController>();
+  /** Which activity chain each item belongs to (#149). See `activity.ts`. */
+  private chains = new ChainTracker();
+  /** Chain sentences in flight, so a close cannot start a second query. */
+  private summarising = new Map<string, AbortController>();
   /**
    * Threads whose last turn died on the credentials. `scheduled` holds the one
    * restart this daemon sends, so a second failure cannot make a thread talk
@@ -331,9 +336,60 @@ export class Engine {
     const item = this.redact(rawItem.threadId, rawItem);
     const existing = this.db.getItem(item.id);
     const seq = existing ? existing.seq : this.db.nextThreadSeq(item.threadId);
-    const stored = { ...item, seq, createdAt: existing?.createdAt ?? item.createdAt };
+    const groupId = this.chainFor(item, existing);
+    const stored = { ...item, seq, createdAt: existing?.createdAt ?? item.createdAt, ...(groupId ? { groupId } : {}) };
     this.db.putItem(stored);
     return this.emitThread(item.threadId, { kind: "item.upserted", item: stored });
+  }
+
+  // ---- activity chains (#149) -----------------------------------------------
+
+  /**
+   * The chain `item` belongs to, and a query for the chain it just closed.
+   *
+   * `ChainTracker` decides which chain is which; this adds the one side
+   * effect, which is to have a weak model name a chain nothing will join again.
+   */
+  private chainFor(item: TimelineItem, existing: TimelineItem | null): string | undefined {
+    const { groupId, closed } = this.chains.file(item, existing);
+    if (closed) void this.nameChain(item.threadId, closed.id, closed.itemIds);
+    return groupId;
+  }
+
+  /** Close the chain open on a thread and have a weak model name it. */
+  private closeChain(threadId: string) {
+    const closed = this.chains.close(threadId);
+    if (closed) void this.nameChain(threadId, closed.id, closed.itemIds);
+  }
+
+  /**
+   * Write the sentence a folded chain says.
+   *
+   * Runs beside the turn, as a title does: until it lands the client paints a
+   * sentence it derived from the calls, so a slow or a failed query costs
+   * nothing but the improvement. Only the tool calls go to the model — a
+   * thought folds away but its text is never read (`activity.ts`).
+   */
+  private async nameChain(threadId: string, chainId: string, itemIds: string[]) {
+    if (this.summarising.has(chainId)) return;
+    const items = itemIds.map((id) => this.db.getItem(id)).filter((i): i is TimelineItem => !!i);
+    if (items.length < MIN_CHAIN) return;
+    const cwd = this.db.getThread(threadId)?.worktreePath;
+    if (!cwd) return;
+    const abort = new AbortController();
+    this.summarising.set(chainId, abort);
+    try {
+      const summary = await summariseActivity(items, cwd, abort);
+      if (!summary) return;
+      const head = this.db.getItem(chainId);
+      if (!head) return; // the thread was cleared, or the turn was rewound
+      head.groupSummary = summary;
+      this.persistItem(head);
+    } catch {
+      /* the client's derived sentence stands */
+    } finally {
+      this.summarising.delete(chainId);
+    }
   }
 
   private upsertItem(item: TimelineItem, opts?: { streaming?: boolean }) {
@@ -751,6 +807,7 @@ export class Engine {
           turnId: fold ? t.latestTurn!.turnId : cmd.turnId,
           seq: 0, createdAt: now, updatedAt: now,
           kind: "user", text: cmd.text, attachments,
+          ...(cmd.system ? { system: true } : {}),
           ...(fold ? { folded: true } : running ? { queued: true } : {}),
         };
         this.persistItem(userItem);
@@ -1404,7 +1461,7 @@ export class Engine {
       this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
       // A turn, not a note: a note is read by a person, and a turn resumes a
       // session the engine released. This is the whole reason the watch exists.
-      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text })
+      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text, system: true })
         .catch((e: any) => this.note(fresh.id, "warning", `Could not deliver the news on pull request #${w.number} as a turn: ${e?.message ?? String(e)}`));
     } finally {
       this.polling.delete(t.id);
@@ -1521,6 +1578,9 @@ export class Engine {
 
   /** After a turn ends: compute its diff, then start the next queued turn. */
   private async finishTurn(threadId: string, turnId: string) {
+    // The turn is over, so the chain it left open is over too. Name it first:
+    // that row is the one the reader is looking at.
+    this.closeChain(threadId);
     const cp = this.db.getCheckpoint(threadId, turnId);
     if (cp?.beforeTree) {
       const after = await captureCheckpoint(cp.cwd, `${threadId}/${turnId}/after`).catch(() => null);
@@ -1978,6 +2038,10 @@ export class Engine {
   /** The stamp watch on its own: a rotation somebody else made, and the
    *  sessions it left holding a token the server has revoked. */
   private async watchRotation(): Promise<string[]> {
+    // A refresh of covey's own rotates the token too, and the stamp it leaves
+    // is recorded when it lands. To read the store in the middle of one is to
+    // read covey's own rotation as somebody else's.
+    if (this.refreshing) return [];
     const stamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null);
     if (!stamp) return [];
     const seen = this.credStamp;
@@ -2018,9 +2082,6 @@ export class Engine {
     this.aheadAt = now;
     try {
       await this.refreshStore();
-      // The rotation is covey's own, so the watch must not read it as
-      // somebody else's and cycle what starts on the new token.
-      this.credStamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null) ?? this.credStamp;
       this.opts.log?.("credentials refreshed ahead of the expiry");
     } catch (e: any) {
       // Nobody is waiting on this one, and no thread owns it, so it is a line
@@ -2098,11 +2159,26 @@ export class Engine {
     return expiry;
   }
 
-  /** One refresh at a time, whoever asked: ten threads that fail together,
-   *  and the sweep that asks ahead of the expiry, all wait on the same one. */
+  /**
+   * One refresh at a time, whoever asked: ten threads that fail together, and
+   * the sweep that asks ahead of the expiry, all wait on the same one.
+   *
+   * The new stamp is read here, inside the promise, because a refresh *is* a
+   * rotation and `watchRotation` must not take covey's own for somebody
+   * else's. Read it anywhere but here and the watch cycles the sessions that
+   * hold the new token — measured on 2026-09-24, where covey refreshed the
+   * store to start a session, and seventeen seconds later stopped that very
+   * session, mid-answer, as stale (#151). The read is inside the promise, so
+   * `this.refreshing` still stands while it runs and the watch waits for it.
+   */
   private refreshStore(): Promise<void> {
     return this.refreshing ??= this.opts.refreshCredentials!().then(
-      () => { this.credStale = false; this.credRefreshedAt = this.now(); this.opts.log?.("credentials refreshed"); },
+      async () => {
+        this.credStale = false;
+        this.credRefreshedAt = this.now();
+        this.credStamp = await (this.opts.credentialStamp ?? credentialStamp)().catch(() => null) ?? this.credStamp;
+        this.opts.log?.("credentials refreshed");
+      },
     ).finally(() => { this.refreshing = null; });
   }
 
@@ -2185,29 +2261,33 @@ export class Engine {
     const t = this.db.getThread(threadId);
     if (!t || t.movedTo || t.latestTurn?.state === "running") return;
     if ((this.queues.get(threadId)?.length ?? 0) > 0) return;
-    const text = this.restartText(threadId, turnId);
-    if (!text) return;
-    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text })
+    const said = this.restartText(threadId, turnId);
+    if (!said) return;
+    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text: said.text, ...(said.system ? { system: true } : {}) })
       // A refresh that failed has already said so, and named the command.
       .catch((e: any) => { if (e?.code !== "auth") this.note(threadId, "warning", `Could not start a new session after the authentication error: ${e?.message ?? String(e)}`); });
   }
 
   /**
-   * What to say to the new session. A turn that had already written something
-   * carries on, because the transcript holds that work and the model can read
-   * it. A turn that died before its first word is sent again instead: "go on"
-   * means nothing to a model that never started.
+   * What to say to the new session, and whose words they are.
+   *
+   * A turn that had already written something carries on, because the
+   * transcript holds that work and the model can read it — covey's own
+   * sentence, so `system` marks it. A turn that died before its first word is
+   * sent again instead: "go on" means nothing to a model that never started,
+   * and what goes back is the reader's own message, which covey must not
+   * dress up as its own.
    */
-  private restartText(threadId: string, turnId: string | null): string | null {
+  private restartText(threadId: string, turnId: string | null): { text: string; system: boolean } | null {
     if (!turnId) return null;
     const started = this.db.sql.prepare(
       "SELECT 1 FROM items WHERE thread_id = ? AND json_extract(json,'$.turnId') = ? AND json_extract(json,'$.kind') IN ('assistant','thinking','tool') LIMIT 1",
     ).get(threadId, turnId);
-    if (started) return "Your last session could not authenticate and stopped part way through that turn. This is a new session on the same transcript. Go on from the point where it stopped.";
+    if (started) return { text: "Your last session could not authenticate and stopped part way through that turn. This is a new session on the same transcript. Go on from the point where it stopped.", system: true };
     const item = this.db.getItem(`u:${turnId}`);
     // Text alone: the CLI already mirrored the attachments of that message
     // into the transcript, and the new session reads them from there.
-    return item && item.kind === "user" ? item.text : null;
+    return item && item.kind === "user" ? { text: item.text, system: item.system === true } : null;
   }
 
   /** One line in a thread's timeline, from the daemon rather than the model. */
@@ -2427,6 +2507,11 @@ export class Engine {
     this.released.clear();
     for (const a of this.titling.values()) a.abort();
     this.titling.clear();
+    // A chain still open is dropped rather than named: the query would outlive
+    // the daemon, and the client derives a sentence for an unnamed chain (#149).
+    for (const a of this.summarising.values()) a.abort();
+    this.summarising.clear();
+    this.chains.closeAll();
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
     this.authRetry.clear();

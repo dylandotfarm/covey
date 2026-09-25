@@ -3,6 +3,12 @@
 A multi-agent terminal UI for Claude Code, built from scratch on the official
 [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
 
+![The covey TUI. Four threads across two projects take a message each and work
+at the same time, and the last panel is the diff of one turn.](docs/media/threads.gif)
+
+*Four threads, two projects, one machine. Each thread works in its own git
+worktree, so they never collide, and `d` shows what a turn changed.*
+
 - Left sidebar: machines → projects → threads. Many threads run concurrently.
 - One small daemon per machine. The TUI connects to any number of them at once.
 - Tailscale-native: a daemon bound to your tailnet accepts peers that `tailscale whois`
@@ -17,6 +23,9 @@ A multi-agent terminal UI for Claude Code, built from scratch on the official
   and threads, one open at a time, to check on the work and start a new idea from anywhere.
 - Runs on Node 22+ with zero native dependencies (Linux, macOS; Windows-friendly paths and
   process handling, untested there).
+- An experimental **desktop client in Rust**, styled like the TUI but drawn in a window, so a
+  screenshot in a transcript is a screenshot and the mouse reports pixels. It runs beside the
+  TUI and replaces nothing — see [docs/DESKTOP.md](docs/DESKTOP.md).
 
 ## Quick start
 
@@ -52,6 +61,16 @@ an agent inside a covey thread knows how to take an issue to a merged pull reque
 `covey issue take` and `covey pr open`. A brief is then one line: `/covey take issue 94 to
 completion, automerge when done`.
 
+![Two covey threads take an issue each at the same time. A brief goes into the
+composer, the agent runs covey issue take, reads the issue with gh, edits the
+code, runs the tests, and covey pr open puts the pull request
+up.](docs/media/issues.gif)
+
+*Two threads, two issues, one brief each. The second one works on covey itself:
+it takes issue #47, fixes the editor, runs the suite, and opens the pull
+request. covey then watches that pull request and sends every checks verdict,
+review and comment back to the thread as a turn.*
+
 After that first build you never have to quit to update: `ctrl+k → "Update covey"` pulls,
 rebuilds, restarts the local daemon and relaunches the client in place. `covey update` does
 the same from a terminal.
@@ -74,6 +93,14 @@ covey machines add ws://other-host.your-tailnet.ts.net:3790 --name other
 Outside Tailscale, append `--token <token from covey info>`.
 
 ### On a phone
+
+![The covey web client on a phone. The list follows two threads that start
+elsewhere, a tap opens a conversation, the composer sends a message, and the
+settings of that conversation come up from the foot of the
+page.](docs/media/phone.gif)
+
+*The same fleet from a phone. The list follows work that starts anywhere, and
+the composer sends from anywhere.*
 
 One machine in your fleet serves a web client at `http://<machine>:3790/`. Turn it on from
 the TUI: press enter on the machine row, then choose "Web server: off". The machine's info
@@ -112,7 +139,7 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `ctrl+k` | anywhere | command palette |
 | `ctrl+n` | anywhere | new thread in the current project |
 | `ctrl+t` | anywhere | toggle sidebar |
-| `ctrl+o` | anywhere | show every tool call, or fold them back into `>_` rows |
+| `ctrl+o` | anywhere | detail: chains folded into one `>_` sentence, every call, or every call open |
 | `ctrl+b` | anywhere | background the running tool calls — the turn moves on, they report back |
 | `ctrl+c` ×2 | anywhere | quit |
 | `j/k` `enter` | sidebar | move, open thread / fold project / machine control panel |
@@ -125,7 +152,8 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 | `enter` / `ctrl+j` | composer | send (a turn already running picks it up at its next tool call) / newline |
 | `cmd+d` / `d` | anywhere / sidebar | show the last turn's diff; `j/k` scroll, `d` or `esc` close |
 | `ctrl+k` → Revert | anywhere | restore files and conversation to before a chosen turn |
-| `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode |
+| `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode, this client's settings |
+| `ctrl+k` → Settings | anywhere | theme (eight palettes), detail, the bell — this client, not the daemon |
 | `ctrl+k` → Update covey | anywhere | pull, rebuild and relaunch the client itself (and, if you want, restart the local daemon) |
 | `ctrl+k` → Open issue / pull request | in a thread | open the thread's issue or pull request in the browser; a `#N` in the transcript is a hyperlink too — `cmd+click` it |
 | `esc` | composer | interrupt the running turn |
@@ -173,8 +201,28 @@ uses package versions that have been public for at least 7 days, enforced by pnp
   Any pnpm ≥ 10 honours that field and switches to the pinned version automatically, so no
   corepack is needed (corepack is deprecated and gone from Node 25).
 
-Override the window with `COVEY_PKG_MIN_DAYS` for the audit script; the pnpm setting is the
-source of truth.
+The Rust client in `desktop/` follows the same rule, with one difference that matters.
+
+- `desktop/.cargo/config.toml` sets `registry.global-min-publish-age = "7 days"` and
+  `resolver.incompatible-publish-age = "deny"`. That is cargo's own equivalent of
+  `minimumReleaseAge`, and it became stable in **Rust 1.100**. On an older toolchain cargo
+  warns that it is ignoring both keys and resolves whatever it likes.
+- So on today's stable, `node scripts/crate-age.mjs check` (also `pnpm run check:crate-age`)
+  is not a second opinion — it is the only thing holding the rule for crates. It audits every
+  version in `desktop/Cargo.lock`, and CI runs it on every push. A crate it cannot date counts
+  as a violation, never as a pass.
+- Publish dates live in `desktop/crate-publish-times.json`, because when a version was
+  published never changes. So the check normally makes no network requests at all and takes
+  about 30 ms, and a reviewer sees each new crate and its publish date in the diff beside the
+  lockfile change that brought it in. After changing dependencies, run
+  `node scripts/crate-age.mjs refresh` to add the new entries.
+- `node scripts/crate-age.mjs pin` prints the `cargo update --precise` lines that move a
+  young lockfile back to compliant versions.
+- The desktop CI job passes `--locked` to every cargo command, so CI never resolves a version
+  the audit has not seen. To enforce the rule locally today: `cargo +nightly -Zmin-publish-age build`.
+
+Override the window with `COVEY_PKG_MIN_DAYS` for the npm audit and `COVEY_CRATE_MIN_DAYS`
+for the crate audit; the pnpm and cargo settings are the source of truth.
 
 ## Layout
 
@@ -186,9 +234,15 @@ packages/cli        `covey` entrypoint: tui | daemon | machines | info | restart
                     and `covey issue …` / `covey pr …` for an agent inside a thread
 bin/covey           launcher that setup links onto your PATH; runs its own checkout,
                     waits for it, and puts the terminal back however it died
+packages/web        the phone's client, served by the daemon
 plugin/             the covey plugin: the /covey skill, handed to every session the daemon starts
 scripts/setup.mjs   one command from a clone: install, build, link the launcher
+desktop/            the experimental Rust desktop client — its own cargo workspace,
+                    outside the pnpm one (issue #142)
+scripts/crate-age.mjs  the 7-day rule for crates; cargo cannot hold it below Rust 1.100
 docs/DESIGN.md      architecture and the reasoning behind it
+docs/DESKTOP.md     why there is a second client, and how its cell grid holds a picture
+docs/media/         the demo recordings this page shows
 ```
 
 Data lives in `~/.local/share/covey` (Linux), `~/Library/Application Support/covey` (macOS),

@@ -13,11 +13,11 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy,
+  DEFAULT_LOD, KNOWN_MODELS, LOD_LABEL, LOD_ORDER, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, type Lod,
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
-import { keepTagged, projectPool, type ConnState, type TaggedAttachment } from "@covey/client";
+import { keepTagged, projectPool, timelineRows, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
 
 export interface MachineSlot {
   /** The `ws://` URL the page dials. */
@@ -103,10 +103,26 @@ export interface State {
   choosing: string | null;
   /** The settings sheet over the page, or null when none is open. */
   sheet: SheetState | null;
+  /**
+   * How much of a transcript is painted before the reader taps a row (#149).
+   *
+   * A preference of this device, kept in `localStorage` by `main.ts` — the
+   * phone reads a thread at `compact` while the laptop that runs it reads the
+   * same thread at `full`. It travels in no command and no event.
+   */
+  lod: Lod;
+  /**
+   * Transcript rows the reader changed from what `lod` gives them.
+   *
+   * A *toggle*, not a list of open rows: at `full` every call starts open, so
+   * a key in here shuts one. Per session, and dropped when the level changes —
+   * a tap was an answer to the level it was made at.
+   */
+  toggledRows: Set<string>;
 }
 
 export function emptyState(): State {
-  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), attachments: new Map(), attaching: null, access: null, showAddresses: false, choosing: null, sheet: null };
+  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), attachments: new Map(), attaching: null, access: null, showAddresses: false, choosing: null, sheet: null, lod: DEFAULT_LOD, toggledRows: new Set() };
 }
 
 export function addMachine(s: State, key: string, name: string, primary = false, token?: string): MachineSlot {
@@ -852,4 +868,30 @@ export function sheetKey(s: State, sheet: SheetState): string {
     ? sheetChoices(s, sheet).map((c) => `${c.id}:${c.current ? 1 : 0}`)
     : sheetRows(s, sheet).map((r) => `${r.id}:${r.value ?? ""}`);
   return [...head, ...body].join("|");
+}
+
+// ---- the transcript's rows (#149) ------------------------------------------
+
+/**
+ * Everything one transcript row paints, as one string.
+ *
+ * The renderer keeps the last one against the row's key and rebuilds only when
+ * it changes. A paint runs on every frame of a turn, and a row rebuilt under a
+ * finger loses the tap — the same rule `sheetKey` keeps for the settings sheet.
+ *
+ * A chain row is the reason this cannot be item identity: the row says how
+ * many calls ran, how long they took and how many failed, so it changes when
+ * any item under it does.
+ */
+export function rowSignature(row: TimelineRow): string {
+  if (row.kind === "chain") {
+    return ["c", row.label, row.open ? 1 : 0, row.items.length, row.running, row.failed, row.durationMs ?? ""].join("|");
+  }
+  if (row.kind === "said") return ["s", row.open ? 1 : 0, row.items.map((i) => i.id).join(",")].join("|");
+  return ["i", row.open ? 1 : 0, row.item.updatedAt, row.live ? 1 : 0].join("|");
+}
+
+/** The rows the open thread paints, at this device's level of detail. */
+export function viewRows(s: State, v: View): TimelineRow[] {
+  return timelineRows(orderedItems(v), { lod: s.lod, toggled: s.toggledRows });
 }

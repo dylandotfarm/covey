@@ -850,6 +850,69 @@ interface ItemBase {
   seq: number;
   createdAt: string;
   updatedAt: string;
+  /**
+   * The activity chain this item belongs to, as the id of the chain's first
+   * item (#149). A chain is the run of tool calls and thoughts the agent made
+   * between two things it said, and a client folds one into a single row.
+   *
+   * The daemon writes it in `persistItem`, the one funnel every item goes
+   * through. Prose, a question and an approval never carry one: they close the
+   * chain that was open, and a reader must not lose them to a fold. An item
+   * written before this field existed carries none, so an old transcript
+   * replays as a flat list.
+   */
+  groupId?: ItemId;
+  /**
+   * One sentence naming what the chain was for, carried on the chain's first
+   * item — the one whose `groupId` is its own id — and on no other.
+   *
+   * A derived sentence lands the moment the chain closes and a model's replaces
+   * it a few seconds later, exactly as a thread title works. Only the tool
+   * calls feed it; see `activity.ts`.
+   */
+  groupSummary?: string;
+}
+
+/**
+ * How much of the transcript a client paints before anybody taps a row (#149).
+ *
+ * This is a preference of the device rather than of the machine — a phone reads
+ * a thread at `compact` while the laptop that runs the same thread reads it at
+ * `full` — so it travels in no command and no event. The TUI keeps it in
+ * `config.json` and the web client in `localStorage`.
+ *
+ * - `minimal`: chain rows, and the first and last thing the agent said in a turn.
+ * - `compact`: chain rows, and everything the agent said.
+ * - `steps`: every item on a row of its own, folded.
+ * - `full`: every item, open.
+ */
+export type Lod = "minimal" | "compact" | "steps" | "full";
+
+/**
+ * A chain shorter than this is never folded: the row that hid it would be no
+ * shorter than the row it hid, and the daemon does not pay a model to name it.
+ * The daemon and both clients read the same number, or one would fold a chain
+ * the other left unnamed.
+ */
+export const MIN_CHAIN = 2;
+
+/** The levels from least detail to most, which is the order `ctrl+o` cycles. */
+export const LOD_ORDER: Lod[] = ["minimal", "compact", "steps", "full"];
+
+/** What covey reads a thread at until somebody says otherwise. */
+export const DEFAULT_LOD: Lod = "compact";
+
+/** The name and the one-line description of each level, for a chooser. */
+export const LOD_LABEL: Record<Lod, { label: string; hint: string }> = {
+  minimal: { label: "Minimal", hint: "one row for each run of tool calls, and only the first and last thing the agent said" },
+  compact: { label: "Compact", hint: "one row for each run of tool calls, and everything the agent said" },
+  steps: { label: "Steps", hint: "every tool call and every thought on a row of its own" },
+  full: { label: "Full", hint: "every tool call open, with what went in and what came back" },
+};
+
+/** `raw` when it names a level, else null. For a stored value of unknown age. */
+export function asLod(raw: unknown): Lod | null {
+  return typeof raw === "string" && (LOD_ORDER as string[]).includes(raw) ? (raw as Lod) : null;
 }
 
 export interface UserMessageItem extends ItemBase {
@@ -864,6 +927,18 @@ export interface UserMessageItem extends ItemBase {
    * boundary rather than after the turn ends. Cleared when the turn finishes.
    */
   folded?: boolean;
+  /**
+   * True for a message covey wrote rather than the reader: the news from a
+   * watched pull request, the line that restarts a turn after an
+   * authentication failure.
+   *
+   * The agent reads it as any other message, because that is the whole point
+   * of it — a turn resumes a session the engine released. A *reader* must be
+   * able to tell the two apart at a glance, so a client paints it as its own
+   * kind of block. A client older than this field simply shows it as a message
+   * the reader did not write, which is what it did before.
+   */
+  system?: boolean;
 }
 
 export interface AssistantMessageItem extends ItemBase {
@@ -1665,6 +1740,12 @@ export type Command =
       turnId: TurnId;
       text: string;
       attachments?: Attachment[];
+      /**
+       * The daemon sent this turn itself, so the item it writes is marked
+       * (`UserMessageItem.system`). Only the daemon sets it: a client that
+       * asked for it would be claiming a message it typed was covey's.
+       */
+      system?: boolean;
     }
   | { type: "turn.interrupt"; threadId: ThreadId }
   /**

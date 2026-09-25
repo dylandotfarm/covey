@@ -1,7 +1,7 @@
 import { questionAnswers, questionAsks, type TimelineItem, type ToolCallItem } from "@covey/protocol";
-import { tableAt, type Table } from "@covey/client";
+import { tableAt, type ChainRow, type SaidRow, type Table } from "@covey/client";
 import { linkSpans, targetUri, toolLink, wordAt, type LinkContext } from "./links.js";
-import { T } from "./theme.js";
+import { T, themeGeneration } from "./theme.js";
 
 /**
  * Pure rendering of timeline items into styled lines. Doing this outside React
@@ -22,6 +22,13 @@ export interface Span {
    * columns by `width()` below, and the wrap would be wrong.
    */
   link?: string;
+  /**
+   * Blank columns the renderer added to draw a block, not content: the run
+   * that pushes a message to the right edge, and the block's own padding
+   * inside it. The screen needs them, the clipboard does not, so
+   * `selectedText` starts a copy after them.
+   */
+  pad?: boolean;
 }
 /**
  * One painted row.
@@ -258,19 +265,77 @@ export interface RenderOpts {
   links?: LinkContext;
 }
 
+/** The blank columns inside a message block, on each side of the words. */
+const BLOCK_PAD = 2;
+
+/**
+ * The heading of a turn covey sent itself, for a message written before
+ * `UserMessageItem.system` existed or by a daemon older than it.
+ *
+ * `integrate/news.ts` writes this line and nothing else does. Keep the two
+ * together: the fallback is what makes a thread already on disk read right.
+ */
+const SYSTEM_PREFIX = "covey watch:";
+
+/**
+ * Did covey write this message, rather than the reader?
+ *
+ * The daemon marks what it sends (`system`). The prefix is the fallback, for
+ * the pull-request news already in a transcript and for a client newer than
+ * the daemon it is talking to.
+ */
+export function isSystemMessage(item: TimelineItem): boolean {
+  if (item.kind !== "user") return false;
+  return item.system === true || item.text.startsWith(SYSTEM_PREFIX);
+}
+
+/** `n` blank columns the clipboard never sees, or nothing at all when n is 0. */
+function indent(n: number): Span[] {
+  return n > 0 ? [{ text: " ".repeat(n), pad: true }] : [];
+}
+
 /** Render one item to lines, including its trailing blank line. */
 export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
   const w = Math.max(20, o.width);
   switch (item.kind) {
     case "user": {
-      const inner = Math.min(w - 4, Math.max(20, Math.floor(w * 0.8)));
-      const body = markdownToLines(item.text, inner, { color: T.text }, o.links);
-      const lines: Line[] = body.map((l) => {
-        const lw = l.reduce((a, s) => a + width(s.text), 0);
+      const system = isSystemMessage(item);
+      const bg = system ? T.systemBg : T.userBg;
+      const max = Math.min(w - 4, Math.max(20, Math.floor(w * 0.8)));
+      const body = markdownToLines(item.text, max, { color: T.text }, o.links);
+      // The block hugs its longest row rather than filling the pane. "yes" is
+      // then a small block and not an eighty-column bar, which is what makes
+      // the right edge below read as a message rather than as a margin.
+      const inner = Math.max(1, ...body.map(lineWidth));
+      // The reader's own words sit against the right edge and covey's against
+      // the left, so which side a block is on says who wrote it before a
+      // colour does.
+      const lead = system ? 0 : Math.max(0, w - inner - BLOCK_PAD * 2);
+      // A rail down covey's block, in place of one of its two blank columns.
+      // Two near-black grounds are one colour on a terminal that has 256 of
+      // them — Gruvbox rounds both to the same index — and this is a glyph, so
+      // it says whose block it is wherever the colours land.
+      const rail: Span[] = system ? [{ text: "▌", color: T.system }] : [];
+      // `pad`, and painted: the block needs the columns, the clipboard does not.
+      const blank = { text: " ".repeat(BLOCK_PAD - rail.length), bg, pad: true };
+      const block = (l: Line): Line => withWrap([
+        ...indent(lead),
+        ...rail,
+        blank,
+        ...l.map((sp) => ({ ...sp, bg })),
+        { text: " ".repeat(Math.max(0, inner - lineWidth(l)) + BLOCK_PAD), bg },
         // `withWrap`, because this row replaces the wrapped one: without it the
         // block padding would hide every soft break in the message.
-        return withWrap([{ text: "  ", bg: T.userBg }, ...l.map((s) => ({ ...s, bg: T.userBg })), { text: " ".repeat(Math.max(0, inner - lw)) + "  ", bg: T.userBg }], l);
-      });
+      ], l);
+      const lines: Line[] = body.map(block);
+      // A block covey wrote says so on its own first row. The text under it is
+      // addressed to the agent — "fix it, commit, and push" — and a reader who
+      // takes that for an instruction of their own has been misled by the one
+      // thing the transcript is for.
+      if (system) lines.unshift(block([{ text: "covey", color: T.system, bold: true }]));
+      // A footer keeps the block's right edge, so the meta of a message lines
+      // up under the message rather than under the pane.
+      const foot = (spans: Span[]) => lines.push([...indent(Math.max(0, lead + inner + BLOCK_PAD * 2 - spans.reduce((a, sp) => a + width(sp.text), 0))), ...spans]);
       // An attachment reads as a tag — `[shot.png]` — inside the text itself,
       // so it needs no line of its own. The footer stays for a file the text
       // does not name: a message sent before tags existed, or one folded in by
@@ -283,11 +348,11 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
         shown.add(label);
         return true;
       });
-      if (unnamed.length) lines.push([{ text: "  " + [...shown].map((l) => `⎘ ${l}`).join("  "), color: T.subtle }]);
+      if (unnamed.length) foot([{ text: [...shown].map((l) => `⎘ ${l}`).join("  "), color: T.subtle }]);
       // Deliberately not "will be read next": the CLI folds this in at a tool
       // boundary and does not say when, so claiming a moment would be a guess.
-      if (item.folded) lines.push([{ text: "  ↳ sent into the turn already running", color: T.info, italic: true }]);
-      else if (item.queued) lines.push([{ text: "  queued · will send when the current turn finishes", color: T.subtle, italic: true }]);
+      if (item.folded) foot([{ text: "↳ sent into the turn already running", color: T.info, italic: true }]);
+      else if (item.queued) foot([{ text: "queued · will send when the current turn finishes", color: T.subtle, italic: true }]);
       lines.push([]);
       return lines;
     }
@@ -420,24 +485,46 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
  * as well as closed; open, the calls follow in their original places rather
  * than bunched underneath it.
  */
-export function renderToolGroupHead(items: ToolCallItem[], open: boolean, o: RenderOpts): Line[] {
+/**
+ * The row a folded chain of tool calls shows (#149).
+ *
+ * One sentence saying what the run was for, and what a reader must not have to
+ * open the row to learn: how many calls, how long they took, and whether any
+ * of them failed. A sentence the daemon's model wrote reads plainly; one the
+ * client derived from the calls is dimmer, so a reader can tell the two apart.
+ */
+export function renderChainHead(row: ChainRow, o: { width: number; links?: LinkContext }): Line[] {
   const w = Math.max(20, o.width);
-  const failed = items.filter((i) => i.status === "error" || i.background?.state === "failed").length;
-  const running = items.filter((i) => i.status === "running" || i.background?.state === "running").length;
-  const names: string[] = [];
-  for (const i of items) if (!names.includes(i.toolName)) names.push(i.toolName);
+  const calls = row.items.filter((i) => i.kind === "tool").length;
   const head: Line = [
     { text: "  " },
-    { text: open ? "▾" : "▸", color: T.subtle },
+    { text: row.open ? "▾" : "▸", color: T.subtle },
     { text: " >_ ", color: T.accent },
-    { text: `${items.length} tool call${items.length === 1 ? "" : "s"}`, color: T.muted },
+    { text: row.label, color: row.written ? T.muted : T.subtle, italic: !row.written },
   ];
-  if (failed > 0) head.push({ text: `  ${failed} failed`, color: T.danger });
-  if (running > 0) head.push({ text: `  ${running} in the background`, color: T.info });
-  const shown = names.slice(0, 4).join(", ") + (names.length > 4 ? ", …" : "");
-  head.push({ text: "  " + shown, color: T.faint });
+  head.push({ text: `  ${calls} call${calls === 1 ? "" : "s"}`, color: T.faint });
+  if (row.durationMs != null) head.push({ text: `  ${fmtMs(row.durationMs)}`, color: T.faint });
+  // A failure and a call still running are the two things worth colour: one
+  // says go and look, the other says the sentence is not the final word.
+  if (row.failed > 0) head.push({ text: `  ${row.failed} failed`, color: T.danger });
+  if (row.running > 0) head.push({ text: `  ${row.running} running`, color: T.working });
   const lines = wrapSpans(head, w);
-  return open ? lines : [...lines, []];
+  return row.open ? lines : [...lines, []];
+}
+
+/**
+ * The row that holds what the agent said in the middle of a turn, at
+ * `minimal`. The first thing it said and the last one keep their own rows.
+ */
+export function renderSaidHead(row: SaidRow, o: { width: number }): Line[] {
+  const n = row.items.length;
+  const head: Line = [
+    { text: "  " },
+    { text: row.open ? "▾" : "▸", color: T.subtle },
+    { text: ` ${n} more message${n === 1 ? "" : "s"}`, color: T.subtle, italic: true },
+  ];
+  const lines = wrapSpans(head, Math.max(20, o.width));
+  return row.open ? lines : [...lines, []];
 }
 
 export function fmtMs(ms: number): string {
@@ -558,7 +645,11 @@ export function selectedText(
   for (let i = Math.max(0, from.line); i <= to.line && i < lines.length; i++) {
     const l = lines[i]!;
     const text = lineText(l);
-    const a = i === from.line ? colToIndex(l, from.col) : 0;
+    // A block pushed to the right edge starts with a run of blanks that place
+    // it. They are on the screen and never in the message, so a copy starts
+    // after them however far into them the drag began.
+    const lead = padPrefix(l);
+    const a = Math.max(lead, i === from.line ? colToIndex(l, from.col) : 0);
     const b = i === to.line ? colToIndex(l, to.col) : text.length;
     // Lines are padded with background spans to draw blocks; that padding is
     // not content, so it never belongs on the clipboard.
@@ -576,6 +667,16 @@ export function selectedText(
   }
   // A soft break with nothing after it leaves a space that was never content.
   return out.replace(/ +$/, "");
+}
+
+/** How many characters at the head of a line are placement, not content. */
+function padPrefix(line: Line): number {
+  let n = 0;
+  for (const sp of line) {
+    if (!sp.pad) break;
+    n += sp.text.length;
+  }
+  return n;
 }
 
 /**
@@ -680,9 +781,9 @@ export function diffToLines(patch: string, w: number): Line[] {
  * hand-rolled signature would be a guess that goes stale the next time
  * `renderItem` learns to read another field.
  *
- * `renderItem` reads three things that are not on the item: the width, the
- * link context, and whether the item is unfolded. The first two empty the
- * cache when they move; the third is kept per item.
+ * `renderItem` reads four things that are not on the item: the width, the
+ * link context, the palette, and whether the item is unfolded. The first three
+ * empty the cache when they move; the fourth is kept per item.
  *
  * A `question` item is never cached. It is the one kind rendered from state
  * the item does not carry — which option the cursor sits on, what has been
@@ -691,13 +792,17 @@ export function diffToLines(patch: string, w: number): Line[] {
 export class ItemLines {
   private width = -1;
   private links: LinkContext | undefined;
+  /** The palette the held lines were painted in. An item does not change when
+   *  the reader picks another theme, so this is what says the colours did. */
+  private theme = -1;
   private cached = new Map<string, { item: TimelineItem; open: boolean; lines: Line[] }>();
 
   /** `renderItem`, but only once per version of an item. */
   render(item: TimelineItem, o: RenderOpts): Line[] {
-    if (o.width !== this.width || o.links !== this.links) {
+    if (o.width !== this.width || o.links !== this.links || themeGeneration() !== this.theme) {
       this.width = o.width;
       this.links = o.links;
+      this.theme = themeGeneration();
       this.cached.clear();
     }
     if (item.kind === "question") return renderItem(item, o);

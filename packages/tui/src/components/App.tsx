@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { projectPool } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
@@ -31,7 +31,7 @@ import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken }
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
 import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, type DropResult, type FailedDrop } from "../attachments.js";
-import { T } from "../theme.js";
+import { T, THEMES, themeFor, themeGeneration } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
 export const SIDEBAR_W = 34;
@@ -250,7 +250,12 @@ export function App({ store }: { store: Store }) {
   // and a wrapper allocated thousands of times a session for no effect.
   const itemLines = useRef<ItemLines>(undefined);
   itemLines.current ??= new ItemLines();
-  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.expandedItems, questionUi, state.toolsExpanded, linkCtx, itemLines.current), [state.view, mainW, state.expandedItems, questionUi, state.toolsExpanded, linkCtx]);
+  // The palette is not state and not a prop — it is one object every renderer
+  // reads — so the memos that hold painted lines have to be told when it
+  // changes, or a new theme paints the frame around a transcript still in the
+  // old colours. `themeGeneration` is the number that says it did.
+  const themeGen = themeGeneration();
+  const baseLayout = useMemo(() => layoutTranscript(state.view, mainW - 2, state.toggledRows, questionUi, state.lod, linkCtx, itemLines.current), [state.view, mainW, state.toggledRows, questionUi, state.lod, linkCtx, themeGen]);
   // Append the live activity row outside the heavy memo, so the spinner can
   // animate without re-rendering every timeline item.
   const layout = useMemo(() => {
@@ -271,7 +276,7 @@ export function App({ store }: { store: Store }) {
   }, [baseLayout, state.view, state.tick]);
   // Hoisted out of DiffPanel so mouse hit-testing and rendering agree on the
   // same line array.
-  const diffLines = useMemo(() => (state.diffView?.diff ? diffToLines(state.diffView.diff.patch, mainW - 2) : []), [state.diffView?.diff, mainW]);
+  const diffLines = useMemo(() => (state.diffView?.diff ? diffToLines(state.diffView.diff.patch, mainW - 2) : []), [state.diffView?.diff, mainW, themeGen]);
   // The scroll the screen shows. The store's count is measured from the bottom
   // and the transcript grows there while a reply streams, so a paint resolves
   // the reader's anchor against the layout it draws (`scroll.ts`). The
@@ -631,6 +636,54 @@ export function App({ store }: { store: Store }) {
   const runningTurns = (machineKey: string) =>
     [...(state.machines.get(machineKey)?.threads.values() ?? [])].filter((t) => t.status === "running" || t.status === "starting").length;
 
+  /** How much of a transcript is open before the reader taps. Also ctrl+o. */
+  const lodPick = () => openPick("Detail", LOD_ORDER.map((l) => ({ id: l, label: LOD_LABEL[l].label, hint: LOD_LABEL[l].hint })), (id) => {
+    store.setOverlay(null);
+    store.setLod(id as Lod);
+  });
+
+  /**
+   * The palette.
+   *
+   * The five blocks in front of each name are that theme's accent and its four
+   * state colours, because a reader who has not seen Everforest learns nothing
+   * from the word. The picker applies the theme on enter rather than under the
+   * cursor: the row the cursor sits on is read from a ref one render behind, and
+   * repainting the whole screen per arrow key is the one thing `frames.ts`
+   * exists to avoid.
+   */
+  const themePick = () => openPick("Theme", THEMES.map((t) => ({
+    id: t.id,
+    label: t.label,
+    hint: t.id === store.theme ? "current" : t.hint,
+    swatch: [t.palette.accent, t.palette.success, t.palette.warning, t.palette.danger, t.palette.claude],
+  })), (id) => { store.setOverlay(null); store.setTheme(id); });
+
+  /**
+   * This client's own settings: the palette, the level of detail, the bell.
+   *
+   * Every row here is the *device's* and no daemon hears about it — it is
+   * written to this machine's `config.json` and read at the next start. That is
+   * why it is a panel of its own rather than more rows on the machine control
+   * panel, where everything else is a default a daemon keeps. Both the control
+   * panel and ctrl+k open it, because "settings" is what a reader goes looking
+   * for in either place.
+   */
+  const settingsPanel = () => {
+    const theme = themeFor(store.theme);
+    openPick("covey settings — this client", [
+      { id: "theme", label: `Theme: ${theme.label}`, hint: theme.hint, swatch: [theme.palette.accent, theme.palette.success, theme.palette.warning, theme.palette.danger, theme.palette.claude] },
+      { id: "lod", label: `Detail: ${LOD_LABEL[state.lod].label}`, hint: "ctrl+o" },
+      { id: "bell", label: `Bell: ${store.bell ? "on" : "off"}`, hint: store.bell ? "rings when a thread needs approval, finishes or fails" : "silent" },
+    ], (id) => {
+      switch (id) {
+        case "theme": return themePick();
+        case "lod": return lodPick();
+        case "bell": { store.setOverlay(null); store.setBell(!store.bell); return; }
+      }
+    });
+  };
+
   /**
    * Machine control panel — what used to need an ssh session: update the daemon
    * from git and restart it, and set the defaults every new thread on that
@@ -666,6 +719,9 @@ export function App({ store }: { store: Store }) {
       ...(settings.bind ? [{ id: "bind", label: `Reachable on: ${bindLabel(settings.bind)}`, hint: "where the daemon listens; changes at once" }] : []),
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
+    // The client's own settings, from the place a reader looks for settings.
+    // They belong to this terminal, not to that daemon, and the hint says so.
+    opts.push({ id: "settings", label: "covey settings — theme, detail, the bell", hint: "this client, not this machine" });
     openPick(`${info.name} — ${info.os}/${info.arch} · build ${buildLine(info.build)}${info.claudeCodeVersion ? ` · claude ${info.claudeCodeVersion}` : ""}`, opts, (id) => {
       switch (id) {
         case "update": return void confirmUpdate(machineKey!);
@@ -709,6 +765,7 @@ export function App({ store }: { store: Store }) {
           );
         });
         case "log": { store.setOverlay({ kind: "update", machine: machineKey! }); return; }
+        case "settings": return settingsPanel();
       }
     });
   };
@@ -1082,7 +1139,8 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "updateclient", label: "Update covey — pull, rebuild, relaunch this client", hint: store.clientSource?.commit ?? "" });
     opts.push({ id: "addmachine", label: "Add machine (ws://host:port)" });
     opts.push({ id: "rmmachine", label: "Remove machine" });
-    opts.push({ id: "tools", label: state.toolsExpanded ? "Fold old tool calls into >_ rows" : "Show every tool call", hint: "ctrl+o" });
+    opts.push({ id: "lod", label: `Detail: ${LOD_LABEL[state.lod].label}`, hint: "ctrl+o" });
+    opts.push({ id: "settings", label: `Settings — theme, detail, the bell`, hint: themeFor(store.theme).label });
     opts.push({ id: "help", label: "Keyboard help", hint: "?" });
     openPick("Commands", opts, (id) => {
       store.setOverlay(null);
@@ -1119,7 +1177,8 @@ export function App({ store }: { store: Store }) {
         case "updateclient": return updateClient();
         case "addmachine": return openInput("Machine URL", (v) => { store.setOverlay(null); const [url, token] = v.split(/\s+/); if (url) store.addMachine({ name: new URL(url).hostname, url, token }); }, "ws://", "ws://host.tailnet.ts.net:3790 [token]");
         case "rmmachine": return openPick("Remove machine", state.order.map((k) => ({ id: k, label: state.machines.get(k)!.saved.name, hint: k })), (k) => { store.setOverlay(null); store.removeMachine(k); });
-        case "tools": return store.toggleAllTools();
+        case "lod": return lodPick();
+        case "settings": return settingsPanel();
         case "help": return store.setOverlay({ kind: "help" });
       }
     });
@@ -1596,7 +1655,7 @@ export function App({ store }: { store: Store }) {
     }
     if (key.ctrl && input === "k") return palette();
     if (key.ctrl && input === "t") return store.toggleSidebar();
-    if (key.ctrl && input === "o") return store.toggleAllTools();
+    if (key.ctrl && input === "o") return store.cycleLod();
     // ctrl+b, as in the Claude Code CLI: stop waiting on a tool call that is
     // taking too long. It keeps running and reports back when it is done.
     if (key.ctrl && input === "b") { void store.background(); return; }
