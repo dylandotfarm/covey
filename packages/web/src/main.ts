@@ -5,7 +5,7 @@
  * re-sends an item every few tens of milliseconds and the phone has one
  * thread for the paint and the keyboard.
  */
-import { applyDrop, MachineClient, uuid } from "@covey/client";
+import { applyDrop, budgetValue, MachineClient, uuid } from "@covey/client";
 import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
 import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState, itemHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
@@ -407,6 +407,8 @@ function sheetCommand(target: SheetTarget, page: string, id: string): Command | 
     case "mode": return { type: "machine.settings", defaultPermissionMode: (id || null) as PermissionMode | null };
     case "streaming": return { type: "machine.settings", defaultStreaming: id === "on" };
     case "web": return { type: "machine.settings", webEnabled: id === "on" };
+    case "live": return { type: "machine.settings", maxLiveSessions: budgetValue(id) };
+    case "idle": return { type: "machine.settings", sessionIdleMinutes: budgetValue(id) };
     default: return null;
   }
 }

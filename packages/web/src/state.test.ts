@@ -395,6 +395,10 @@ test("the machine sheet is the defaults new threads there inherit, and may hand 
     ["model", "Sonnet"],
     ["mode", "From Claude settings"],
     ["streaming", "On"],
+    // This daemon sent no `sessionBudget`, so neither limit can name the
+    // number it resolves to — and says the word alone rather than a guess.
+    ["live", "from memory"],
+    ["idle", "default"],
   ]);
   assert.match(sheetNote(s, s.sheet), /Every new thread on box/, "a default is not what a running thread has");
   assert.equal(sheetNote(s, { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" }), "", "a conversation's own settings need no caption");
@@ -416,7 +420,44 @@ test("the web server row is offered on a fleet machine and withheld from the one
   }
   const ids = (key: string) => sheetRows(s, { target: { kind: "machine", machine: key }, page: "" }).map((r) => r.id);
   assert.ok(!ids(here.key).includes("web"), "the page must not offer to close itself");
-  assert.deepEqual(ids(there.key), ["model", "mode", "streaming", "web"]);
+  assert.deepEqual(ids(there.key), ["model", "mode", "streaming", "web", "live", "idle"]);
+});
+
+test("the session limits name the number the daemon resolved them to, and price the memory", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  const m = info("box");
+  m.settings = { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null };
+  m.sessionBudget = { idleMinutes: 120, liveLimit: 4, sessionMemoryBytes: 300 * 1024 * 1024 };
+  applyShellSnapshot(box, { seq: 1, machine: m, projects: [], threads: [] });
+  s.sheet = { target: { kind: "machine", machine: box.key }, page: "" };
+
+  // "default" is not an answer a reader can act on; the number behind it is.
+  const rows = sheetRows(s, s.sheet);
+  assert.equal(rows.find((r) => r.id === "live")!.value, "from memory (4)");
+  assert.equal(rows.find((r) => r.id === "idle")!.value, "default (2 hours)");
+
+  s.sheet.page = "live";
+  const live = sheetChoices(s, s.sheet);
+  assert.deepEqual(live.filter((c) => c.current).map((c) => c.id), [""]);
+  assert.equal(live[0]!.label, "From memory (4)");
+  // The count of sessions is not what the reader is choosing — the memory is.
+  assert.equal(live.find((c) => c.id === "4")!.hint, "about 1.3 GB");
+  assert.match(sheetNote(s, s.sheet), /about 300 MB/);
+
+  s.sheet.page = "idle";
+  const idle = sheetChoices(s, s.sheet);
+  assert.deepEqual(idle.map((c) => c.id), ["", "0", "15", "30", "60", "120", "240", "480"]);
+  assert.equal(idle[1]!.label, "Never");
+  assert.match(idle[1]!.hint!, /live-session limit/, "never is not the absence of a limit");
+  assert.match(sheetNote(s, s.sheet), /resumes it from the transcript/);
+
+  // A limit this machine holds itself reads as itself, on the row and ticked.
+  m.settings.sessionIdleMinutes = 30;
+  s.sheet.page = "";
+  assert.equal(sheetRows(s, s.sheet).find((r) => r.id === "idle")!.value, "30 minutes");
+  s.sheet.page = "idle";
+  assert.deepEqual(sheetChoices(s, s.sheet).filter((c) => c.current).map((c) => c.id), ["30"]);
 });
 
 test("the sheet's key changes with what the sheet says, and with nothing else", () => {

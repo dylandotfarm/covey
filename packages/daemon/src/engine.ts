@@ -15,7 +15,7 @@ import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } fro
 import { redactDeep, redactor } from "./redact.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, threadFilesDir } from "./attachments.js";
-import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, projectsDir, saveFleet } from "./config.js";
+import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { ChainTracker, summariseActivity } from "./activity.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
@@ -227,6 +227,10 @@ export class Engine {
     // them from its cursor: the tick reads the rows, and nothing is re-armed.
     this.watchTimer = setInterval(() => { void this.pollWatches(); }, WATCH_TICK_MS);
     this.watchTimer.unref?.();
+    // What the two session limits resolve to here. A client reads `null` as
+    // "the default" and cannot name it: the live ceiling comes from this
+    // machine's memory. So say it once now, and again whenever it changes.
+    this.publishSessionBudget();
   }
 
   /** Where this daemon keeps its clones: what the machine reports, else the default. */
@@ -546,6 +550,7 @@ export class Engine {
         this.machine.settings.bind = rebind ?? liveBind;
         // A lower limit applies to the sessions already live, not only to the
         // next one: the user asked for less memory now.
+        this.publishSessionBudget();
         this.sweepSessions();
         return this.emitShell({ kind: "machine.updated", machine: this.machine });
       }
@@ -1951,6 +1956,20 @@ export class Engine {
   private liveSessionLimit(): number {
     const v = this.machine.settings.maxLiveSessions;
     return v === null || v === undefined ? defaultLiveSessionLimit() : Math.max(1, Math.floor(v));
+  }
+
+  /**
+   * Restate the resolved limits on `MachineInfo`, so a control panel can print
+   * the number behind the word "default". Mutates `machine` in place, the way
+   * the settings themselves do: it is the same object the server hands to every
+   * `hello`, so a client connecting next reads the new figures.
+   */
+  private publishSessionBudget() {
+    this.machine.sessionBudget = {
+      idleMinutes: this.idleLimitMinutes(),
+      liveLimit: this.liveSessionLimit(),
+      sessionMemoryBytes: SESSION_MEMORY_BYTES,
+    };
   }
 
   /**

@@ -17,7 +17,7 @@ import {
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
-import { keepTagged, projectPool, timelineRows, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
+import { idleChoices, idleValueLabel, keepTagged, liveChoices, liveValueLabel, projectPool, timelineRows, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
 
 export interface MachineSlot {
   /** The `ws://` URL the page dials. */
@@ -796,7 +796,17 @@ export function machineSheetRows(m: MachineSlot): SheetRow[] {
     { id: "streaming", label: "Default streaming", value: g.defaultStreaming ? "On" : "Off", choices: true },
   ];
   if (!m.primary) rows.push({ id: "web", label: "Web server", value: g.webEnabled ? "On" : "Off", choices: true });
+  // The memory this machine spends on live sessions. Not a default a new thread
+  // inherits, which is why `sheetNote` says something else on these two pages.
+  const budget = m.info?.sessionBudget;
+  rows.push({ id: "live", label: "Live sessions", value: liveValueLabel(g.maxLiveSessions, budget), choices: true });
+  rows.push({ id: "idle", label: "Release when idle", value: idleValueLabel(g.sessionIdleMinutes, budget), choices: true });
   return rows;
+}
+
+/** A shared session-limit choice as a sheet choice. */
+function budgetSheetChoices(choices: BudgetChoice[]): SheetChoice[] {
+  return choices.map((c) => ({ id: c.id, label: c.label, ...(c.hint ? { hint: c.hint } : {}), current: c.current }));
 }
 
 /** The rows of the list of settings, for whichever sheet is open. */
@@ -830,6 +840,8 @@ export function sheetChoices(s: State, sheet: SheetState): SheetChoice[] {
     case "mode": return modeChoices(g.defaultPermissionMode, true);
     case "streaming": return onOffChoices(g.defaultStreaming === true, "new threads show text as it arrives", "new threads show each reply whole");
     case "web": return onOffChoices(g.webEnabled === true, "this machine serves the phone client", "this machine serves nothing");
+    case "live": return budgetSheetChoices(liveChoices(g.maxLiveSessions, m?.info?.sessionBudget));
+    case "idle": return budgetSheetChoices(idleChoices(g.sessionIdleMinutes, m?.info?.sessionBudget));
     default: return [];
   }
 }
@@ -851,9 +863,12 @@ export function sheetTitle(s: State, sheet: SheetState): string {
 export function sheetNote(s: State, sheet: SheetState): string {
   if (sheet.target.kind !== "machine") return "";
   const name = sheetMachine(s, sheet)?.name ?? "this machine";
-  return sheet.page === "web"
-    ? `Whether ${name} serves the phone client.`
-    : `Every new thread on ${name} starts with this. A thread that runs keeps what it has.`;
+  if (sheet.page === "web") return `Whether ${name} serves the phone client.`;
+  // Neither session limit is a default a new thread inherits: both apply to
+  // every thread on the machine, and to the ones running now.
+  if (sheet.page === "live") return `How much memory ${name} may hold in live sessions. A session is about 300 MB.`;
+  if (sheet.page === "idle") return `When ${name} stops the session of a thread nobody is using. The next message resumes it from the transcript.`;
+  return `Every new thread on ${name} starts with this. A thread that runs keeps what it has.`;
 }
 
 /**

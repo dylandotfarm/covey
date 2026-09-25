@@ -186,7 +186,13 @@
   over three days: 25 of the 31 released threads came back within two hours, which is the
   number. Never release a session that runs a turn, waits on an
   approval, or still owns a background task — `Engine.sessionBusy` decides, and a background
-  task dies with its session. `/health` reports `sessions.live`.
+  task dies with its session. `/health` reports `sessions.live`. Both limits are rows on the
+  machine control panel and on the web client's machine sheet. A `null` means "the daemon's
+  default" and no client can name it — the ceiling is read from that machine's memory — so
+  `MachineInfo.sessionBudget` carries the two resolved figures and what one session costs,
+  and the panel prints the number behind the word. The choices are
+  `client/src/sessionBudget.ts`, pure and read by both clients; keep a panel hint short, or
+  `Overlay` truncates the label away to make room for it.
 - Every session on a machine reads one credential store and then holds its access token in
   memory, so a refresh anywhere revokes what the others hold: `401 OAuth access token has
   been revoked`, and that process never recovers — an SDK session has no `/login`. A *resumed*
