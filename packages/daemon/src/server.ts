@@ -5,7 +5,7 @@ import { Engine, EngineError } from "./engine.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
 import { readFleet, type DaemonConfig } from "./config.js";
-import { listRepos, createRepo, GH_CWD } from "./repos.js";
+import { listRepos, createRepo, cloneUrlsFor, GH_CWD } from "./repos.js";
 import { listRemoteBranches } from "./git.js";
 import { findWebRoots, serveWeb } from "./web.js";
 import { serveMedia } from "./media.js";
@@ -253,8 +253,12 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return engine.runIssues(String(p.projectId), Array.isArray(p.numbers) ? p.numbers.map(Number) : []);
       case "repos.list":
         return listRepos();
-      case "repos.branches":
-        return listRemoteBranches(String(p.url ?? ""), GH_CWD);
+      case "repos.branches": {
+        // The branches are read the way this machine reaches the repository,
+        // the same way it would clone it.
+        const url = String(p.url ?? "");
+        return listRemoteBranches(url, GH_CWD, await cloneUrlsFor(url));
+      }
       case "repos.create":
         return createRepo({ name: String(p.name ?? ""), visibility: p.visibility === "public" ? "public" : "private", description: p.description ? String(p.description) : undefined });
       case "run.pullRequest":

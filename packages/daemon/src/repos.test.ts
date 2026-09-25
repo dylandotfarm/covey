@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseRepoList, cloneUrlFor, createRepo } from "./repos.js";
+import { parseRepoList, cloneUrlFor, cloneUrlsFor, createRepo } from "./repos.js";
 import { assertReadOnly } from "./integrate/gh.js";
 
 const printed = [
@@ -58,4 +58,12 @@ test("createRepo reads the URL gh prints and answers with the clone URL in the p
   const https = await createRepo({ name: "api", visibility: "private" }, { exec: fake, protocol: "https" });
   assert.equal(https.cloneUrl, "https://github.com/acme/api.git", "the owner comes from what gh printed, not from the name");
   await assert.rejects(createRepo({ name: "api", visibility: "private" }, { exec: async () => ({ stdout: "done\n" }), protocol: "https" }), /did not print its URL/, "no URL is no answer, not a guess");
+});
+
+test("cloneUrlsFor asks gh about github.com and about nothing else", async () => {
+  // `gh` is the login for GitHub, so it speaks for github.com alone. A
+  // repository on another host keeps the URL as it came, with the other
+  // protocol behind it, and this test never spawns a process to find out.
+  assert.deepEqual(await cloneUrlsFor("git@gitlab.com:acme/api.git"), ["git@gitlab.com:acme/api.git", "https://gitlab.com/acme/api.git"]);
+  assert.deepEqual(await cloneUrlsFor("/tmp/covey/remote.git"), ["/tmp/covey/remote.git"], "a path is never rewritten: it is what the tests clone");
 });

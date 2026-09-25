@@ -3,18 +3,50 @@ import { promisify } from "node:util";
 import { existsSync, mkdirSync as mkdirp, writeFileSync as writeFile } from "node:fs";
 import { join, dirname } from "node:path";
 import type { ProjectGit, RemoteBranches } from "@covey/protocol";
+import type { GitProtocol } from "./repos.js";
 
 const run = promisify(execFile);
 
 /** Like `git()`, but keeps git's own complaint so it can be shown to the user. */
-async function gitTry(cwd: string, args: string[], timeout = 10_000): Promise<{ ok: true; out: string } | { ok: false; err: string }> {
+async function gitTry(cwd: string, args: string[], timeout = 10_000, env?: NodeJS.ProcessEnv): Promise<{ ok: true; out: string } | { ok: false; err: string }> {
   try {
-    const { stdout } = await run("git", args, { cwd, timeout });
+    const { stdout } = await run("git", args, { cwd, timeout, ...(env ? { env } : {}) });
     return { ok: true, out: stdout.trim() };
   } catch (e: any) {
-    const text = String(e?.stderr ?? e?.message ?? e).trim();
-    return { ok: false, err: text.split("\n").filter(Boolean).pop() ?? "git failed" };
+    return { ok: false, err: gitComplaint(String(e?.stderr ?? e?.message ?? e)) };
   }
+}
+
+/**
+ * What git said, in the one line that names the reason.
+ *
+ * The last line is the reason for almost every git command, but a fetch that
+ * cannot reach a remote ends with two lines of advice and a line that only
+ * says the remote could not be read. Both hide the line that matters — the
+ * key that was refused, the repository that is not there — and a clone that
+ * tried two URLs would print the advice twice.
+ */
+export function gitComplaint(stderr: string): string {
+  const lines = stderr.trim().split("\n").map((l) => l.trim()).filter(Boolean);
+  const advice = lines.findIndex((l) => l.startsWith("Please make sure you have the correct access rights"));
+  const kept = (advice === -1 ? lines : lines.slice(0, advice)).filter((l) => !/^fatal: Could not read from remote repository/.test(l));
+  return kept[kept.length - 1] ?? lines[lines.length - 1] ?? "git failed";
+}
+
+/**
+ * The environment for a git command that speaks to a remote.
+ *
+ * The daemon has no terminal, so a prompt for a password or a passphrase is a
+ * command that says nothing and then hits its timeout. Both settings turn that
+ * wait into an answer: git says which credential it wanted, ssh says the key
+ * was refused. An `GIT_SSH_COMMAND` the user set stays as they wrote it.
+ */
+function remoteEnv(): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+    ...(process.env.GIT_SSH_COMMAND ? {} : { GIT_SSH_COMMAND: "ssh -o BatchMode=yes" }),
+  };
 }
 
 async function git(cwd: string, args: string[]): Promise<string | null> {
@@ -40,6 +72,63 @@ export function normaliseRemote(url: string): string {
   u = u.replace(/^([^/:]+):/, "$1/"); // host:path → host/path
   u = u.replace(/\/+$/, "").replace(/\.git$/, "").replace(/\/+$/, "");
   return u.toLowerCase();
+}
+
+/**
+ * One repository written both ways: `git@host:owner/repo.git` and
+ * `https://host/owner/repo.git`, with the way the URL itself was written.
+ *
+ * This is what lets each machine clone a repository its own way. A URL names
+ * the repository; how to reach it is the machine's business, and two machines
+ * may be set up for different styles of authentication on purpose.
+ *
+ * Null for a URL covey must not rewrite, because the user wrote it that way
+ * for a reason: a local path, a host from the user's ssh config rather than a
+ * host name, a port, or credentials in the URL.
+ */
+export function remoteForms(url: string): { host: string; path: string; ssh: string; https: string; protocol: GitProtocol } | null {
+  const u = url.trim();
+  if (!u || u.startsWith("-")) return null;
+  const uri = /^(ssh|https?):\/\/(?:([^/@]+)@)?([^/:@]+)(:\d+)?\/(.+)$/.exec(u);
+  const scp = /^(?:([^@/:]+)@)?([^@/:]+):([^/:].*)$/.exec(u);
+  let user = "git";
+  let host: string;
+  let path: string;
+  let protocol: GitProtocol;
+  if (uri) {
+    const [, scheme, userinfo, name, port, rest] = uri;
+    if (port) return null;
+    // A password or a token in an https URL is the user's own credential.
+    if (userinfo && scheme !== "ssh") return null;
+    if (userinfo) user = userinfo;
+    host = name!; path = rest!; protocol = scheme === "ssh" ? "ssh" : "https";
+  } else if (scp && !u.includes("://")) {
+    if (scp[1]) user = scp[1];
+    host = scp[2]!; path = scp[3]!; protocol = "ssh";
+  } else return null;
+  // A name with no dot is an alias in the user's ssh config, and covey knows
+  // no https address for it. `C:\repo` lands here too, and stays a path.
+  if (!host.includes(".")) return null;
+  path = path.replace(/^\/+/, "").replace(/\/+$/, "").replace(/\.git$/, "").replace(/\/+$/, "");
+  if (!path.includes("/")) return null;
+  return { host, path, ssh: `${user}@${host}:${path}.git`, https: `https://${host}/${path}.git`, protocol };
+}
+
+/**
+ * The URLs to try for a repository, best first.
+ *
+ * `protocol` is the way this machine clones, or null when it has no opinion
+ * and the URL keeps the way it came. The other way follows as a second
+ * chance: a machine whose `gh` says `ssh` but which holds no key still gets
+ * its project, and says so once rather than failing.
+ *
+ * A URL with no host to rewrite is the only candidate there is.
+ */
+export function cloneCandidates(url: string, protocol: GitProtocol | null): string[] {
+  const forms = remoteForms(url);
+  if (!forms) return [url.trim()];
+  const lead = (protocol ?? forms.protocol) === "ssh" ? forms.ssh : forms.https;
+  return [lead, lead === forms.ssh ? forms.https : forms.ssh];
 }
 
 /**
@@ -97,6 +186,12 @@ export const CLONE_TIMEOUT_MS = 10 * 60_000;
  * worktrees are the only checkouts, so there is no `HEAD` to work from and no
  * directory that two threads change at the same time.
  *
+ * `url` may be several URLs for one repository, best first, as
+ * `cloneCandidates` writes them. The first that answers is the one `origin`
+ * keeps, and the one the answer names, so every later fetch and push from this
+ * machine takes the same route. When none answers, the error names each URL
+ * and what it said.
+ *
  * `git clone --bare` would write no fetch refspec, so `origin/main` would never
  * appear and every fetch after the first would find nothing. `init` plus
  * `remote add` writes the refspec, and `remote set-head` records which branch
@@ -107,26 +202,40 @@ export const CLONE_TIMEOUT_MS = 10 * 60_000;
  * in its worktree would merge the copy, not the remote. `origin/main` is the
  * ref every worktree can reach, and the one the thread is told to merge.
  */
-export async function cloneBare(url: string, dir: string): Promise<{ ok: true } | { error: string }> {
+export async function cloneBare(url: string | string[], dir: string): Promise<{ ok: true; url: string } | { error: string }> {
+  const urls = (Array.isArray(url) ? url : [url]).map((u) => u.trim()).filter(Boolean);
+  if (urls.length === 0) return { error: "a repository URL is needed" };
   if (!existsSync(join(dir, "HEAD"))) {
     mkdirp(dir, { recursive: true });
     const init = await gitTry(dir, ["init", "--quiet", "--bare"]);
     if (!init.ok) return { error: init.err };
   }
-  // The URL is the caller's, every time. A directory left by a clone that
-  // failed keeps the URL that failed, and a retry with another URL for the
-  // same repository must not fetch from the old one.
-  const has = await git(dir, ["remote", "get-url", "origin"]);
-  const remote = await gitTry(dir, has === null ? ["remote", "add", "origin", url] : ["remote", "set-url", "origin", url]);
-  if (!remote.ok) return { error: remote.err };
-  const fetch = await gitTry(dir, ["fetch", "--no-tags", "--quiet", "origin"], CLONE_TIMEOUT_MS);
-  if (!fetch.ok) return { error: fetch.err };
-  const head = await gitTry(dir, ["remote", "set-head", "origin", "--auto"]);
-  if (!head.ok) return { error: head.err };
-  // A whole fetch just happened. The next thread must not pay for another.
-  markFetched(dir);
-  return { ok: true };
+  // The budget belongs to the repository, not to the attempt: a second URL
+  // must not double how long the reader waits for a project.
+  const deadline = Date.now() + CLONE_TIMEOUT_MS;
+  const failures: string[] = [];
+  for (const candidate of urls) {
+    const left = deadline - Date.now();
+    if (failures.length > 0 && left < LAST_CHANCE_MS) break;
+    // The URL is the caller's, every time. A directory left by a clone that
+    // failed keeps the URL that failed, and a retry with another URL for the
+    // same repository must not fetch from the old one.
+    const has = await git(dir, ["remote", "get-url", "origin"]);
+    const remote = await gitTry(dir, has === null ? ["remote", "add", "origin", candidate] : ["remote", "set-url", "origin", candidate]);
+    if (!remote.ok) return { error: remote.err };
+    const fetch = await gitTry(dir, ["fetch", "--no-tags", "--quiet", "origin"], Math.max(left, LAST_CHANCE_MS), remoteEnv());
+    if (!fetch.ok) { failures.push(`${candidate}: ${fetch.err}`); continue; }
+    const head = await gitTry(dir, ["remote", "set-head", "origin", "--auto"]);
+    if (!head.ok) return { error: head.err };
+    // A whole fetch just happened. The next thread must not pay for another.
+    markFetched(dir);
+    return { ok: true, url: candidate };
+  }
+  return { error: failures.join("; ") };
 }
+
+/** How much of the clone budget a second URL needs to be worth trying. */
+const LAST_CHANCE_MS = 30_000;
 
 /** Fetch one branch from `origin`, so it can be branched from. False when the
  *  remote has no such branch, or cannot be reached. */
@@ -358,13 +467,21 @@ export async function gitInfo(dir: string): Promise<ProjectGit> {
  * a directory that exists and need not be a repository, with the credentials
  * a clone from this machine would use. Never throws; a remote that cannot be
  * read is an `error` and an empty list.
+ *
+ * `candidates` is the same list a clone would try, so the branch pick reads
+ * the remote the way this machine reaches it. The default is the URL as it
+ * came, with the other protocol as a second chance.
  */
-export async function listRemoteBranches(url: string, cwd = process.cwd()): Promise<RemoteBranches> {
+export async function listRemoteBranches(url: string, cwd = process.cwd(), candidates?: string[]): Promise<RemoteBranches> {
   const u = url.trim();
   if (!u || u.startsWith("-")) return { branches: [], defaultBranch: null, error: "a repository URL is needed" };
-  const r = await gitTry(cwd, ["ls-remote", "--symref", u, "HEAD", "refs/heads/*"], LS_REMOTE_TIMEOUT_MS);
-  if (!r.ok) return { branches: [], defaultBranch: null, error: `could not read the branches of ${u}: ${r.err}` };
-  return parseLsRemote(r.out);
+  const failures: string[] = [];
+  for (const candidate of candidates?.length ? candidates : cloneCandidates(u, null)) {
+    const r = await gitTry(cwd, ["ls-remote", "--symref", candidate, "HEAD", "refs/heads/*"], LS_REMOTE_TIMEOUT_MS, remoteEnv());
+    if (r.ok) return parseLsRemote(r.out);
+    failures.push(`${candidate}: ${r.err}`);
+  }
+  return { branches: [], defaultBranch: null, error: `could not read the branches of ${u}: ${failures.join("; ")}` };
 }
 
 /** A remote that answers nothing gets half a minute, the same as a `gh` call. */

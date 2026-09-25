@@ -22,6 +22,7 @@ import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { ClaudeModels } from "./models.js";
 import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod, GitHubAction, GitHubItem } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
+import { cloneUrlsFor } from "./repos.js";
 import { realGhHost, UploadRefused, type GhHost, type RealHostOptions } from "./integrate/gh.js";
 import { AttachError, describeUploadFailure, placeAttachments, planAttachments, type UploadedAttachment } from "./integrate/attach.js";
 import { gateMember } from "./integrate/gate.js";
@@ -576,7 +577,9 @@ export class Engine {
         if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}${dup.baseBranch ? ` on ${dup.baseBranch}` : ""}`);
         const root = join(this.projectsDir, projectSlug(identity), "repo.git");
         const cloned = await this.cloneOnce(url, root);
-        if ("error" in cloned) throw new EngineError("git", `could not clone ${url}: ${cloned.error}`);
+        // The repository is named, not the URL: the URL that failed is in the
+        // reason, once per way this machine tried to reach it.
+        if ("error" in cloned) throw new EngineError("git", `could not clone ${identity}: ${cloned.error}`);
         // The clone fetched every branch, so the base is checked here, once,
         // and a project that would have nothing to branch from is never made.
         if (baseBranch !== undefined && !(await remoteHasBranch(root, baseBranch))) throw new EngineError("no_branch", `${identity} has no branch ${baseBranch}`);
@@ -587,7 +590,9 @@ export class Engine {
         if (raced) return this.db.shellSeq();
         const p: Project = {
           id: randomUUID(), title: cmd.title ?? basename(identity), workspaceRoot: root,
-          repositoryIdentity: identity, kind: "clone", remoteUrl: url,
+          // The URL that answered on this machine, which may not be the one
+          // the client sent: every later fetch and push takes the same route.
+          repositoryIdentity: identity, kind: "clone", remoteUrl: cloned.url,
           ...(baseBranch !== undefined ? { baseBranch } : {}),
           defaultModel: null, createdAt: now, updatedAt: now,
         };
@@ -1728,12 +1733,20 @@ export class Engine {
 
   /** Clones in flight, by bare repository path. Two creates for one repository
    *  that arrive together wait on one clone. */
-  private clones = new Map<string, Promise<{ ok: true } | { error: string }>>();
+  private clones = new Map<string, Promise<{ ok: true; url: string } | { error: string }>>();
 
-  private cloneOnce(url: string, root: string): Promise<{ ok: true } | { error: string }> {
+  /**
+   * Clone a repository, in the way that makes sense on this machine.
+   *
+   * The caller's URL names the repository; `cloneUrlsFor` says how this
+   * machine reaches it. The whole fleet gets one URL from the client, and each
+   * daemon works out its own here, so a machine that clones by https and one
+   * that clones by ssh both get the project.
+   */
+  private cloneOnce(url: string, root: string): Promise<{ ok: true; url: string } | { error: string }> {
     let p = this.clones.get(root);
     if (!p) {
-      p = cloneBare(url, root).finally(() => this.clones.delete(root));
+      p = cloneUrlsFor(url).then((urls) => cloneBare(urls, root)).finally(() => this.clones.delete(root));
       this.clones.set(root, p);
     }
     return p;
