@@ -246,7 +246,15 @@ async function stopDaemon(port: number): Promise<boolean> {
   return true;
 }
 
-/** Stop the local daemon and start a fresh one from the build on disk. */
+/**
+ * Stop the local daemon and start a fresh one from the build on disk.
+ *
+ * The stop has to succeed before the start: a second daemon cannot bind a port
+ * the first one still holds. That makes `isAlive` the hinge of this function,
+ * and a zombie daemon used to read as alive there — so "update & restart" said
+ * `the daemon did not restart` about a restart that would have worked, and then
+ * skipped it (#153). `isAlive` refuses a zombie now; see `pidfile.ts`.
+ */
 async function restartLocalDaemon(): Promise<boolean> {
   const port = localPort();
   if (!(await stopDaemon(port))) return false;
