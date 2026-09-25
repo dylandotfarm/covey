@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { homedir } from "node:os";
 import type { RepoInfo } from "@covey/protocol";
 import { gh, ghError } from "./gh.js";
+import { cloneCandidates, remoteForms } from "./git.js";
 
 const run = promisify(execFile);
 
@@ -68,15 +69,32 @@ export function cloneUrlFor(r: { url: string; sshUrl: string }, protocol: GitPro
 /**
  * The protocol `gh` clones with, as the user set it for github.com. The
  * answer `gh auth login` records lives under the host, so the host is asked
- * first and the global setting second. `https` when neither says.
+ * first and the global setting second.
+ *
+ * Null when `gh` says nothing: it is missing, or it answered something else.
+ * That machine has no preference, and a caller keeps the URL it was given.
  */
-export async function gitProtocol(cwd = GH_CWD): Promise<GitProtocol> {
+export async function gitProtocol(cwd = GH_CWD): Promise<GitProtocol | null> {
   for (const args of [["config", "get", "-h", "github.com", "git_protocol"], ["config", "get", "git_protocol"]]) {
     const r = await gh(cwd, args, CONFIG_TIMEOUT_MS);
     if (r.ok && r.out.trim() === "ssh") return "ssh";
     if (r.ok && r.out.trim() === "https") return "https";
   }
-  return "https";
+  return null;
+}
+
+/**
+ * The URLs this machine should try for a repository, best first.
+ *
+ * The repository is what the caller names; the way to reach it is this
+ * machine's own. `gh` speaks for github.com and for no other host, so a
+ * repository somewhere else keeps the URL as it came and only falls back to
+ * the other protocol when that one fails.
+ */
+export async function cloneUrlsFor(url: string, cwd = GH_CWD): Promise<string[]> {
+  const forms = remoteForms(url);
+  const onGitHub = forms?.host.toLowerCase() === "github.com";
+  return cloneCandidates(url, onGitHub ? await gitProtocol(cwd) : null);
 }
 
 /**
@@ -87,7 +105,10 @@ export async function gitProtocol(cwd = GH_CWD): Promise<GitProtocol> {
 export async function listRepos(cwd = GH_CWD): Promise<{ repos: RepoInfo[]; error: string | null }> {
   const [protocol, list] = await Promise.all([gitProtocol(cwd), gh(cwd, LIST_ARGS, LIST_TIMEOUT_MS)]);
   if (!list.ok) return { repos: [], error: list.error };
-  return { repos: parseRepoList(list.out, protocol), error: null };
+  // The row a client shows is one machine's; every daemon works out its own
+  // URL when it clones (`cloneUrlsFor`), so this one only has to name the
+  // repository.
+  return { repos: parseRepoList(list.out, protocol ?? "https"), error: null };
 }
 
 /** What runs `gh` for the one write. A test passes one that never spawns. */
@@ -131,6 +152,6 @@ export async function createRepo(o: { name: string; visibility: "private" | "pub
   if (!url) throw new Error(`gh made ${name} but did not print its URL; find it on GitHub and add it by URL`);
   const { host, pathname } = new URL(url);
   const nameWithOwner = pathname.replace(/^\//, "").replace(/\.git$/, "");
-  const protocol = deps.protocol ?? (await gitProtocol());
+  const protocol = deps.protocol ?? (await gitProtocol()) ?? "https";
   return { nameWithOwner, cloneUrl: cloneUrlFor({ url, sshUrl: `git@${host}:${nameWithOwner}.git` }, protocol) };
 }

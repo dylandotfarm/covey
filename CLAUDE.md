@@ -134,6 +134,19 @@
   project on a base another one already holds. Never key any of this on
   `repositoryIdentity` alone: a thread would start from the wrong commit and open its pull
   request against the wrong base.
+- A project's URL names the *repository*; how to reach it is each machine's own business
+  (#157). The client sends one URL to the whole pool, and every daemon works out its own
+  clone URL with `cloneUrlsFor` — two machines may be set up for different styles of
+  authentication on purpose, one on an ssh key and one on the `gh` token over https, and
+  the machine that happened to answer the repository pick must not decide for the rest.
+  `gh` speaks for github.com and for no other host, so a repository elsewhere keeps the URL
+  as it came, and `remoteForms` rewrites nothing it cannot name — a path, a host from the
+  user's ssh config, a port, a credential in the URL. The other protocol follows as a
+  second chance inside the same clone budget, so a machine whose `gh` says `ssh` but which
+  holds no key still gets its project; `origin` and `Project.remoteUrl` then keep the URL
+  that answered, so every later fetch and push takes that route. A git call that reaches a
+  remote runs with no terminal prompt and with `ssh -o BatchMode=yes`, because a daemon has
+  no terminal and a prompt is a command that hangs until its timeout.
 - A covey session knows which thread it is: the daemon puts `COVEY_THREAD_ID` and
   `COVEY_PROJECT_ID` in the environment of every Claude session it starts. Pass the thread
   id back as `threadId` at `hello` and every thread and every run that connection creates
