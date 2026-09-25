@@ -363,7 +363,7 @@ const SOLARIZED: Palette = {
  * the theme whole, and a reader who sets neither still gets readable text.
  */
 export const THEMES: Theme[] = [
-  { id: "covey", label: "covey", hint: "the default — near-black greys, one indigo accent", palette: COVEY },
+  { id: "covey", label: "covey", hint: "near-black greys, one indigo accent", palette: COVEY },
   { id: "catppuccin", label: "Catppuccin Mocha", hint: "terminal background #1e1e2e", palette: CATPPUCCIN },
   { id: "dracula", label: "Dracula", hint: "terminal background #282a36", palette: DRACULA },
   { id: "everforest", label: "Everforest Dark", hint: "terminal background #2d353b", palette: EVERFOREST },
