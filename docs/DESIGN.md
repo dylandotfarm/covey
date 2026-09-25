@@ -200,7 +200,9 @@ idleMinutes }` — the number to compare a `ps` list against when a machine hold
 processes than this daemon started.
 
 `COVEY_SESSION_IDLE_MINUTES` and `COVEY_MAX_LIVE_SESSIONS` seed the two settings for a machine
-whose `daemon.json` says nothing. `sessionIdleMinutes: 0` keeps every session for ever.
+whose `daemon.json` says nothing. `sessionIdleMinutes: 0` keeps every session for ever. Both
+limits are also rows on the machine control panel and on the web client's machine sheet, so
+changing one needs neither an ssh session nor a restart — see *The machine control panel*.
 
 ## Credentials, and the 401 that follows a rotation or an expiry
 
@@ -1017,6 +1019,26 @@ daemon current does not mean finding an ssh session for it:
 - **Restart** — the same restart without the pull.
 - **Default model** and **default mode** (manual / auto / bypass) for new threads on that
   machine.
+- **Live sessions** and **Release when idle** — the two session limits, which is to say how
+  much memory that machine spends on Claude sessions. Neither is a default a new thread
+  inherits: both apply to the threads running now, and the daemon re-sweeps as soon as one
+  changes, so a lower ceiling frees memory on the spot.
+
+  A `null` in either setting means "the daemon's own default", and no client can work out
+  what that resolves to — the ceiling's default is read from the machine's memory, so it is 4
+  on a Pi and 8 on a workstation. So the daemon says: `MachineInfo.sessionBudget` carries the
+  two resolved figures and what one session costs, and it is re-sent with every
+  `machine.updated`. The panel therefore reads `from memory (4)` and `default (2 hours)`
+  rather than the bare word, and every row of the ceiling's picker is priced
+  (`4 sessions · about 1.3 GB`) — the count of sessions is not what the reader is choosing.
+  A daemon built before that field says "default" with no number, rather than a guess made
+  from the memory of the machine the *client* runs on.
+
+  The words are `packages/client/src/sessionBudget.ts`: pure, node-tested, and read by the
+  TUI's panel and the web client's machine sheet both, so the setting reads the same on a
+  phone and in a terminal. Keep the panel's hints short — `Overlay` gives the label whatever
+  the hint leaves of the row, so a long hint truncates the label away and the row reads as
+  its own footnote. The picker is where the reasoning fits.
 - **covey settings** — the last row, and the odd one out: it opens *this client's* own
   panel, which no daemon hears about. That is the whole distinction the row's hint draws,
   and it is there because "settings" is what a reader goes looking for on a control panel.
@@ -1492,9 +1514,6 @@ streaming, queueing, and diff capture.
   repository, over ssh or over git served by the daemon, and daemons do not talk to each
   other. The upgrade to a remote is easy once it exists: set the remote URL on every member
   and push once.
-- **A control for the session limits**: `sessionIdleMinutes` and `maxLiveSessions` are in
-  `MachineSettings`, and the machine control panel does not offer them yet. Until it does,
-  `daemon.json` or the two environment variables set them.
 - **An issue claim every machine can see**: `thread.takeIssue` refuses a number another
   live thread holds on the same machine, and no further. Daemons do not talk to each other,
   so a claim across the pool needs a record on GitHub (an assignee, or a comment), which

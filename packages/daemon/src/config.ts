@@ -102,7 +102,7 @@ export interface DaemonConfig {
 export const DEFAULT_SESSION_IDLE_MINUTES = 120;
 
 /** What one live session costs in resident memory. Measured: 271-363 MB. */
-const SESSION_MEMORY_BYTES = 300 * 1024 * 1024;
+export const SESSION_MEMORY_BYTES = 300 * 1024 * 1024;
 
 /**
  * How many sessions this machine keeps live when nobody said otherwise.

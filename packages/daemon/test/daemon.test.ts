@@ -334,15 +334,26 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal(e.permissionMode, "plan");
   assert.equal(e.streaming, false, "an explicit choice still wins");
 
+  // What a `null` resolves to, so a control panel can print the number behind
+  // the word "default". No client can work this out: the live ceiling is read
+  // from this machine's memory.
+  const budget = async () => (await a.rpc("shell.snapshot", {})).machine.sessionBudget;
+  const fresh = await budget();
+  assert.equal(fresh!.idleMinutes, 120, "the default idle limit, said out loud");
+  assert.ok(fresh!.liveLimit >= 2 && fresh!.liveLimit <= 8, `a ceiling from this machine's memory, got ${fresh!.liveLimit}`);
+  assert.equal(fresh!.sessionMemoryBytes, 300 * 1024 * 1024, "what one session costs, so a panel can price a ceiling before it is set");
+
   // The session limits live beside the rest, and a nonsense value reads as "no
   // opinion" rather than as a limit that would release every session at once.
   await a.command({ type: "machine.settings", sessionIdleMinutes: 30, maxLiveSessions: 0 });
   assert.equal((await settings()).sessionIdleMinutes, 30);
   assert.equal((await settings()).maxLiveSessions, 1, "one live session is the smallest budget there is");
   assert.equal(JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8")).sessionIdleMinutes, 30, "and survives a restart");
+  assert.deepEqual(await budget(), { idleMinutes: 30, liveLimit: 1, sessionMemoryBytes: 300 * 1024 * 1024 }, "the resolved figures follow the settings");
 
   await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null });
   assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, bind: "loopback" }, "and can be cleared again");
+  assert.deepEqual(await budget(), fresh, "and the resolved figures come back with them");
 });
 
 test("streaming is a per-thread switch that needs no restart", async () => {

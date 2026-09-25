@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { projectPool } from "@covey/client";
+import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
@@ -87,6 +87,15 @@ const MACHINE_MODES: PickOption[] = [
   { id: "acceptEdits", label: "Auto", hint: "file edits go through, other tools ask" },
   { id: "bypassPermissions", label: "Bypass", hint: "never ask" },
 ];
+
+/**
+ * The session-limit choices as panel rows. `@covey/client` holds the list, so
+ * the phone offers the same words; this puts the TUI's own mark on the row in
+ * force, the way every other picker here does.
+ */
+function budgetRows(choices: BudgetChoice[]): PickOption[] {
+  return choices.map((c) => ({ id: c.id, label: c.label, hint: c.current ? "current" : c.hint }));
+}
 
 /** The states the operator sets by hand in the run panel, in `t`'s order. */
 const MEMBER_STATES: RunMemberState[] = ["working", "review", "blocked", "merged", "withdrawn", "dispatched", "planned"];
@@ -703,6 +712,10 @@ export function App({ store }: { store: Store }) {
     // knowing: a machine on a newer Claude Code offers newer models. The
     // built-in list stands in for a daemon too old to send one.
     const models = info.models ?? KNOWN_MODELS;
+    // What `null` resolves to for the two session limits. Only the daemon can
+    // say: the live ceiling is read from that machine's memory. Undefined on a
+    // daemon built before the field, and the labels then say "default" alone.
+    const budget = info.sessionBudget;
     const defaultLabel = settings.defaultModel
       ? modelLabel(settings.defaultModel, models)
       : "from Claude settings";
@@ -717,6 +730,16 @@ export function App({ store }: { store: Store }) {
       { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
       { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
       ...(settings.bind ? [{ id: "bind", label: `Reachable on: ${bindLabel(settings.bind)}`, hint: "where the daemon listens; changes at once" }] : []),
+      // The memory dial of this machine. A session is a subprocess of about
+      // 300 MB, so the ceiling is what the reader is really setting; the hint
+      // prices it rather than repeating the number in the label.
+      //
+      // Both hints are short on purpose. `Overlay` gives the label what the
+      // hint leaves of the row, so a long hint here truncates the label away
+      // and the row reads as its own footnote. The picker each row opens is
+      // where the reasoning fits.
+      { id: "live", label: `Live sessions: ${liveValueLabel(settings.maxLiveSessions, budget)}`, hint: sessionMemoryLabel(settings.maxLiveSessions ?? budget?.liveLimit ?? 0, budget) || "the memory ceiling" },
+      { id: "idle", label: `Release when idle: ${idleValueLabel(settings.sessionIdleMinutes, budget)}`, hint: "resumes from disk" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
     // The client's own settings, from the place a reader looks for settings.
@@ -763,6 +786,23 @@ export function App({ store }: { store: Store }) {
             () => store.notify(`${info.name} now listens on ${bindLabel(bid)}`, "success"),
             (e: Error) => store.notify(`${info.name}: ${e.message}`, "error"),
           );
+        });
+        // Both limits take the same shape: `""` clears the setting back to the
+        // daemon's default, and any other id is the number to send. The daemon
+        // re-sweeps on the spot, so a lower ceiling frees memory now.
+        case "live": return openPick(`Live sessions on ${info.name}`, budgetRows(liveChoices(settings.maxLiveSessions, budget)), (v) => {
+          store.setOverlay(null);
+          const n = budgetValue(v);
+          void store.setMachineDefaults(machineKey!, { maxLiveSessions: n });
+          store.notify(`${info.name}: keeps ${n === null ? `as many sessions live as its memory allows${budget ? ` (${budget.liveLimit})` : ""}` : `${n} session${n === 1 ? "" : "s"} live`}`);
+        });
+        case "idle": return openPick(`Release an idle session on ${info.name}`, budgetRows(idleChoices(settings.sessionIdleMinutes, budget)), (v) => {
+          store.setOverlay(null);
+          const n = budgetValue(v);
+          void store.setMachineDefaults(machineKey!, { sessionIdleMinutes: n });
+          store.notify(`${info.name}: ${n === 0
+            ? "keeps an idle session until the live-session limit releases it"
+            : `releases an idle session after ${idleValueLabel(n, budget)}`}`);
         });
         case "log": { store.setOverlay({ kind: "update", machine: machineKey! }); return; }
         case "settings": return settingsPanel();
@@ -1131,7 +1171,7 @@ export function App({ store }: { store: Store }) {
     if (contextProject) opts.push({ id: "pooladd", label: "Add a machine to this project — clone it there too" });
     opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
-    opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults", hint: "enter on a machine" });
+    opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults, session memory", hint: "enter on a machine" });
     // Only offered when there is something to retry, so the list does not grow
     // a row that does nothing on a fleet that is all up.
     const offline = state.order.filter((k) => state.machines.get(k)?.conn === "offline");

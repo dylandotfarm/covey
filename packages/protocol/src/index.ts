@@ -78,6 +78,33 @@ export interface MachineInfo {
    * is what covey stores for "no model set".
    */
   claudeDefaultModel?: ModelChoice;
+  /**
+   * What this machine's session limits resolve to, and what one session costs
+   * there. Absent on a daemon built before the field.
+   */
+  sessionBudget?: SessionBudget;
+}
+
+/**
+ * The memory a machine spends on live Claude sessions, resolved.
+ *
+ * `sessionIdleMinutes` and `maxLiveSessions` read `null` for "the daemon's own
+ * default", and no client can work out what either default is: the idle one is
+ * a constant the daemon holds, and the live one is read from the machine's
+ * memory, which differs per machine. So the daemon says, and a control panel
+ * can name the number a reader is about to change instead of the word
+ * "default". Re-sent with every `machine.updated`.
+ */
+export interface SessionBudget {
+  /** Minutes a thread may idle before its session is released; `0` = never. */
+  idleMinutes: number;
+  /** Sessions this machine keeps live at one time. */
+  liveLimit: number;
+  /**
+   * What one live session costs in resident memory, in bytes. Measured, not
+   * read from the machine, so a panel can price a ceiling before it is set.
+   */
+  sessionMemoryBytes: number;
 }
 
 /**
