@@ -1,4 +1,6 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { platform } from "node:os";
 import { join } from "node:path";
 import { dataDir } from "./config.js";
 
@@ -61,15 +63,62 @@ export function clearPidFile(port: number, pid: number): void {
 }
 
 /**
- * True when a process with this pid exists. Signal 0 delivers nothing; it only
- * tests the pid. `EPERM` means the process exists and belongs to another user,
- * so it counts as alive.
+ * True when a process with this pid can still do something.
+ *
+ * Signal 0 delivers nothing; it only tests the pid. `EPERM` means the process
+ * exists and belongs to another user, so it counts as alive.
+ *
+ * A zombie does not count. It is a process that has already exited and waits
+ * for a parent that will never read its status, and signal 0 succeeds on one
+ * for as long as that parent lives. covey makes such a parent itself: the CLI
+ * starts the local daemon as a detached child, then relaunches itself with
+ * `process.execve`, which keeps the pid and leaves the child watcher behind
+ * with the old runtime. The daemon it stops next is nobody's to reap. So
+ * `stopDaemon` waited ten seconds on a corpse, said "the daemon did not
+ * restart", and skipped the daemon it was about to start — every second update
+ * (#153). A zombie holds no port and runs no code, so it is not a daemon.
  */
 export function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (e: any) {
     return e?.code === "EPERM";
   }
+  return !isZombie(pid);
+}
+
+/** The `ps` keyword for the process state. BSD spells it one way, POSIX the other. */
+const STATE_KEYWORDS = ["state=", "stat="];
+
+/**
+ * True when the pid names a process that has exited and was never reaped.
+ *
+ * Linux answers from `/proc`, which costs one read. Everywhere else `ps`
+ * answers: macOS and Linux both print `Z` first in the state column. A
+ * question `ps` cannot answer reads as "not a zombie", which is what this file
+ * assumed before it could ask at all.
+ */
+function isZombie(pid: number): boolean {
+  if (platform() === "win32") return false;
+  if (platform() === "linux") {
+    try {
+      // The second field is the command, it may hold ")" and spaces, and the
+      // state is the character after it. So read from the last ") ", never the
+      // first.
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const end = stat.lastIndexOf(") ");
+      return end >= 0 && stat[end + 2] === "Z";
+    } catch {
+      return false;
+    }
+  }
+  for (const keyword of STATE_KEYWORDS) {
+    try {
+      const out = execFileSync("ps", ["-o", keyword, "-p", String(pid)], { timeout: 2000, stdio: ["ignore", "pipe", "ignore"] });
+      return out.toString().trim().startsWith("Z");
+    } catch {
+      // An unknown keyword, or no `ps` at all. Try the other spelling.
+    }
+  }
+  return false;
 }
