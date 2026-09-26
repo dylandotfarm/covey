@@ -65,6 +65,18 @@
   ends at a separator is never a directory drop, because that is exactly what the front half
   of a cut path looks like. Both routes end at the same `attach`, so a change to one wants the
   other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`).
+- The agent shows its own work the same way the reader drops one (#160): `covey show
+  shot.png --text "…"` copies the file into that one store and writes a `note` carrying
+  `SystemNoteItem.files`, which the web client paints inline and the TUI names with an
+  OSC 8 link to the daemon's `/file` route (`threadFileUri`, `httpBaseFor`) — the daemon
+  that holds the thread serves it, so a TUI on a laptop opens a screenshot made anywhere.
+  A note carries no `groupId`, so a picture never folds away into a chain row. The store's
+  boundary does not move: `thread.showFiles` copies *into* it, and `/file` still serves
+  that one thread's own files. The command answers a loopback connection only, as
+  `secrets.env` does, because `path` names a file on the daemon's machine. This is not
+  `covey pr --attach`, and never becomes it: one shows a thing to the person reading now,
+  the other puts it on a pull request. Change `packages/cli/src/show.ts` and the `/covey`
+  skill together, as with the loop and `covey env`.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled

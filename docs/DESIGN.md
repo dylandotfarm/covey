@@ -436,7 +436,7 @@ responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Meth
 `thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
 `run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`,
-`thread.commentPullRequest`, `github.item/act`, `secrets.list/env`.
+`thread.commentPullRequest`, `thread.showFiles`, `github.item/act`, `secrets.list/env`.
 
 ## Secrets: an environment the agent uses and never reads
 
@@ -1321,6 +1321,37 @@ deleted is a file dropped with nothing said. Every file of one directory shares 
 **Not yet:** the bytes live on exactly one machine. A thread that moves takes its timeline but
 not its files, and no client can ask for a file back. #85 has the shape of the content-addressed
 store that would fix both.
+
+## Showing a file: the other direction through the same store (#160)
+
+A drop carries a file *to* the agent. `covey show` carries one *from* it — a screenshot of the
+bug, a recording of the fix, a chart — to the person reading the thread. Before it, the only
+way to let anybody look at an agent's picture was to put it on GitHub with `covey pr open
+--attach`, which needs a pull request and is the wrong place for a thing said in passing.
+
+`thread.showFiles` is the call. It answers a **loopback connection only**, like `secrets.env`
+and for the same reason: `path` names a file on the daemon's machine, so only something on
+that machine can name one. `storeShownFiles` copies each file into the same store a drop lands
+in, under the same `safeName`, and a file already inside the store is left where it is. The
+copy matters twice over: `/file` serves that store and nothing else on disk, and the agent's
+`/tmp/shot.png` will not outlive the turn while the transcript has to keep saying what it said.
+128 MB a file and twenty files a call — the bytes never cross the socket, so the cap is not the
+frame size; it is there so a runaway agent cannot fill the worktree.
+
+What lands in the timeline is an ordinary **note** with `files` on it. Not a new item kind: a
+client older than the field paints the note's text and nothing else, where a kind it had never
+heard of would paint nothing at all. A note carries no `groupId`, so a picture is never folded
+away into a chain row. The note's text is the `--text` line and may be empty; then the files
+stand alone.
+
+Every client already knows how to load one, because the route is the one dropped media uses.
+The web client paints an image as an image and a video as a player, the same `attachedEl` a
+message's drops go through. The TUI cannot paint either, so it names each file and hangs an
+OSC 8 link on the name — `threadFileUri`, pointing at `/file` on the *thread's own* daemon,
+with the token the client dials that machine with, because a browser sends no Authorization
+header. That is the case a `file://` path cannot serve, and it is the common one: a TUI on a
+laptop, a daemon on another machine, and a ctrl+click that opens the screenshot in the
+reader's own browser.
 
 ## Thread titles
 

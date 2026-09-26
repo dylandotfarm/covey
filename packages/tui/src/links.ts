@@ -27,6 +27,11 @@
  * A path in the transcript is a path on the *daemon's* host, and the file
  * manager runs on the *client's* host. So a file link is drawn only when the
  * thread's machine is the loopback one. A URL is safe from any machine.
+ *
+ * A file covey is *showing* (#160) is the one path that crosses that line, and
+ * it crosses as a URL: `threadFileUri` points at the daemon's own `/file`
+ * route, so a ctrl+click opens a screenshot made on a machine anywhere in the
+ * reader's own browser.
  */
 import type { Span } from "./lines.js";
 
@@ -44,6 +49,49 @@ export interface LinkContext {
    * Absent, a `#N` stays text.
    */
   repoUrl?: string;
+  /**
+   * Where the thread's own daemon answers over HTTP, as an origin with the
+   * token it needs: `http://box:3790` or `…?token=…`. `threadFileUri` builds
+   * the link that opens a file covey is showing (#160).
+   *
+   * The daemon serves the file, not this machine, which is the whole point:
+   * a TUI on a laptop opens a screenshot made on a daemon anywhere. Absent
+   * for a machine the client has no address for, and then a shown file is a
+   * name and nothing more.
+   */
+  fileBase?: string;
+}
+
+/**
+ * The link that opens one of a thread's own files in a browser (#160).
+ *
+ * The daemon's `/file` route serves it, so the URL carries the thread and the
+ * path exactly as the route reads them, and the token the client dials that
+ * machine with — a browser sends no Authorization header for a link.
+ */
+export function threadFileUri(threadId: string, path: string, ctx: LinkContext | undefined): string | undefined {
+  if (!ctx?.fileBase) return undefined;
+  const [base, query] = splitQuery(ctx.fileBase);
+  const q = new URLSearchParams(query);
+  q.set("thread", threadId);
+  q.set("path", path);
+  return safeUri(`${base}/file?${q.toString()}`);
+}
+
+/**
+ * `LinkContext.fileBase` for one machine: its socket URL as an HTTP origin,
+ * carrying the token when the client dials with one. The daemon answers both
+ * on the same listener, so the port and the credentials are already right.
+ */
+export function httpBaseFor(url: string, token?: string): string {
+  const http = url.replace(/^ws/, "http").replace(/\/+$/, "");
+  return token ? `${http}?token=${encodeURIComponent(token)}` : http;
+}
+
+/** An origin and the query string already on it, which holds the token. */
+function splitQuery(base: string): [string, string] {
+  const i = base.indexOf("?");
+  return i < 0 ? [base.replace(/\/$/, ""), ""] : [base.slice(0, i).replace(/\/$/, ""), base.slice(i + 1)];
 }
 
 /** The web URL of a project's repository, from its normalised remote, or undefined when it is not on GitHub. */

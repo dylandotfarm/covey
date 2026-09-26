@@ -237,6 +237,16 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         // else has a use for it.
         if (!loopback) throw new EngineError("forbidden", "secrets.env answers a connection from this machine only");
         return { env: engine.secretsEnv(p.threadId) };
+      case "thread.showFiles":
+        // `covey show` (#160). The paths name files on this machine, so only
+        // something on this machine can name one — the same rule, and for the
+        // same reason, as `secrets.env` above.
+        if (!loopback) throw new EngineError("forbidden", "thread.showFiles answers a connection from this machine only");
+        return engine.showFiles({
+          threadId: String(p.threadId),
+          text: p.text === undefined ? undefined : String(p.text),
+          files: readAttachmentParams(p.files),
+        });
       case "turn.diff":
         return engine.turnDiff(p.threadId, p.turnId);
       case "usage.report":

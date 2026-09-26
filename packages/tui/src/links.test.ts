@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { findTargets, hyperlinksEnabled, linkSpans, openCommand, openGesture, osc8, repoUrlOf, safeUri, targetUri, toolLink, type LinkContext } from "./links.js";
+import { findTargets, httpBaseFor, hyperlinksEnabled, linkSpans, openCommand, openGesture, osc8, repoUrlOf, safeUri, targetUri, threadFileUri, toolLink, type LinkContext } from "./links.js";
 import { linkAt, markdownToLines, renderItem, wrapSpans, width } from "./lines.js";
 import type { TimelineItem } from "@covey/protocol";
 
@@ -200,4 +200,30 @@ test("repoUrlOf reads a GitHub identity and nothing else", () => {
   assert.equal(repoUrlOf("gitlab.com/o/r"), undefined);
   assert.equal(repoUrlOf(null), undefined);
   assert.equal(repoUrlOf("github.com/o"), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// A file covey is showing (#160)
+// ---------------------------------------------------------------------------
+
+test("a shown file links to the daemon's own route, so a picture made anywhere opens in this browser", () => {
+  const ctx: LinkContext = { localFiles: false, fileBase: httpBaseFor("ws://box:3790") };
+  const uri = threadFileUri("t-1", "/w/.covey/threads/t-1/files/shot.png", ctx);
+  assert.equal(uri, "http://box:3790/file?thread=t-1&path=%2Fw%2F.covey%2Fthreads%2Ft-1%2Ffiles%2Fshot.png");
+});
+
+test("the token the client dials with rides on the link, because a browser sends no header", () => {
+  const ctx: LinkContext = { localFiles: false, fileBase: httpBaseFor("wss://box.ts.net:3790/", "tok en") };
+  const uri = threadFileUri("t-1", "/w/shot.png", ctx)!;
+  const u = new URL(uri);
+  assert.equal(u.origin, "https://box.ts.net:3790");
+  assert.equal(u.pathname, "/file");
+  assert.equal(u.searchParams.get("token"), "tok en");
+  assert.equal(u.searchParams.get("thread"), "t-1");
+  assert.equal(u.searchParams.get("path"), "/w/shot.png");
+});
+
+test("no address for the machine is no link, and never a broken one", () => {
+  assert.equal(threadFileUri("t-1", "/w/shot.png", { localFiles: true }), undefined);
+  assert.equal(threadFileUri("t-1", "/w/shot.png", undefined), undefined);
 });

@@ -9,7 +9,7 @@
  * item id and rebuilt only when the daemon re-sent that item.
  */
 import { acceptCommand, commandLabel, cutTag, spliceTags, tagSpanAt } from "@covey/client";
-import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
+import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Attachment, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
@@ -1052,8 +1052,15 @@ function renderItem(item: TimelineItem, a: Actions, markdown: { media: (url: str
       return approvalCard(item, a);
     case "question":
       return questionCard(item, a);
-    case "note":
-      return h("div", { class: `note ${item.tone}` }, ...refNodes(item.text));
+    case "note": {
+      // A note covey wrote, and — since #160 — the files an agent asked covey
+      // to show. Either may be missing: `covey show shot.png` with no words
+      // of its own is a picture and nothing else.
+      const el = h("div", { class: `note ${item.tone}` }, ...(item.text ? refNodes(item.text) : []));
+      const files = attachedEl(item.threadId, item.files ?? [], fileSrc);
+      if (files) el.append(files);
+      return el;
+    }
     case "error":
       return h("div", { class: "note error" }, item.text);
   }
@@ -1071,11 +1078,16 @@ function renderItem(item: TimelineItem, a: Actions, markdown: { media: (url: str
  * An image shows, a video plays, and anything else is a name that opens.
  */
 function userAttachments(item: UserMessageItem, fileSrc: (threadId: string, path: string) => string): HTMLElement | null {
-  const rows = attachmentRows(item.attachments ?? []);
+  return attachedEl(item.threadId, item.attachments ?? [], fileSrc);
+}
+
+/** The block of media itself, shared by a message's drops and by `covey show`. */
+function attachedEl(threadId: string, atts: Attachment[], fileSrc: (threadId: string, path: string) => string): HTMLElement | null {
+  const rows = attachmentRows(atts);
   if (rows.length === 0) return null;
   const el = h("div", { class: "attached" });
   for (const r of rows) {
-    const src = r.att.path ? fileSrc(item.threadId, r.att.path) : "";
+    const src = r.att.path ? fileSrc(threadId, r.att.path) : "";
     if (!src) { el.append(h("span", { class: "attach-file" }, r.label)); continue; }
     if (r.kind === "image") { el.append(h("img", { class: "media", src, alt: r.label, "data-full": src, loading: "lazy" })); continue; }
     if (r.kind === "video") { el.append(h("video", { class: "media", src, controls: true, playsinline: true, preload: "metadata" })); continue; }
