@@ -130,6 +130,8 @@ details.tool[open] .summary { white-space: normal; overflow-wrap: anywhere; }
 .note { font-size: 13px; color: var(--subtle); text-align: center; padding: 4px 0; }
 .note.warning { color: var(--warning); }
 .note.error { color: var(--danger); text-align: left; white-space: pre-wrap; }
+/* A file covey is showing (#160) sits in the middle, as the note's text does. */
+.note .attached { align-items: center; }
 .activity { display: flex; align-items: center; gap: 8px; color: var(--working); font-size: 14px; }
 .spinner { width: 12px; height: 12px; border: 2px solid var(--working); border-right-color: transparent; border-radius: 50%; animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

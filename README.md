@@ -131,6 +131,14 @@ On the tailnet the phone needs no token for any of them. Tap a thread to read it
 and answer an approval or a question. Tap `+` on a project to start a thread. The phone does
 not dispatch runs, move threads, or update machines; the TUI does those.
 
+An agent can put a picture or a video in the conversation itself: `covey show shot.png
+--text "the sidebar after the fix"`. covey copies the file into that thread's own files and
+serves it from the machine the thread runs on, so the phone shows an image inline and plays
+a video where it sits. The TUI cannot paint either, so it names each file and hangs a link
+on the name: ctrl+click, and the file opens in a browser — which is what makes this work
+when the daemon is on another machine. Nothing goes to GitHub and nothing is committed;
+`covey pr open --attach` is still the way to put a demo on a pull request.
+
 ## Keys
 
 | Key | Where | Action |

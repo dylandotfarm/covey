@@ -7,7 +7,7 @@ import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, 
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
-import { hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, type LinkContext } from "../links.js";
+import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
 
 const HYPERLINKS = hyperlinksEnabled();
@@ -250,7 +250,11 @@ export function App({ store }: { store: Store }) {
   // same from every machine.
   const viewProjectId = state.view?.thread?.projectId ?? null;
   const viewRepoUrl = viewMachine && viewProjectId ? repoUrlOf(state.machines.get(viewMachine)?.projects.get(viewProjectId)?.repositoryIdentity) : undefined;
-  const linkCtx = useMemo<LinkContext>(() => ({ localFiles: !!viewMachine && isLoopbackUrl(viewMachine), homeDir: viewHome, repoUrl: viewRepoUrl }), [viewMachine, viewHome, viewRepoUrl]);
+  // Where the thread's own daemon answers over HTTP, so a file covey is
+  // showing opens in a browser (#160). The same host, port and token the
+  // client already dials, because the daemon serves both on one listener.
+  const viewFileBase = viewMachine ? httpBaseFor(viewMachine, state.machines.get(viewMachine)?.saved.token) : undefined;
+  const linkCtx = useMemo<LinkContext>(() => ({ localFiles: !!viewMachine && isLoopbackUrl(viewMachine), homeDir: viewHome, repoUrl: viewRepoUrl, fileBase: viewFileBase }), [viewMachine, viewHome, viewRepoUrl, viewFileBase]);
   // The lines of every item that did not change. A streamed reply replaces one
   // item and leaves the rest alone, so without this the client lays out the
   // whole transcript sixteen times a second to follow a single paragraph.

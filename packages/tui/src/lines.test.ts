@@ -224,3 +224,31 @@ test("a queued message keeps its note under the block, not under the pane", () =
   assert.equal(lineWidth(note), 80, "the note ends where the block ends");
   assert.ok(indentOf(note) > 20, "so it reads with the message rather than with the margin");
 });
+
+test("a file covey is showing is a row of its own, with the daemon's link on the name (#160)", () => {
+  const item = {
+    id: "n1", threadId: "t-1", turnId: null, seq: 1, createdAt: "", updatedAt: "",
+    kind: "note", tone: "info", text: "the composer after the fix",
+    files: [{ name: "shot.png", path: "/w/.covey/threads/t-1/files/shot.png", mimeType: "image/png" }],
+  } as const;
+  const links = { localFiles: false, fileBase: "http://box:3790" };
+  const lines = renderItem(item as any, { width: 60, expanded: new Set(), links });
+  assert.match(text(lines[0]!), /the composer after the fix/);
+  assert.match(text(lines[1]!), /⎘ shot\.png/);
+  const name = lines[1]!.find((s) => s.text === "shot.png");
+  assert.equal(name!.link, "http://box:3790/file?thread=t-1&path=%2Fw%2F.covey%2Fthreads%2Ft-1%2Ffiles%2Fshot.png");
+
+  // No address for that machine: the name still shows, and links nowhere.
+  const noLink = renderItem(item as any, { width: 60, expanded: new Set(), links: { localFiles: true } });
+  assert.match(text(noLink[1]!), /⎘ shot\.png/);
+  assert.equal(noLink[1]!.find((s) => s.text === "shot.png")!.link, undefined);
+});
+
+test("a shown file with no words of its own is the file alone (#160)", () => {
+  const lines = renderItem({
+    id: "n2", threadId: "t-1", turnId: null, seq: 1, createdAt: "", updatedAt: "",
+    kind: "note", tone: "info", text: "",
+    files: [{ name: "demo.mp4", path: "/w/demo.mp4", mimeType: "video/mp4" }],
+  } as any, { width: 60, expanded: new Set(), links: { localFiles: false, fileBase: "http://box:3790" } });
+  assert.match(text(lines[0]!), /⎘ demo\.mp4/);
+});

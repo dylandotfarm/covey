@@ -1081,6 +1081,19 @@ export interface SystemNoteItem extends ItemBase {
   kind: "note";
   tone: "info" | "warning";
   text: string;
+  /**
+   * Files covey shows in the conversation (#160), already in the thread's file
+   * store and served by that machine's `/file` route.
+   *
+   * This is how an agent shows its own work: `covey show shot.png` copies the
+   * file into the store and writes one of these notes. The web client paints
+   * an image as an image and a video as a player; the TUI names each file and
+   * links it to the route, so a ctrl+click opens it in a browser.
+   *
+   * Optional, so a client older than the field paints the note's text and
+   * nothing else, which is what it did before.
+   */
+  files?: Attachment[];
 }
 
 export interface ErrorItem extends ItemBase {
@@ -1170,6 +1183,19 @@ export const PACK_ATTACHMENT_BYTES = 1024 * 1024;
  * refusal that says the count is kinder than a minute of reading.
  */
 export const MAX_DIRECTORY_FILES = 200;
+
+/**
+ * What one file shown in the conversation may weigh (#160).
+ *
+ * These bytes never cross the socket — the daemon copies the file on its own
+ * disk and serves it over HTTP, a range at a time — so the cap is not the
+ * frame size. It is there so a runaway agent cannot fill the worktree, and it
+ * is large enough for a screen recording of a minute.
+ */
+export const MAX_SHOWN_BYTES = 128 * 1024 * 1024;
+
+/** How many files one `covey show` may name. */
+export const MAX_SHOWN_FILES = 20;
 
 /** Image media types the model accepts. */
 export const IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
@@ -1974,6 +2000,23 @@ export interface RpcMethods {
    * runs the work, and a remote client has no use for one.
    */
   "secrets.env": { params: { threadId: ThreadId }; result: { env: Record<string, string> } };
+  /**
+   * Put files in a thread's conversation (#160), for `covey show`.
+   *
+   * The daemon copies each one into the thread's file store and writes one
+   * note that carries them, so every client can load them from that machine's
+   * `/file` route: inline on a phone, and a link to a browser in the TUI.
+   *
+   * Loopback only, and for the same reason as `secrets.env`: `path` names a
+   * file on the daemon's machine, so only something on that machine can name
+   * one. A connection from anywhere else is refused with code `forbidden`.
+   *
+   * `text` is one line saying what the files show, and may be empty.
+   */
+  "thread.showFiles": {
+    params: { threadId: ThreadId; text?: string; files: { name: string; path: string }[] };
+    result: { files: { name: string; path: string }[] };
+  };
   /** Full patch for a turn; `turnId` omitted = latest turn with a diff. */
   "turn.diff": { params: { threadId: ThreadId; turnId?: TurnId }; result: TurnDiff | null };
   /**

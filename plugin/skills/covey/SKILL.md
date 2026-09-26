@@ -127,6 +127,37 @@ harness, a browser driven by a script, `ffmpeg`, or a terminal capture. Keep
 a video short, under a minute, and name what it shows in the body next to
 the placeholder.
 
+## Show a file in the conversation
+
+`covey show` puts a picture or a video in *this conversation*, where the
+reader is already looking. Use it for anything a person should look at that
+does not belong to a pull request: the screenshot of the bug they described,
+the recording of the fix, a chart. The file is copied into the thread's own
+files and served by this machine — nothing goes to GitHub and nothing is
+committed.
+
+```
+covey show shot.png --text "the sidebar after the fix"
+covey show before.png after.png --text "before, and after"
+covey show demo.mp4
+```
+
+The rules:
+
+- The reader sees an image and a video inline on a phone. In the TUI each file
+  is a row that opens in a browser on ctrl+click, so this works when the daemon
+  runs on another machine.
+- `--text` is one line saying what the files show. It is optional; with none,
+  the files stand alone.
+- Twenty files at a time, and 128 MB each.
+- The file must be on this machine, which is where your shell runs.
+- The command prints where each copy went. Name that path in a later
+  `covey pr open --attach` and the picture reaches GitHub as well.
+
+`covey show` and `--attach` answer different questions. Use `--attach` for the
+demo that belongs to the pull request, and `covey show` to let the person you
+are talking to look at something now.
+
 ## Secrets: use them by name, never print one
 
 A project or a thread may hold credentials that covey keeps for you. They are
@@ -172,6 +203,8 @@ covey pr watch <n> [--auto]   watch a pull request opened by hand
 covey pr watch --stop         stop the watch
 covey pr policy auto|manual   change who merges
 covey pr status               the issue, the pull request and the watch of this thread
+covey show <file>... [--text "…"]
+                              put a picture or a video in this conversation
 covey env                     the secrets this thread can use, by name
 covey env exec -- <cmd>       run one command with those secrets in its environment
 ```

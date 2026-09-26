@@ -47,9 +47,18 @@ export function threadFileTarget(root: string, path: string | null): string | nu
   return file;
 }
 
+/**
+ * The media type of a file, by its extension, or null for one the page does
+ * not render. The route below answers with it, and `storeShownFiles` records
+ * it on the attachment, so one map says what a file is.
+ */
+export function mimeOf(file: string): string | null {
+  return TYPES[extname(file).toLowerCase()] ?? null;
+}
+
 /** What to answer a request for `file` with: its media type, and whether the page may show it. */
 export function fileHeaders(file: string): { type: string; inline: boolean } {
-  const type = TYPES[extname(file).toLowerCase()];
+  const type = mimeOf(file);
   // An SVG is a document the browser runs scripts in, so it downloads rather
   // than renders: the bytes came from whoever dropped it.
   if (!type || type === "image/svg+xml") return { type: "application/octet-stream", inline: false };

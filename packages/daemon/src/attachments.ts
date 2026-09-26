@@ -2,8 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, copyFileSync, rmSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, isImageMime, type Attachment } from "@covey/protocol";
+import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_SHOWN_BYTES, MAX_SHOWN_FILES, isImageMime, type Attachment } from "@covey/protocol";
 import { dataDir } from "./config.js";
+import { mimeOf } from "./threadFiles.js";
 
 /**
  * Attachments arrive from the TUI with their bytes inline, because the TUI may
@@ -144,6 +145,57 @@ function ignoreStore(cwd: string): void {
     const ignore = join(cwd, ".covey", ".gitignore");
     if (!existsSync(ignore)) writeFileSync(ignore, "*\n");
   } catch { /* best effort; the files matter more than the status */ }
+}
+
+/** One file an agent asks covey to show, as `covey show` names it. */
+export interface ShownFile {
+  /** What to call it in the transcript. The base name, as a rule. */
+  name: string;
+  /** Absolute path on this machine. */
+  path: string;
+}
+
+/**
+ * Put the files of one `covey show` into the thread's file store (#160).
+ *
+ * The agent made these itself, on this machine, so there are no bytes on the
+ * wire to unpack and no name off the wire to cut down — only a path to read.
+ * They are *copied* rather than pointed at, for two reasons: the route serves
+ * that one store and nothing else on disk, and the agent's `/tmp/shot.png`
+ * will not outlive the turn, while the transcript has to keep saying what it
+ * said.
+ *
+ * A file already inside the store stays where it is. An agent that wrote
+ * straight into `.covey/threads/<id>/files` has already done the copy.
+ *
+ * @throws AttachmentError with a sentence for the agent's tool output.
+ */
+export function storeShownFiles(cwd: string, threadId: string, files: ShownFile[]): Attachment[] {
+  if (files.length === 0) throw new AttachmentError("name at least one file to show");
+  if (files.length > MAX_SHOWN_FILES) throw new AttachmentError(`covey show takes ${MAX_SHOWN_FILES} files at a time, not ${files.length}`);
+  const root = threadFilesDir(cwd, threadId);
+  mkdirSync(root, { recursive: true });
+  ignoreStore(cwd);
+  const taken = new Set<string>();
+  return files.map((f) => {
+    let size: number;
+    try {
+      const st = statSync(f.path);
+      if (st.isDirectory()) throw new AttachmentError(`${f.path} is a directory; covey show takes files`);
+      if (!st.isFile()) throw new AttachmentError(`${f.path} is not a file`);
+      size = st.size;
+    } catch (e: any) {
+      if (e instanceof AttachmentError) throw e;
+      throw new AttachmentError(`could not read ${f.path}: ${e?.message ?? e}`);
+    }
+    if (size > MAX_SHOWN_BYTES) {
+      throw new AttachmentError(`${f.name} is ${mb(size)} MB, over the ${mb(MAX_SHOWN_BYTES)} MB limit for a file shown in the conversation`);
+    }
+    const name = safeName(f.name);
+    const dest = within(root, f.path) ? f.path : join(root, unique(root, name, taken));
+    if (dest !== f.path) copyFileSync(f.path, dest);
+    return { name, path: dest, mimeType: mimeOf(dest) ?? "application/octet-stream" };
+  });
 }
 
 /** Drop a thread's file store, for a thread being deleted. */

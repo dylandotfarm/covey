@@ -14,7 +14,7 @@ import { makeSessionStore } from "./sessionStore.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
 import { redactDeep, redactor } from "./redact.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
-import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, threadFilesDir } from "./attachments.js";
+import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { ChainTracker, summariseActivity } from "./activity.js";
@@ -1795,6 +1795,30 @@ export class Engine {
     const wt = await createWorktree(p.workspaceRoot, name, cleanStart.ref, path);
     if ("error" in wt) throw new EngineError("git", `could not create worktree from ${cleanStart.ref}: ${wt.error}`);
     return { worktreePath: wt.path, branch: wt.branch, cleanStart, carried: false };
+  }
+
+  /**
+   * Show files in a thread's conversation (#160).
+   *
+   * `covey show shot.png` reaches here. The files are copied into the thread's
+   * file store and one note carries them, so every client that reads the
+   * thread can load them from this machine's `/file` route — the phone paints
+   * them inline, and the TUI links them into a browser.
+   *
+   * The paths name files on this machine, which is why `server.ts` answers
+   * this on a loopback connection only. Nothing goes to GitHub and nothing is
+   * shown to the model: the agent made these and has already seen them.
+   */
+  showFiles(p: { threadId: string; text?: string; files: ShownFile[] }): { files: { name: string; path: string }[] } {
+    const t = this.db.getThread(p.threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const files = storeShownFiles(this.threadCwd(t), t.id, p.files);
+    const now = new Date().toISOString();
+    this.persistItem({
+      id: `note:${randomUUID()}`, threadId: t.id, turnId: null, seq: 0, createdAt: now, updatedAt: now,
+      kind: "note", tone: "info", text: p.text?.trim() ?? "", files,
+    });
+    return { files: files.map(({ name, path }) => ({ name, path })) };
   }
 
   /**

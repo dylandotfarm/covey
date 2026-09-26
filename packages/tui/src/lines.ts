@@ -1,6 +1,6 @@
 import { questionAnswers, questionAsks, type TimelineItem, type ToolCallItem } from "@covey/protocol";
 import { tableAt, type ChainRow, type SaidRow, type Table } from "@covey/client";
-import { linkSpans, targetUri, toolLink, wordAt, type LinkContext } from "./links.js";
+import { linkSpans, targetUri, threadFileUri, toolLink, wordAt, type LinkContext } from "./links.js";
 import { T, themeGeneration } from "./theme.js";
 
 /**
@@ -468,8 +468,20 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       lines.push([]);
       return lines;
     }
-    case "note":
-      return [...wrapSpans([{ text: "  ─ " + item.text, color: item.tone === "warning" ? T.warning : T.subtle, italic: true }], w, o.links), []];
+    case "note": {
+      const color = item.tone === "warning" ? T.warning : T.subtle;
+      const lines: Line[] = item.text ? wrapSpans([{ text: "  ─ " + item.text, color, italic: true }], w, o.links) : [];
+      // A file covey is showing (#160). The terminal cannot paint a picture,
+      // so the row is the file's name with the daemon's own `/file` link on
+      // it: ctrl+click, and it opens in a browser — on the reader's machine,
+      // from the daemon's, which is the case a `file://` path cannot serve.
+      for (const f of item.files ?? []) {
+        const link = threadFileUri(item.threadId, f.path, o.links);
+        lines.push(...wrapSpans([{ text: "    ⎘ " }, { text: f.name, color: link ? T.accent : color, link }], w));
+      }
+      lines.push([]);
+      return lines;
+    }
     case "error":
       return [...wrapSpans([{ text: "  ✗ " + item.text, color: T.danger }], w, o.links), []];
   }

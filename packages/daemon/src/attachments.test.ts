@@ -8,7 +8,7 @@ import { join } from "node:path";
 // dataDir() reads COVEY_HOME at call time, so point it at a throwaway dir
 // before importing the module under test.
 process.env.COVEY_HOME = mkdtempSync(join(tmpdir(), "covey-daemon-att-"));
-const { materialiseAttachments, attachmentBlocks, threadFilesDir, removeThreadFiles } = await import("./attachments.js");
+const { materialiseAttachments, attachmentBlocks, storeShownFiles, threadFilesDir, removeThreadFiles } = await import("./attachments.js");
 
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 const b64 = (b: Buffer) => b.toString("base64");
@@ -162,4 +162,68 @@ test("a file already on this machine is left where it is", () => {
   writeFileSync(here, "here");
   const [a] = materialiseAttachments(dir, "t", [{ name: "already.txt", path: here, mimeType: "text/plain" }]);
   assert.equal(a!.path, here);
+});
+
+// ---------------------------------------------------------------------------
+// covey show (#160)
+// ---------------------------------------------------------------------------
+
+test("a file an agent shows is copied into the thread's store, with its media type (#160)", () => {
+  const dir = cwd();
+  const made = join(dir, "shot.png");
+  writeFileSync(made, PNG);
+  const [a] = storeShownFiles(dir, "t", [{ name: "shot.png", path: made }]);
+  assert.equal(a!.path, join(threadFilesDir(dir, "t"), "shot.png"));
+  assert.equal(a!.mimeType, "image/png");
+  assert.deepEqual(readFileSync(a!.path), PNG, "the copy holds the bytes, so the transcript keeps saying what it said");
+  writeFileSync(made, Buffer.from("changed"));
+  assert.deepEqual(readFileSync(a!.path), PNG, "and a later write to the agent's own file does not change it");
+});
+
+test("a file already in the store is shown where it is, and not copied beside itself (#160)", () => {
+  const dir = cwd();
+  const root = threadFilesDir(dir, "t");
+  mkdirSync(root, { recursive: true });
+  const inside = join(root, "made.png");
+  writeFileSync(inside, PNG);
+  const [a] = storeShownFiles(dir, "t", [{ name: "made.png", path: inside }]);
+  assert.equal(a!.path, inside);
+  assert.equal(existsSync(join(root, "made-2.png")), false);
+});
+
+test("two shown files of one name are told apart, as two dropped ones are (#160)", () => {
+  const dir = cwd();
+  const a = join(dir, "a"); const b = join(dir, "b");
+  mkdirSync(a); mkdirSync(b);
+  writeFileSync(join(a, "shot.png"), PNG);
+  writeFileSync(join(b, "shot.png"), Buffer.from("second"));
+  const stored = storeShownFiles(dir, "t", [
+    { name: "shot.png", path: join(a, "shot.png") },
+    { name: "shot.png", path: join(b, "shot.png") },
+  ]);
+  assert.equal(stored[1]!.path, join(threadFilesDir(dir, "t"), "shot-2.png"));
+  assert.deepEqual(readFileSync(stored[0]!.path), PNG);
+});
+
+test("a name that tries to climb out of the store cannot (#160)", () => {
+  const dir = cwd();
+  const made = join(dir, "escape.png");
+  writeFileSync(made, PNG);
+  const [a] = storeShownFiles(dir, "t", [{ name: "../../escape.png", path: made }]);
+  assert.equal(a!.path, join(threadFilesDir(dir, "t"), "escape.png"));
+});
+
+test("showing what is not a file says so, in a sentence for the agent (#160)", () => {
+  const dir = cwd();
+  assert.throws(() => storeShownFiles(dir, "t", [{ name: "gone.png", path: join(dir, "gone.png") }]), /could not read/);
+  assert.throws(() => storeShownFiles(dir, "t", [{ name: "dir", path: dir }]), /is a directory/);
+  assert.throws(() => storeShownFiles(dir, "t", []), /at least one file/);
+});
+
+test("a shown file keeps the store out of git, as a dropped one does (#160)", () => {
+  const dir = cwd();
+  const made = join(dir, "shot.png");
+  writeFileSync(made, PNG);
+  storeShownFiles(dir, "t", [{ name: "shot.png", path: made }]);
+  assert.equal(readFileSync(join(dir, ".covey", ".gitignore"), "utf8"), "*\n");
 });
