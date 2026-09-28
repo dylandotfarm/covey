@@ -25,6 +25,12 @@ export interface TranscriptLayout {
   itemStarts: { id: string; start: number; end: number }[];
   /** Line index → the id a click on that line folds or unfolds. */
   toggles: Map<number, string>;
+  /**
+   * Line index → the file a click on that line previews (#163), and the thread
+   * that holds it. The thread comes from the item and not from the open view,
+   * because `/file` serves one thread's own store and nothing else.
+   */
+  media: Map<number, { threadId: string; path: string; name: string }>;
 }
 
 /** Nothing at all, for a layout with no thread open. */
@@ -53,10 +59,11 @@ export function layoutTranscript(view: ThreadView | null, width: number, toggled
   const lines: Line[] = [];
   const itemStarts: TranscriptLayout["itemStarts"] = [];
   const toggles = new Map<number, string>();
+  const media = new Map<number, { threadId: string; path: string; name: string }>();
   // Before the `!view` guard, not after it: a reader leaving a thread is the
   // case `prune` exists for, and `state.view` is null the moment they do.
   cache?.prune(view?.items ?? EMPTY_ITEMS);
-  if (!view) return { lines, itemStarts, toggles };
+  if (!view) return { lines, itemStarts, toggles, media };
   const items = [...view.items.values()].sort((a, b) => a.seq - b.seq);
 
   for (const row of timelineRows(items, { lod, toggled })) {
@@ -78,11 +85,17 @@ export function layoutTranscript(view: ThreadView | null, width: number, toggled
     const opts = { width, expanded: row.open ? new Set([row.item.id]) : EMPTY_EXPANDED, question, links };
     lines.push(...(cache ? cache.render(row.item, opts) : renderItem(row.item, opts)));
     itemStarts.push({ id: row.item.id, start, end: lines.length });
+    // `renderItem` marks the rows `covey show` drew, and only it knows where in
+    // the item they landed. The item carries the thread, which `/file` needs.
+    for (let i = start; i < lines.length; i++) {
+      const m = lines[i]?.media;
+      if (m) media.set(i, { threadId: row.item.threadId, ...m });
+    }
     // A note with words it hides folds too (#160), and one without must not
     // take the click: a row that answers a tap with nothing reads as broken.
     if (row.item.kind === "tool" || row.item.kind === "thinking" || (row.item.kind === "note" && noteFold(row.item.text).rest)) toggles.set(start, row.item.id);
   }
-  return { lines, itemStarts, toggles };
+  return { lines, itemStarts, toggles, media };
 }
 
 /** Shared by every folded row, so no set is built for one that is shut. */

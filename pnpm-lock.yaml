@@ -238,6 +238,10 @@ importers:
       ws:
         specifier: ^8.18.0
         version: 8.21.3
+    devDependencies:
+      string-width:
+        specifier: ^8.2.2
+        version: 8.2.2
 
   packages/web:
     dependencies:

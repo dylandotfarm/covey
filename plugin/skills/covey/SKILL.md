@@ -145,8 +145,10 @@ covey show demo.mp4
 The rules:
 
 - The reader sees an image and a video inline on a phone. In the TUI each file
-  is a row that opens in a browser on ctrl+click, so this works when the daemon
-  runs on another machine.
+  is a row: a click paints the picture over the conversation where the terminal
+  can — Ghostty, kitty and WezTerm — and ctrl+click opens it in a browser
+  anywhere else. Both routes work when the daemon runs on another machine.
+  A video shows its first frame; no terminal plays one.
 - `--text` is one line saying what the files show. It is optional; with none,
   the files stand alone.
 - Twenty files at a time, and 128 MB each.

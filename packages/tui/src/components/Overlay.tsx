@@ -6,6 +6,7 @@ import { PLACEMENT_RULE } from "../run.js";
 import { T } from "../theme.js";
 import { truncate, SPINNER } from "../lines.js";
 import { hyperlinksEnabled, openGesture, osc8 } from "../links.js";
+import { placeholderRows } from "../media.js";
 
 const HYPERLINKS = hyperlinksEnabled();
 /** cmd+click on a Mac, ctrl+click elsewhere — see `openGesture`. */
@@ -32,6 +33,35 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
     </Box>
   );
   switch (overlay.kind) {
+    case "media": {
+      // Not `frame()`. A border would take two of the columns the picture was
+      // sized for, and the frame truncates — which on a painted row would cut a
+      // cell in half and leave the terminal a mark it cannot place.
+      const v = overlay.view;
+      // The rectangle was sized against the pane as it was when the reader
+      // clicked. After a resize it may be taller than the pane, so paint only
+      // the rows that still fit: a cropped picture beats a broken layout.
+      const room = Math.max(1, height - 4);
+      const rows = v.kind === "ready" ? placeholderRows(v.id, v.cols, v.rows).slice(0, room) : [];
+      const name = truncate(overlay.name, Math.max(8, width - 4));
+      return (
+        <Box width="100%" height={height} flexDirection="column" alignItems="center" justifyContent="center">
+          <Text color={T.muted}>
+            {name}
+            {v.kind === "ready" && v.poster ? <Text color={T.subtle} italic>{"  the first frame — a terminal plays no video"}</Text> : null}
+          </Text>
+          <Box marginTop={1} flexDirection="column" width={v.kind === "ready" ? undefined : Math.min(width - 4, 70)}>
+            {v.kind === "loading" && <Text color={T.subtle} italic>fetching…</Text>}
+            {v.kind === "error" && <Text color={T.danger}>{v.message}</Text>}
+            {/* One `<Text>` per row, with no style prop of its own: the row
+                already carries the colour that names the image, and a prop here
+                would write an SGR after it and break the placement. */}
+            {rows.map((r, i) => <Text key={i} wrap="truncate">{r}</Text>)}
+          </Box>
+          <Box marginTop={1}><Text color={T.faint}>{`esc or click close · ${OPEN_GESTURE} the row opens it in a browser`}</Text></Box>
+        </Box>
+      );
+    }
     case "help":
       return frame("Keys", (
         <Box flexDirection="column">

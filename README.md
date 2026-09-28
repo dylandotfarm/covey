@@ -134,9 +134,12 @@ not dispatch runs, move threads, or update machines; the TUI does those.
 An agent can put a picture or a video in the conversation itself: `covey show shot.png
 --text "the sidebar after the fix"`. covey copies the file into that thread's own files and
 serves it from the machine the thread runs on, so the phone shows an image inline and plays
-a video where it sits. The TUI cannot paint either, so it names each file and hangs a link
-on the name: ctrl+click, and the file opens in a browser — which is what makes this work
-when the daemon is on another machine. Nothing goes to GitHub and nothing is committed;
+a video where it sits. In the TUI each file is a row, and a click paints the picture over
+the conversation where the terminal can — Ghostty, kitty and WezTerm speak the protocol
+that does it; a video shows its first frame, because no terminal plays one. Everywhere
+else, and beside the preview, ctrl+click on the name opens the file in a browser. Both
+routes read the bytes from the machine the thread runs on, which is what makes this work
+when the daemon is somewhere else. Nothing goes to GitHub and nothing is committed;
 `covey pr open --attach` is still the way to put a demo on a pull request.
 
 ## Keys
@@ -171,7 +174,7 @@ when the daemon is on another machine. Nothing goes to GitHub and nothing is com
 | `cmd+↑↓` `cmd+j/k` | anywhere | scroll the conversation a line; add `shift` for a page (`pgup`/`pgdn` too) |
 | `cmd+g` / `cmd+shift+g` | anywhere | jump to the oldest loaded line / back to the newest |
 | `cmd+o` | anywhere | expand/collapse the last tool call |
-| click | conversation | on a `▸` or `>_` row: fold or unfold it |
+| click | conversation | on a `▸` or `>_` row: fold or unfold it. On a file from `covey show`: paint it over the conversation (Ghostty, kitty, WezTerm; `COVEY_NO_GRAPHICS=1` turns it off) |
 | `cmd+click` | conversation | open a link: a URL, an issue or pull request `#N`, or reveal a file. `ctrl+click` on Linux — the terminal opens it, so a plain click still selects text. A terminal that knows no OSC 8 takes `alt+click` from covey instead |
 
 The conversation is never focused — `cmd` is its modifier, so scrolling works mid-sentence.
