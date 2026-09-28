@@ -15,7 +15,7 @@ import { useCallback, useState } from "react";
 import { Alert, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import {
-  machineSheetRows, sheetChoices, sheetMachine, sheetNote, sheetRows, sheetThread, sheetTitle, viewRowNumber,
+  sheetChoices, sheetMachine, sheetNote, sheetRows, sheetThread, sheetTitle, viewRowNumber,
 } from "@covey/web";
 import { store } from "../store";
 import { useStore } from "../useStore";

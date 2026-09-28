@@ -181,8 +181,8 @@ function QuestionCard({ item, ctx }: { item: QuestionItem; ctx: RowContext }) {
   );
 }
 
-function ItemView({ item, open, ctx, onToggle, rowKey }: {
-  item: TimelineItem; open: boolean; ctx: RowContext; onToggle: () => void; rowKey: string;
+function ItemView({ item, open, ctx, onToggle }: {
+  item: TimelineItem; open: boolean; ctx: RowContext; onToggle: () => void;
 }) {
   switch (item.kind) {
     case "user":
@@ -285,7 +285,7 @@ function RowBody({ row, ctx }: { row: TimelineRow; ctx: RowContext }) {
         {row.open ? (
           <View style={{ gap: 4, paddingLeft: 10 }}>
             {row.items.map((it) => (
-              <ItemView key={it.id} item={it} open={false} ctx={ctx} rowKey={row.key} onToggle={() => ctx.onToggle(row.key)} />
+              <ItemView key={it.id} item={it} open={false} ctx={ctx} onToggle={() => ctx.onToggle(row.key)} />
             ))}
           </View>
         ) : null}
@@ -301,13 +301,13 @@ function RowBody({ row, ctx }: { row: TimelineRow; ctx: RowContext }) {
         </Pressable>
         {row.open ? (
           <View style={{ gap: 6, paddingLeft: 10 }}>
-            {row.items.map((it) => <ItemView key={it.id} item={it} open ctx={ctx} rowKey={row.key} onToggle={() => ctx.onToggle(row.key)} />)}
+            {row.items.map((it) => <ItemView key={it.id} item={it} open ctx={ctx} onToggle={() => ctx.onToggle(row.key)} />)}
           </View>
         ) : null}
       </View>
     );
   }
-  return <ItemView item={row.item} open={row.open} ctx={ctx} rowKey={row.key} onToggle={() => ctx.onToggle(row.key)} />;
+  return <ItemView item={row.item} open={row.open} ctx={ctx} onToggle={() => ctx.onToggle(row.key)} />;
 }
 
 /**

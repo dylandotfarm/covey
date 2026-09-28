@@ -26,7 +26,7 @@
  * goes.
  */
 import { AppState } from "react-native";
-import { applyDrop, budgetValue, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
+import { applyDrop, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
 import {
   APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type FleetMember, type GitHubAction, type Lod, type QuestionItem,
 } from "@covey/protocol";

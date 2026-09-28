@@ -45,9 +45,6 @@ export type Block =
 /** Only `http(s)`. Anything else stays text — the same rule the page keeps. */
 const SRC = /^https?:\/\/[^\s<>"']+$/;
 
-/** A placeholder no reply can contain, standing in for a span already taken. */
-const HOLE = "\u0000";
-
 /**
  * One line of text as spans.
  *

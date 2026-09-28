@@ -13,12 +13,12 @@
  * reload throws away what the reader was typing.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
+import { Alert, RefreshControl, ScrollView, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { bindLabel, relTime, updateLabel } from "@covey/web";
 import { store } from "../store";
 import { useStore } from "../useStore";
-import { SIZE, T, TONE } from "../theme";
+import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle } from "../ui";
 import { applyUpdate, fetchUpdate, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
 import type { Routes } from "../nav";
@@ -88,7 +88,7 @@ export function SettingsScreen({ navigation }: Props) {
         contentContainerStyle={{ paddingBottom: 36 }}
       >
         <SectionTitle text="Machines" />
-        {[...s.machines.values()].map((m, i) => {
+        {[...s.machines.values()].map((m) => {
           // Only what a person typed can be forgotten. A fleet member came from
           // the TUI's list and forgetting it here would mean nothing: the next
           // `machine.access` would bring it straight back.

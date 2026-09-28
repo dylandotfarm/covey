@@ -3,6 +3,10 @@
   "compilerOptions": {
     "strict": true,
     "noUncheckedIndexedAccess": true,
+    // An unused import is dead weight in the bundle and usually a leftover from
+    // a change that moved somewhere else. Catch it here rather than ship it.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noImplicitOverride": true,
     "jsx": "react-jsx",
     "moduleResolution": "bundler",
