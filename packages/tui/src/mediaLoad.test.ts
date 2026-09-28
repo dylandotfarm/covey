@@ -20,7 +20,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadPreview, PREVIEW_LONG_EDGE } from "./mediaView.js";
+import { clearPreviewCache, loadPreview, PreviewCache, PREVIEW_LONG_EDGE, type Preview } from "./mediaView.js";
 import { ASSUMED_CELL, kittyTransmit, mediaBox, pngSize } from "./media.js";
 
 const HAVE_FFMPEG = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" }).status === 0;
@@ -35,8 +35,10 @@ function fixture(name: string, args: string[]): Buffer {
 }
 
 /** Serve one body on every request, the way `/file` serves one file. */
-async function serving(body: Buffer | string, status = 200): Promise<{ url: (name: string) => string; close: () => void }> {
+async function serving(body: Buffer | string, status = 200): Promise<{ url: (name: string) => string; close: () => void; hits: () => number }> {
+  let hits = 0;
   const server: Server = createServer((_req, res) => {
+    hits++;
     res.writeHead(status, { "content-type": "application/octet-stream" });
     res.end(body);
   });
@@ -45,6 +47,7 @@ async function serving(body: Buffer | string, status = 200): Promise<{ url: (nam
   return {
     url: (name) => `http://127.0.0.1:${port}/file?thread=t&path=${encodeURIComponent("/w/" + name)}`,
     close: () => server.close(),
+    hits: () => hits,
   };
 }
 
@@ -137,4 +140,85 @@ test("a name covey cannot paint is refused before anything is fetched", async ()
   const got = await loadPreview("http://127.0.0.1:1/file?thread=t&path=x", "notes.txt");
   assert.ok("error" in got);
   assert.match("error" in got ? got.error : "", /cannot paint \.txt/);
+});
+
+// ---------------------------------------------------------------------------
+// The cache, which is what makes an arrow key instant (#165)
+// ---------------------------------------------------------------------------
+
+test("a picture covey already holds is not fetched again", { skip }, async () => {
+  // A reader walks a conversation's pictures back and forth. Without this,
+  // every step pays the network and another run of a conversion tool for bytes
+  // covey already had.
+  clearPreviewCache();
+  const jpg = fixture("again.jpg", ["-f", "lavfi", "-i", "testsrc=size=320x240:duration=1:rate=1", "-frames:v", "1"]);
+  const s = await serving(jpg);
+  try {
+    const first = await loadPreview(s.url("again.jpg"), "again.jpg");
+    assert.ok(!("error" in first));
+    assert.equal(s.hits(), 1);
+    const second = await loadPreview(s.url("again.jpg"), "again.jpg");
+    assert.ok(!("error" in second));
+    assert.equal(s.hits(), 1, "the second look went nowhere near the network");
+    // The same bytes, so the same escape and the same picture.
+    if ("error" in first || "error" in second) return;
+    assert.deepEqual([second.width, second.height], [first.width, first.height]);
+    assert.ok(second.png.equals(first.png));
+  } finally { s.close(); }
+});
+
+test("a failure is never cached", { skip: false }, async () => {
+  // A machine that was away for a moment must not be away for the session.
+  clearPreviewCache();
+  const s = await serving("file: not there", 404);
+  try {
+    assert.ok("error" in await loadPreview(s.url("gone.png"), "gone.png"));
+    assert.equal(s.hits(), 1);
+    assert.ok("error" in await loadPreview(s.url("gone.png"), "gone.png"));
+    assert.equal(s.hits(), 2, "covey asked again");
+  } finally { s.close(); }
+});
+
+// The eviction rules, on a budget small enough to reach. The cache above is
+// 48 MB, so nothing a test could reasonably make would ever fill it.
+const fake = (bytes: number): Preview => ({ png: Buffer.alloc(bytes), width: 1, height: 1, poster: false });
+
+test("the cache drops the oldest picture to make room", () => {
+  const cache = new PreviewCache(300);
+  cache.put("a", fake(100));
+  cache.put("b", fake(100));
+  cache.put("c", fake(100));
+  assert.equal(cache.size, 300);
+  cache.put("d", fake(100));
+  assert.equal(cache.get("a"), undefined, "the oldest went");
+  assert.ok(cache.get("b") && cache.get("c") && cache.get("d"));
+  assert.equal(cache.size, 300);
+});
+
+test("the picture just asked for is never the one evicted", () => {
+  // It is the one on the screen. Dropping it would refetch it on the next step
+  // back, which is the whole thing this cache exists to stop.
+  const cache = new PreviewCache(100);
+  cache.put("a", fake(60));
+  cache.put("b", fake(90));
+  assert.ok(cache.get("b"), "the newest stayed");
+  assert.equal(cache.get("a"), undefined);
+  assert.equal(cache.size, 90);
+});
+
+test("a picture larger than the whole budget is not kept, and costs nothing", () => {
+  // It would empty the cache to make room and then still not fit.
+  const cache = new PreviewCache(100);
+  cache.put("a", fake(50));
+  cache.put("huge", fake(500));
+  assert.equal(cache.get("huge"), undefined);
+  assert.ok(cache.get("a"), "the picture already held was not thrown away for it");
+  assert.equal(cache.size, 50);
+});
+
+test("putting the same picture twice counts it once", () => {
+  const cache = new PreviewCache(100);
+  cache.put("a", fake(40));
+  cache.put("a", fake(40));
+  assert.equal(cache.size, 40);
 });

@@ -8,7 +8,7 @@
 import { applyDrop, budgetValue, MachineClient, uuid } from "@covey/client";
 import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
-import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState, itemHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
+import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, baseHash, composerKey, emptyState, itemHash, mediaHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
 import { attachingLabel, readPicked, sendingLabel } from "./attach.js";
 import { picked, shrinkInBrowser } from "./shrink.js";
 
@@ -170,10 +170,24 @@ function loadItem() {
 function applyRoute(r: Route) {
   // The sheet belongs to the screen it was opened from. The screen is changing.
   state.sheet = null;
+  // A route that names a picture covey does not hold is one nobody opened from
+  // this page: a reload, or a pasted URL. The picture cannot be named in the
+  // hash (see `Route`), so there is nothing to restore — put the address bar
+  // back to the screen it was over rather than leave it saying otherwise.
+  if (r?.media && !state.media) { location.replace(baseHash(r)); return; }
+  // Off a `/media` route, no picture. This is the one place a picture closes,
+  // so the tap, `esc`, the in-page control and the browser's own all end here.
+  if (!r?.media) state.media = null;
   if (!r) { enteredFromList = false; enteredItem = false; state.item = null; leaveThread(); schedule(); return; }
   if (!clients.has(r.machine)) { pendingRoute = r; return; }
   if (r.kind === "thread") { state.item = null; showThread(r.machine, r.threadId); schedule(); return; }
   showItem(r.machine, r.projectId, r.number);
+}
+
+/** The hash of the screen on show, with no picture over it. */
+function screenHash(): string {
+  if (state.item) return itemHash(state.item.machine, state.item.projectId, state.item.number);
+  return state.view ? threadHash(state.view.machine, state.view.threadId) : "";
 }
 
 const actions: Actions = {
@@ -198,6 +212,9 @@ const actions: Actions = {
     if (location.hash === hash) applyRoute(routeOf(hash)); else location.hash = hash;
   },
   back() {
+    // A picture is over everything, so it is the first thing back shuts — and
+    // it shuts by going back, because it was opened by going forward (#167).
+    if (state.media) { history.back(); return; }
     // An item opened from this page is one step back in the history. One
     // opened by its URL has nothing behind it, so the thread it belongs
     // over, or the list, is put there instead of a step back out of the page.
@@ -333,6 +350,25 @@ const actions: Actions = {
   },
   archiveThread(machine, threadId) {
     clients.get(machine)?.command({ type: "thread.archive", threadId, archived: true }).catch(fail);
+  },
+  openMedia(src, alt) {
+    const base = screenHash();
+    // A picture always opens from a transcript or from an item's own body, so
+    // there is always a screen under it. With none there would be nothing for
+    // the back control to return to, and the hash would name a layer over the
+    // list, which `routeOf` reads as the list itself.
+    if (!base) return;
+    state.media = { src, alt };
+    const hash = mediaHash(base);
+    // `location.hash` pushes an entry, which is the whole point: the reader
+    // went forward, so back comes out again.
+    if (location.hash === hash) schedule(); else location.hash = hash;
+  },
+  closeMedia() {
+    if (!state.media) return;
+    // Never by clearing the state: that would leave the entry behind, and the
+    // next back would be a press that did nothing.
+    history.back();
   },
   openSheet(target) { state.sheet = { target, page: "" }; schedule(); },
   closeSheet() { state.sheet = null; schedule(); },

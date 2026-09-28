@@ -66,12 +66,12 @@ async function paint(overlay: Overlay, width = 80, height = 24): Promise<string>
   return frame;
 }
 
+/** One file, as `covey show` put it in a conversation. */
+const file = (n: string) => ({ threadId: "t-1", path: `/w/.covey/threads/t-1/files/${n}`, name: n });
+
 /** A media overlay in whatever state a case is about. */
-function media(view: (Overlay & { kind: "media" })["view"]): Overlay {
-  return {
-    kind: "media", threadId: "t-1", path: "/w/.covey/threads/t-1/files/shot.png", name: "shot.png",
-    uri: "http://box:3790/file?thread=t-1&path=%2Fw%2Fshot.png", view,
-  };
+function media(view: (Overlay & { kind: "media" })["view"], files = [file("shot.png")], at = 0): Overlay {
+  return { kind: "media", files, at, view };
 }
 
 const ready = (id: number, cols: number, rows: number, poster = false): Overlay =>
@@ -140,4 +140,33 @@ test("a failure is the sentence, not a blank rectangle", async () => {
   const frame = await paint(media({ kind: "error", message }));
   assert.match(frame, /no tool to make a picture/);
   assert.ok(!frame.includes(PLACEHOLDER));
+});
+
+// ---------------------------------------------------------------------------
+// Walking the pictures (#165)
+// ---------------------------------------------------------------------------
+
+test("one picture is never told it is the first of one", async () => {
+  // A count and an arrow hint on a conversation with a single screenshot would
+  // name a thing the reader cannot do.
+  const frame = await paint(ready(1, 20, 3));
+  assert.doesNotMatch(frame, /1 of 1/);
+  assert.doesNotMatch(frame, /←\/→/);
+});
+
+test("with more than one, the overlay says which and offers the arrows", async () => {
+  const files = ["a.png", "b.png", "c.png"].map(file);
+  const frame = await paint(media({ kind: "ready", id: 1, cols: 20, rows: 3, poster: false }, files, 1));
+  assert.match(frame, /b\.png/, "the name is the one at `at`, not the first");
+  assert.match(frame, /2 of 3/);
+  assert.match(frame, /←\/→/);
+});
+
+test("the name follows `at` while covey fetches the next one", async () => {
+  // The reader pressed an arrow, so the name must already be the picture they
+  // asked for; a name that lagged would read as the arrow having missed.
+  const files = ["a.png", "b.png"].map(file);
+  const frame = await paint(media({ kind: "loading" }, files, 1));
+  assert.match(frame, /b\.png/);
+  assert.match(frame, /fetching/);
 });

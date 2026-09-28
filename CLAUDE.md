@@ -98,6 +98,17 @@
   gone. `graphicsEnabled` is asked at the click and not read into a constant beside
   `HYPERLINKS`: one click cannot pay for a module that has to load after the environment
   is set, which is the `NODE_ENV` trap again.
+  The arrow keys walk every picture of the conversation (#165), in transcript order, and
+  stop at each end rather than wrap — the `n of m` beside the name is what says there is
+  no more. The list is `Overlay.files`, frozen when the preview opens, because a reader
+  looks at what was on the screen when they clicked. `showMedia` is the one route a click
+  and an arrow both take, and its guard is `at` *and* the list's identity, so a slow fetch
+  can never paint over a later one. Walking on must forget the picture walked away from —
+  the `useEffect` keyed on the image id is what sends `a=d,d=I`, and `mediaClick.test.ts`
+  holds it, or every picture a reader stepped past stays in the terminal for the session.
+  `PreviewCache` bounds by bytes and never by count, because one screenshot is a hundred
+  times another, and never holds a failure: a machine away for a moment must not be away
+  for the session.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled
@@ -373,6 +384,20 @@
   off there is to close the page.
 - Media in the web client is inline (#110): `markdown.ts` writes an `<img>` or a `<video>`
   and the style sheet caps it at 40% of the screen; a tap on an image opens it full size.
+  That picture is a *layer on the route*, `#/t/<machine>/<thread>/media` (#167), because
+  the phone's back control and the swipe from the edge are the same gesture as the one
+  that leaves a screen — and a picture outside the route meant one gesture shut nothing
+  and skipped a level. The hash says *that* a picture is open and never *which*: the
+  source carries that machine's token, and `readToken` takes the token out of the address
+  bar on the first load, so naming the picture would write it into the browser's history.
+  `routeOf` reads the whole hash first and only then strips the suffix, or a conversation
+  whose id is `media` would come out as a layer over nothing. A route that names a picture
+  covey does not hold — a reload, a pasted URL — is replaced by the screen it was over.
+  Every close runs through that one route change: the tap, `esc`, the in-page control, and
+  the browser's own. Never shut a layer by clearing the state alone; the entry would
+  outlive it and the next back would be a press that did nothing. The settings sheet is
+  *not* a layer yet and has the same bug — it has pages of its own, so back inside it
+  means more than one thing.
   A GitHub user attachment loads through `GET /media?url=…` on the daemon (`media.ts`):
   GitHub answers 404 without the account's token and a five-minute signed redirect with
   it, and the daemon forwards that redirect with the `gh` token. The route is gated like

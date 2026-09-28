@@ -88,6 +88,19 @@ export interface DirListing {
 
 export type Focus = "sidebar" | "composer";
 
+/**
+ * One file `covey show` put in a conversation (#163).
+ *
+ * The thread comes off the timeline item and not off the open view, because
+ * `/file` serves one thread's own store and nothing else.
+ */
+export interface MediaRef {
+  threadId: string;
+  /** The path on the daemon's machine, as the timeline item carries it. */
+  path: string;
+  name: string;
+}
+
 export type Overlay =
   | { kind: "help" }
   | { kind: "palette" }
@@ -131,12 +144,15 @@ export type Overlay =
    */
   | {
       kind: "media";
-      threadId: string;
-      /** The path on the daemon's machine, as the timeline item carries it. */
-      path: string;
-      name: string;
-      /** The `/file` URL, so the footer can name the browser route as well. */
-      uri?: string;
+      /**
+       * Every file `covey show` put in this conversation, in transcript order,
+       * so the arrow keys walk them (#165). Frozen when the preview opens: a
+       * reader looks at what was on the screen when they clicked, and a list
+       * that grew under them would move the picture they were pointing at.
+       */
+      files: MediaRef[];
+      /** Which of `files` is on the screen. */
+      at: number;
       view:
         | { kind: "loading" }
         | { kind: "ready"; id: number; cols: number; rows: number; poster: boolean }
