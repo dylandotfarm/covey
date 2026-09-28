@@ -133,3 +133,22 @@ test("a dropped directory was one tag, so it needs no footer line either", () =>
   assert.match(out, /⎘ notes\//);
   assert.doesNotMatch(out, /a\.md/);
 });
+
+test("a long note is a click target and the level says how it starts (#160)", () => {
+  const long = base("note", null, {
+    tone: "info", text: "The system, not a prompt.\n\nHow it runs: it takes a shot directory.",
+    files: [{ name: "sheet.png", path: "/w/sheet.png", mimeType: "image/png" }],
+  });
+  const short = base("note", null, { tone: "info", text: "Context compacted (auto)", files: [] });
+  const items = [user("a", "go"), long, short];
+
+  const shut = layoutTranscript(view(items, "a"), 80, new Set());
+  assert.doesNotMatch(text(shut), /How it runs/, "the words wait for the reader");
+  assert.match(text(shut), /sheet\.png/, "the picture does not");
+  assert.ok([...shut.toggles.values()].includes(long.id), "the row takes a click");
+  assert.ok(!([...shut.toggles.values()].includes(short.id)), "a note with nothing to open takes none");
+
+  assert.match(text(layoutTranscript(view(items, "a"), 80, new Set([long.id]))), /How it runs/);
+  // `full` is the auto-expanded level, and it opens the note with everything else.
+  assert.match(text(layoutTranscript(view(items, "a"), 80, new Set(), undefined, "full")), /How it runs/);
+});

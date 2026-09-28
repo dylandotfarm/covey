@@ -8,7 +8,7 @@
  * so the skeleton is built once and kept, and each timeline row is keyed by
  * item id and rebuilt only when the daemon re-sent that item.
  */
-import { acceptCommand, commandLabel, cutTag, spliceTags, tagSpanAt } from "@covey/client";
+import { acceptCommand, commandLabel, cutTag, noteFold, spliceTags, tagSpanAt } from "@covey/client";
 import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Attachment, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
@@ -865,6 +865,15 @@ export class Renderer {
       (el as HTMLDetailsElement).open = row.open;
       el.addEventListener("toggle", () => this.a.toggleRow(row.key));
     }
+    // A note's `<details>` is inside the row rather than being it, because the
+    // files hang off the row and a picture never folds. A short note has none.
+    if (row.item.kind === "note") {
+      const words = el.querySelector("details.note-words") as HTMLDetailsElement | null;
+      if (words) {
+        words.open = row.open;
+        words.addEventListener("toggle", () => this.a.toggleRow(row.key));
+      }
+    }
     if (row.live) el.classList.add("live");
     return el;
   }
@@ -1056,7 +1065,17 @@ function renderItem(item: TimelineItem, a: Actions, markdown: { media: (url: str
       // A note covey wrote, and — since #160 — the files an agent asked covey
       // to show. Either may be missing: `covey show shot.png` with no words
       // of its own is a picture and nothing else.
-      const el = h("div", { class: `note ${item.tone}` }, ...(item.text ? refNodes(item.text) : []));
+      //
+      // The words fold when there are more of them than one row holds, and
+      // the picture never does: a reader scrolling a phone came here to look
+      // at it, not to read the message again.
+      const el = h("div", { class: `note ${item.tone}` });
+      if (item.text) {
+        const { lead, rest } = noteFold(item.text);
+        el.append(rest
+          ? h("details", { class: "note-words" }, h("summary", {}, ...refNodes(lead)), h("div", { class: "body" }, ...refNodes(rest)))
+          : h("div", { class: "note-words" }, ...refNodes(lead)));
+      }
       const files = attachedEl(item.threadId, item.files ?? [], fileSrc);
       if (files) el.append(files);
       return el;

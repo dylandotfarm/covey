@@ -1,7 +1,7 @@
 import React, { useMemo } from "react";
 import { Box, Text } from "ink";
 import { DEFAULT_LOD, type Lod, type TimelineItem } from "@covey/protocol";
-import { timelineRows } from "@covey/client";
+import { noteFold, timelineRows } from "@covey/client";
 import { selectionBounds, type Selection, type ThreadView } from "../store.js";
 import { ItemLines, renderItem, renderChainHead, renderSaidHead, highlightLine, colToIndex, lineText, type Line, type QuestionUi } from "../lines.js";
 import { hyperlinksEnabled, osc8, type LinkContext } from "../links.js";
@@ -78,7 +78,9 @@ export function layoutTranscript(view: ThreadView | null, width: number, toggled
     const opts = { width, expanded: row.open ? new Set([row.item.id]) : EMPTY_EXPANDED, question, links };
     lines.push(...(cache ? cache.render(row.item, opts) : renderItem(row.item, opts)));
     itemStarts.push({ id: row.item.id, start, end: lines.length });
-    if (row.item.kind === "tool" || row.item.kind === "thinking") toggles.set(start, row.item.id);
+    // A note with words it hides folds too (#160), and one without must not
+    // take the click: a row that answers a tap with nothing reads as broken.
+    if (row.item.kind === "tool" || row.item.kind === "thinking" || (row.item.kind === "note" && noteFold(row.item.text).rest)) toggles.set(start, row.item.id);
   }
   return { lines, itemStarts, toggles };
 }

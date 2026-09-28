@@ -132,6 +132,15 @@ details.tool[open] .summary { white-space: normal; overflow-wrap: anywhere; }
 .note.error { color: var(--danger); text-align: left; white-space: pre-wrap; }
 /* A file covey is showing (#160) sits in the middle, as the note's text does. */
 .note .attached { align-items: center; }
+/* A note long enough to fold keeps the browser's own arrow, and reads from
+   the left edge: centred prose is hard to follow on a phone, and a note this
+   long is a message the agent wrote rather than a line covey wrote. */
+details.note-words { text-align: left; cursor: pointer; }
+/* One row while it is shut, as a chain row is: the transcript stays a list of
+   rows a thumb can scan, and the whole lead comes back when it opens. */
+details.note-words > summary { color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+details.note-words[open] > summary { white-space: normal; overflow-wrap: anywhere; }
+details.note-words > .body { white-space: pre-wrap; padding: 4px 0 0 12px; }
 .activity { display: flex; align-items: center; gap: 8px; color: var(--working); font-size: 14px; }
 .spinner { width: 12px; height: 12px; border: 2px solid var(--working); border-right-color: transparent; border-radius: 50%; animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
