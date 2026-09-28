@@ -1,0 +1,25 @@
+# The React Native client's own workspace root (issue #168).
+#
+# `mobile/` is not a member of the repository's pnpm workspace, and this file is
+# what keeps it out: pnpm walks up for the nearest `pnpm-workspace.yaml`, so
+# without one here an install would join the workspace above and the app would
+# inherit rules written for a node project. React Native is not one. It wants a
+# bundler, it wants install scripts, and `tsc -b` must never see its files.
+#
+# The same separation `desktop/` has, for the same reason — see docs/MOBILE.md.
+packages: []
+
+# --- supply-chain policy -----------------------------------------------------
+# The repository's 7-day rule, kept here in pnpm's own terms rather than in a
+# script. `scripts/pkg-age.mjs` audits the workspace above; this holds the
+# floor for the app's own lockfile, and CI installs with `--frozen-lockfile` so
+# a version the rule never saw cannot enter.
+minimumReleaseAge: 10080
+
+# Install scripts are denied unless listed. React Native is the one place in
+# this repository where a build script is the point rather than a smell: each
+# of these compiles or links native code that the app cannot start without.
+# A new entry is a decision, and pnpm fails the install until it is made.
+allowBuilds:
+  esbuild: false
+  fsevents: false

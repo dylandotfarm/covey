@@ -1,0 +1,18 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "target": "esnext",
+    "lib": ["esnext", "dom"],
+    "types": ["node", "react"],
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "app.config.ts", "scripts"],
+  "exclude": ["node_modules", "dist", "android"]
+}
