@@ -224,12 +224,24 @@ refuse.
 
 ### Building the app itself
 
+You need the Android SDK and a JDK. `ANDROID_HOME` has to be exported, not just
+written into `android/local.properties`: `prebuild` regenerates `android/` and
+takes any file you put there with it.
+
 ```sh
+export ANDROID_HOME=$HOME/Android/sdk        # wherever your SDK lives
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+
 cd mobile
 cp .env.example .env          # and name your own machine in it
 pnpm run prebuild             # writes android/ from app.config.ts
 pnpm run apk                  # android/app/build/outputs/apk/release/app-release.apk
+pnpm run export               # the bundle the daemon serves from then on
 ```
+
+With nothing but the command-line tools, the packages this needs are
+`platform-tools`, `platforms;android-36`, `build-tools;36.0.0`,
+`ndk;27.1.12297006` and `cmake;3.22.1` — about 4.7 GB.
 
 `prebuild` writes `android/` from `app.config.ts`, so the config is the source
 and the native project is not committed. Set `.env` **before** either step: it is
