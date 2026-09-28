@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 // note. The comparison is the whole point of the file, so the import is not an
 // accident of the layout.
 import { markdownToHtml } from "@covey/web/markdown";
-import { flatSpans, inlineSpans, markdownBlocks, spansText, type Span } from "./markdown.js";
+import { flatSpans, inlineSpans, markdownBlocks, spansText, type Span } from "./markdown";
 
 /** The block shapes of a reply, as this client reads them. */
 function blockShape(text: string): string[] {

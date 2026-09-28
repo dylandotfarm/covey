@@ -21,7 +21,7 @@
  */
 import Constants from "expo-constants";
 import * as Updates from "expo-updates";
-import { readMachines, readToken } from "./machines.js";
+import { readMachines, readToken } from "./machines";
 
 /** Where this build asks for updates, or null when it was built without a machine. */
 export function updatesUrl(): string | null {

@@ -23,7 +23,16 @@ import { fileURLToPath } from "node:url";
 const app = dirname(dirname(fileURLToPath(import.meta.url)));
 const dist = join(app, "dist");
 
-const run = (args) => execFileSync("npx", args, { cwd: app, stdio: ["ignore", "pipe", "inherit"] }).toString();
+/** Read a command's output, for the one call whose answer this script parses. */
+const read = (args) => execFileSync("npx", args, { cwd: app, stdio: ["ignore", "pipe", "inherit"] }).toString();
+/**
+ * Run a command and let it write straight to this terminal.
+ *
+ * `expo export` reports a failed bundle on its own output, and capturing that
+ * output turns a one-line "cannot resolve ./store" into a page of byte arrays.
+ * Whatever this script is for, it is not for hiding that.
+ */
+const run = (args) => execFileSync("npx", args, { cwd: app, stdio: "inherit" });
 
 /**
  * The runtime version this export is for.
@@ -45,11 +54,11 @@ function runtimeVersion(config) {
 }
 
 console.log("reading the app config…");
-const config = JSON.parse(run(["expo", "config", "--type", "public", "--json"]));
+const config = JSON.parse(read(["expo", "config", "--type", "public", "--json"]));
 const version = runtimeVersion(config);
 
 console.log(`exporting the android bundle for runtime ${version}…`);
-process.stdout.write(run(["expo", "export", "--platform", "android"]));
+run(["expo", "export", "--platform", "android"]);
 
 mkdirSync(dist, { recursive: true });
 const stamp = { runtimeVersion: version, createdAt: new Date().toISOString() };

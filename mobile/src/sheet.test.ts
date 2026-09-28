@@ -8,7 +8,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { sheetCommand } from "./sheet.js";
+import { sheetCommand } from "./sheet";
 
 const thread = { kind: "thread", machine: "ws://pi:3790", threadId: "t1" } as const;
 const machine = { kind: "machine", machine: "ws://pi:3790" } as const;

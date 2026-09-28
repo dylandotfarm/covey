@@ -36,10 +36,10 @@ import {
   syncAttachments, type MachineSlot, type SheetTarget, type State,
 } from "@covey/web";
 import { attachingLabel, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
-import { forgetMachine, readLod, readMachines, readToken, saveLod, saveMachine, type SavedMachine } from "./machines.js";
-import { shrinkOnDevice } from "./attach.js";
-import { primeUpdateToken } from "./ota.js";
-import { sheetCommand } from "./sheet.js";
+import { forgetMachine, readLod, readMachines, readToken, saveLod, saveMachine, type SavedMachine } from "./machines";
+import { shrinkOnDevice } from "./attach";
+import { primeUpdateToken } from "./ota";
+import { sheetCommand } from "./sheet";
 
 /** How long a notice stays on screen before it goes, in milliseconds. */
 const NOTICE_MS = 4000;

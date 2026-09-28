@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseAddress } from "./address.js";
+import { parseAddress } from "./address";
 
 const ok = (input: string) => {
   const r = parseAddress(input);
