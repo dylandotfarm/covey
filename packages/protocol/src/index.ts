@@ -513,10 +513,21 @@ export const USER_CLIENT = "covey-tui";
  */
 export const WEB_CLIENT = "covey-web";
 
+/**
+ * The `client` name the React Native client gives at `hello` (#168).
+ *
+ * A third client a person types into, beside the TUI and the page. It is named
+ * separately rather than borrowing `WEB_CLIENT` because the two are not the
+ * same client and a daemon's log should say which one is on the other end —
+ * they reach a machine over the same socket but they are built, updated and
+ * installed by different routes.
+ */
+export const APP_CLIENT = "covey-app";
+
 /** True when a person types into this client, so the threads it creates are
  *  the person's and not a program's. Self-declared, like the name itself. */
 export function isUserClient(client: string | undefined): boolean {
-  return client === USER_CLIENT || client === WEB_CLIENT;
+  return client === USER_CLIENT || client === WEB_CLIENT || client === APP_CLIENT;
 }
 
 /**

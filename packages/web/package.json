@@ -2,6 +2,7 @@
   "name": "@covey/web",
   "version": "0.0.1",
   "description": "The covey web client for a phone: projects and threads in a list, one thread open at a time. Served by the daemon.",
+  "//exports": "`.` is state.ts, which holds the page's logic and no DOM. `./attach` and `./markdown` are named as well because the React Native client (#168) reads them: the attachment caps and the four failure words (#132) must be the same on both clients, and mobile/src/markdown.test.ts holds its own parser against this one. Nothing else here is anybody else's business.",
   "license": "MIT",
   "author": "dylan <270018429+dylandotfarm@users.noreply.github.com>",
   "repository": {
@@ -16,6 +17,14 @@
     ".": {
       "types": "./dist/state.d.ts",
       "import": "./dist/state.js"
+    },
+    "./attach": {
+      "types": "./dist/attach.d.ts",
+      "import": "./dist/attach.js"
+    },
+    "./markdown": {
+      "types": "./dist/markdown.d.ts",
+      "import": "./dist/markdown.js"
     },
     "./package.json": "./package.json"
   },

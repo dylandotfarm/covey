@@ -13,10 +13,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-// Reached by path on purpose. `@covey/web` exports its state module and nothing
-// else, and widening that export to let a test read it would be a change to the
-// web client's surface for this file's benefit.
-import { markdownToHtml } from "../../packages/web/dist/markdown.js";
+// The web package names this subpath for this client — see its `//exports`
+// note. The comparison is the whole point of the file, so the import is not an
+// accident of the layout.
+import { markdownToHtml } from "@covey/web/markdown";
 import { flatSpans, inlineSpans, markdownBlocks, spansText, type Span } from "./markdown.js";
 
 /** The block shapes of a reply, as this client reads them. */
