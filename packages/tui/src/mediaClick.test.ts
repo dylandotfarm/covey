@@ -33,7 +33,8 @@ import type { TimelineItem } from "@covey/protocol";
 import { App } from "./components/App.js";
 import { Store } from "./store.js";
 import { layoutTranscript } from "./components/Transcript.js";
-import type { ThreadView } from "./store.js";
+import { kittyDelete } from "./media.js";
+import type { Overlay, ThreadView } from "./store.js";
 
 const ESC = "\u001b";
 /** Nothing listens here, so `loadPreview` fails at the connection. */
@@ -102,7 +103,7 @@ async function mount() {
   // `⎘` is the mark on a shown file, so a frame carrying one is a frame with
   // the rows this file clicks on.
   await until(() => painted.some((w) => w.includes("⎘")));
-  return { store, stdin, unmount: () => app.unmount() };
+  return { store, stdin, painted, unmount: () => app.unmount() };
 }
 
 const press = (col: number, row: number, mods = 0) => `${ESC}[<${mods};${col};${row}M`;
@@ -148,10 +149,12 @@ test("a plain click on a shown file opens the preview", async () => {
     await until(() => store.getState().overlay?.kind === "media");
     const ov = store.getState().overlay;
     assert.equal(ov?.kind, "media");
-    assert.match(ov!.kind === "media" ? ov.name : "", /^shot-\d+\.png$/);
-    // The URL is the daemon's own `/file` route, carrying the thread — not a
-    // `file://` path, which would name a file on the wrong machine.
-    assert.match(ov!.kind === "media" ? ov.uri ?? "" : "", /^http:\/\/127\.0\.0\.1:1\/file\?thread=t&path=/);
+    if (ov?.kind !== "media") return;
+    // The whole conversation's files go with the click, so the arrows have
+    // somewhere to walk, and `at` says which one was hit.
+    assert.equal(ov.files.length, FILES);
+    assert.match(ov.files[ov.at]!.name, /^shot-\d+\.png$/);
+    assert.equal(ov.files[ov.at]!.threadId, "t");
   } finally { unmount(); }
 });
 
@@ -206,5 +209,125 @@ test("a click closes the preview, the same gesture that opened it", async () => 
     stdin.write(press(60, 10));
     await until(() => store.getState().overlay == null);
     assert.equal(store.getState().overlay, null);
+  } finally { unmount(); }
+});
+
+// ---------------------------------------------------------------------------
+// Walking the pictures with the arrow keys (#165)
+// ---------------------------------------------------------------------------
+
+/**
+ * Open the preview on a known list, without a click.
+ *
+ * The click's own row arithmetic is settled above; these cases are about the
+ * keys, and a list of three says more about an end than a list of two hundred.
+ */
+async function previewing(names: string[], at: number, view: (Overlay & { kind: "media" })["view"] = { kind: "loading" }) {
+  const m = await mount();
+  const files = names.map((name) => ({ threadId: "t", path: `/w/.covey/threads/t/files/${name}`, name }));
+  m.store.setOverlay({ kind: "media", files, at, view });
+  await until(() => m.store.getState().overlay?.kind === "media");
+  return m;
+}
+
+/** The name of the picture on the screen, or "" when none is. */
+function showing(store: Store): string {
+  const ov = store.getState().overlay;
+  return ov?.kind === "media" ? ov.files[ov.at]?.name ?? "" : "";
+}
+
+const NAMES = ["a.png", "b.png", "c.png"];
+
+test("the right arrow walks to the next picture, and the left one back", async () => {
+  const { store, stdin, unmount } = await previewing(NAMES, 0);
+  try {
+    stdin.write(`${ESC}[C`);
+    await until(() => showing(store) === "b.png");
+    assert.equal(showing(store), "b.png");
+    stdin.write(`${ESC}[C`);
+    await until(() => showing(store) === "c.png");
+    assert.equal(showing(store), "c.png");
+    stdin.write(`${ESC}[D`);
+    await until(() => showing(store) === "b.png");
+    assert.equal(showing(store), "b.png");
+  } finally { unmount(); }
+});
+
+test("the walk stops at each end rather than wrapping", async () => {
+  // A wrap would take a reader who held an arrow down back to the beginning
+  // without saying so; the count beside the name is what says there is no more.
+  const last = await previewing(NAMES, NAMES.length - 1);
+  try {
+    last.stdin.write(`${ESC}[C`);
+    await tick(150);
+    assert.equal(showing(last.store), "c.png", "the last picture stayed");
+  } finally { last.unmount(); }
+
+  const first = await previewing(NAMES, 0);
+  try {
+    first.stdin.write(`${ESC}[D`);
+    await tick(150);
+    assert.equal(showing(first.store), "a.png", "the first picture stayed");
+  } finally { first.unmount(); }
+});
+
+test("h and l walk too, as they do in covey's other overlays", async () => {
+  const { store, stdin, unmount } = await previewing(NAMES, 1);
+  try {
+    stdin.write("l");
+    await until(() => showing(store) === "c.png");
+    assert.equal(showing(store), "c.png");
+    stdin.write("h");
+    await until(() => showing(store) === "b.png");
+    assert.equal(showing(store), "b.png");
+  } finally { unmount(); }
+});
+
+test("a key that means nothing here leaves the picture alone", async () => {
+  // The overlay takes every key, so a stray one must not close it or move it.
+  const { store, stdin, unmount } = await previewing(NAMES, 1);
+  try {
+    stdin.write("x");
+    await tick(150);
+    assert.equal(store.getState().overlay?.kind, "media");
+    assert.equal(showing(store), "b.png");
+  } finally { unmount(); }
+});
+
+test("esc still closes, from wherever the walk got to", async () => {
+  const { store, stdin, unmount } = await previewing(NAMES, 2);
+  try {
+    stdin.write(ESC);
+    await until(() => store.getState().overlay == null);
+    assert.equal(store.getState().overlay, null);
+  } finally { unmount(); }
+});
+
+// ---------------------------------------------------------------------------
+// The terminal must forget a picture the reader has walked past
+// ---------------------------------------------------------------------------
+
+/** A picture already on the screen, so there is something to forget. */
+const SHOWN = { kind: "ready", id: 0xabc123, cols: 20, rows: 3, poster: false } as const;
+
+test("walking on forgets the picture the reader walked away from", async () => {
+  // Without this every picture a reader stepped past would stay in the
+  // terminal's own memory for the rest of the session.
+  const { stdin, painted, unmount } = await previewing(NAMES, 0, SHOWN);
+  try {
+    const before = painted.length;
+    stdin.write(`${ESC}[C`);
+    await until(() => painted.slice(before).some((w) => w.includes(kittyDelete(SHOWN.id))));
+    assert.ok(painted.slice(before).some((w) => w.includes(kittyDelete(SHOWN.id))), "covey never sent the delete");
+  } finally { unmount(); }
+});
+
+test("closing forgets it too", async () => {
+  const { stdin, painted, unmount } = await previewing(NAMES, 0, SHOWN);
+  try {
+    const before = painted.length;
+    stdin.write(ESC);
+    await until(() => painted.slice(before).some((w) => w.includes(kittyDelete(SHOWN.id))));
+    assert.ok(painted.slice(before).some((w) => w.includes(kittyDelete(SHOWN.id))), "covey never sent the delete");
   } finally { unmount(); }
 });

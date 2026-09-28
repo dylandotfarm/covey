@@ -5,7 +5,7 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
-import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
+import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
@@ -305,6 +305,17 @@ export function App({ store }: { store: Store }) {
   }, [baseLayout, state.view, state.tick]);
   // Hoisted out of DiffPanel so mouse hit-testing and rendering agree on the
   // same line array.
+  /**
+   * Every row `covey show` drew, in transcript order, with the line it is on.
+   *
+   * The line is kept beside the file so a click can say *which* of them it hit:
+   * the agent may show one file twice, and a search by path would then open the
+   * first of the two whichever the reader pointed at.
+   */
+  const mediaRows = useMemo(() => [...layout.media.entries()].sort((a, b) => a[0] - b[0]), [layout.media]);
+  /** The same list, as the preview walks it with the arrow keys (#165). */
+  const mediaRefs = useMemo<MediaRef[]>(() => mediaRows.map(([, ref]) => ref), [mediaRows]);
+
   const diffLines = useMemo(() => (state.diffView?.diff ? diffToLines(state.diffView.diff.patch, mainW - 2) : []), [state.diffView?.diff, mainW, themeGen]);
   // The scroll the screen shows. The store's count is measured from the bottom
   // and the transcript grows there while a reply streams, so a paint resolves
@@ -1406,7 +1417,7 @@ export function App({ store }: { store: Store }) {
    * painted row; what goes in the rows is the placeholder rectangle, which
    * measures exactly the cells it covers. See `media.ts`.
    */
-  function openMediaPreview(ref: { threadId: string; path: string; name: string }) {
+  function openMediaPreview(files: MediaRef[], at: number) {
     // Asked here, and not read into a constant beside `HYPERLINKS`. A constant
     // is right for that one because every span of every paint consults it; this
     // is consulted once per click, so the saving is nothing and the cost is a
@@ -1414,30 +1425,64 @@ export function App({ store }: { store: Store }) {
     // same trap as `NODE_ENV` in the CLI entry: node evaluates every static
     // import before the first statement of a file.
     if (!graphicsEnabled()) {
-      store.notify(`this terminal cannot paint a picture — ${OPEN_GESTURE} to open ${truncate(ref.name, 40)} in a browser`);
+      const name = files[at]?.name ?? "the file";
+      store.notify(`this terminal cannot paint a picture — ${OPEN_GESTURE} to open ${truncate(name, 40)} in a browser`);
       return;
     }
+    showMedia(files, at);
+  }
+
+  /**
+   * Put one of `files` on the screen, and fetch it if covey does not hold it.
+   *
+   * The same call opens the preview and walks it, so an arrow key and a click
+   * take exactly the same route. `files` is passed through rather than read
+   * from the overlay, because the list is frozen when the preview opens: see
+   * `Overlay` in `store.ts`.
+   */
+  function showMedia(files: MediaRef[], at: number) {
+    const ref = files[at];
+    if (!ref) return;
     const uri = threadFileUri(ref.threadId, ref.path, linkCtx);
     if (!uri) {
       store.notify(`covey has no address for the machine that holds ${truncate(ref.name, 40)}`);
       return;
     }
-    store.setOverlay({ kind: "media", threadId: ref.threadId, path: ref.path, name: ref.name, uri, view: { kind: "loading" } });
+    store.setOverlay({ kind: "media", files, at, view: { kind: "loading" } });
     // The rectangle is worked out from the pane as it is now. A resize while a
     // preview is open leaves the picture at the size it was transmitted, and
     // `OverlayView` paints only the rows that still fit.
     const max = { cols: Math.max(1, mainW - 6), rows: Math.max(1, transcriptH - 4) };
     void loadPreview(uri, ref.name).then((got) => {
-      // The reader may have closed this, or opened another picture, while covey
-      // fetched. The store, not `state`: that is the snapshot from before.
+      // The reader may have closed this, or walked on, while covey fetched.
+      // The store, not `state`: that is the snapshot from before. `at` and the
+      // list together say it is still this picture that is wanted, so a slow
+      // fetch can never paint over a later one.
       const ov = store.getState().overlay;
-      if (ov?.kind !== "media" || ov.path !== ref.path) return;
+      if (ov?.kind !== "media" || ov.at !== at || ov.files !== files) return;
       if ("error" in got) return store.setOverlay({ ...ov, view: { kind: "error", message: got.error } });
       const box = mediaBox(got, cellSize.current, max);
       const id = nextImageId();
       stdout.write(kittyTransmit(id, got.png, box.cols, box.rows));
       store.setOverlay({ ...ov, view: { kind: "ready", id, cols: box.cols, rows: box.rows, poster: got.poster } });
     });
+  }
+
+  /**
+   * The arrow keys walk the pictures of the open conversation (#165).
+   *
+   * They stop at each end rather than wrap, as the usage overlay's windows do,
+   * and the count beside the name is what says there is no more to see. `h`
+   * and `l` come along because the rest of covey's overlays take them.
+   */
+  function handleMediaKey(ov: Overlay & { kind: "media" }, input: string, key: any) {
+    const step = key.leftArrow || key.upArrow || input === "h" || input === "k" ? -1
+      : key.rightArrow || key.downArrow || input === "l" || input === "j" ? 1
+      : 0;
+    if (step === 0) return;
+    const at = ov.at + step;
+    if (at < 0 || at >= ov.files.length) return;
+    showMedia(ov.files, at);
   }
 
   /**
@@ -1684,9 +1729,10 @@ export function App({ store }: { store: Store }) {
       // what the keyboard would.
       if (line != null && !state.diffView) {
         // A file row comes first: it is the one row of a note that is not the
-        // fold, and a plain click there asked for the picture.
-        const shown = layout.media.get(line);
-        if (shown) return openMediaPreview(shown);
+        // fold, and a plain click there asked for the picture. The whole list
+        // goes with it, so the arrow keys can walk on from whichever was hit.
+        const at = mediaRows.findIndex(([ln]) => ln === line);
+        if (at >= 0) return openMediaPreview(mediaRefs, at);
         const id = layout.toggles.get(line);
         if (id) store.toggleItem(id);
       }
@@ -1823,7 +1869,8 @@ export function App({ store }: { store: Store }) {
       if (ov.kind === "input" || ov.kind === "pick") ov.onCancel?.();
       return;
     }
-    if (ov.kind === "help" || ov.kind === "update" || ov.kind === "media") return;
+    if (ov.kind === "media") return handleMediaKey(ov, input, key);
+    if (ov.kind === "help" || ov.kind === "update") return;
     if (ov.kind === "run") return handleRunKey(ov, input, key);
     if (ov.kind === "secrets") return handleSecretsKey(ov, input, key);
     if (ov.kind === "usage") {

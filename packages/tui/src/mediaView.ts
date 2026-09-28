@@ -77,6 +77,81 @@ export interface Preview {
  * (#132).
  */
 export async function loadPreview(uri: string, name: string): Promise<Preview | { error: string }> {
+  const hit = CACHE.get(uri);
+  if (hit) return hit;
+  const got = await load(uri, name);
+  // Only a success is kept: a failure is very often the machine being away for
+  // a moment, and a cached refusal would outlive it.
+  if (!("error" in got)) CACHE.put(uri, got);
+  return got;
+}
+
+/**
+ * What covey has already fetched and converted, so an arrow key is instant
+ * (#165).
+ *
+ * A reader walks a conversation's pictures back and forth, and without this
+ * every step pays the network and another run of `ffmpeg` for bytes covey
+ * already had.
+ *
+ * Bounded by bytes rather than by count, because one screenshot is a hundred
+ * times another. The oldest goes first, which for a walk through a
+ * conversation is the picture furthest from the one being looked at.
+ */
+export class PreviewCache {
+  private held = new Map<string, Preview>();
+  private bytes = 0;
+
+  constructor(private readonly limit: number) {}
+
+  get(uri: string): Preview | undefined {
+    return this.held.get(uri);
+  }
+
+  /** How much covey is holding, for a test and for nothing else. */
+  get size(): number {
+    return this.bytes;
+  }
+
+  put(uri: string, preview: Preview): void {
+    // A picture larger than the whole budget would empty the cache to make room
+    // and then still not fit, so every other picture would be lost to one that
+    // cannot be held anyway. Keep none of it.
+    if (preview.png.byteLength > this.limit) return;
+    this.drop(uri);
+    this.held.set(uri, preview);
+    this.bytes += preview.png.byteLength;
+    for (const key of this.held.keys()) {
+      if (this.bytes <= this.limit) break;
+      if (key === uri) continue; // never the one just asked for
+      this.drop(key);
+    }
+  }
+
+  clear(): void {
+    this.held.clear();
+    this.bytes = 0;
+  }
+
+  private drop(key: string): void {
+    const held = this.held.get(key);
+    if (!held) return;
+    this.held.delete(key);
+    this.bytes -= held.png.byteLength;
+  }
+}
+
+/** How much converted picture covey holds. Two or three large screenshots. */
+export const PREVIEW_CACHE_BYTES = 48 * 1024 * 1024;
+
+const CACHE = new PreviewCache(PREVIEW_CACHE_BYTES);
+
+/** Forget everything. For a test that counts how often covey fetches. */
+export function clearPreviewCache(): void {
+  CACHE.clear();
+}
+
+async function load(uri: string, name: string): Promise<Preview | { error: string }> {
   if (!isPaintableName(name)) return { error: `covey cannot paint ${extname(name) || "a file with no extension"}` };
   const got = await fetchFile(uri);
   if ("error" in got) return got;

@@ -98,6 +98,17 @@
   gone. `graphicsEnabled` is asked at the click and not read into a constant beside
   `HYPERLINKS`: one click cannot pay for a module that has to load after the environment
   is set, which is the `NODE_ENV` trap again.
+  The arrow keys walk every picture of the conversation (#165), in transcript order, and
+  stop at each end rather than wrap — the `n of m` beside the name is what says there is
+  no more. The list is `Overlay.files`, frozen when the preview opens, because a reader
+  looks at what was on the screen when they clicked. `showMedia` is the one route a click
+  and an arrow both take, and its guard is `at` *and* the list's identity, so a slow fetch
+  can never paint over a later one. Walking on must forget the picture walked away from —
+  the `useEffect` keyed on the image id is what sends `a=d,d=I`, and `mediaClick.test.ts`
+  holds it, or every picture a reader stepped past stays in the terminal for the session.
+  `PreviewCache` bounds by bytes and never by count, because one screenshot is a hundred
+  times another, and never holds a failure: a machine away for a moment must not be away
+  for the session.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled

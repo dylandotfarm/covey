@@ -43,11 +43,16 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
       // the rows that still fit: a cropped picture beats a broken layout.
       const room = Math.max(1, height - 4);
       const rows = v.kind === "ready" ? placeholderRows(v.id, v.cols, v.rows).slice(0, room) : [];
-      const name = truncate(overlay.name, Math.max(8, width - 4));
+      const shown = overlay.files[overlay.at];
+      const name = truncate(shown?.name ?? "", Math.max(8, width - 4));
+      // Only worth saying when there is somewhere to go. One picture in a
+      // conversation should not be told it is the first of one.
+      const many = overlay.files.length > 1;
       return (
         <Box width="100%" height={height} flexDirection="column" alignItems="center" justifyContent="center">
           <Text color={T.muted}>
             {name}
+            {many ? <Text color={T.faint}>{`  ${overlay.at + 1} of ${overlay.files.length}`}</Text> : null}
             {v.kind === "ready" && v.poster ? <Text color={T.subtle} italic>{"  the first frame — a terminal plays no video"}</Text> : null}
           </Text>
           <Box marginTop={1} flexDirection="column" width={v.kind === "ready" ? undefined : Math.min(width - 4, 70)}>
@@ -58,7 +63,7 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
                 would write an SGR after it and break the placement. */}
             {rows.map((r, i) => <Text key={i} wrap="truncate">{r}</Text>)}
           </Box>
-          <Box marginTop={1}><Text color={T.faint}>{`esc or click close · ${OPEN_GESTURE} the row opens it in a browser`}</Text></Box>
+          <Box marginTop={1}><Text color={T.faint}>{`esc or click close${many ? " · ←/→ the other pictures" : ""} · ${OPEN_GESTURE} the row opens it in a browser`}</Text></Box>
         </Box>
       );
     }
