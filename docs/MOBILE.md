@@ -75,6 +75,19 @@ which is the reason a covey change would stop reaching the phone. So the bundle
 comes over the air, and it comes from the same place the page comes from: the
 daemon.
 
+**Two acts, not one.** A machine update — the control panel, or
+`machine.update` — runs `git pull`, `pnpm install` and `pnpm run build`, and none
+of those touch `mobile/`: `tsc -b` never sees it and Metro is not part of that
+build. An updated machine therefore serves the bundle it last exported. To put a
+change on the phone, run `pnpm run export` in `mobile/` on the machine that
+serves updates; the phone takes it on its next cold start.
+
+That is deliberate for now rather than forgotten. A bundler inside the daemon's
+own update path is a step that can fail, and a failure there would block the
+update that was meant to fix it. Making the export part of a machine update is a
+reasonable next change — it would need to be gated on an export already existing,
+so a machine that has never built the app does not start needing the Expo CLI.
+
 `packages/daemon/src/updates.ts` answers the Expo Updates protocol, version 1:
 
 ```

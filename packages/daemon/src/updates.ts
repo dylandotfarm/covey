@@ -5,8 +5,16 @@
  * `web.ts` serves the web client — a browser re-reads the page on every visit
  * and an installed app does not. Instead the app asks this daemon, on every
  * cold start, whether there is a newer bundle than the one it holds, and takes
- * it if there is. A `covey update` on the machine then reaches the phone
- * without anybody sideloading anything.
+ * it if there is, so a change reaches the phone without anybody sideloading
+ * anything.
+ *
+ * What it does *not* do is rebuild that bundle. A machine update runs
+ * `git pull`, `pnpm install` and `pnpm run build` (`update.ts`), and none of
+ * those touch `mobile/`: `tsc -b` never sees it and Metro is not part of that
+ * build. So an updated machine serves the bundle it last exported until somebody
+ * runs `pnpm run export` in `mobile/`. Deliberate for now — a bundler in the
+ * daemon's own update path is a step that can fail and block the update — but it
+ * does mean the export is a second act, and `docs/MOBILE.md` says so.
  *
  * The answer is the Expo Updates protocol, version 1. Three facts shape the
  * implementation and none of them are ours to choose:

@@ -131,7 +131,10 @@
   base64url SHA-256 of its own bytes; and a runtime version that does not match gets a
   directive, never a manifest, which is what stops a bundle built against other native
   modules from launching. `expo export` records no runtime version, so
-  `mobile/scripts/export.mjs` writes `covey-update.json` beside the bundle.
+  `mobile/scripts/export.mjs` writes `covey-update.json` beside the bundle. A machine
+  update does *not* refresh that bundle — it runs `git pull`, `pnpm install` and
+  `pnpm run build`, and none of those touch `mobile/` — so putting a change on the phone
+  is a second act, `pnpm run export` on the machine that serves updates.
   The update URL is baked in at build time and the token is not: a run-time URL needs
   Expo's `disableAntiBrickingMeasures`, which gives up the one measure that lets a later
   update repair a broken one, so covey rebuilds instead. That URL is
