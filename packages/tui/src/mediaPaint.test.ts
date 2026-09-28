@@ -23,12 +23,22 @@ import { OverlayView } from "./components/Overlay.js";
 import { PLACEHOLDER, placeholderRows } from "./media.js";
 import type { Overlay } from "./store.js";
 
+/** The footer of every media overlay, in all three of its states. */
+const FOOTER = "esc or click close";
+
 /**
  * Render one overlay and give back the last frame ink painted.
  *
  * The last one *before* the unmount: ink clears the screen and paints again on
  * the way out, so a test that read every write would count each row twice and a
  * crop would look like a spill.
+ *
+ * Waited for by the frame, never by a spell. A fixed wait measures the runner
+ * and not covey: at 120ms every case here passed on this machine and every one
+ * of them read an empty frame on a loaded CI runner, which is a failure a long
+ * way from anything they cover. The footer is the condition because it is on
+ * the screen in all three states, so a frame that carries it is a frame that
+ * has been laid out.
  */
 async function paint(overlay: Overlay, width = 80, height = 24): Promise<string> {
   const writes: string[] = [];
@@ -40,11 +50,14 @@ async function paint(overlay: Overlay, width = 80, height = 24): Promise<string>
     React.createElement(OverlayView, { overlay, cursor: 0, filter: "", checked: false, width, height }),
     { stdout, patchConsole: false, exitOnCtrlC: false },
   );
-  await new Promise((r) => setTimeout(r, 120));
-  // A frame is the write that carries rows; the rest are the cursor and the
+  // A frame is a write that carries rows; the rest are the cursor and the
   // synchronised-update brackets around it.
-  const frame = writes.filter((w) => w.includes("\n")).at(-1) ?? "";
+  const frames = () => writes.filter((w) => w.includes("\n") && w.includes(FOOTER));
+  const deadline = Date.now() + 10_000;
+  while (frames().length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  const frame = frames().at(-1) ?? "";
   app.unmount();
+  assert.ok(frame, "ink painted no frame at all");
   return frame;
 }
 
@@ -102,7 +115,7 @@ test("a rectangle taller than the pane is cropped, not spilled", async () => {
 test("the name and the way out are always on the screen", async () => {
   const frame = await paint(ready(1, 20, 3));
   assert.match(frame, /shot\.png/);
-  assert.match(frame, /esc or click close/);
+  assert.match(frame, new RegExp(FOOTER));
 });
 
 test("a video says it is one frame, and an image does not", async () => {

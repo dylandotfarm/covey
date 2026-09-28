@@ -76,19 +76,32 @@ function fakeStdin() {
   return s as NodeJS.ReadStream & { write(chunk: string): boolean };
 }
 
+/**
+ * Mount App and wait until it has painted a file row.
+ *
+ * Waited for by the paint, never by a spell. A click that lands before the
+ * first frame finds no layout to hit, and the case then fails on a timeout a
+ * long way from what it covers — which is what a fixed 120ms did to
+ * `mediaPaint.test.ts` on a loaded CI runner.
+ */
 async function mount() {
   const store = new Store([]);
   store.state = { ...store.state, focus: "composer", scrollFromBottom: 5, view: viewOf() } as Store["state"];
   const stdin = fakeStdin();
+  const painted: string[] = [];
   const stdout = new PassThrough() as any;
   stdout.isTTY = true;
   stdout.columns = 120;
   stdout.rows = 30;
+  const write = stdout.write.bind(stdout);
+  stdout.write = (c: unknown, ...rest: unknown[]) => { painted.push(String(c)); return write(c, ...rest); };
   stdout.resume();
   const app = render(React.createElement(App, { store }), {
     stdin, stdout: stdout as NodeJS.WriteStream, patchConsole: false, exitOnCtrlC: false, interactive: true,
   });
-  await tick(150);
+  // `⎘` is the mark on a shown file, so a frame carrying one is a frame with
+  // the rows this file clicks on.
+  await until(() => painted.some((w) => w.includes("⎘")));
   return { store, stdin, unmount: () => app.unmount() };
 }
 
