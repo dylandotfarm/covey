@@ -9,6 +9,13 @@
 # The same separation `desktop/` has, for the same reason — see docs/MOBILE.md.
 packages: []
 
+# Metro resolves modules by walking real directories, and pnpm's default store
+# is a tree of symlinks. Expo's own guidance for pnpm is a hoisted layout, and
+# without it the bundler loses React Native's transitive native modules. It
+# lives here rather than in a `.npmrc` because npm warns about a key it does
+# not know, and `npx` is npm.
+nodeLinker: hoisted
+
 # --- supply-chain policy -----------------------------------------------------
 # The repository's 7-day rule, kept here in pnpm's own terms rather than in a
 # script. `scripts/pkg-age.mjs` audits the workspace above; this holds the

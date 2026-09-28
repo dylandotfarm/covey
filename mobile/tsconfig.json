@@ -11,7 +11,24 @@
     "lib": ["esnext", "dom"],
     "types": ["node", "react"],
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    // Metro is told the same three things in metro.config.js, and has to be:
+    // this is the type checker's own map and the bundler never reads it.
+    //
+    // Each path names the package *directory* rather than a file, so one
+    // mapping serves three readers: `tsc` finds the declarations through the
+    // package's `types`, `tsx` finds the JavaScript through its `import`, and
+    // the node test runner gets a module it can actually execute. Naming
+    // `dist/index.d.ts` here type-checks and then fails at run time.
+    //
+    // `pnpm run build` in the checkout above has to have run, the same rule
+    // the bundle follows.
+    "baseUrl": ".",
+    "paths": {
+      "@covey/protocol": ["../packages/protocol"],
+      "@covey/client": ["../packages/client"],
+      "@covey/web": ["../packages/web"]
+    }
   },
   "include": ["src", "app.config.ts", "scripts"],
   "exclude": ["node_modules", "dist", "android"]

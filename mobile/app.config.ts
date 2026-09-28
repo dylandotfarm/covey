@@ -44,15 +44,8 @@ export default (): ExpoConfig => ({
   orientation: "default",
   scheme: "covey",
   userInterfaceStyle: "dark",
-  newArchEnabled: true,
   android: {
     package: "io.github.dylandotfarm.covey",
-    edgeToEdgeEnabled: true,
-    // The app talks to a daemon on a private address over plain HTTP, which is
-    // the ordinary case: a tailnet peer or a machine on the same network. The
-    // traffic is already on a network the reader controls, and a certificate
-    // for `100.x` or `192.168.x` is not a thing they can get.
-    usesCleartextTraffic: true,
   },
   // `appVersion` keys an update to the binary's own version, so a bundle built
   // against newer native modules can never land in an older app. Change
@@ -81,6 +74,17 @@ export default (): ExpoConfig => ({
   // rather than extending what it is handed — so an `app.json` beside this
   // file is a config that looks authoritative and has no effect. There is
   // none, deliberately. Add a plugin to this list by hand.
-  plugins: ["expo-secure-store", "expo-image", "expo-video"],
+  plugins: [
+    "expo-secure-store",
+    "expo-image",
+    "expo-video",
+    // A daemon speaks plain HTTP on a private address, which is the ordinary
+    // case: a tailnet peer, or a machine on the same network. Android 9 and
+    // later refuse cleartext unless the app asks for it, and without this both
+    // the socket and the update check fail with nothing to read. The traffic is
+    // already on a network the reader controls, and a certificate for `100.x`
+    // or `192.168.x` is not a thing they can get.
+    ["expo-build-properties", { android: { usesCleartextTraffic: true } }],
+  ],
   experiments: { typedRoutes: false },
 });
