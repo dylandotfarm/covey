@@ -20,7 +20,7 @@ import { store } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle } from "../ui";
-import { applyUpdate, fetchUpdate, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
+import { applyUpdate, fetchUpdate, updateInconsistency, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "Settings">;
@@ -150,6 +150,11 @@ export function SettingsScreen({ navigation }: Props) {
               </Text>
             </View>
           </Row>
+          {/* A build whose two halves disagree says so here. It is the one
+              failure a reader cannot diagnose from anything else on screen. */}
+          {updateInconsistency() ? (
+            <Row><Text style={[{ color: T.warning, fontSize: SIZE.small }, S.grow]}>{updateInconsistency()}</Text></Row>
+          ) : null}
           {otaWord ? (
             <Row><Text style={[S.muted, S.grow]}>{otaWord}</Text></Row>
           ) : null}

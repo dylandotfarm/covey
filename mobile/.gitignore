@@ -11,6 +11,11 @@ dist/
 android/
 ios/
 
+# The machine that serves this app's updates, per checkout. `.env.example` is
+# the committed template.
+.env
+.env.local
+
 # Expo's own caches.
 .expo/
 web-build/

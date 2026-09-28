@@ -12,8 +12,10 @@
     "test": "node --import tsx --test \"src/**/*.test.ts\"",
     "export": "node scripts/export.mjs",
     "prebuild": "expo prebuild --platform android",
+    "apk": "cd android && ./gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a -Dorg.gradle.jvmargs=\"-Xmx8g -XX:MaxMetaspaceSize=2g\" -x lintVitalRelease",
     "codesign": "node scripts/codesign.mjs"
   },
+  "//apk": "The three flags are not decoration; the plain `./gradlew assembleRelease` the template gives you does not finish. `-Dorg.gradle.jvmargs` raises a metaspace ceiling of 256m that React Native's own template sets to 512m and that four ABIs plus Kotlin plus lint exhaust — the first build here died on `OutOfMemoryError: Metaspace` after 24 minutes. `expo-build-properties` has no option for JVM arguments, so it cannot live in app.config.ts. `-PreactNativeArchitectures` builds the one ABI every modern phone uses instead of four. `-x lintVitalRelease` skips the release lint chain, which fails inside expo-modules-core and has nothing to say about this app; exclude the parent task and not its two subtasks, or the text-output task runs and demands files that were never produced. On a machine with little memory add `--max-workers=2`.",
   "//expo.install.exclude": "Packages this project pins on purpose, so `expo-doctor` stops reporting them as out of date. Every one is held back by the repository's 7-day dependency rule (minimumReleaseAge in pnpm-workspace.yaml): Expo publishes a patch and pnpm will not resolve it until it has been public for a week, which is the policy working rather than a version to chase. `typescript` is different — it tracks the checkout above, whose packages emit the declarations this app type-checks against, so Expo's preferred major is not ours to take. Removing a name here does not upgrade anything; it only makes the doctor complain again.",
   "expo": {
     "install": {

@@ -108,6 +108,24 @@ each against bytes rather than intent:
 A directive is signed as well. An unsigned "nothing for you" is a downgrade
 anybody on the path could send.
 
+### One variable, loaded from a file
+
+`EXPO_PUBLIC_COVEY_UPDATES_URL` names the machine, and it lives in `mobile/.env`
+(`.env.example` is the committed template). Expo loads `.env` for every one of
+its commands, and `EXPO_PUBLIC_` is what makes Metro inline the value into the
+bundle, so `app.config.ts` and `src/ota.ts` read one value from one place.
+
+That is not tidiness, it is a bug this feature already had. The first APK built
+here set the variable for `expo prebuild` — which writes the URL into
+`AndroidManifest.xml` — and not for the gradle build, which writes
+`assets/app.config` from `app.config.ts`. The binary then carried a native layer
+that would update and a JavaScript layer that reported it could not, and the
+settings screen said "this build takes no updates over the air" while the app
+updated itself. `src/ota.ts` reads the variable rather than
+`Constants.expoConfig` for exactly that reason, and `updateInconsistency()`
+names the mismatch on screen if the two halves ever diverge again — it is the
+one failure nothing else on screen would reveal.
+
 ### The URL is baked in and the token is not
 
 This is the one design decision in the feature worth arguing about, so here is
@@ -195,18 +213,51 @@ refuse.
 
 ```sh
 cd mobile
-COVEY_UPDATES_URL=http://pi.tail1234.ts.net:3790/updates pnpm run prebuild
-# then a debug or release build with the Android SDK, or `eas build`
+cp .env.example .env          # and name your own machine in it
+pnpm run prebuild             # writes android/ from app.config.ts
+pnpm run apk                  # android/app/build/outputs/apk/release/app-release.apk
 ```
 
 `prebuild` writes `android/` from `app.config.ts`, so the config is the source
-and the native project is not committed.
+and the native project is not committed. Set `.env` **before** either step: it is
+the one place both of them read, and the section above says what happens
+otherwise.
 
-**This has not been done yet.** No APK has been built or installed, because
-this machine has no Android SDK. Everything up to the bundle is verified —
-the bundle builds, the daemon serves it, and every asset's hash checks out —
-and nothing past it is. The first person to build one should expect to find
-something.
+`pnpm run apk` carries three flags and none of them are optional. The plain
+`./gradlew assembleRelease` the template gives you **does not finish**:
+
+- **It runs out of metaspace.** React Native's template sets
+  `-XX:MaxMetaspaceSize=512m`, and four ABIs plus Kotlin plus lint exhaust it —
+  the first build here died on `OutOfMemoryError: Metaspace` after 24 minutes.
+  `expo-build-properties` has no option for JVM arguments, so this cannot live
+  in `app.config.ts` and has to be a flag.
+- **Release lint fails inside `expo-modules-core`**, which has nothing to say
+  about this app. Exclude the *parent* task, `lintVitalRelease`; excluding its
+  two subtasks instead leaves the text-output task demanding files nothing
+  produced, which is its own confusing failure.
+- **One ABI, not four.** `arm64-v8a` is every modern phone, and it is four times
+  less native compilation.
+
+On a machine with little memory add `--max-workers=2`.
+
+#### What the APK is, and is not
+
+Verified: it builds. 37 MB, `arm64-v8a`, 21 native libraries, a 1.88 MB embedded
+JavaScript bundle, and both halves of the update configuration agreeing — the
+native `EXPO_UPDATE_URL` and `assets/app.config` naming the same machine, with
+`{"authorization":""}` as the declared header the run-time override needs.
+
+Two things it is not:
+
+- **It has never run.** This machine has no access to `/dev/kvm`, so no
+  emulator, and there is no device here. Nothing about the app's behaviour on a
+  screen is verified — only that it compiles, bundles and is packaged. Expect
+  the first launch to find something.
+- **It is signed with the Android *debug* certificate**, which is what React
+  Native's template configures for release builds. That is fine for sideloading
+  onto your own phone and wrong for anything else. A real keystore is a
+  `signingConfigs` change in the generated project, which means it belongs in a
+  config plugin before anybody distributes this.
 
 ## What is not here
 

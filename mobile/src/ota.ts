@@ -1,8 +1,9 @@
 /**
  * Taking a new bundle from the daemon that serves it (issue #168).
  *
- * The machine is decided when the app is built — `COVEY_UPDATES_URL`, baked into
- * `updates.url` — and `app.config.ts` says why it is not a run-time setting.
+ * The machine is decided when the app is built — `EXPO_PUBLIC_COVEY_UPDATES_URL`,
+ * which `app.config.ts` also reads — and that file says why it is not a run-time
+ * setting.
  * What is decided at run time is the *credential*: the token is a secret, a
  * binary is no place for one, so the app reads it from the device's keychain and
  * hands it to `expo-updates` through `setUpdateRequestHeadersOverride`. That
@@ -19,19 +20,54 @@
  * ready and the reader taps. `checkAutomatically: ON_LOAD` means the check has
  * usually finished by the time they look.
  */
-import Constants from "expo-constants";
 import * as Updates from "expo-updates";
 import { readMachines, readToken } from "./machines";
 
-/** Where this build asks for updates, or null when it was built without a machine. */
+/**
+ * Where this build asks for updates, or null when it was built without a machine.
+ *
+ * Read from the environment variable and *not* from `Constants.expoConfig`. The
+ * two are written by different build steps — `expo prebuild` puts the URL into
+ * `AndroidManifest.xml`, and the gradle build writes `assets/app.config` from
+ * `app.config.ts` — and the first APK built here proved they can disagree: the
+ * native layer would update and this function said the build took no updates.
+ * Metro inlines an `EXPO_PUBLIC_` variable at bundle time, so this is the same
+ * literal the app config was built from.
+ */
 export function updatesUrl(): string | null {
-  const url = (Constants.expoConfig?.updates as { url?: string } | undefined)?.url;
-  return typeof url === "string" && url ? url : null;
+  const url = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL?.trim();
+  return url ? url : null;
 }
 
-/** Whether this build can take an update at all. False in development, always. */
+/**
+ * Whether this build can take an update at all. False in development, always.
+ *
+ * `Updates.isEnabled` is the *native* answer, read from the manifest the build
+ * wrote, and it is the one that decides whether a check can happen at all. The
+ * URL is this bundle's own idea of where. Both have to agree, and
+ * `updateInconsistency` is what says so when they do not.
+ */
 export function updatesEnabled(): boolean {
   return Updates.isEnabled && Boolean(updatesUrl());
+}
+
+/**
+ * A build whose two halves disagree, described, or null when they agree.
+ *
+ * There is exactly one way to produce this and it is worth naming rather than
+ * hiding: a build that set the environment variable for one step and not the
+ * other. Saying "this build takes no updates" would be a lie the reader could
+ * not act on, because the native layer would go on updating without them.
+ */
+export function updateInconsistency(): string | null {
+  const url = updatesUrl();
+  if (Updates.isEnabled && !url) {
+    return "This build updates itself but does not say from where. It was built with EXPO_PUBLIC_COVEY_UPDATES_URL set for one step and not the other — see docs/MOBILE.md.";
+  }
+  if (!Updates.isEnabled && url) {
+    return `This build names ${url} for updates but the updates module is off in the binary. Rebuild after a prebuild with the same environment.`;
+  }
+  return null;
 }
 
 /**

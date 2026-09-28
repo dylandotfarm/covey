@@ -4,8 +4,17 @@
  * Two things here are decided at build time and never at run time, and both
  * are deliberate.
  *
- * **Which machine serves updates.** `COVEY_UPDATES_URL` names it, and the URL
- * is baked into the binary. A daemon that serves updates serves the JavaScript
+ * **Which machine serves updates.** `EXPO_PUBLIC_COVEY_UPDATES_URL` names it, and
+ * the URL is baked into the binary.
+
+ * The name is not decoration. Expo loads `.env` for every one of its commands
+ * and inlines an `EXPO_PUBLIC_` variable into the bundle, so this file and
+ * `src/ota.ts` read *one* value from *one* place. The first APK built here got
+ * that wrong: the variable was set for `expo prebuild`, which wrote the URL into
+ * `AndroidManifest.xml`, and not for the gradle build, which wrote
+ * `assets/app.config` from this file — so the binary carried a native layer that
+ * would update and a JavaScript layer that reported it could not. One variable
+ * loaded from a file cannot disagree with itself. A daemon that serves updates serves the JavaScript
  * this app runs, so that trust is named once, by the person who builds the
  * app, and is never inferred from a fleet list. The alternative — Expo's
  * `setUpdateURLAndRequestHeadersOverride` — needs
@@ -21,7 +30,7 @@
  * requires the header be declared at build time to be overridable at run time,
  * which is why the empty declaration is here rather than absent.
  *
- * With no `COVEY_UPDATES_URL` the updates module is off and the app runs
+ * With no `EXPO_PUBLIC_COVEY_UPDATES_URL` the updates module is off and the app runs
  * whatever bundle it was built with. That is the development case, and it must
  * keep working on a machine that has never seen a certificate.
  */
@@ -32,7 +41,7 @@ import type { ExpoConfig } from "expo/config";
 /** The version the runtime is keyed on. An update must match the app it lands in. */
 const VERSION = "0.1.0";
 
-const updatesUrl = process.env.COVEY_UPDATES_URL?.trim();
+const updatesUrl = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL?.trim();
 /** The certificate is committed; the private key that matches it is not. */
 const certificate = join(__dirname, "certs", "certificate.pem");
 const signed = existsSync(certificate);

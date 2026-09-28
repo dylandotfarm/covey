@@ -134,7 +134,14 @@
   `mobile/scripts/export.mjs` writes `covey-update.json` beside the bundle.
   The update URL is baked in at build time and the token is not: a run-time URL needs
   Expo's `disableAntiBrickingMeasures`, which gives up the one measure that lets a later
-  update repair a broken one, so covey rebuilds instead. Two screens are screens on
+  update repair a broken one, so covey rebuilds instead. That URL is
+  `EXPO_PUBLIC_COVEY_UPDATES_URL` in `mobile/.env` and is read from the environment in
+  both halves — never from `Constants.expoConfig`, because `expo prebuild` writes the
+  native manifest and the gradle build writes `assets/app.config`, and a variable set for
+  one step and not the other ships an app that updates itself while telling the reader it
+  cannot. `pnpm run apk` is the build, and its three flags are all load-bearing: the
+  template's gradle runs out of metaspace, release lint fails inside `expo-modules-core`,
+  and one ABI is four times less native compilation. Two screens are screens on
   purpose — a picture, which is #167's lesson, and the settings sheet, which fixes a bug
   the page still has — and the transcript is an inverted `FlatList`, this platform's
   answer to #114. Relative imports carry no `.js`: Metro does not follow TypeScript's
