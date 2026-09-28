@@ -7,12 +7,16 @@ import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, 
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
-import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, type LinkContext } from "../links.js";
+import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
+import { ASSUMED_CELL, CELL_SIZE_QUERY, graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, parseCellSize, type CellSize } from "../media.js";
+import { loadPreview, nextImageId } from "../mediaView.js";
 
 const HYPERLINKS = hyperlinksEnabled();
 /** The words for the gesture that opens a link, read once like HYPERLINKS. */
 const OPEN_GESTURE = openGesture(process.platform, HYPERLINKS);
+/** The exact answer to `CELL_SIZE_QUERY`, and nothing else that looks like it. */
+const CELL_SIZE_REPLY = /^\u001b\[6;\d+;\d+t$/;
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
@@ -123,6 +127,18 @@ export function App({ store }: { store: Store }) {
     stdout.on("resize", on);
     return () => { stdout.off("resize", on); };
   }, [stdout]);
+
+  /**
+   * How big one cell is, in pixels, which is the whole of what keeps a preview
+   * from being stretched (#163). A ref and not state: nothing on the screen
+   * changes when the answer lands, and only the next preview reads it.
+   */
+  const cellSize = useRef<CellSize>(ASSUMED_CELL);
+  useEffect(() => {
+    // Asked again after a resize, because the reader may have changed the font
+    // size — which moves the cell and leaves the grid where it was.
+    if (graphicsEnabled()) stdout.write(CELL_SIZE_QUERY);
+  }, [stdout, size.cols, size.rows]);
 
   /**
    * The sidebar cursor is a row key, not an index. The tree re-sorts under it
@@ -1378,6 +1394,65 @@ export function App({ store }: { store: Store }) {
     }
   }
 
+  /**
+   * Paint one of a thread's files over the transcript (#163).
+   *
+   * The bytes come from the daemon that holds the thread, over its own `/file`
+   * route, so this works for a screenshot made on a machine anywhere — which is
+   * the case the browser route exists for and a `file://` path cannot serve.
+   *
+   * The graphics escape is written out of band, to the stream ink owns. It
+   * measures 17 columns to `string-width`, so it can never travel inside a
+   * painted row; what goes in the rows is the placeholder rectangle, which
+   * measures exactly the cells it covers. See `media.ts`.
+   */
+  function openMediaPreview(ref: { threadId: string; path: string; name: string }) {
+    // Asked here, and not read into a constant beside `HYPERLINKS`. A constant
+    // is right for that one because every span of every paint consults it; this
+    // is consulted once per click, so the saving is nothing and the cost is a
+    // module that has to be loaded after the environment is set. That is the
+    // same trap as `NODE_ENV` in the CLI entry: node evaluates every static
+    // import before the first statement of a file.
+    if (!graphicsEnabled()) {
+      store.notify(`this terminal cannot paint a picture — ${OPEN_GESTURE} to open ${truncate(ref.name, 40)} in a browser`);
+      return;
+    }
+    const uri = threadFileUri(ref.threadId, ref.path, linkCtx);
+    if (!uri) {
+      store.notify(`covey has no address for the machine that holds ${truncate(ref.name, 40)}`);
+      return;
+    }
+    store.setOverlay({ kind: "media", threadId: ref.threadId, path: ref.path, name: ref.name, uri, view: { kind: "loading" } });
+    // The rectangle is worked out from the pane as it is now. A resize while a
+    // preview is open leaves the picture at the size it was transmitted, and
+    // `OverlayView` paints only the rows that still fit.
+    const max = { cols: Math.max(1, mainW - 6), rows: Math.max(1, transcriptH - 4) };
+    void loadPreview(uri, ref.name).then((got) => {
+      // The reader may have closed this, or opened another picture, while covey
+      // fetched. The store, not `state`: that is the snapshot from before.
+      const ov = store.getState().overlay;
+      if (ov?.kind !== "media" || ov.path !== ref.path) return;
+      if ("error" in got) return store.setOverlay({ ...ov, view: { kind: "error", message: got.error } });
+      const box = mediaBox(got, cellSize.current, max);
+      const id = nextImageId();
+      stdout.write(kittyTransmit(id, got.png, box.cols, box.rows));
+      store.setOverlay({ ...ov, view: { kind: "ready", id, cols: box.cols, rows: box.rows, poster: got.poster } });
+    });
+  }
+
+  /**
+   * Forget a picture in the terminal once the overlay holding it has gone.
+   *
+   * Keyed on the id, so this covers every way it can go: esc, another picture
+   * opened over it, and the client shutting down. Without it every preview a
+   * reader opened would stay in the terminal's memory for the whole session.
+   */
+  const shownImage = state.overlay?.kind === "media" && state.overlay.view.kind === "ready" ? state.overlay.view.id : null;
+  useEffect(() => {
+    if (shownImage == null) return;
+    return () => { stdout.write(kittyDelete(shownImage)); };
+  }, [shownImage, stdout]);
+
   /** Copy a selection. The caller passes the one it just made, because
    *  `state` is the last render's snapshot and does not hold it yet. */
   function copySelection(selection: Selection | null = state.selection) {
@@ -1479,7 +1554,13 @@ export function App({ store }: { store: Store }) {
     // An overlay covers the screen, so the conversation behind it is not what
     // the pointer is on. The wheel still means something there; nothing else
     // does.
-    if (state.overlay) { if (ev.kind === "wheel") scrollOverlay(ev); return; }
+    if (state.overlay) {
+      if (ev.kind === "wheel") scrollOverlay(ev);
+      // A preview is one picture and nothing to point at, so a press anywhere
+      // shuts it — the gesture that opened it, used again.
+      else if (ev.kind === "press" && state.overlay.kind === "media") store.setOverlay(null);
+      return;
+    }
     const inSidebar = sidebarVisible && ev.col <= SIDEBAR_W;
     const inTranscript = ev.row >= TRANSCRIPT_TOP && ev.row < TRANSCRIPT_TOP + transcriptH && !inSidebar;
 
@@ -1552,7 +1633,10 @@ export function App({ store }: { store: Store }) {
         // The words, not the target: the notice shares its row with the title
         // bar, which already crowds it below about 94 columns (#87), and the
         // reader is pointing at the target as they read this.
-        if (hit?.exact && run.count === 1 && !state.diffView) {
+        // A row `covey show` drew answers a plain click with the picture, so
+        // naming the browser route there would teach a gesture the reader did
+        // not need. The row keeps the link, and ctrl+click still takes it.
+        if (hit?.exact && run.count === 1 && !state.diffView && !layout.media.has(hit.line)) {
           const uri = linkAt(layout.lines[hit.line] ?? [], hit.col);
           if (uri) store.notify(`${OPEN_GESTURE} to ${uri.startsWith("file://") ? "reveal this file" : "open this link"}`);
         }
@@ -1599,6 +1683,10 @@ export function App({ store }: { store: Store }) {
       // that folds something — a `>_` group, a tool call, a thought — it does
       // what the keyboard would.
       if (line != null && !state.diffView) {
+        // A file row comes first: it is the one row of a note that is not the
+        // fold, and a plain click there asked for the picture.
+        const shown = layout.media.get(line);
+        if (shown) return openMediaPreview(shown);
         const id = layout.toggles.get(line);
         if (id) store.toggleItem(id);
       }
@@ -1611,6 +1699,15 @@ export function App({ store }: { store: Store }) {
     // both would double each keystroke. Repeats are real input, so keep them.
     if (rawKey.eventType === "release") return;
     if (process.env.COVEY_KEYLOG) { try { appendFileSync(process.env.COVEY_KEYLOG, JSON.stringify({ input: rawInput, key: rawKey, focus: state.focus }) + "\n"); } catch { /* ignore */ } }
+    // The terminal's answer to `CELL_SIZE_QUERY` arrives the same way, and has
+    // to go the same way: an escape left in the stream is typing to `useInput`.
+    // Matched whole, so a chunk that merely contains something similar is still
+    // the reader's.
+    if (CELL_SIZE_REPLY.test(rawInput)) {
+      const cell = parseCellSize(rawInput);
+      if (cell) cellSize.current = cell;
+      return;
+    }
     // Mouse reports arrive through the same channel as keys; Ink leaves them
     // intact as an unrecognised CSI, so pick them off before anything can treat
     // them as typed text.
@@ -1726,7 +1823,7 @@ export function App({ store }: { store: Store }) {
       if (ov.kind === "input" || ov.kind === "pick") ov.onCancel?.();
       return;
     }
-    if (ov.kind === "help" || ov.kind === "update") return;
+    if (ov.kind === "help" || ov.kind === "update" || ov.kind === "media") return;
     if (ov.kind === "run") return handleRunKey(ov, input, key);
     if (ov.kind === "secrets") return handleSecretsKey(ov, input, key);
     if (ov.kind === "usage") {

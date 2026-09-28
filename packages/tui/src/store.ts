@@ -119,6 +119,29 @@ export type Overlay =
   | { kind: "input"; title: string; placeholder?: string; initial?: string; mask?: boolean; onSubmit: (v: string) => void; onCancel?: () => void }
   /** Live progress of `machine.update`; closing it leaves the update running. */
   | { kind: "update"; machine: string }
+  /**
+   * A picture from `covey show`, painted over the transcript (#163).
+   *
+   * The state is a three-way rather than a flag, because each of the three is a
+   * different thing on the screen: a line saying covey is fetching, the rows the
+   * terminal paints the picture over, and the sentence saying which of the four
+   * things went wrong. `id`, `cols` and `rows` are the terminal's own: the
+   * picture is already in the terminal by the time they are set, and `App.tsx`
+   * forgets it again when this overlay closes.
+   */
+  | {
+      kind: "media";
+      threadId: string;
+      /** The path on the daemon's machine, as the timeline item carries it. */
+      path: string;
+      name: string;
+      /** The `/file` URL, so the footer can name the browser route as well. */
+      uri?: string;
+      view:
+        | { kind: "loading" }
+        | { kind: "ready"; id: number; cols: number; rows: number; poster: boolean }
+        | { kind: "error"; message: string };
+    }
   /** Token and estimated-cost totals, asked of every connected machine. */
   | {
       kind: "usage";

@@ -24,5 +24,8 @@
     "ink": "^7.1.1",
     "react": "^19.2.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "string-width": "^8.2.2"
   }
 }

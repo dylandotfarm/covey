@@ -77,6 +77,27 @@
   `covey pr --attach`, and never becomes it: one shows a thing to the person reading now,
   the other puts it on a pull request. Change `packages/cli/src/show.ts` and the `/covey`
   skill together, as with the loop and `covey env`.
+- A terminal that speaks the kitty graphics protocol paints that picture, over the
+  transcript, on a plain click (#163). `media.ts` is pure and holds the escapes; the route
+  is *Unicode placeholders* and may never become a plain placement: ink erases the rows it
+  rewrites and `relTime` re-renders the client every `CLOCK_MS`, so a picture anchored to
+  the screen is a picture the next frame deletes. A virtual placement belongs to cells
+  instead — covey sends the bytes once with `U=1`, then paints a rectangle of `U+10EEEE`
+  whose foreground colour carries the image id, and every repaint re-composites for free.
+  The measurements are the whole reason it works, and `mediaPaint.test.ts` holds them
+  against the real ink: the graphics escape costs 17 columns, so it goes out of band to
+  the stream ink owns and never inside a span; a placeholder cell costs 1 and a combining
+  mark 0, so a painted row measures exactly the cells it covers. Every escape carries
+  `q=2`, because the terminal's answer would arrive on stdin and `useInput` would read it
+  as typing — which is also why `CELL_SIZE_QUERY`'s reply is picked off in `App.tsx`
+  before the mouse parse. Inline in the transcript is the next step and it waits on #24:
+  `width()` counts a combining mark as a column, so `wrapSpans` would misjudge a row. The
+  overlay builds its own rows and never calls it. kitty takes PNG and raw RGB alone, so
+  `mediaView.ts` converts with the four tools `attachments.ts` already looks for, and a
+  video becomes its first frame — never a stream of frames, which is the paint budget
+  gone. `graphicsEnabled` is asked at the click and not read into a constant beside
+  `HYPERLINKS`: one click cannot pay for a module that has to load after the environment
+  is set, which is the `NODE_ENV` trap again.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled

@@ -51,6 +51,15 @@ export interface Span {
  */
 export interface Line extends Array<Span> {
   wrap?: "space" | "char";
+  /**
+   * The file this row names, when the row is one `covey show` drew (#163). A
+   * click on it opens the preview overlay, so `layoutTranscript` collects these
+   * into a map from line to file the way it already collects `toggles`.
+   *
+   * Every row of a wrapped name carries it: a reader who clicks the second row
+   * of a long file name asked for the same picture as one who clicked the first.
+   */
+  media?: { path: string; name: string };
 }
 
 /** Carry `src`'s wrap marker onto a row rebuilt from it. */
@@ -486,13 +495,20 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       // inside a span is a row Ink paints as several and the layout counts as
       // one, which is what made a shown picture overlap the rows under it.
       if (rest && open) lines.push(...markdownToLines(rest, w - 4, { color, italic: true }, o.links).map((l) => withWrap([{ text: "    " }, ...l], l)));
-      // A file covey is showing (#160). The terminal cannot paint a picture,
-      // so the row is the file's name with the daemon's own `/file` link on
-      // it: ctrl+click, and it opens in a browser — on the reader's machine,
-      // from the daemon's, which is the case a `file://` path cannot serve.
+      // A file covey is showing (#160). The row is the file's name with the
+      // daemon's own `/file` link on it: ctrl+click, and it opens in a browser
+      // — on the reader's machine, from the daemon's, which is the case a
+      // `file://` path cannot serve.
+      //
+      // `media` marks the row as well (#163), so a plain click paints the
+      // picture over the transcript on a terminal that can. The mark is set
+      // whether or not this terminal can paint: `App.tsx` decides that, and a
+      // click that cannot paint says so rather than doing nothing.
       for (const f of item.files ?? []) {
         const link = threadFileUri(item.threadId, f.path, o.links);
-        lines.push(...wrapSpans([{ text: "    ⎘ " }, { text: f.name, color: link ? T.accent : color, link }], w));
+        const rows = wrapSpans([{ text: "    ⎘ " }, { text: f.name, color: link ? T.accent : color, link }], w);
+        for (const r of rows) r.media = { path: f.path, name: f.name };
+        lines.push(...rows);
       }
       lines.push([]);
       return lines;
