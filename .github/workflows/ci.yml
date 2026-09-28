@@ -27,6 +27,41 @@ jobs:
   # The Rust desktop client (issue #142). Its own job because it is its own
   # workspace: `tsc -b` never sees it and `cargo` never needs node. A red job
   # here does not say the TUI is broken, and the other way round.
+  # The React Native client (issue #168). Its own job because it is its own pnpm
+  # workspace: `tsc -b` never sees it, and its install rules are not the ones
+  # written for a node project. A red job here does not say the TUI is broken.
+  #
+  # `pnpm run export` is the point of this job. It is the only thing that proves
+  # Metro still resolves `@covey/client`, `@covey/protocol` and `@covey/web` from
+  # outside the workspace, and that resolution is the whole bet of a third client
+  # that shares its logic. A typecheck cannot see it: the bundler never reads a
+  # tsconfig.
+  mobile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      # The app bundles what `tsc -b` wrote, so the workspace above is built
+      # first. Nothing here needs its tests.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      # `--frozen-lockfile` is what holds the 7-day rule here: pnpm verifies the
+      # lockfile against `minimumReleaseAge` in mobile/pnpm-workspace.yaml, so a
+      # version the policy never saw cannot enter. There is no separate audit
+      # script for this workspace and it does not need one.
+      - run: pnpm install --frozen-lockfile
+        working-directory: mobile
+      - run: pnpm run typecheck
+        working-directory: mobile
+      - run: pnpm test
+        working-directory: mobile
+      - run: pnpm run export
+        working-directory: mobile
+
   desktop:
     runs-on: ubuntu-latest
     defaults:

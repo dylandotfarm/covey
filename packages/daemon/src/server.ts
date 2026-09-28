@@ -8,6 +8,7 @@ import { readFleet, type DaemonConfig } from "./config.js";
 import { listRepos, createRepo, cloneUrlsFor, GH_CWD } from "./repos.js";
 import { listRemoteBranches } from "./git.js";
 import { findWebRoots, serveWeb } from "./web.js";
+import { findUpdateDir, serveUpdates } from "./updates.js";
 import { serveMedia } from "./media.js";
 import { serveThreadFile } from "./threadFiles.js";
 import { webAddresses } from "./addresses.js";
@@ -49,6 +50,10 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
   const selfUserId = self?.userId ?? null;
   // Found once: the package graph does not move while the daemon runs.
   const webRoots = findWebRoots();
+  // Where `pnpm run export` in `mobile/` leaves the bundle, or null when nobody
+  // has run it here. Found once, but read per request, so a fresh export
+  // reaches the next phone that asks without restarting the daemon.
+  const updateDir = findUpdateDir();
   const http = createServer((req, res) => {
     if (req.url === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -71,6 +76,16 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
       void authenticate(req, o.config, selfUserId).then((auth) => {
         if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`file: ${auth.reason}\n`); return; }
         serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id));
+      }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+      return;
+    }
+    // The React Native client's bundle, over the air (#168). Gated by
+    // `authenticate` and by nothing else — see `updates.ts` for why the web
+    // client's own setting has no say here.
+    if (req.url === "/updates" || req.url?.startsWith("/updates/") || req.url?.startsWith("/updates?")) {
+      void authenticate(req, o.config, selfUserId).then((auth) => {
+        if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`updates: ${auth.reason}\n`); return; }
+        serveUpdates(req, res, { dir: updateDir, token: o.config.token, log: o.log });
       }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
       return;
     }

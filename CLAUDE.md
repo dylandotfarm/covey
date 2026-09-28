@@ -109,6 +109,49 @@
   `PreviewCache` bounds by bytes and never by count, because one screenshot is a hundred
   times another, and never holds a failure: a machine away for a moment must not be away
   for the session.
+- `mobile/` is the React Native client (#168), a *third* client beside the TUI and the
+  page, and a pnpm workspace of its own outside the repository's: `tsc -b` never sees it
+  and Metro never inherits install rules written for a node project. It is mostly a
+  paint, because `@covey/client` and `@covey/protocol` import no node module and
+  `packages/web/package.json` already named `state.ts` its entry — so the app imports the
+  same `State` the page keeps and applies it with the same functions. Never write a second
+  copy of a decision: `projectRows` (and `projectPool` under it), `timelineRows`,
+  `sheetRows`, `tableAt`, and `readPicked` for the caps and the four failure words (#132)
+  are all shared, and the web package names `./attach` and `./markdown` in its exports for
+  exactly that. The one thing the app parses itself is the markdown *layout*, because a
+  `<Text>` is not HTML — and `mobile/src/markdown.test.ts` holds it against
+  `markdownToHtml` on every input, not against a fixture, because the page applies its
+  patterns in order to one flat string and so bold may hold a link *and* a link's label
+  may be bold. A recursive descent gets one or the other.
+  The bundle comes over the air from the daemon (`packages/daemon/src/updates.ts`, the
+  Expo Updates protocol v1 on `/updates`), gated by `authenticate()` and by nothing else —
+  the machine that serves bundles is chosen when the app is built and is very often not
+  the machine that serves the page. The signature is a header on the manifest *part* and
+  signs that part's exact bytes, so serialise the manifest once; an asset is named by the
+  base64url SHA-256 of its own bytes; and a runtime version that does not match gets a
+  directive, never a manifest, which is what stops a bundle built against other native
+  modules from launching. `expo export` records no runtime version, so
+  `mobile/scripts/export.mjs` writes `covey-update.json` beside the bundle. A machine
+  update does *not* refresh that bundle — it runs `git pull`, `pnpm install` and
+  `pnpm run build`, and none of those touch `mobile/` — so putting a change on the phone
+  is a second act, `pnpm run export` on the machine that serves updates.
+  The update URL is baked in at build time and the token is not: a run-time URL needs
+  Expo's `disableAntiBrickingMeasures`, which gives up the one measure that lets a later
+  update repair a broken one, so covey rebuilds instead. That URL is
+  `EXPO_PUBLIC_COVEY_UPDATES_URL` in `mobile/.env` and is read from the environment in
+  both halves — never from `Constants.expoConfig`, because `expo prebuild` writes the
+  native manifest and the gradle build writes `assets/app.config`, and a variable set for
+  one step and not the other ships an app that updates itself while telling the reader it
+  cannot. `pnpm run apk` is the build, and its three flags are all load-bearing: the
+  template's gradle runs out of metaspace, release lint fails inside `expo-modules-core`,
+  and one ABI is four times less native compilation. Two screens are screens on
+  purpose — a picture, which is #167's lesson, and the settings sheet, which fixes a bug
+  the page still has — and the transcript is an inverted `FlatList`, this platform's
+  answer to #114. Relative imports carry no `.js`: Metro does not follow TypeScript's
+  convention. `pnpm run export` is the integration test that matters and CI runs it,
+  because it is the only thing that proves Metro still resolves the three shared packages
+  from outside the workspace. `docs/MOBILE.md` holds the reasoning and the rules; no APK
+  has been built yet.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled

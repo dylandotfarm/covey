@@ -1,0 +1,50 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    // An unused import is dead weight in the bundle and usually a leftover from
+    // a change that moved somewhere else. Catch it here rather than ship it.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "jsx": "react-jsx",
+    "moduleResolution": "bundler",
+    "module": "esnext",
+    "target": "esnext",
+    "lib": ["esnext", "dom"],
+    "types": ["node", "react"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    // Metro is told the same three things in metro.config.js, and has to be:
+    // this is the type checker's own map and the bundler never reads it.
+    //
+    // Each path names the package *directory* rather than a file, so one
+    // mapping serves three readers: `tsc` finds the declarations through the
+    // package's `types`, `tsx` finds the JavaScript through its `import`, and
+    // the node test runner gets a module it can actually execute. Naming
+    // `dist/index.d.ts` here type-checks and then fails at run time.
+    //
+    // `pnpm run build` in the checkout above has to have run, the same rule
+    // the bundle follows.
+    "baseUrl": ".",
+    "paths": {
+      "@covey/protocol": ["../packages/protocol"],
+      "@covey/client": ["../packages/client"],
+      "@covey/web": ["../packages/web"],
+      // The two subpaths the web package names for this client. A bare
+      // specifier resolves through the package directory above; a subpath does
+      // not, so each is mapped by hand.
+      //
+      // These two name the *source* rather than `dist`, because the built file
+      // carries its types in a sibling `.d.ts` that a path mapping does not
+      // reach: mapping the `.js` type-checks as `any`, and mapping the `.d.ts`
+      // leaves `tsx` with a file it cannot run. Metro still bundles the built
+      // file through the package's `exports`, which is the same code.
+      "@covey/web/attach": ["../packages/web/src/attach.ts"],
+      "@covey/web/markdown": ["../packages/web/src/markdown.ts"]
+    }
+  },
+  "include": ["src", "app.config.ts", "scripts"],
+  "exclude": ["node_modules", "dist", "android"]
+}

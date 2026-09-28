@@ -1,0 +1,28 @@
+# Installed by pnpm, with this directory's own lockfile.
+node_modules/
+
+# `pnpm run export` writes the bundle the daemon serves. A build artifact of a
+# second client: the daemon reads it from disk, and nothing in the repository
+# needs it.
+dist/
+
+# `expo prebuild` writes the native project. Generated from app.config.ts, so
+# the config is the source and this is not.
+android/
+ios/
+
+# The machine that serves this app's updates, per checkout. `.env.example` is
+# the committed template.
+.env
+.env.local
+
+# Expo's own caches.
+.expo/
+web-build/
+
+# The private key never enters the checkout — `scripts/codesign.mjs` writes it
+# to $COVEY_HOME. This is the staging directory it uses on the way there, and a
+# belt to go with that brace.
+.codesign-keys/
+*-private-key.pem
+private-key.pem

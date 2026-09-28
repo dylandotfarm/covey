@@ -13,7 +13,7 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  DEFAULT_LOD, KNOWN_MODELS, LOD_LABEL, LOD_ORDER, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, type Lod,
+  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, type Lod,
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
