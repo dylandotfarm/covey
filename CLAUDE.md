@@ -384,6 +384,20 @@
   off there is to close the page.
 - Media in the web client is inline (#110): `markdown.ts` writes an `<img>` or a `<video>`
   and the style sheet caps it at 40% of the screen; a tap on an image opens it full size.
+  That picture is a *layer on the route*, `#/t/<machine>/<thread>/media` (#167), because
+  the phone's back control and the swipe from the edge are the same gesture as the one
+  that leaves a screen — and a picture outside the route meant one gesture shut nothing
+  and skipped a level. The hash says *that* a picture is open and never *which*: the
+  source carries that machine's token, and `readToken` takes the token out of the address
+  bar on the first load, so naming the picture would write it into the browser's history.
+  `routeOf` reads the whole hash first and only then strips the suffix, or a conversation
+  whose id is `media` would come out as a layer over nothing. A route that names a picture
+  covey does not hold — a reload, a pasted URL — is replaced by the screen it was over.
+  Every close runs through that one route change: the tap, `esc`, the in-page control, and
+  the browser's own. Never shut a layer by clearing the state alone; the entry would
+  outlive it and the next back would be a press that did nothing. The settings sheet is
+  *not* a layer yet and has the same bug — it has pages of its own, so back inside it
+  means more than one thing.
   A GitHub user attachment loads through `GET /media?url=…` on the daemon (`media.ts`):
   GitHub answers 404 without the account's token and a five-minute signed redirect with
   it, and the daemon forwards that redirect with the `gh` token. The route is gated like

@@ -104,6 +104,15 @@ export interface State {
   /** The settings sheet over the page, or null when none is open. */
   sheet: SheetState | null;
   /**
+   * The picture open full size over the page (#110), or null when none is.
+   *
+   * Held here rather than in the renderer's own DOM, because the back control
+   * has to know it is there: `/media` on the route says a picture is open, and
+   * this says which (#167). The pair is what lets a reload of a `/media` route
+   * tell "the reader opened a picture" from "somebody pasted this URL".
+   */
+  media: { src: string; alt: string } | null;
+  /**
    * How much of a transcript is painted before the reader taps a row (#149).
    *
    * A preference of this device, kept in `localStorage` by `main.ts` — the
@@ -122,7 +131,7 @@ export interface State {
 }
 
 export function emptyState(): State {
-  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), attachments: new Map(), attaching: null, access: null, showAddresses: false, choosing: null, sheet: null, lod: DEFAULT_LOD, toggledRows: new Set() };
+  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), attachments: new Map(), attaching: null, access: null, showAddresses: false, choosing: null, sheet: null, media: null, lod: DEFAULT_LOD, toggledRows: new Set() };
 }
 
 export function addMachine(s: State, key: string, name: string, primary = false, token?: string): MachineSlot {
@@ -379,18 +388,55 @@ export function threadStatusLabel(t: Thread): string {
  * What the hash names: a thread, `#/t/<machine>/<thread>`; an issue or a pull
  * request, `#/gh/<machine>/<project>/<number>`; or the list, no hash. The
  * browser's back control, a swipe from the edge and a reload all read it.
+ *
+ * A picture open full size is a *layer* over one of those, and it is in the
+ * hash too, as a `/media` suffix (#167). That is what makes the back control
+ * shut the picture instead of leaving it on the screen and navigating out of
+ * the conversation underneath it.
+ *
+ * The suffix says *that* a picture is open and never *which*. The source of an
+ * inline picture is the daemon's `/file` route carrying that machine's token,
+ * and `readToken` in `main.ts` takes the token out of the address bar on the
+ * first load on purpose; naming the picture here would write it back into the
+ * browser's history. So a reload of a `/media` route lands on the screen the
+ * picture was over, and `applyRoute` puts the URL back to match.
  */
-export type Route =
+export type Screen =
   | { kind: "thread"; machine: string; threadId: string }
-  | { kind: "item"; machine: string; projectId: string; number: number }
-  | null;
+  | { kind: "item"; machine: string; projectId: string; number: number };
 
-export function routeOf(hash: string): Route {
+/**
+ * A screen, and whether a picture is open over it.
+ *
+ * Written as an intersection so the layer is stated once. `(A | B) & C` is
+ * `(A & C) | (B & C)`, so `r.kind` still narrows to the one screen's fields.
+ */
+export type Route = (Screen & { media: boolean }) | null;
+
+/** The suffix that says a picture is open over the route before it. */
+const MEDIA = "/media";
+
+function screenOf(hash: string): Screen | null {
   const t = /^#\/t\/([^/]+)\/([^/]+)$/.exec(hash);
   if (t) return { kind: "thread", machine: decodeURIComponent(t[1]!), threadId: decodeURIComponent(t[2]!) };
   const i = /^#\/gh\/([^/]+)\/([^/]+)\/(\d+)$/.exec(hash);
   if (i) return { kind: "item", machine: decodeURIComponent(i[1]!), projectId: decodeURIComponent(i[2]!), number: Number(i[3]) };
   return null;
+}
+
+export function routeOf(hash: string): Route {
+  // The whole hash first, and the suffix taken off only when that fails. A
+  // conversation whose id is `media` ends its own hash in the layer's name, and
+  // read the other way round it would come out as a layer over nothing — which
+  // is the list, so the reader's thread would vanish on a reload. A screen
+  // never has a spare segment, so the two can never both parse.
+  const plain = screenOf(hash);
+  if (plain) return { ...plain, media: false };
+  if (!hash.endsWith(MEDIA)) return null;
+  const under = screenOf(hash.slice(0, -MEDIA.length));
+  // A bare `#/media` is over nothing. There is no screen to shut it back to,
+  // so it reads as the list rather than as a layer.
+  return under ? { ...under, media: true } : null;
 }
 
 export function threadHash(machine: string, threadId: string): string {
@@ -399,6 +445,17 @@ export function threadHash(machine: string, threadId: string): string {
 
 export function itemHash(machine: string, projectId: string, number: number): string {
   return `#/gh/${encodeURIComponent(machine)}/${encodeURIComponent(projectId)}/${number}`;
+}
+
+/** The hash of one route, with no layer on it: the screen a picture is over. */
+export function baseHash(r: Route): string {
+  if (!r) return "";
+  return r.kind === "thread" ? threadHash(r.machine, r.threadId) : itemHash(r.machine, r.projectId, r.number);
+}
+
+/** The same hash with a picture open over it. */
+export function mediaHash(base: string): string {
+  return base ? base + MEDIA : "";
 }
 
 // ---------------------------------------------------------------------------

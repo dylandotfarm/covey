@@ -4,7 +4,7 @@ import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project,
 import type { TaggedAttachment } from "@covey/client";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
-  isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
+  baseHash, isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaHash, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
   attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
 } from "./state.js";
@@ -186,11 +186,60 @@ test("the page knows which address it is on", () => {
 
 test("the hash names a thread, an item, or the list (#108)", () => {
   assert.deepEqual(routeOf(""), null);
-  assert.deepEqual(routeOf("#/t/ws%3A%2F%2Fbox%3A3790/t1"), { kind: "thread", machine: "ws://box:3790", threadId: "t1" });
-  assert.deepEqual(routeOf("#/gh/ws%3A%2F%2Fbox%3A3790/p1/12"), { kind: "item", machine: "ws://box:3790", projectId: "p1", number: 12 });
+  assert.deepEqual(routeOf("#/t/ws%3A%2F%2Fbox%3A3790/t1"), { kind: "thread", machine: "ws://box:3790", threadId: "t1", media: false });
+  assert.deepEqual(routeOf("#/gh/ws%3A%2F%2Fbox%3A3790/p1/12"), { kind: "item", machine: "ws://box:3790", projectId: "p1", number: 12, media: false });
   assert.deepEqual(routeOf("#/gh/m/p/x"), null);
   assert.equal(routeOf(itemHash("ws://box:3790", "p1", 12))?.kind, "item");
   assert.equal(routeOf(threadHash("ws://box:3790", "t1"))?.kind, "thread");
+});
+
+// ---------------------------------------------------------------------------
+// A picture is a layer on the route, so back shuts it (#167)
+// ---------------------------------------------------------------------------
+
+test("a picture open over a screen is in the hash, as a layer on it", () => {
+  // Without this the back control leaves the conversation and the picture
+  // stays on the screen over the list: one gesture, a level skipped, and the
+  // thing it should have shut still there.
+  const t = threadHash("ws://box:3790", "t1");
+  assert.deepEqual(routeOf(mediaHash(t)), { kind: "thread", machine: "ws://box:3790", threadId: "t1", media: true });
+  const i = itemHash("ws://box:3790", "p1", 12);
+  assert.deepEqual(routeOf(mediaHash(i)), { kind: "item", machine: "ws://box:3790", projectId: "p1", number: 12, media: true });
+});
+
+test("the screen under a picture is the route without the layer", () => {
+  // This is what back returns to, and what a reload of a `/media` route is put
+  // back to, so it has to be the hash the screen was reached by.
+  const t = threadHash("ws://box:3790", "t1");
+  assert.equal(baseHash(routeOf(mediaHash(t))), t);
+  assert.equal(baseHash(routeOf(t)), t);
+  const i = itemHash("ws://box:3790", "p1", 12);
+  assert.equal(baseHash(routeOf(mediaHash(i))), i);
+  assert.equal(baseHash(null), "");
+});
+
+test("the hash says that a picture is open and never which one", () => {
+  // The source of an inline picture carries the machine's token, and
+  // `readToken` takes the token out of the address bar on the first load on
+  // purpose. A hash that named the picture would write it back into history.
+  const hash = mediaHash(threadHash("ws://box:3790", "t1"));
+  assert.doesNotMatch(hash, /token/);
+  assert.equal(hash, "#/t/ws%3A%2F%2Fbox%3A3790/t1/media");
+});
+
+test("a layer over nothing is the list, not a layer", () => {
+  // There would be no screen to shut it back to. `main.ts` refuses to open one
+  // without a screen under it, and this is the other half of that rule.
+  assert.equal(mediaHash(""), "");
+  assert.equal(routeOf("#/media"), null);
+});
+
+test("a thread id that ends in the layer's own name is still a thread id", () => {
+  // The suffix is taken off before the route is read, so a conversation whose
+  // id ends in `media` must not read as a layer over a shorter one.
+  const t = threadHash("ws://box:3790", "media");
+  assert.deepEqual(routeOf(t), { kind: "thread", machine: "ws://box:3790", threadId: "media", media: false });
+  assert.deepEqual(routeOf(mediaHash(t)), { kind: "thread", machine: "ws://box:3790", threadId: "media", media: true });
 });
 
 test("the #N references in a piece of text, with their offsets (#108)", () => {

@@ -57,6 +57,16 @@ export interface Actions {
   /** One act on the item on screen: a review, a comment, a merge, a close or a reopen. */
   actItem(action: GitHubAction): void;
   setItemDraft(text: string): void;
+  /**
+   * Put a picture on the screen full size, or take it off again (#110).
+   *
+   * Through the actions rather than in this file, because the back control has
+   * to shut it: the route carries a picture as a layer, so the browser's own
+   * back, a swipe from the edge, `esc` and a tap all end at one route change
+   * (#167).
+   */
+  openMedia(src: string, alt: string): void;
+  closeMedia(): void;
   /** Open the settings sheet over the page, for a conversation or a machine. */
   openSheet(target: SheetTarget): void;
   closeSheet(): void;
@@ -182,7 +192,7 @@ export class Renderer {
     this.itemBar = h("div", { class: "item-bar" });
     this.itemScreen = h("main", { class: "item hidden" }, this.itemHeader, this.itemBody, this.itemBar);
     this.lightboxImg = h("img", { alt: "" });
-    this.lightbox = h("div", { class: "lightbox hidden", onclick: () => this.closeLightbox() }, this.lightboxImg);
+    this.lightbox = h("div", { class: "lightbox hidden", onclick: () => this.a.closeMedia() }, this.lightboxImg);
     this.sheetPanel = h("div", { class: "sheet-panel", role: "dialog", "aria-modal": "true" });
     // A tap on the scrim, and only on the scrim, shuts the sheet.
     this.sheet = h("div", { class: "sheet hidden", onclick: (ev) => { if (ev.target === this.sheet) this.a.closeSheet(); } }, this.sheetPanel);
@@ -194,7 +204,7 @@ export class Renderer {
     this.itemBody.addEventListener("click", (ev) => this.refClick(ev));
     addEventListener("keydown", (ev) => {
       if (ev.key !== "Escape") return;
-      if (!this.lightbox.classList.contains("hidden")) { this.closeLightbox(); return; }
+      if (!this.lightbox.classList.contains("hidden")) { this.a.closeMedia(); return; }
       if (!this.sheet.classList.contains("hidden")) this.a.closeSheet();
     });
 
@@ -419,6 +429,7 @@ export class Renderer {
     // not painted meanwhile; its rows are keyed, so the return folds in what
     // arrived. A thread that is no longer on screen loses its skeleton, so a
     // return to it starts clean.
+    this.paintLightbox(s.media);
     this.itemScreen.classList.toggle("hidden", !s.item);
     if (!s.view) { this.shownThread = null; this.commands = null; }
     if (s.item) { this.list.classList.add("hidden"); this.threadScreen.classList.add("hidden"); this.paintItem(s, s.item); return; }
@@ -427,22 +438,29 @@ export class Renderer {
     else { this.threadScreen.classList.add("hidden"); this.list.classList.remove("hidden"); this.paintList(s); }
   }
 
-  /** A tap on an inline image: the same image, full size, over the page. */
-  private openLightbox(img: HTMLImageElement) {
-    this.lightboxImg.src = img.currentSrc || img.src;
-    this.lightboxImg.alt = img.alt;
+  /**
+   * Paint the picture the state says is open, or take the last one down.
+   *
+   * The source is set only when it changes: assigning the same `src` again
+   * makes the browser fetch and decode the picture a second time, and a paint
+   * runs on every frame of a turn.
+   */
+  private paintLightbox(media: { src: string; alt: string } | null) {
+    if (!media) {
+      if (this.lightbox.classList.contains("hidden")) return;
+      this.lightbox.classList.add("hidden");
+      this.lightboxImg.removeAttribute("src");
+      return;
+    }
+    if (this.lightboxImg.getAttribute("src") !== media.src) this.lightboxImg.src = media.src;
+    this.lightboxImg.alt = media.alt;
     this.lightbox.classList.remove("hidden");
-  }
-
-  private closeLightbox() {
-    this.lightbox.classList.add("hidden");
-    this.lightboxImg.removeAttribute("src");
   }
 
   /** A click on a `#N` anchor opens the item of the thread on screen, or of the item on screen; one on an image opens it full size. */
   private refClick(ev: Event) {
     const target = ev.target as HTMLElement | null;
-    if (target instanceof HTMLImageElement && target.classList.contains("media")) { ev.preventDefault(); this.openLightbox(target); return; }
+    if (target instanceof HTMLImageElement && target.classList.contains("media")) { ev.preventDefault(); this.a.openMedia(target.currentSrc || target.src, target.alt); return; }
     const a = target?.closest?.("a.ref") as HTMLElement | null;
     if (!a) return;
     ev.preventDefault();
