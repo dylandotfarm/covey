@@ -33,11 +33,16 @@ const FOOTER = "esc or click close";
  * the way out, so a test that read every write would count each row twice and a
  * crop would look like a spill.
  *
- * Waited for by the frame, never by a spell. A fixed wait measures the runner
- * and not covey: at 120ms every case here passed on this machine and every one
- * of them read an empty frame on a loaded CI runner, which is a failure a long
- * way from anything they cover. The footer is the condition because it is on
- * the screen in all three states, so a frame that carries it is a frame that
+ * `interactive` is spelled out, and must stay that way. ink resolves it as
+ * `interactive ?? (!isInCi && stdout.isTTY)`, so on a CI runner it goes
+ * non-interactive and writes nothing at all until the unmount — which is a
+ * different renderer from the one a reader has, and not the one this file is
+ * about. Left to itself every case here passed on a desk and timed out on CI.
+ * `CI=true pnpm test` reproduces that in one command.
+ *
+ * Waited for by the frame, never by a spell, for the same reason: a fixed wait
+ * measures the runner and not covey. The footer is the condition because it is
+ * on the screen in all three states, so a frame that carries it is a frame that
  * has been laid out.
  */
 async function paint(overlay: Overlay, width = 80, height = 24): Promise<string> {
@@ -48,7 +53,7 @@ async function paint(overlay: Overlay, width = 80, height = 24): Promise<string>
   (stdout as { isTTY?: boolean }).isTTY = true;
   const app = render(
     React.createElement(OverlayView, { overlay, cursor: 0, filter: "", checked: false, width, height }),
-    { stdout, patchConsole: false, exitOnCtrlC: false },
+    { stdout, patchConsole: false, exitOnCtrlC: false, interactive: true },
   );
   // A frame is a write that carries rows; the rest are the cursor and the
   // synchronised-update brackets around it.
