@@ -234,10 +234,15 @@ test("a directive is signed too, so 'nothing for you' cannot be forged", () => {
 
 test("an app that expects a signature and a machine with no key is an error, not an unsigned reply", () => {
   const ex = readExport(makeExport())!;
-  const reply = manifestReply(ex, req({ expectSignature: true }), null);
-  assert.equal(reply.kind, "error");
-  assert.equal(reply.status, 500);
-  assert.match((reply as { message: string }).message, /signing key/);
+  // Both answers, because an app that verifies a manifest verifies a directive
+  // too: a machine with no key can send neither, and an unsigned directive would
+  // be a downgrade the app rejects without saying why.
+  for (const r of [req({ expectSignature: true }), req({ expectSignature: true, runtimeVersion: "9.9.9" })]) {
+    const reply = manifestReply(ex, r, null);
+    assert.equal(reply.kind, "error");
+    assert.equal(reply.status, 500);
+    assert.match((reply as { message: string }).message, /signing key/);
+  }
 });
 
 test("multipart moves the boundary off a body that contains it", () => {

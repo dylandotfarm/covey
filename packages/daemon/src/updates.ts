@@ -314,6 +314,14 @@ export function manifestReply(ex: UpdateExport | null, req: UpdateRequest, priva
   if (!ex) return { kind: "error", status: 404, message: "no exported bundle on this machine: run `pnpm run export` in mobile/" };
   const platform = req.platform;
   if (!platform) return { kind: "error", status: 400, message: "expo-platform header missing" };
+  // Checked once, before either answer is built. An app that verifies a manifest
+  // verifies a directive too, so a machine with no key can answer neither — and
+  // saying so is the whole point: the app would reject an unsigned reply without
+  // explaining why, and a rejection this daemon could have named is a morning
+  // lost to a silent failure.
+  if (req.expectSignature && !privateKey) {
+    return { kind: "error", status: 500, message: "this app expects a signed update and this machine holds no signing key" };
+  }
   const manifest = buildManifest(ex, platform, req.base, req.token);
   if (!manifest) return { kind: "error", status: 404, message: `the exported bundle holds nothing for ${platform}` };
   // An app built against other native modules must not take this bundle. The
@@ -329,10 +337,7 @@ export function manifestReply(ex: UpdateExport | null, req: UpdateRequest, priva
   }
   const body = JSON.stringify(manifest);
   const headers: Record<string, string> = { "content-type": "application/json; charset=utf-8" };
-  if (req.expectSignature) {
-    if (!privateKey) return { kind: "error", status: 500, message: "this app expects a signed update and this machine holds no signing key" };
-    headers["expo-signature"] = signManifest(body, privateKey);
-  }
+  if (req.expectSignature && privateKey) headers["expo-signature"] = signManifest(body, privateKey);
   const { body: multi, boundary } = multipart([{ name: "manifest", type: "application/json; charset=utf-8", body, headers }]);
   return { kind: "manifest", status: 200, headers: { ...COMMON, "content-type": `multipart/mixed; boundary=${boundary}` }, body: multi };
 }
@@ -341,9 +346,10 @@ export function manifestReply(ex: UpdateExport | null, req: UpdateRequest, priva
 function directive(type: "noUpdateAvailable" | "rollBackToEmbedded", req: UpdateRequest, privateKey: string | null): UpdateReply {
   const body = JSON.stringify({ type });
   const headers: Record<string, string> = {};
-  // A directive is signed exactly as a manifest is: an app that verifies one
-  // verifies both, and an unsigned "nothing for you" is a downgrade anybody on
-  // the path could send.
+  // A directive is signed exactly as a manifest is: an unsigned "nothing for
+  // you" is a downgrade anybody on the path could send. `manifestReply` has
+  // already refused the request if a signature was wanted and there is no key,
+  // so reaching here without one means none was asked for.
   if (req.expectSignature && privateKey) headers["expo-signature"] = signManifest(body, privateKey);
   const { body: multi, boundary } = multipart([{ name: "directive", type: "application/json; charset=utf-8", body, headers }]);
   return { kind: "directive", status: 200, headers: { ...COMMON, "content-type": `multipart/mixed; boundary=${boundary}` }, body: multi };
