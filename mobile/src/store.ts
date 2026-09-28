@@ -129,7 +129,15 @@ class Store {
         slot.conn = s;
         slot.connError = err ?? null;
         this.schedule();
-        if (s === "connected" && slot.primary) this.askAccess(client);
+        // Every machine a *person* added is asked for the fleet, not only the
+        // first one. The page asks the daemon that served it, which by
+        // definition answered; here the first machine in the list may be a
+        // laptop that is shut, and asking only that one would mean a reader
+        // with two machines saw the fleet of neither.
+        //
+        // A fleet member is not asked: it came from a fleet list already, and
+        // the machines it would name are the ones this daemon just named.
+        if (s === "connected" && this.saved.some((x) => x.url === slot.key)) this.askAccess(client, slot.primary);
       },
       shellSnapshot: (snap) => { applyShellSnapshot(slot, snap); this.schedule(); },
       shellEvent: (ev) => { applyShellEvent(this.state, slot, ev); this.schedule(); },
@@ -148,10 +156,17 @@ class Store {
     client.start();
   }
 
-  /** The primary daemon's token, its other addresses, and the fleet. */
-  private askAccess(client: MachineClient): void {
+  /**
+   * A daemon's token, its other addresses, and the fleet it knows.
+   *
+   * Only the TUI sends a fleet list, and it sends it to one machine, so most
+   * daemons answer with none. Every answer's members are dialled; `state.access`
+   * — which is only the list of addresses a reader can copy — is kept from the
+   * primary, or from whoever answered first if the primary never does.
+   */
+  private askAccess(client: MachineClient, primary: boolean): void {
     client.rpc("machine.access", {}).then((a) => {
-      this.state.access = a;
+      if (primary || !this.state.access) this.state.access = a;
       for (const m of a.fleet ?? []) this.dialMember(m);
       this.schedule();
     }).catch(() => {});
