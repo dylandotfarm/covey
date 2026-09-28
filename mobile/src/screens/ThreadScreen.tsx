@@ -84,16 +84,22 @@ export function ThreadScreen({ route, navigation }: Props) {
   const data = useMemo(() => [...rows].reverse(), [rows]);
 
   const busy = thread ? threadIsBusy(thread) : false;
-  const tags = useMemo(() => {
-    const seen = new Set<string>();
-    const out: { tag: string; name: string; failed?: boolean }[] = [];
-    for (const a of store.attachments(machine, threadId)) {
-      if (seen.has(a.tag)) continue;
-      seen.add(a.tag);
-      out.push({ tag: a.tag, name: a.name, ...(a.failed ? { failed: true } : {}) });
-    }
-    return out;
-  }, [machine, threadId, store.state.attachments]);
+
+  /**
+   * One chip per file waiting to go, deduplicated by tag.
+   *
+   * Deliberately not memoised. `state.attachments` is a `Map` that is mutated in
+   * place, so its identity never changes and a `useMemo` keyed on it would hand
+   * back the first render's chips for ever. The loop is over a handful of files
+   * and the render already happened.
+   */
+  const seen = new Set<string>();
+  const tags: { tag: string; name: string; failed?: boolean }[] = [];
+  for (const a of store.attachments(machine, threadId)) {
+    if (seen.has(a.tag)) continue;
+    seen.add(a.tag);
+    tags.push({ tag: a.tag, name: a.name, ...(a.failed ? { failed: true } : {}) });
+  }
 
   return (
     <View style={S.screen}>

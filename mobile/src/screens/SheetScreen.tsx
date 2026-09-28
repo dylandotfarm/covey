@@ -102,14 +102,12 @@ export function SheetScreen({ route, navigation }: Props) {
         "The browser client stops being served from there. This app does not need it.",
         [
           { text: "Keep it on", style: "cancel" },
-          { text: "Stop it", style: "destructive", onPress: () => { store.state.sheet = { target, page }; store.sheetChoose(id); navigation.goBack(); } },
+          { text: "Stop it", style: "destructive", onPress: () => { store.sheetChoose(target, page, id); navigation.goBack(); } },
         ],
       );
       return;
     }
-    // `sheetChoose` reads the store's own sheet, so it is set to this one first.
-    store.state.sheet = { target, page };
-    store.sheetChoose(id);
+    store.sheetChoose(target, page, id);
     navigation.goBack();
   };
 

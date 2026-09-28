@@ -21,7 +21,7 @@ import { Image } from "expo-image";
 import { chainLabel, type TimelineRow } from "@covey/client";
 import { attachmentKind, relTime, rowSignature } from "@covey/web";
 import { questionAnswers, questionAsks, type ApprovalItem, type Attachment, type QuestionItem, type TimelineItem } from "@covey/protocol";
-import { MONO, SIZE, T, TONE } from "../theme";
+import { MONO, SIZE, T } from "../theme";
 import { Markdown, type MarkdownContext } from "./Markdown";
 
 /** What a row needs from the thread screen. */

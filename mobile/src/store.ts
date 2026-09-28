@@ -463,12 +463,10 @@ class Store {
    * a model of `""` clears the setting, and the thread or the machine falls back
    * to what the user's own Claude configuration says.
    */
-  sheetChoose = (id: string): void => {
-    const sh = this.state.sheet;
-    if (!sh) return;
-    const client = this.clients.get(sh.target.machine);
+  sheetChoose = (target: SheetTarget, page: string, id: string): void => {
+    const client = this.clients.get(target.machine);
     if (!client) return;
-    const cmd = sheetCommand(sh.target, sh.page, id);
+    const cmd = sheetCommand(target, page, id);
     if (!cmd) return;
     this.state.sheet = null;
     this.schedule();

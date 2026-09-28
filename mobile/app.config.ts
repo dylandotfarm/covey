@@ -76,6 +76,10 @@ export default (): ExpoConfig => ({
   // none, deliberately. Add a plugin to this list by hand.
   plugins: [
     "expo-secure-store",
+    // `userInterfaceStyle: "dark"` above does nothing without this: the setting
+    // is about the *system's* surfaces — the keyboard, the navigation bar — and
+    // the app's own palette cannot reach them. Prebuild says so if it is missing.
+    "expo-system-ui",
     "expo-image",
     "expo-video",
     // A daemon speaks plain HTTP on a private address, which is the ordinary
