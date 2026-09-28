@@ -76,6 +76,11 @@ export default (): ExpoConfig => ({
           : {}),
       }
     : { enabled: false },
+  // Listed here and nowhere else. `expo install` writes a plugin into an
+  // `app.json` when it finds one, and this config returns its own object
+  // rather than extending what it is handed — so an `app.json` beside this
+  // file is a config that looks authoritative and has no effect. There is
+  // none, deliberately. Add a plugin to this list by hand.
   plugins: ["expo-secure-store", "expo-image", "expo-video"],
   experiments: { typedRoutes: false },
 });
