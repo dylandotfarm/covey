@@ -10,7 +10,7 @@
  * the daemon's rule; this screen just paints what it sent.
  */
 import { useCallback, useLayoutEffect, useState } from "react";
-import { Linking, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
+import { KeyboardAvoidingView, Linking, Pressable, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { GitHubAction, MergeMethod } from "@covey/protocol";
 import { checksLabel, holderOf, isGitHubAttachment, itemActions, itemStateLabel, mediaSrc, relTime } from "@covey/web";
@@ -18,6 +18,7 @@ import { store } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
 import { Button, Empty, Notice, Pill, S, SectionTitle, Spinner } from "../ui";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Markdown } from "../components/Markdown";
 import type { Routes } from "../nav";
 
@@ -39,6 +40,7 @@ export function ItemScreen({ route, navigation }: Props) {
   const [body, setBody] = useState("");
   const [method, setMethod] = useState<MergeMethod>("merge");
 
+  const insets = useSafeAreaInsets();
   const iv = store.state.item;
   const mine = iv && iv.machine === machine && iv.projectId === projectId && iv.number === number ? iv : null;
 
@@ -80,11 +82,12 @@ export function ItemScreen({ route, navigation }: Props) {
   const src = (url: string) => (isGitHubAttachment(url) ? mediaSrc(url, slot?.token) : url);
 
   return (
-    <View style={S.screen}>
+    <KeyboardAvoidingView style={S.screen} behavior="padding">
       {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
       <ScrollView
         refreshControl={<RefreshControl refreshing={mine.loading} onRefresh={store.loadItem} tintColor={T.accent} />}
-        contentContainerStyle={{ paddingBottom: 28 }}
+        contentContainerStyle={{ paddingBottom: 28 + insets.bottom }}
+        keyboardShouldPersistTaps="handled"
       >
         <View style={{ padding: 14, gap: 8 }}>
           <Text style={{ color: T.text, fontSize: SIZE.heading, fontWeight: "700" }}>{item.title}</Text>
@@ -157,8 +160,27 @@ export function ItemScreen({ route, navigation }: Props) {
 
         <SectionTitle text="Act" />
         <View style={{ paddingHorizontal: 12, gap: 10 }}>
+          {/*
+            The field the acts below write with. It was missing on the first
+            build, which left "Comment" and "Request changes" permanently
+            disabled — both are gated on there being something written, and
+            there was nowhere to write it.
+          */}
           {actions.some((a) => a.needsBody) ? (
-            <Text style={S.subtle}>A review that asks for changes, and a comment, both need something written.</Text>
+            <>
+              <TextInput
+                value={body}
+                onChangeText={setBody}
+                placeholder="Write a comment, or the reason for requesting changes"
+                placeholderTextColor={T.faint}
+                multiline
+                style={{
+                  color: T.text, fontSize: SIZE.body, backgroundColor: T.surface,
+                  borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, minHeight: 84,
+                }}
+              />
+              <Text style={S.subtle}>A review that asks for changes, and a comment, both need something written.</Text>
+            </>
           ) : null}
           {item.kind === "pull" && item.state === "OPEN" ? (
             <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
@@ -190,6 +212,6 @@ export function ItemScreen({ route, navigation }: Props) {
           </View>
         </View>
       </ScrollView>
-    </View>
+    </KeyboardAvoidingView>
   );
 }

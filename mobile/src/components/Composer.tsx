@@ -51,6 +51,15 @@ export interface ComposerProps {
   onInterrupt: () => void;
   /** Read the picked files and answer with the tags that are new. */
   onAttach: (files: DeviceFile[], draft: string) => Promise<string[] | null>;
+  /**
+   * What the gesture bar takes at the bottom of the screen.
+   *
+   * An edge-to-edge app draws under the navigation bar, so without this the home
+   * bar sits on top of the composer. The screen passes 0 while the keyboard is
+   * up, because the keyboard covers the gesture bar and the padding would
+   * otherwise be a gap.
+   */
+  bottomInset?: number;
 }
 
 export function Composer(p: ComposerProps) {
@@ -141,7 +150,7 @@ export function Composer(p: ComposerProps) {
         </View>
       ) : null}
 
-      <View style={st.row}>
+      <View style={[st.row, { paddingBottom: 8 + (p.bottomInset ?? 0) }]}>
         <Pressable style={st.icon} onPress={() => void attach(pickMedia)} disabled={picking} accessibilityLabel="Attach a photo or a video">
           <Text style={{ color: T.muted, fontSize: 17 }}>🖼</Text>
         </Pressable>

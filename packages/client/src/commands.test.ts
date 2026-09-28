@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SlashCommandInfo } from "@covey/protocol";
 import { acceptCommand, commandLabel, commandMenu, commandToken } from "./commands.js";
+import { uuid } from "./uuid.js";
 
 const sdk = (name: string, description = "", argumentHint = "", aliases?: string[]): SlashCommandInfo => ({
   name, description, argumentHint, ...(aliases ? { aliases } : {}), source: "sdk",
@@ -104,4 +105,46 @@ test("taking a row replaces the draft with the name and a space, which closes th
 test("a row shows the argument hint when the command takes arguments", () => {
   assert.equal(commandLabel(sdk("compact", "Free up context", "<instructions>")), "/compact <instructions>");
   assert.equal(commandLabel(sdk("resume", "Pick up a thread")), "/resume");
+});
+
+// ---- uuid, on a runtime with no Web Crypto (#168) ---------------------------
+
+test("uuid works where there is no crypto global at all", () => {
+  // React Native is that runtime: Hermes implements no Web Crypto and nothing
+  // polyfills one. This shipped once — every write from the phone's app crashed
+  // on `commandId: uuid()` while every read went on working.
+  const real = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  try {
+    Object.defineProperty(globalThis, "crypto", { value: undefined, configurable: true });
+    const seen = new Set<string>();
+    for (let i = 0; i < 500; i++) {
+      const id = uuid();
+      assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/, "a v4 uuid");
+      seen.add(id);
+    }
+    assert.equal(seen.size, 500, "500 uuids, none repeated");
+  } finally {
+    if (real) Object.defineProperty(globalThis, "crypto", real);
+  }
+});
+
+test("uuid uses getRandomValues when there is no randomUUID", () => {
+  // A browser on a plain http origin, which is how the phone reaches a daemon.
+  // node exposes `crypto` through a getter, so the descriptor carries no
+  // `value`. Keep the object itself, not the descriptor's idea of it.
+  const real = Object.getOwnPropertyDescriptor(globalThis, "crypto")!;
+  const realCrypto = globalThis.crypto;
+  try {
+    let used = false;
+    Object.defineProperty(globalThis, "crypto", {
+      value: {
+        getRandomValues(a: Uint8Array) { used = true; return realCrypto.getRandomValues(a); },
+      },
+      configurable: true,
+    });
+    assert.match(uuid(), /^[0-9a-f-]{36}$/);
+    assert.equal(used, true, "it took the getRandomValues path");
+  } finally {
+    Object.defineProperty(globalThis, "crypto", real);
+  }
 });
