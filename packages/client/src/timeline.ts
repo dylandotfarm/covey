@@ -284,3 +284,45 @@ export function chainLabel(items: TimelineItem[]): string {
   const capped = sentence.charAt(0).toUpperCase() + sentence.slice(1);
   return capped.length > MAX_LABEL ? capped.slice(0, MAX_LABEL - 1) + "…" : capped;
 }
+
+// ---- a note's words ---------------------------------------------------------
+
+/**
+ * How much of a note a shut row shows. Eighty characters, the figure
+ * `summariseActivity` writes to, because that is one line of a phone screen.
+ */
+export const NOTE_LEAD = 80;
+
+/**
+ * A note's text, cut into the words a shut row shows and the rest it hides.
+ *
+ * `covey show` (#160) made a note as long as a message: the agent writes what
+ * it found and hangs the pictures off it. A background task that answers its
+ * own turn writes one longer still. Painted whole, either buries the
+ * conversation around it, so the row shows its opening words and opens on a
+ * tap — the level of detail says which way it starts, as it does for a chain.
+ *
+ * `rest` is empty when the whole note fits on the row. The caller then paints
+ * it as it always did: a one-line note never grows an arrow.
+ *
+ * `lead` never holds a newline, so a client may wrap it as one paragraph.
+ * `lead` and `rest` together are the text, so nothing is painted twice when
+ * the row is open.
+ */
+export function noteFold(text: string): { lead: string; rest: string } {
+  const t = text.trim();
+  const nl = t.indexOf("\n");
+  const first = nl < 0 ? t : t.slice(0, nl);
+  // A first line that fits is the lead as it stands, and the rest is whatever
+  // follows it — nothing at all for a note of one line.
+  if (first.length <= NOTE_LEAD) return { lead: first, rest: nl < 0 ? "" : t.slice(nl + 1).trim() };
+  const cut = (at: number, ellipsis: boolean) => ({ lead: t.slice(0, at).trimEnd() + (ellipsis ? "…" : ""), rest: t.slice(at).trim() });
+  // A whole sentence first: the row then reads as a sentence, and the words
+  // under it start on the next one rather than halfway through a phrase.
+  const stop = first.slice(0, NOTE_LEAD + 1).search(/[.!?](?=\s|$)(?![^]*[.!?](?=\s|$))/);
+  // Twenty characters, because a lead shorter than that says nothing.
+  if (stop >= 20) return cut(stop + 1, false);
+  // Failing that, the last whole word: half a word reads as a bug, not a cut.
+  const space = first.slice(0, NOTE_LEAD).lastIndexOf(" ");
+  return cut(space > NOTE_LEAD / 2 ? space : NOTE_LEAD, true);
+}

@@ -1,5 +1,5 @@
 import { questionAnswers, questionAsks, type TimelineItem, type ToolCallItem } from "@covey/protocol";
-import { tableAt, type ChainRow, type SaidRow, type Table } from "@covey/client";
+import { noteFold, tableAt, type ChainRow, type SaidRow, type Table } from "@covey/client";
 import { linkSpans, targetUri, threadFileUri, toolLink, wordAt, type LinkContext } from "./links.js";
 import { T, themeGeneration } from "./theme.js";
 
@@ -470,7 +470,22 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
     }
     case "note": {
       const color = item.tone === "warning" ? T.warning : T.subtle;
-      const lines: Line[] = item.text ? wrapSpans([{ text: "  ─ " + item.text, color, italic: true }], w, o.links) : [];
+      // A long note folds to its opening words, as a chain folds to its
+      // sentence: `covey show` and a background task each write a note as long
+      // as a message, and painted whole either one buries the conversation
+      // around it. `lead` and `rest` are the text between them, so an open row
+      // repeats nothing.
+      const { lead, rest } = item.text ? noteFold(item.text) : { lead: "", rest: "" };
+      const open = o.expanded.has(item.id);
+      // The arrow leads, as it does on a chain row and on a thought, and the
+      // dash stays: it is what says the line is covey's own and not prose.
+      const mark = rest ? (open ? "  ▾ ─ " : "  ▸ ─ ") : "  ─ ";
+      const lines: Line[] = item.text ? wrapSpans([{ text: mark + lead, color, italic: true }], w, o.links) : [];
+      // `markdownToLines`, not `wrapSpans`: the rest carries the newlines the
+      // agent wrote, and `wrapSpans` reads one paragraph. A newline left
+      // inside a span is a row Ink paints as several and the layout counts as
+      // one, which is what made a shown picture overlap the rows under it.
+      if (rest && open) lines.push(...markdownToLines(rest, w - 4, { color, italic: true }, o.links).map((l) => withWrap([{ text: "    " }, ...l], l)));
       // A file covey is showing (#160). The terminal cannot paint a picture,
       // so the row is the file's name with the daemon's own `/file` link on
       // it: ctrl+click, and it opens in a browser — on the reader's machine,

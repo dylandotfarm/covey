@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { TimelineItem, ToolCallItem } from "@covey/protocol";
-import { chainLabel, chainsOf, timelineRows, type ChainRow, type ItemRow, type SaidRow } from "./timeline.js";
+import { NOTE_LEAD, chainLabel, chainsOf, noteFold, timelineRows, type ChainRow, type ItemRow, type SaidRow } from "./timeline.js";
 
 const AT = "2026-09-24T00:00:00.000Z";
 let seq = 0;
@@ -164,4 +164,47 @@ test("a chain of thoughts alone is named without reading one", () => {
 
 test("an unknown tool still counts", () => {
   assert.equal(chainLabel([tool("a", { toolName: "mcp__x__y" }), tool("b", { toolName: "mcp__x__y" })]), "Called 2 tools");
+});
+
+// ---- a note's words ---------------------------------------------------------
+
+test("a short note of one line hides nothing", () => {
+  const { lead, rest } = noteFold("Stopped watching pull request #133: it was merged.");
+  assert.equal(lead, "Stopped watching pull request #133: it was merged.");
+  assert.equal(rest, "");
+});
+
+test("a note of many lines leads with the first and hides the others", () => {
+  const { lead, rest } = noteFold("The system, not a prompt.\n\nHow it runs: it takes a shot directory.");
+  assert.equal(lead, "The system, not a prompt.");
+  assert.equal(rest, "How it runs: it takes a shot directory.");
+});
+
+test("a long first line leads with a whole sentence where it has one", () => {
+  const text = "Round 4, eight seeds a style, scored on your criterion rather than mine. A green border means the poles held.";
+  const { lead, rest } = noteFold(text);
+  assert.equal(lead, "Round 4, eight seeds a style, scored on your criterion rather than mine.");
+  assert.equal(rest, "A green border means the poles held.");
+  // Nothing is painted twice, and nothing is lost: the two are the text.
+  assert.equal(lead + " " + rest, text);
+});
+
+test("a first line with no sentence end is cut at a whole word", () => {
+  const text = "Round 4, eight seeds a style, scored on your criterion rather than mine, and a green border means the poles held";
+  const { lead, rest } = noteFold(text);
+  assert.ok(lead.length <= NOTE_LEAD + 1, lead);
+  assert.ok(lead.endsWith("\u2026"), lead);
+  assert.ok(!lead.slice(0, -1).endsWith(" "), lead);
+  assert.equal(lead.slice(0, -1) + " " + rest, text);
+});
+
+test("a first line of exactly the lead is not cut", () => {
+  const line = "x".repeat(NOTE_LEAD);
+  assert.deepEqual(noteFold(line), { lead: line, rest: "" });
+});
+
+test("one long word still leaves a lead", () => {
+  const { lead, rest } = noteFold("y".repeat(NOTE_LEAD * 2));
+  assert.equal(lead, "y".repeat(NOTE_LEAD) + "\u2026");
+  assert.equal(rest, "y".repeat(NOTE_LEAD));
 });

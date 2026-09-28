@@ -252,3 +252,43 @@ test("a shown file with no words of its own is the file alone (#160)", () => {
   } as any, { width: 60, expanded: new Set(), links: { localFiles: false, fileBase: "http://box:3790" } });
   assert.match(text(lines[0]!), /⎘ demo\.mp4/);
 });
+
+test("a long note is one row until the reader opens it, and the picture stays (#160)", () => {
+  const item = {
+    id: "n3", threadId: "t-1", turnId: null, seq: 1, createdAt: "", updatedAt: "",
+    kind: "note", tone: "info",
+    text: "Round 4, eight seeds a style.\n\nH3 held 7 of 8.\n\nH5 held 2 of 8.",
+    files: [{ name: "sheet.png", path: "/w/sheet.png", mimeType: "image/png" }],
+  } as const;
+  const links = { localFiles: false, fileBase: "http://box:3790" };
+
+  const shut = renderItem(item as any, { width: 60, expanded: new Set(), links });
+  assert.match(text(shut[0]!), /^ {2}\u25b8 \u2500 Round 4, eight seeds a style\.$/);
+  assert.ok(!shut.some((l) => lineText(l).includes("H3 held")), "the rest waits for the reader");
+  // The picture is what the reader came for, so it never folds.
+  assert.ok(shut.some((l) => lineText(l).includes("\u2398 sheet.png")));
+
+  const open = renderItem(item as any, { width: 60, expanded: new Set(["n3"]), links });
+  assert.match(text(open[0]!), /^ {2}\u25be \u2500 Round 4/);
+  assert.ok(open.some((l) => lineText(l).includes("H3 held 7 of 8")));
+  assert.ok(open.some((l) => lineText(l).includes("H5 held 2 of 8")));
+  assert.ok(open.some((l) => lineText(l).includes("\u2398 sheet.png")));
+  // The lead is not painted twice when the row is open.
+  assert.equal(open.filter((l) => lineText(l).includes("eight seeds")).length, 1);
+});
+
+test("a note never leaves a newline inside a span, so the layout counts its rows", () => {
+  const lines = renderItem({
+    id: "n4", threadId: "t-1", turnId: null, seq: 1, createdAt: "", updatedAt: "",
+    kind: "note", tone: "info", text: "One.\n\nTwo.\n\nThree.", files: [],
+  } as any, { width: 60, expanded: new Set(["n4"]), links: { localFiles: true } });
+  for (const l of lines) for (const sp of l) assert.ok(!sp.text.includes("\n"), JSON.stringify(sp.text));
+});
+
+test("a short note keeps its dash and grows no arrow", () => {
+  const lines = renderItem({
+    id: "n5", threadId: "t-1", turnId: null, seq: 1, createdAt: "", updatedAt: "",
+    kind: "note", tone: "info", text: "Context compacted (auto)", files: [],
+  } as any, { width: 60, expanded: new Set(), links: { localFiles: true } });
+  assert.equal(text(lines[0]!), "  \u2500 Context compacted (auto)");
+});

@@ -8,7 +8,7 @@ export {
 } from "./sessionBudget.js";
 export { tableAt, tableCells, type Align, type Table } from "./markdown.js";
 export {
-  chainLabel, chainsOf, foldsChains, timelineRows,
+  NOTE_LEAD, chainLabel, chainsOf, foldsChains, noteFold, timelineRows,
   type ChainRow, type FoldOpts, type ItemRow, type SaidRow, type TimelineRow,
 } from "./timeline.js";
 export {
