@@ -33,6 +33,11 @@ const st = StyleSheet.create({
   },
   icon: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: T.surfaceAlt },
   send: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: T.accent },
+  menu: {
+    alignSelf: "flex-start", backgroundColor: T.surfaceAlt, borderRadius: 10,
+    marginTop: 8, marginBottom: 2, overflow: "hidden", minWidth: 180,
+  },
+  menuRow: { paddingHorizontal: 14, paddingVertical: 11 },
   stop: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: T.danger },
 });
 
@@ -71,6 +76,8 @@ export function Composer(p: ComposerProps) {
   /** Where the caret is, so a tag lands where the reader was typing. */
   const caret = useRef(p.initial.length);
   const [picking, setPicking] = useState(false);
+  /** The attach menu, open only while the reader is choosing. */
+  const [menu, setMenu] = useState(false);
 
   // A different thread is a different draft. Without this, opening a second
   // conversation would show the first one's half-written message.
@@ -110,6 +117,7 @@ export function Composer(p: ComposerProps) {
   };
 
   const attach = async (pick: () => Promise<DeviceFile[]>) => {
+    setMenu(false);
     setPicking(true);
     try {
       const files = await pick();
@@ -154,19 +162,44 @@ export function Composer(p: ComposerProps) {
         </View>
       ) : null}
 
+      {menu ? (
+        <View style={[st.menu, { marginLeft: 10 + (p.leftInset ?? 0) }]}>
+          {([
+            ["Photo or video", pickMedia],
+            ["Camera", pickCamera],
+            ["File", pickDocument],
+          ] as const).map(([label, pick], i) => (
+            <Pressable
+              key={label}
+              onPress={() => void attach(pick)}
+              android_ripple={{ color: T.surfaceAlt }}
+              style={[st.menuRow, i === 0 ? null : { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: T.border }]}
+            >
+              <Text style={{ color: T.text, fontSize: SIZE.body }}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+
       <View style={[st.row, {
         paddingBottom: 8 + (p.bottomInset ?? 0),
         paddingLeft: 10 + (p.leftInset ?? 0),
         paddingRight: 10 + (p.rightInset ?? 0),
       }]}>
-        <Pressable style={st.icon} onPress={() => void attach(pickMedia)} disabled={picking} accessibilityLabel="Attach a photo or a video">
-          <Text style={{ color: T.muted, fontSize: 17 }}>🖼</Text>
-        </Pressable>
-        <Pressable style={st.icon} onPress={() => void attach(pickCamera)} disabled={picking} accessibilityLabel="Take a photo">
-          <Text style={{ color: T.muted, fontSize: 17 }}>📷</Text>
-        </Pressable>
-        <Pressable style={st.icon} onPress={() => void attach(pickDocument)} disabled={picking} accessibilityLabel="Attach a file">
-          <Text style={{ color: T.muted, fontSize: 17 }}>📎</Text>
+        {/*
+          One button, not three. Three lived on the composer of every
+          conversation to offer a choice a reader makes rarely, and each of them
+          cost width on the screen with least — the same trade the detail row
+          lost. The choice moves into a menu that is only there while it is
+          being made.
+        */}
+        <Pressable
+          style={st.icon}
+          onPress={() => setMenu((open) => !open)}
+          disabled={picking}
+          accessibilityLabel={menu ? "Close the attach menu" : "Attach a photo, a picture or a file"}
+        >
+          <Text style={{ color: menu ? T.accent : T.muted, fontSize: 21, lineHeight: 24 }}>{menu ? "×" : "＋"}</Text>
         </Pressable>
 
         <TextInput

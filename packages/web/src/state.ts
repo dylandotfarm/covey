@@ -1010,7 +1010,13 @@ export function threadMedia(items: TimelineItem[]): MediaRef[] {
   const fromFiles = (files: Attachment[] | undefined, itemId: string) => {
     for (const f of files ?? []) {
       const kind = attachmentKind(f);
-      if (kind === "image" || kind === "video") add({ kind, source: { at: "file", path: f.name }, label: f.name, itemId });
+      if (kind !== "image" && kind !== "video") continue;
+      // `path`, never `name`. The `/file` route resolves what it is given and
+      // demands the answer sit inside that thread's store, so a bare name lands
+      // outside it and the daemon refuses the request — correctly. The name is
+      // what a reader is shown; the path is what fetches the bytes.
+      if (!f.path) continue;
+      add({ kind, source: { at: "file", path: f.path }, label: f.name, itemId });
     }
   };
   for (const item of items) {

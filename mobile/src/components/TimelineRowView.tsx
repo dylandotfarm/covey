@@ -84,7 +84,11 @@ function Files({ files, ctx }: { files: Attachment[]; ctx: RowContext }) {
     <View style={{ gap: 6 }}>
       {files.map((f, i) => {
         const kind = attachmentKind(f);
-        const src = ctx.fileSrc(f.name);
+        // `path`, never `name`: `/file` resolves what it is given and demands
+        // the answer sit inside that thread's store. A bare name lands outside
+        // it and the daemon refuses — which read as "that machine would not
+        // send the file" on every picture in the app.
+        const src = f.path ? ctx.fileSrc(f.path) : "";
         if (kind === "image" || kind === "video") {
           // An agent showing its own work paints inline, the same way a reader's
           // own drop does (#160). A tap opens the route.
