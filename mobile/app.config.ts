@@ -38,8 +38,20 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ExpoConfig } from "expo/config";
 
-/** The version the runtime is keyed on. An update must match the app it lands in. */
-const VERSION = "0.1.0";
+/**
+ * The version the runtime is keyed on. An update must match the app it lands in.
+ *
+ * `0.2.0` because `expo-speech-recognition` is native code, and a bundle that
+ * calls it cannot run in an app built without it. Moving this moves the runtime
+ * version, so a `0.1.0` install is offered nothing further — `updates.ts` in the
+ * daemon answers it `noUpdateAvailable` rather than a manifest it could not use.
+ * That is the protection working, and the cost is one sideload.
+ *
+ * **Move this whenever a native module is added or removed, and at no other
+ * time.** A JavaScript change ships over the air and wants no bump; a bump
+ * strands every installed app until somebody installs the new one by hand.
+ */
+const VERSION = "0.2.0";
 
 const updatesUrl = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL?.trim();
 /** The certificate is committed; the private key that matches it is not. */
@@ -85,6 +97,11 @@ export default (): ExpoConfig => ({
   // none, deliberately. Add a plugin to this list by hand.
   plugins: [
     "expo-secure-store",
+    // Dictation (#172). The plugin asks for RECORD_AUDIO and adds the
+    // `<queries>` entry Android needs to see a recognition service at all —
+    // without it `isRecognitionAvailable()` answers false on a device that has
+    // one.
+    ["expo-speech-recognition", { microphonePermission: "covey uses the microphone to write your message when you dictate it." }],
     // `userInterfaceStyle: "dark"` above does nothing without this: the setting
     // is about the *system's* surfaces — the keyboard, the navigation bar — and
     // the app's own palette cannot reach them. Prebuild says so if it is missing.

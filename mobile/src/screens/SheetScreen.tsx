@@ -18,9 +18,10 @@ import {
   sheetChoices, sheetMachine, sheetNote, sheetRows, sheetThread, sheetTitle, viewRowNumber,
 } from "@covey/web";
 import { store } from "../store";
+import { Icon } from "../Icon";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
-import { Row, S } from "../ui";
+import { Row, S, useContentInsets } from "../ui";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "Sheet">;
@@ -38,6 +39,7 @@ export function SheetScreen({ route, navigation }: Props) {
    */
   const [page, setPage] = useState("");
   const [rename, setRename] = useState("");
+  const insets = useContentInsets();
   const sheet = { target, page };
   const s = store.state;
 
@@ -113,7 +115,7 @@ export function SheetScreen({ route, navigation }: Props) {
 
   return (
     <View style={[S.screen, { backgroundColor: T.bg }]}>
-      <View style={S.bar}>
+      <View style={[S.bar, { paddingLeft: 14 + insets.left, paddingRight: 14 + insets.right }]}>
         <Pressable onPress={back} hitSlop={10} accessibilityLabel={page ? "Back" : "Close"}>
           <Text style={{ color: T.accent, fontSize: SIZE.body }}>{page ? "‹ Back" : "Close"}</Text>
         </Pressable>
@@ -122,7 +124,7 @@ export function SheetScreen({ route, navigation }: Props) {
         <View style={{ width: 52 }} />
       </View>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
+      <ScrollView contentContainerStyle={{ paddingBottom: 32 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}>
         {note ? <Text style={[S.subtle, { paddingHorizontal: 16, paddingVertical: 10 }]}>{note}</Text> : null}
 
         {renaming ? (
@@ -164,7 +166,7 @@ export function SheetScreen({ route, navigation }: Props) {
                   <Text style={S.title}>{c.label}</Text>
                   {c.hint ? <Text style={S.subtle}>{c.hint}</Text> : null}
                 </View>
-                {c.current ? <Text style={{ color: T.accent, fontSize: 17 }}>✓</Text> : null}
+                {c.current ? <Icon name="tick" size={20} colour={T.accent} /> : null}
               </Row>
             ))}
           </View>
@@ -174,7 +176,7 @@ export function SheetScreen({ route, navigation }: Props) {
               <Row key={r.id} first={i === 0} onPress={() => (r.choices ? setPage(r.id) : act(r.id))}>
                 <Text style={[S.title, r.tone === "danger" ? { color: T.danger } : null, S.grow]}>{r.label}</Text>
                 {r.value ? <Text style={S.muted}>{r.value}</Text> : null}
-                {r.choices ? <Text style={{ color: T.faint, fontSize: 17 }}>›</Text> : null}
+                {r.choices ? <Icon name="chevron" size={20} colour={T.faint} /> : null}
               </Row>
             ))}
             {rows.length === 0 ? (

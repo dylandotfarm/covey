@@ -39,9 +39,6 @@ import { attachingLabel, readPicked, sendingLabel, type PickedFile } from "@cove
 import { forgetMachine, readLod, readMachines, readToken, saveLod, saveMachine, type SavedMachine } from "./machines";
 import { shrinkOnDevice } from "./attach";
 import { primeUpdateToken } from "./ota";
-
-/** The stored value that means the cover-screen view. Not a `Lod`. */
-export const ULTRA = "ultra" as const;
 import { sheetCommand } from "./sheet";
 
 /** How long a notice stays on screen before it goes, in milliseconds. */
@@ -61,21 +58,6 @@ class Store {
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   /** True once the saved machines have been read, so a first launch can say so. */
   loaded = false;
-  /**
-   * The cover-screen view (#172), which is this client's own and not a `Lod`.
-   *
-   * `Lod` is shared with the TUI and the page and means "how much of the
-   * transcript to paint". This means "do not paint the transcript at all", so it
-   * is not a fifth value of that type — `timelineRows` would have to be taught a
-   * level it can never satisfy. It rides in the same stored preference because
-   * it is the same choice to a reader: how much do I want to see.
-   */
-  ultra = false;
-  /**
-   * The reader has said which they want, so a small screen must not override it.
-   * False until the stored preference is read and found to hold something.
-   */
-  detailChosen = false;
 
   // ---- what React subscribes to ------------------------------------------
 
@@ -123,10 +105,11 @@ class Store {
    * too: the daemon may be on this tailnet, and `whois` is credential enough.
    */
   start = async (): Promise<void> => {
-    const stored = await readLod();
-    this.detailChosen = Boolean(stored);
-    this.ultra = stored === ULTRA;
-    this.state.lod = asLod(stored) ?? DEFAULT_LOD;
+    // `asLod` refuses anything it does not know, which includes the `ultra` a
+    // build between #172 and this one could have stored. It falls back to the
+    // default, which is what a reader of that build now wants anyway: the small
+    // view is decided by the screen and is no longer a preference.
+    this.state.lod = asLod(await readLod()) ?? DEFAULT_LOD;
     this.saved = await readMachines();
     for (const [i, m] of this.saved.entries()) {
       const token = await readToken(m.url);
@@ -444,32 +427,13 @@ class Store {
     this.schedule();
   };
 
-  /**
-   * The detail this device reads at: one of the shared levels, or this client's
-   * own cover-screen view.
-   *
-   * One preference, because to a reader it is one question. `asLod` refuses
-   * `ultra` on the way back in, so a device that stored it and then ran an older
-   * build simply gets the default.
-   */
-  setDetail = (choice: Lod | typeof ULTRA): void => {
-    this.detailChosen = true;
-    this.ultra = choice === ULTRA;
-    if (choice !== ULTRA) this.state.lod = choice;
+  /** The level of detail this device reads a transcript at (#149). */
+  setLod = (lod: Lod): void => {
+    this.state.lod = lod;
     // The taps go with it: each was an answer to the level it was made at, and
     // at the new one half of them would mean the opposite.
     this.state.toggledRows = new Set();
-    void saveLod(choice);
-    this.schedule();
-  };
-
-  /**
-   * Take the cover-screen view because the screen is small, unless the reader
-   * has already said what they want. Called by the screen that measured it.
-   */
-  suggestUltra = (small: boolean): void => {
-    if (this.detailChosen || this.ultra === small) return;
-    this.ultra = small;
+    void saveLod(lod);
     this.schedule();
   };
 

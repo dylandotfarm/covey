@@ -15,11 +15,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, RefreshControl, ScrollView, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { LOD_LABEL, LOD_ORDER, type Lod } from "@covey/protocol";
 import { bindLabel, relTime, updateLabel } from "@covey/web";
 import { store } from "../store";
+import { Icon, iconFontFailure } from "../Icon";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
-import { Button, Dot, Notice, Pill, Row, S, SectionTitle } from "../ui";
+import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
 import { applyUpdate, fetchUpdate, updateInconsistency, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
 import type { Routes } from "../nav";
 
@@ -35,6 +37,7 @@ const CONN: Record<string, string> = {
 
 export function SettingsScreen({ navigation }: Props) {
   useStore();
+  const insets = useContentInsets();
   const s = store.state;
   const [ota, setOta] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
@@ -85,8 +88,36 @@ export function SettingsScreen({ navigation }: Props) {
       {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
       <ScrollView
         refreshControl={<RefreshControl refreshing={false} onRefresh={store.retry} tintColor={T.accent} />}
-        contentContainerStyle={{ paddingBottom: 36 }}
+        contentContainerStyle={{ paddingBottom: 36 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
       >
+        {/*
+          The level of detail, at the head of the page — where the web client
+          puts the same choice. It was a row above every transcript once, which
+          cost a line on every conversation to answer a question a reader asks
+          about twice a month, on the screen with fewest lines to give.
+
+          It is this *device's* preference and travels in no command: the phone
+          reads a thread at `compact` while the laptop running it reads the same
+          thread at `full`.
+
+          The cover screen's own view is not among these. It is decided by the
+          screen in front of the reader rather than chosen — see
+          `useCoverScreen` — because it made no sense on a display with room for
+          the conversation, and a preference would have kept it there.
+        */}
+        <SectionTitle text="Detail" />
+        <View style={S.card}>
+          {LOD_ORDER.map((l: Lod, i: number) => (
+            <Row key={l} first={i === 0} onPress={() => store.setLod(l)}>
+              <View style={S.grow}>
+                <Text style={S.title}>{LOD_LABEL[l].label}</Text>
+                <Text style={S.subtle}>{LOD_LABEL[l].hint}</Text>
+              </View>
+              {s.lod === l ? <Icon name="tick" size={20} colour={T.accent} /> : null}
+            </Row>
+          ))}
+        </View>
+
         <SectionTitle text="Machines" />
         {[...s.machines.values()].map((m) => {
           // Only what a person typed can be forgotten. A fleet member came from
@@ -110,7 +141,7 @@ export function SettingsScreen({ navigation }: Props) {
                   {m.info?.settings.bind ? <Text style={S.subtle}>{bindLabel(m.info.settings.bind)}</Text> : null}
                   {m.update ? <Text style={{ color: T.warning, fontSize: SIZE.small }}>{updateLabel(m.update)}</Text> : null}
                 </View>
-                <Text style={{ color: T.faint, fontSize: 17 }}>›</Text>
+                <Icon name="chevron" size={20} colour={T.faint} />
               </Row>
               <View style={[S.row, S.rowDivider, { gap: 8, flexWrap: "wrap" }]}>
                 <Button label="Update" onPress={() => update(m.key, m.name)} disabled={m.conn !== "connected"} />
@@ -146,10 +177,17 @@ export function SettingsScreen({ navigation }: Props) {
               <Text style={S.title}>Updates from</Text>
               <Text style={S.subtle}>
                 {/* Baked in when the app was built, and app.config.ts says why. */}
-                {updatesEnabled() ? (ota?.machine ?? "a machine this device has not added") : "nowhere — this build takes none"}
+                {!updatesEnabled()
+                  ? "nowhere — this build takes none"
+                  : (ota?.machine ?? "a machine this bundle does not name")}
               </Text>
             </View>
           </Row>
+          {iconFontFailure() ? (
+            <Row><Text style={[{ color: T.warning, fontSize: SIZE.small }, S.grow]}>
+              The icon font would not load, so the controls are plain characters. {iconFontFailure()}
+            </Text></Row>
+          ) : null}
           {/* A build whose two halves disagree says so here. It is the one
               failure a reader cannot diagnose from anything else on screen. */}
           {updateInconsistency() ? (

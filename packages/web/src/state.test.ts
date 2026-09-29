@@ -665,14 +665,26 @@ const mediaItem = (over: Record<string, unknown>): TimelineItem =>
 test("threadMedia finds pictures in a reply, a drop and a note", () => {
   const items = [
     mediaItem({ kind: "assistant", text: "Here: ![a shot](https://x/a.png)", streaming: false, model: null }),
-    mediaItem({ kind: "user", text: "look", attachments: [{ name: "drop.jpg", mimeType: "image/jpeg", bytes: "" }] }),
-    mediaItem({ kind: "note", tone: "info", text: "shown", files: [{ name: "clip.mp4", mimeType: "video/mp4", bytes: "" }] }),
+    mediaItem({ kind: "user", text: "look", attachments: [{ name: "drop.jpg", path: "/w/.covey/threads/t/files/drop.jpg", mimeType: "image/jpeg" }] }),
+    mediaItem({ kind: "note", tone: "info", text: "shown", files: [{ name: "clip.mp4", path: "/w/.covey/threads/t/files/clip.mp4", mimeType: "video/mp4" }] }),
   ];
   const found = threadMedia(items);
   assert.deepEqual(found.map((m) => m.kind), ["image", "image", "video"]);
   assert.deepEqual(found.map((m) => m.label), ["a shot", "drop.jpg", "clip.mp4"]);
   assert.equal(found[0]!.source.at, "url");
   assert.equal(found[1]!.source.at, "file");
+  // The path fetches the bytes and the name is only what a reader reads. The
+  // `/file` route resolves what it is given and refuses anything outside the
+  // thread's store, so a bare name there is a picture that will not open.
+  assert.deepEqual(found[1]!.source, { at: "file", path: "/w/.covey/threads/t/files/drop.jpg" });
+  assert.equal(found[1]!.label, "drop.jpg");
+});
+
+test("threadMedia skips a file with no path, which it cannot fetch", () => {
+  const found = threadMedia([
+    mediaItem({ kind: "user", text: "", attachments: [{ name: "nopath.png", mimeType: "image/png" }] }),
+  ]);
+  assert.equal(found.length, 0);
 });
 
 test("threadMedia reads a bare URL and GitHub's own img tag", () => {

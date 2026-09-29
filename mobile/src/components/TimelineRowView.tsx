@@ -23,6 +23,7 @@ import { attachmentKind, relTime, rowSignature } from "@covey/web";
 import { questionAnswers, questionAsks, type ApprovalItem, type Attachment, type QuestionItem, type TimelineItem } from "@covey/protocol";
 import { MONO, SIZE, T } from "../theme";
 import { Markdown, type MarkdownContext } from "./Markdown";
+import { Icon } from "../Icon";
 
 /** What a row needs from the thread screen. */
 export interface RowContext extends MarkdownContext {
@@ -84,7 +85,11 @@ function Files({ files, ctx }: { files: Attachment[]; ctx: RowContext }) {
     <View style={{ gap: 6 }}>
       {files.map((f, i) => {
         const kind = attachmentKind(f);
-        const src = ctx.fileSrc(f.name);
+        // `path`, never `name`: `/file` resolves what it is given and demands
+        // the answer sit inside that thread's store. A bare name lands outside
+        // it and the daemon refuses — which read as "that machine would not
+        // send the file" on every picture in the app.
+        const src = f.path ? ctx.fileSrc(f.path) : "";
         if (kind === "image" || kind === "video") {
           // An agent showing its own work paints inline, the same way a reader's
           // own drop does (#160). A tap opens the route.
@@ -97,7 +102,8 @@ function Files({ files, ctx }: { files: Attachment[]; ctx: RowContext }) {
         }
         return (
           <View key={i} style={st.chip}>
-            <Text style={{ color: T.muted, fontSize: SIZE.small }}>📄 {f.name}</Text>
+            <Icon name="file" size={15} colour={T.muted} />
+            <Text style={{ color: T.muted, fontSize: SIZE.small }}>{f.name}</Text>
           </View>
         );
       })}
@@ -276,7 +282,7 @@ function RowBody({ row, ctx }: { row: TimelineRow; ctx: RowContext }) {
     return (
       <View style={{ gap: 4 }}>
         <Pressable onPress={() => ctx.onToggle(row.key)} style={st.fold}>
-          <Text style={{ color: T.faint, fontSize: 11 }}>{row.open ? "▾" : "▸"}</Text>
+          <Icon name={row.open ? "open" : "shut"} size={16} colour={T.faint} />
           <Text style={st.label} numberOfLines={row.open ? undefined : 2}>{label}</Text>
           {row.failed > 0 ? <Text style={{ color: T.danger, fontSize: 10 }}>{row.failed} failed</Text> : null}
           {row.running > 0 ? <Text style={{ color: T.working, fontSize: 10 }}>{row.running} running</Text> : null}
@@ -296,7 +302,7 @@ function RowBody({ row, ctx }: { row: TimelineRow; ctx: RowContext }) {
     return (
       <View style={{ gap: 4 }}>
         <Pressable onPress={() => ctx.onToggle(row.key)} style={st.fold}>
-          <Text style={{ color: T.faint, fontSize: 11 }}>{row.open ? "▾" : "▸"}</Text>
+          <Icon name={row.open ? "open" : "shut"} size={16} colour={T.faint} />
           <Text style={st.label}>{row.open ? "said" : `said ${row.items.length} more thing${row.items.length === 1 ? "" : "s"}`}</Text>
         </Pressable>
         {row.open ? (

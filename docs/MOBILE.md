@@ -124,7 +124,12 @@ anybody on the path could send.
 ### One variable, loaded from a file
 
 `EXPO_PUBLIC_COVEY_UPDATES_URL` names the machine, and it lives in `mobile/.env`
-(`.env.example` is the committed template). Expo loads `.env` for every one of
+(`.env.example` is the committed template). **Every checkout needs its own**:
+`.env` is not committed, so a git worktree starts without one, and a bundle
+exported there names no machine. That is not fatal — the installed app holds the
+real URL in its native configuration and goes on updating — but the bundle
+cannot match a token to that machine, and the settings screen says so.
+`pnpm run export` prints the URL it baked in, and warns when there is none. Expo loads `.env` for every one of
 its commands, and `EXPO_PUBLIC_` is what makes Metro inline the value into the
 bundle, so `app.config.ts` and `src/ota.ts` read one value from one place.
 

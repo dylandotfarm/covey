@@ -42,13 +42,19 @@ export function updatesUrl(): string | null {
 /**
  * Whether this build can take an update at all. False in development, always.
  *
- * `Updates.isEnabled` is the *native* answer, read from the manifest the build
- * wrote, and it is the one that decides whether a check can happen at all. The
- * URL is this bundle's own idea of where. Both have to agree, and
- * `updateInconsistency` is what says so when they do not.
+ * **`Updates.isEnabled` alone**, which is the native answer read from the
+ * manifest the build wrote. That is the only thing that decides whether a check
+ * can happen, because `checkForUpdateAsync` asks the URL in the *native*
+ * config — not the one this module knows.
+ *
+ * An earlier version required both and got this exactly backwards: a bundle
+ * exported without the variable set turned the check off in an app whose native
+ * side was updating perfectly well. The reader was told "this build takes none"
+ * while it took them. The JavaScript URL is for naming the machine and matching
+ * its token, and for nothing else.
  */
 export function updatesEnabled(): boolean {
-  return Updates.isEnabled && Boolean(updatesUrl());
+  return Updates.isEnabled;
 }
 
 /**
@@ -62,7 +68,11 @@ export function updatesEnabled(): boolean {
 export function updateInconsistency(): string | null {
   const url = updatesUrl();
   if (Updates.isEnabled && !url) {
-    return "This build updates itself but does not say from where. It was built with EXPO_PUBLIC_COVEY_UPDATES_URL set for one step and not the other — see docs/MOBILE.md.";
+    // Not a failure: the native side holds the real URL and the check works.
+    // What is lost is the name of the machine and the token matched to it, so
+    // a machine that needs one will answer 401 until the bundle is exported
+    // with the variable set.
+    return "This bundle does not name the machine it updates from, so it cannot match a token to it. Updates still work; a machine that needs a token will refuse. Export with EXPO_PUBLIC_COVEY_UPDATES_URL set — see docs/MOBILE.md.";
   }
   if (!Updates.isEnabled && url) {
     return `This build names ${url} for updates but the updates module is off in the binary. Rebuild after a prebuild with the same environment.`;
@@ -103,6 +113,9 @@ export async function updateMachineName(): Promise<string | null> {
 export async function primeUpdateToken(): Promise<void> {
   if (!Updates.isEnabled) return;
   const url = updatesUrl();
+  // With no URL there is no host to match a token against, and guessing one
+  // would hand a machine's credential to whichever machine happens to serve
+  // bundles. The build's own headers stand.
   if (!url) return;
   let token: string | undefined;
   try {

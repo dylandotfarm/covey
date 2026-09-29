@@ -21,13 +21,17 @@ import {
 import { store } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T, TONE } from "../theme";
-import { Dot, Empty, Notice, Pill, Row, S } from "../ui";
+import { Dot, Empty, Notice, Pill, Row, S, useContentInsets } from "../ui";
+import { Icon } from "../Icon";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "List">;
 
 export function ListScreen({ navigation }: Props) {
   useStore();
+  // A camera punch is inside the screen on Android 15 and later, and on a
+  // Razr's cover display it is inside the only screen there is.
+  const insets = useContentInsets();
   const s = store.state;
   const rows = projectRows(s);
   const conn = connectionSummary(s);
@@ -83,7 +87,8 @@ export function ListScreen({ navigation }: Props) {
         refreshControl={<RefreshControl refreshing={false} onRefresh={store.retry} tintColor={T.accent} />}
         ListHeaderComponent={
           <Pressable onPress={() => navigation.navigate("Settings")} style={[S.row, { paddingBottom: 4 }]}>
-            <Text style={{ color: T.accent, fontSize: SIZE.small }}>⚙ Machines and settings</Text>
+            <Icon name="settings" size={16} colour={T.accent} />
+            <Text style={{ color: T.accent, fontSize: SIZE.small }}>Machines and settings</Text>
           </Pressable>
         }
         ListEmptyComponent={<Empty title="No projects yet." hint="Start one in the TUI, and it appears here." />}
@@ -94,7 +99,7 @@ export function ListScreen({ navigation }: Props) {
           return (
             <View style={S.card}>
               <Row first onPress={() => store.toggleFold(row.key)}>
-                <Text style={{ color: T.faint, fontSize: 11 }}>{folded ? "▸" : "▾"}</Text>
+                <Icon name={folded ? "shut" : "open"} size={17} colour={T.faint} />
                 <View style={S.grow}>
                   <Text style={[S.title, { fontWeight: "600" }]} numberOfLines={1}>{row.title}</Text>
                   <Text style={S.subtle} numberOfLines={1}>
@@ -109,7 +114,7 @@ export function ListScreen({ navigation }: Props) {
                 {row.active > 0 ? <Pill text={`${row.active} busy`} colour={T.working} /> : null}
                 {homes.length > 0 ? (
                   <Pressable onPress={() => newThread(row)} hitSlop={10} style={{ paddingHorizontal: 6 }}>
-                    <Text style={{ color: T.accent, fontSize: 21 }}>＋</Text>
+                    <Icon name="add" size={24} colour={T.accent} />
                   </Pressable>
                 ) : null}
               </Row>
@@ -160,7 +165,7 @@ export function ListScreen({ navigation }: Props) {
             </View>
           );
         }}
-        contentContainerStyle={{ paddingBottom: 28 }}
+        contentContainerStyle={{ paddingBottom: 28 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
       />
     </View>
   );
