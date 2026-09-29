@@ -27,18 +27,24 @@
  *
  * `viewRows` decides the rows, at this device's level of detail, and it is
  * `timelineRows` underneath: the same fold as the TUI and the page (#149).
+ *
+ * The level itself is chosen on the settings screen and not here. A row of
+ * choices above the transcript costs a line on every conversation to answer a
+ * question a reader asks about twice a month — and it costs it on the screen
+ * that has fewest lines to give. The web client puts the same choice in the
+ * same place, at the head of its settings page.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { FlatList, Keyboard, KeyboardAvoidingView, Pressable, Text, useWindowDimensions, View } from "react-native";
+import { useHeaderHeight } from "@react-navigation/elements";
 import { useFocusEffect } from "@react-navigation/native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { LOD_LABEL, LOD_ORDER, threadIsBusy, type Lod } from "@covey/protocol";
+import { threadIsBusy } from "@covey/protocol";
 import { isGitHubAttachment, mediaSrc, orderedItems, threadFileSrc, viewRows, type MediaRef } from "@covey/web";
-import { store, ULTRA } from "../store";
+import { store } from "../store";
 import { useStore } from "../useStore";
-import { SIZE, T, TONE } from "../theme";
-import { Empty, Notice, S, Spinner } from "../ui";
+import { T } from "../theme";
+import { Empty, Notice, S, Spinner, useContentInsets } from "../ui";
 import { TimelineRowView, type RowContext } from "../components/TimelineRowView";
 import { Composer } from "../components/Composer";
 import { UltraView } from "./UltraView";
@@ -49,7 +55,16 @@ type Props = NativeStackScreenProps<Routes, "Thread">;
 export function ThreadScreen({ route, navigation }: Props) {
   const { machine, threadId } = route.params;
   useStore();
-  const insets = useSafeAreaInsets();
+  const insets = useContentInsets();
+  /**
+   * What `KeyboardAvoidingView` must be told about the header.
+   *
+   * It measures its own frame, and that frame starts *below* the navigation
+   * header — so without this the padding it adds is short by exactly the
+   * header's height and the composer stays under the keyboard's toolbar. That
+   * is what a first attempt shipped: the composer moved, and not far enough.
+   */
+  const headerHeight = useHeaderHeight();
   /**
    * A cover screen is a few lines tall. 420 points is comfortably below any
    * phone held open and comfortably above every cover screen, and the reader's
@@ -136,30 +151,9 @@ export function ThreadScreen({ route, navigation }: Props) {
   }
 
   return (
-    <KeyboardAvoidingView style={S.screen} behavior="padding">
+    <KeyboardAvoidingView style={S.screen} behavior="padding" keyboardVerticalOffset={headerHeight}>
       {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
 
-      {/* The level of detail is this device's preference and travels in no
-          command — `prefs.lod` on the TUI, ctrl+o there, this row here (#149). */}
-      <View style={[S.bar, { paddingVertical: 6 }]}>
-        <Text style={S.subtle}>Detail</Text>
-        {/* Ultra first: it is the least of them, and on the screen it is for it
-            is the one the reader wants nearest the edge. */}
-        <Pressable onPress={() => store.setDetail(ULTRA)} hitSlop={6}>
-          <Text style={{ color: store.ultra ? T.accent : T.subtle, fontSize: SIZE.small, fontWeight: store.ultra ? "700" : "400" }}>
-            Ultra
-          </Text>
-        </Pressable>
-        {LOD_ORDER.map((l: Lod) => (
-          <Pressable key={l} onPress={() => store.setDetail(l)} hitSlop={6}>
-            <Text style={{ color: !store.ultra && s.lod === l ? T.accent : T.subtle, fontSize: SIZE.small, fontWeight: !store.ultra && s.lod === l ? "700" : "400" }}>
-              {LOD_LABEL[l].label}
-            </Text>
-          </Pressable>
-        ))}
-        <View style={S.grow} />
-        {busy ? <Spinner colour={TONE.busy} /> : null}
-      </View>
 
       {store.ultra ? (
         <View style={S.grow}>
@@ -190,7 +184,7 @@ export function ThreadScreen({ route, navigation }: Props) {
           windowSize={7}
           removeClippedSubviews
           keyboardDismissMode="interactive"
-          contentContainerStyle={{ paddingVertical: 8 }}
+          contentContainerStyle={{ paddingVertical: 8, paddingLeft: insets.left, paddingRight: insets.right }}
         />
       )}
 
@@ -210,6 +204,8 @@ export function ThreadScreen({ route, navigation }: Props) {
         onInterrupt={store.interrupt}
         onAttach={store.attachFiles}
         bottomInset={keyboardUp ? 0 : insets.bottom}
+        leftInset={insets.left}
+        rightInset={insets.right}
       />
     </KeyboardAvoidingView>
   );

@@ -21,13 +21,16 @@ import {
 import { store } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T, TONE } from "../theme";
-import { Dot, Empty, Notice, Pill, Row, S } from "../ui";
+import { Dot, Empty, Notice, Pill, Row, S, useContentInsets } from "../ui";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "List">;
 
 export function ListScreen({ navigation }: Props) {
   useStore();
+  // A camera punch is inside the screen on Android 15 and later, and on a
+  // Razr's cover display it is inside the only screen there is.
+  const insets = useContentInsets();
   const s = store.state;
   const rows = projectRows(s);
   const conn = connectionSummary(s);
@@ -160,7 +163,7 @@ export function ListScreen({ navigation }: Props) {
             </View>
           );
         }}
-        contentContainerStyle={{ paddingBottom: 28 }}
+        contentContainerStyle={{ paddingBottom: 28 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
       />
     </View>
   );

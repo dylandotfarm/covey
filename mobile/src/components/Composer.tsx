@@ -51,6 +51,10 @@ export interface ComposerProps {
   onInterrupt: () => void;
   /** Read the picked files and answer with the tags that are new. */
   onAttach: (files: DeviceFile[], draft: string) => Promise<string[] | null>;
+  /** What a display cutout takes at the sides. A camera punch is inside the
+   *  drawable area on Android 15 and later — see `useContentInsets`. */
+  leftInset?: number;
+  rightInset?: number;
   /**
    * What the gesture bar takes at the bottom of the screen.
    *
@@ -125,7 +129,7 @@ export function Composer(p: ComposerProps) {
   return (
     <View style={st.wrap}>
       {p.attaching || p.tags.length ? (
-        <View style={st.strip}>
+        <View style={[st.strip, { paddingLeft: 12 + (p.leftInset ?? 0), paddingRight: 12 + (p.rightInset ?? 0) }]}>
           {p.attaching ? (
             <View style={[st.chip, { gap: 8 }]}>
               <Spinner />
@@ -150,7 +154,11 @@ export function Composer(p: ComposerProps) {
         </View>
       ) : null}
 
-      <View style={[st.row, { paddingBottom: 8 + (p.bottomInset ?? 0) }]}>
+      <View style={[st.row, {
+        paddingBottom: 8 + (p.bottomInset ?? 0),
+        paddingLeft: 10 + (p.leftInset ?? 0),
+        paddingRight: 10 + (p.rightInset ?? 0),
+      }]}>
         <Pressable style={st.icon} onPress={() => void attach(pickMedia)} disabled={picking} accessibilityLabel="Attach a photo or a video">
           <Text style={{ color: T.muted, fontSize: 17 }}>🖼</Text>
         </Pressable>
@@ -174,15 +182,28 @@ export function Composer(p: ComposerProps) {
           returnKeyType="default"
         />
 
+        {/*
+          Both, never one instead of the other.
+
+          A running turn is not a reason to refuse a message: the daemon queues
+          one, or hands it to the turn already running, which is what
+          `Thread.queuedTurns` and `UserMessageItem.folded` are for. Swapping
+          send for stop made the reader interrupt covey to say anything to it —
+          and the web client has always shown both, hiding only the stop.
+        */}
         {p.busy ? (
           <Pressable style={st.stop} onPress={p.onInterrupt} accessibilityLabel="Interrupt the turn">
             <Text style={{ color: "#ffffff", fontSize: 15 }}>■</Text>
           </Pressable>
-        ) : (
-          <Pressable style={[st.send, { opacity: text.trim() ? 1 : 0.4 }]} onPress={send} disabled={!text.trim()} accessibilityLabel="Send">
-            <Text style={{ color: "#ffffff", fontSize: 17 }}>↑</Text>
-          </Pressable>
-        )}
+        ) : null}
+        <Pressable
+          style={[st.send, { opacity: text.trim() ? 1 : 0.4 }]}
+          onPress={send}
+          disabled={!text.trim()}
+          accessibilityLabel={p.busy ? "Send, and covey answers it after this turn" : "Send"}
+        >
+          <Text style={{ color: "#ffffff", fontSize: 17 }}>↑</Text>
+        </Pressable>
       </View>
     </View>
   );

@@ -11,14 +11,14 @@
  */
 import { useCallback, useLayoutEffect, useState } from "react";
 import { KeyboardAvoidingView, Linking, Pressable, RefreshControl, ScrollView, Text, TextInput, View } from "react-native";
+import { useHeaderHeight } from "@react-navigation/elements";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import type { GitHubAction, MergeMethod } from "@covey/protocol";
 import { checksLabel, holderOf, isGitHubAttachment, itemActions, itemStateLabel, mediaSrc, relTime } from "@covey/web";
 import { store } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
-import { Button, Empty, Notice, Pill, S, SectionTitle, Spinner } from "../ui";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { Button, Empty, Notice, Pill, S, SectionTitle, Spinner, useContentInsets } from "../ui";
 import { Markdown } from "../components/Markdown";
 import type { Routes } from "../nav";
 
@@ -40,7 +40,8 @@ export function ItemScreen({ route, navigation }: Props) {
   const [body, setBody] = useState("");
   const [method, setMethod] = useState<MergeMethod>("merge");
 
-  const insets = useSafeAreaInsets();
+  const insets = useContentInsets();
+  const headerHeight = useHeaderHeight();
   const iv = store.state.item;
   const mine = iv && iv.machine === machine && iv.projectId === projectId && iv.number === number ? iv : null;
 
@@ -82,11 +83,11 @@ export function ItemScreen({ route, navigation }: Props) {
   const src = (url: string) => (isGitHubAttachment(url) ? mediaSrc(url, slot?.token) : url);
 
   return (
-    <KeyboardAvoidingView style={S.screen} behavior="padding">
+    <KeyboardAvoidingView style={S.screen} behavior="padding" keyboardVerticalOffset={headerHeight}>
       {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
       <ScrollView
         refreshControl={<RefreshControl refreshing={mine.loading} onRefresh={store.loadItem} tintColor={T.accent} />}
-        contentContainerStyle={{ paddingBottom: 28 + insets.bottom }}
+        contentContainerStyle={{ paddingBottom: 28 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
         keyboardShouldPersistTaps="handled"
       >
         <View style={{ padding: 14, gap: 8 }}>

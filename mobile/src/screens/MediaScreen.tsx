@@ -73,14 +73,14 @@ export function MediaScreen({ route, navigation }: Props) {
         onPress={() => navigation.goBack()}
         hitSlop={12}
         accessibilityLabel="Close"
-        style={{ position: "absolute", top: insets.top + 8, right: 16, width: 36, height: 36, borderRadius: 18, backgroundColor: "#00000099", alignItems: "center", justifyContent: "center" }}
+        style={{ position: "absolute", top: insets.top + 8, right: 16 + insets.right, width: 36, height: 36, borderRadius: 18, backgroundColor: "#00000099", alignItems: "center", justifyContent: "center" }}
       >
         <Text style={{ color: "#ffffff", fontSize: 19 }}>✕</Text>
       </Pressable>
 
       <Text
         numberOfLines={2}
-        style={{ position: "absolute", bottom: insets.bottom + 12, left: 16, right: 16, color: "#ffffffcc", fontSize: SIZE.small }}
+        style={{ position: "absolute", bottom: insets.bottom + 12, left: 16 + insets.left, right: 16 + insets.right, color: "#ffffffcc", fontSize: SIZE.small }}
       >
         {alt}
       </Text>

@@ -20,7 +20,7 @@ import {
 import { store } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
-import { Row, S } from "../ui";
+import { Row, S, useContentInsets } from "../ui";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "Sheet">;
@@ -38,6 +38,7 @@ export function SheetScreen({ route, navigation }: Props) {
    */
   const [page, setPage] = useState("");
   const [rename, setRename] = useState("");
+  const insets = useContentInsets();
   const sheet = { target, page };
   const s = store.state;
 
@@ -113,7 +114,7 @@ export function SheetScreen({ route, navigation }: Props) {
 
   return (
     <View style={[S.screen, { backgroundColor: T.bg }]}>
-      <View style={S.bar}>
+      <View style={[S.bar, { paddingLeft: 14 + insets.left, paddingRight: 14 + insets.right }]}>
         <Pressable onPress={back} hitSlop={10} accessibilityLabel={page ? "Back" : "Close"}>
           <Text style={{ color: T.accent, fontSize: SIZE.body }}>{page ? "‹ Back" : "Close"}</Text>
         </Pressable>
@@ -122,7 +123,7 @@ export function SheetScreen({ route, navigation }: Props) {
         <View style={{ width: 52 }} />
       </View>
 
-      <ScrollView contentContainerStyle={{ paddingBottom: 32 }}>
+      <ScrollView contentContainerStyle={{ paddingBottom: 32 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}>
         {note ? <Text style={[S.subtle, { paddingHorizontal: 16, paddingVertical: 10 }]}>{note}</Text> : null}
 
         {renaming ? (

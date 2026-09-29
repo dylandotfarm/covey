@@ -13,7 +13,7 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { parseAddress } from "../address";
 import { store } from "../store";
 import { SIZE, T } from "../theme";
-import { Button, S, SectionTitle } from "../ui";
+import { Button, S, SectionTitle, useContentInsets } from "../ui";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "AddMachine">;
@@ -23,6 +23,7 @@ export function AddMachineScreen({ navigation }: Props) {
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const insets = useContentInsets();
 
   const input = {
     color: T.text, fontSize: SIZE.body, backgroundColor: T.surface,
@@ -56,7 +57,11 @@ export function AddMachineScreen({ navigation }: Props) {
   };
 
   return (
-    <ScrollView style={S.screen} contentContainerStyle={{ paddingBottom: 32 }} keyboardShouldPersistTaps="handled">
+    <ScrollView
+      style={S.screen}
+      contentContainerStyle={{ paddingBottom: 32 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
+      keyboardShouldPersistTaps="handled"
+    >
       <SectionTitle text="Address" />
       <TextInput
         style={input}

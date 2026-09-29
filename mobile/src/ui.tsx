@@ -6,7 +6,34 @@
  */
 import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MONO, SIZE, T } from "./theme";
+
+/**
+ * What the screen's own hardware takes, on every side (#172).
+ *
+ * This app targets SDK 36, so Android draws it under the gesture bar *and*
+ * under any display cutout — the default since Android 15. A camera punch is
+ * therefore inside the drawable area, and on the cover screen of a Motorola
+ * Razr it is inside the *only* area: that display wraps around the lenses.
+ *
+ * `react-native-safe-area-context` asks for `displayCutout` along with the
+ * system bars, so the punch arrives here as a left or right inset, whichever
+ * edge it is nearest. Use both: which one it is depends on how the device is
+ * held.
+ *
+ * **It is a conservative rectangle, and deliberately so.** A punch occupies
+ * part of one edge and this reserves the whole column beside it, which on the
+ * smallest screen covey has is real estate worth wanting back. Android can say
+ * exactly where a cutout is — `DisplayCutout.getBoundingRects()` — and React
+ * Native exposes no such API, so being exact means a native module. Losing a
+ * column is the cheaper mistake: a state chip half behind a camera lens is one
+ * a reader cannot read at all.
+ */
+export function useContentInsets(): { left: number; right: number; bottom: number; top: number } {
+  const insets = useSafeAreaInsets();
+  return { left: insets.left, right: insets.right, bottom: insets.bottom, top: insets.top };
+}
 
 export const S = StyleSheet.create({
   screen: { flex: 1, backgroundColor: T.bg },

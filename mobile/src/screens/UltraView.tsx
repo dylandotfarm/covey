@@ -23,6 +23,7 @@ import { replyLead, threadActivity, type Activity } from "@covey/client";
 import { threadMedia, type MediaRef } from "@covey/web";
 import type { Thread, TimelineItem } from "@covey/protocol";
 import { SIZE, T } from "../theme";
+import { useContentInsets } from "../ui";
 
 /** One colour per state. The chip is the only colour on this screen. */
 const COLOUR: Record<Activity, string> = {
@@ -36,7 +37,7 @@ const COLOUR: Record<Activity, string> = {
 };
 
 const st = StyleSheet.create({
-  wrap: { paddingHorizontal: 12, paddingTop: 8, gap: 8 },
+  wrap: { paddingTop: 8, gap: 8 },
   head: { flexDirection: "row", alignItems: "center", gap: 8 },
   dot: { width: 9, height: 9, borderRadius: 5 },
   state: { fontSize: SIZE.body, fontWeight: "700" },
@@ -75,9 +76,15 @@ const Thumb = memo(function Thumb({ media, src, onPress }: { media: MediaRef; sr
 });
 
 export function UltraView({ thread, items, srcOf, onMedia, onExpand }: UltraProps) {
+  // The camera punch is inside this screen, not beside it — see `useContentInsets`.
+  // On a Razr's cover display the lenses sit in the panel and it wraps around
+  // them, so a chip laid out to the edge is a chip behind a lens.
+  const insets = useContentInsets();
+  const pad = { paddingLeft: 12 + insets.left, paddingRight: 12 + insets.right };
+
   if (!thread) {
     return (
-      <View style={st.wrap}>
+      <View style={[st.wrap, pad]}>
         <Text style={st.detail}>Opening…</Text>
       </View>
     );
@@ -92,7 +99,7 @@ export function UltraView({ thread, items, srcOf, onMedia, onExpand }: UltraProp
   const recent = [...media].reverse().slice(0, 8);
 
   return (
-    <View style={st.wrap}>
+    <View style={[st.wrap, pad]}>
       <Pressable onPress={onExpand} style={st.head} accessibilityLabel="Open the full conversation">
         <View style={[st.dot, { backgroundColor: COLOUR[state.activity] }]} />
         <Text style={[st.state, { color: COLOUR[state.activity] }]}>{state.label}</Text>
@@ -111,7 +118,13 @@ export function UltraView({ thread, items, srcOf, onMedia, onExpand }: UltraProp
       )}
 
       {recent.length ? (
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={st.thumbs}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          // The strip scrolls past the container's padding, so the inset goes
+          // on its content: otherwise the last thumb parks under the lens.
+          contentContainerStyle={[st.thumbs, { paddingRight: insets.right }]}
+        >
           {recent.map((m) => {
             const src = srcOf(m);
             return <Thumb key={`${m.itemId}:${m.label}`} media={m} src={src} onPress={() => onMedia(src, m.label)} />;

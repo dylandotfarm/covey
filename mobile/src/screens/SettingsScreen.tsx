@@ -15,11 +15,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { Alert, RefreshControl, ScrollView, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
+import { LOD_LABEL, LOD_ORDER, type Lod } from "@covey/protocol";
 import { bindLabel, relTime, updateLabel } from "@covey/web";
-import { store } from "../store";
+import { store, ULTRA } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
-import { Button, Dot, Notice, Pill, Row, S, SectionTitle } from "../ui";
+import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
 import { applyUpdate, fetchUpdate, updateInconsistency, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
 import type { Routes } from "../nav";
 
@@ -35,6 +36,7 @@ const CONN: Record<string, string> = {
 
 export function SettingsScreen({ navigation }: Props) {
   useStore();
+  const insets = useContentInsets();
   const s = store.state;
   const [ota, setOta] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
@@ -85,8 +87,38 @@ export function SettingsScreen({ navigation }: Props) {
       {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
       <ScrollView
         refreshControl={<RefreshControl refreshing={false} onRefresh={store.retry} tintColor={T.accent} />}
-        contentContainerStyle={{ paddingBottom: 36 }}
+        contentContainerStyle={{ paddingBottom: 36 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
       >
+        {/*
+          The level of detail, at the head of the page — where the web client
+          puts the same choice. It was a row above every transcript once, which
+          cost a line on every conversation to answer a question a reader asks
+          about twice a month, on the screen with fewest lines to give.
+
+          It is this *device's* preference and travels in no command: the phone
+          reads a thread at `compact` while the laptop running it reads the same
+          thread at `full`.
+        */}
+        <SectionTitle text="Detail" />
+        <View style={S.card}>
+          <Row first onPress={() => store.setDetail(ULTRA)}>
+            <View style={S.grow}>
+              <Text style={S.title}>Ultra</Text>
+              <Text style={S.subtle}>what it is doing, one sentence, and the pictures — for a cover screen</Text>
+            </View>
+            {store.ultra ? <Text style={{ color: T.accent, fontSize: 17 }}>✓</Text> : null}
+          </Row>
+          {LOD_ORDER.map((l: Lod) => (
+            <Row key={l} onPress={() => store.setDetail(l)}>
+              <View style={S.grow}>
+                <Text style={S.title}>{LOD_LABEL[l].label}</Text>
+                <Text style={S.subtle}>{LOD_LABEL[l].hint}</Text>
+              </View>
+              {!store.ultra && s.lod === l ? <Text style={{ color: T.accent, fontSize: 17 }}>✓</Text> : null}
+            </Row>
+          ))}
+        </View>
+
         <SectionTitle text="Machines" />
         {[...s.machines.values()].map((m) => {
           // Only what a person typed can be forgotten. A fleet member came from
