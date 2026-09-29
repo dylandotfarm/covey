@@ -35,7 +35,7 @@
  * same place, at the head of its settings page.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
-import { FlatList, Keyboard, KeyboardAvoidingView, Pressable, Text, useWindowDimensions, View } from "react-native";
+import { FlatList, Keyboard, KeyboardAvoidingView, Pressable, Text, View } from "react-native";
 import { useHeaderHeight } from "@react-navigation/elements";
 import { useFocusEffect } from "@react-navigation/native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
@@ -44,7 +44,7 @@ import { isGitHubAttachment, mediaSrc, orderedItems, threadFileSrc, viewRows, ty
 import { store } from "../store";
 import { useStore } from "../useStore";
 import { T } from "../theme";
-import { Empty, Notice, S, Spinner, useContentInsets } from "../ui";
+import { Empty, Notice, S, Spinner, useContentInsets, useCoverScreen } from "../ui";
 import { TimelineRowView, type RowContext } from "../components/TimelineRowView";
 import { Composer } from "../components/Composer";
 import { UltraView } from "./UltraView";
@@ -66,12 +66,19 @@ export function ThreadScreen({ route, navigation }: Props) {
    */
   const headerHeight = useHeaderHeight();
   /**
-   * A cover screen is a few lines tall. 420 points is comfortably below any
-   * phone held open and comfortably above every cover screen, and the reader's
-   * own choice always wins — `suggestUltra` does nothing once they have chosen.
+   * The small view follows the screen, not a preference: it is on while this is
+   * a cover display and off the moment the device is opened. `useCoverScreen`
+   * measures the current window, so unfolding answers the question again.
+   *
+   * `expanded` is the one escape from it, and deliberately not remembered: a
+   * reader who taps through to the transcript wants it for this visit, and the
+   * next time they raise a shut phone they want the summary again.
    */
-  const { height } = useWindowDimensions();
-  useEffect(() => { store.suggestUltra(height < 420); }, [height]);
+  const cover = useCoverScreen();
+  const [expanded, setExpanded] = useState(false);
+  const ultra = cover && !expanded;
+  // Leaving the conversation forgets it, so the next visit starts small again.
+  useFocusEffect(useCallback(() => () => setExpanded(false), []));
   /** The keyboard covers the gesture bar, so its inset must not be held twice. */
   const [keyboardUp, setKeyboardUp] = useState(false);
   useEffect(() => {
@@ -155,14 +162,14 @@ export function ThreadScreen({ route, navigation }: Props) {
       {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
 
 
-      {store.ultra ? (
+      {ultra ? (
         <View style={S.grow}>
           <UltraView
             thread={thread ?? null}
             items={view ? orderedItems(view) : []}
             srcOf={(m: MediaRef) => (m.source.at === "file" ? ctx.fileSrc(m.source.path) : ctx.src(m.source.url))}
             onMedia={(src, label) => navigation.navigate("Media", { src, alt: label })}
-            onExpand={() => store.setDetail(s.lod)}
+            onExpand={() => setExpanded(true)}
           />
         </View>
       ) : view?.loading && rows.length === 0 ? (
@@ -206,9 +213,11 @@ export function ThreadScreen({ route, navigation }: Props) {
         bottomInset={keyboardUp ? 0 : insets.bottom}
         leftInset={insets.left}
         rightInset={insets.right}
-        // The cover screen: the lenses take the bottom-right corner and the
-        // device reports nothing about them, so the controls move left.
-        compact={store.ultra}
+        // The cover screen, and not whether the transcript is expanded: the
+        // lenses are in that corner either way, and the device reports nothing
+        // about them. On any other screen the send button stays on the right,
+        // where a reader's thumb expects it.
+        compact={cover}
       />
     </KeyboardAvoidingView>
   );

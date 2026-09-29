@@ -17,7 +17,7 @@ import { Alert, RefreshControl, ScrollView, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { LOD_LABEL, LOD_ORDER, type Lod } from "@covey/protocol";
 import { bindLabel, relTime, updateLabel } from "@covey/web";
-import { store, ULTRA } from "../store";
+import { store } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
@@ -98,23 +98,21 @@ export function SettingsScreen({ navigation }: Props) {
           It is this *device's* preference and travels in no command: the phone
           reads a thread at `compact` while the laptop running it reads the same
           thread at `full`.
+
+          The cover screen's own view is not among these. It is decided by the
+          screen in front of the reader rather than chosen — see
+          `useCoverScreen` — because it made no sense on a display with room for
+          the conversation, and a preference would have kept it there.
         */}
         <SectionTitle text="Detail" />
         <View style={S.card}>
-          <Row first onPress={() => store.setDetail(ULTRA)}>
-            <View style={S.grow}>
-              <Text style={S.title}>Ultra</Text>
-              <Text style={S.subtle}>what it is doing, one sentence, and the pictures — for a cover screen</Text>
-            </View>
-            {store.ultra ? <Text style={{ color: T.accent, fontSize: 17 }}>✓</Text> : null}
-          </Row>
-          {LOD_ORDER.map((l: Lod) => (
-            <Row key={l} onPress={() => store.setDetail(l)}>
+          {LOD_ORDER.map((l: Lod, i: number) => (
+            <Row key={l} first={i === 0} onPress={() => store.setLod(l)}>
               <View style={S.grow}>
                 <Text style={S.title}>{LOD_LABEL[l].label}</Text>
                 <Text style={S.subtle}>{LOD_LABEL[l].hint}</Text>
               </View>
-              {!store.ultra && s.lod === l ? <Text style={{ color: T.accent, fontSize: 17 }}>✓</Text> : null}
+              {s.lod === l ? <Text style={{ color: T.accent, fontSize: 17 }}>✓</Text> : null}
             </Row>
           ))}
         </View>

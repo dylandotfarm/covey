@@ -6,8 +6,37 @@
  */
 import type { ReactNode } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
+import { useWindowDimensions } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { MONO, SIZE, T } from "./theme";
+
+/**
+ * The largest a cover screen is, in points, on either side.
+ *
+ * No modern phone's *open* display is under this in **both** directions, and
+ * every foldable's cover display is. That is what makes the test device
+ * independent: it needs no list of models and no fold API, which React Native
+ * does not expose anyway.
+ *
+ * Both sides matter. A phone held sideways is short and very wide, so a test on
+ * height alone would call it a cover screen and hand a landscape reader a
+ * thumbnail of their own conversation.
+ */
+const COVER_MAX = 600;
+
+/**
+ * True while this is the cover screen of a closed foldable (#172).
+ *
+ * Asked of the *current* window, so it answers again when the device is opened
+ * or shut — which is the whole point. The small view is a property of the screen
+ * in front of the reader and not a preference they set: keeping it once they
+ * unfolded gave them a one-line summary on a display with room for the
+ * conversation.
+ */
+export function useCoverScreen(): boolean {
+  const { width, height } = useWindowDimensions();
+  return width < COVER_MAX && height < COVER_MAX;
+}
 
 /**
  * What the screen's own hardware takes, on every side (#172).
