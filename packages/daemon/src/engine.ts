@@ -6,7 +6,7 @@ import type {
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite,
 } from "@covey/protocol";
-import { isUserClient, KNOWN_MODELS, MIN_CHAIN } from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS, MIN_CHAIN, type AssistantMessageItem,} from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
@@ -18,6 +18,7 @@ import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThrea
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { ChainTracker, summariseActivity } from "./activity.js";
+import { summariseReply } from "./digest.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { ClaudeModels } from "./models.js";
 import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod, GitHubAction, GitHubItem } from "@covey/protocol";
@@ -394,6 +395,42 @@ export class Engine {
       /* the client's derived sentence stands */
     } finally {
       this.summarising.delete(chainId);
+    }
+  }
+
+  /**
+   * Write the sentence a small screen shows instead of the reply (#172).
+   *
+   * Only the *last* thing the agent said in the turn: the ones before it are
+   * steps, and a sentence for each would cost a query per message to say what
+   * the next message says better. A reply that is still streaming is skipped —
+   * summarising half a sentence is worse than the lead the client already has.
+   */
+  private async nameReply(threadId: string, turnId: string) {
+    const key = `reply:${turnId}`;
+    if (this.summarising.has(key)) return;
+    const thread = this.db.getThread(threadId);
+    const cwd = thread?.worktreePath;
+    if (!cwd) return;
+    const last = this.db.listItems(threadId).items
+      .filter((i): i is AssistantMessageItem => i.kind === "assistant" && i.turnId === turnId && !i.streaming)
+      .pop();
+    if (!last?.text.trim()) return;
+    const abort = new AbortController();
+    this.summarising.set(key, abort);
+    try {
+      const summary = await summariseReply(last.text, cwd, abort);
+      if (!summary) return;
+      // Read the item again: the thread may have been cleared or rewound while
+      // the query ran, exactly as `nameChain` guards for.
+      const fresh = this.db.getItem(last.id);
+      if (!fresh || fresh.kind !== "assistant") return;
+      fresh.summary = summary;
+      this.persistItem(fresh);
+    } catch {
+      /* the client's lead sentence stands */
+    } finally {
+      this.summarising.delete(key);
     }
   }
 
@@ -1434,8 +1471,14 @@ export class Engine {
       // thread must be idle: #45 established that a merge under a running
       // turn hides the commits it is about to push. One try per head, so a
       // refusal is not a loop.
+      // Computed under either policy, and kept on the watch (#172). A `manual`
+      // watch is the one that most wants it: its whole purpose is to tell a
+      // person the branch is ready, and a phone's cover screen has room for
+      // that word and nothing else.
+      const ready = mergeReadiness(facts, base);
+      live.readiness = ready;
+
       if (live.merge === "auto" && facts.state === "OPEN" && !events.some(asksForWork) && cursor.mergeTried !== facts.headRefOid) {
-        const ready = mergeReadiness(facts, base);
         const running = fresh.latestTurn?.state === "running" || fresh.status === "running" || fresh.status === "starting";
         if (ready.ready && !running) {
           const merger = this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot, allowMerge: true });
@@ -2398,6 +2441,10 @@ export class Engine {
         t.status = "idle";
         t.lastMessageAt = new Date().toISOString();
         this.putThreadAndEmit(t);
+        // The one sentence a cover screen shows instead of the reply (#172).
+        // Beside the turn, as a title and a chain's sentence are: until it
+        // lands a small screen paints the reply's own first sentence.
+        if (t.latestTurn) void this.nameReply(threadId, t.latestTurn.turnId);
         if (t.latestTurn) {
           if (info.userMessageUuid) { const cp = this.db.getCheckpoint(threadId, t.latestTurn.turnId); if (cp) this.db.putCheckpoint({ ...cp, threadId, userMessageUuid: info.userMessageUuid }); }
           void this.finishTurn(threadId, t.latestTurn.turnId);

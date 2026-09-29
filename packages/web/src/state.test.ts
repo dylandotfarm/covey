@@ -7,6 +7,7 @@ import {
   baseHash, isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaHash, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
   attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
+  threadMedia,
 } from "./state.js";
 
 // The model rows as a daemon sends them: its own Claude Code's list, aliases
@@ -654,4 +655,48 @@ test("an item's signature follows the daemon's last write of it", () => {
   const a = viewRows(s, lodView([lodItem("c1", { updatedAt: "u1" })]))[0]!;
   const b = viewRows(s, lodView([lodItem("c1", { updatedAt: "u2" })]))[0]!;
   assert.notEqual(rowSignature(a), rowSignature(b));
+});
+
+// ---- every picture in a conversation (#172) ---------------------------------
+
+const mediaItem = (over: Record<string, unknown>): TimelineItem =>
+  ({ id: `i${Math.random()}`, threadId: "t", turnId: "u", seq: 1, createdAt: "", updatedAt: "", ...over }) as TimelineItem;
+
+test("threadMedia finds pictures in a reply, a drop and a note", () => {
+  const items = [
+    mediaItem({ kind: "assistant", text: "Here: ![a shot](https://x/a.png)", streaming: false, model: null }),
+    mediaItem({ kind: "user", text: "look", attachments: [{ name: "drop.jpg", mimeType: "image/jpeg", bytes: "" }] }),
+    mediaItem({ kind: "note", tone: "info", text: "shown", files: [{ name: "clip.mp4", mimeType: "video/mp4", bytes: "" }] }),
+  ];
+  const found = threadMedia(items);
+  assert.deepEqual(found.map((m) => m.kind), ["image", "image", "video"]);
+  assert.deepEqual(found.map((m) => m.label), ["a shot", "drop.jpg", "clip.mp4"]);
+  assert.equal(found[0]!.source.at, "url");
+  assert.equal(found[1]!.source.at, "file");
+});
+
+test("threadMedia reads a bare URL and GitHub's own img tag", () => {
+  const found = threadMedia([
+    mediaItem({ kind: "assistant", text: "https://x/demo.mp4", streaming: false, model: null }),
+    mediaItem({ kind: "assistant", text: '<img src="https://x/b.png" alt="b">', streaming: false, model: null }),
+  ]);
+  assert.deepEqual(found.map((m) => m.kind), ["video", "image"]);
+});
+
+test("threadMedia counts one picture once, however often it is re-sent", () => {
+  // A streaming reply re-sends its own text, and a note can name a file a
+  // message already carried. A thumb strip must not grow while nothing happens.
+  const text = "![a](https://x/a.png)";
+  const found = threadMedia([
+    mediaItem({ kind: "assistant", text, streaming: true, model: null }),
+    mediaItem({ kind: "assistant", text, streaming: false, model: null }),
+  ]);
+  assert.equal(found.length, 1);
+});
+
+test("threadMedia ignores a link that is not media", () => {
+  const found = threadMedia([
+    mediaItem({ kind: "assistant", text: "See https://example.com/page and https://x/notes.txt", streaming: false, model: null }),
+  ]);
+  assert.equal(found.length, 0);
 });
