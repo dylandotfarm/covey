@@ -65,4 +65,33 @@ const stamp = { runtimeVersion: version, createdAt: new Date().toISOString() };
 writeFileSync(join(dist, "covey-update.json"), `${JSON.stringify(stamp, null, 2)}\n`);
 
 console.log(`wrote ${join("dist", "covey-update.json")}: runtime ${version}, created ${stamp.createdAt}`);
+
+/**
+ * Say which machine this bundle names, every time.
+ *
+ * Read from the *resolved config* and never from this script's own
+ * `process.env`. Expo loads `.env` for its own commands, so the variable
+ * reaches `expo export` and the bundle without ever reaching the process that
+ * spawned it — which is how the first version of this warning managed to fire
+ * on an export that had the URL.
+ *
+ * A bundle exported without it names no machine and cannot match a token to
+ * one. That is not fatal: the installed app holds the real URL in its native
+ * configuration and goes on updating. Which is exactly why it has to be said
+ * out loud — the failure is silent until somebody opens the settings screen.
+ *
+ * A warning and not an error, because `.env` is per checkout and CI has none:
+ * the export there proves Metro still resolves the shared packages, and that
+ * proof needs no URL.
+ */
+const bakedUrl = config.updates?.url?.trim();
+if (bakedUrl) {
+  console.log(`this bundle names ${bakedUrl} as the machine it updates from.`);
+} else {
+  console.warn("\nwarning: EXPO_PUBLIC_COVEY_UPDATES_URL is not set, so this bundle names no machine.");
+  console.warn("  Updates still work — the installed app holds the URL natively — but the bundle");
+  console.warn("  cannot match a token to that machine, and the settings screen will say so.");
+  console.warn("  Put it in mobile/.env. Every checkout needs its own; .env is not committed.\n");
+}
+
 console.log("the daemon on this machine now serves this bundle at /updates.");

@@ -178,7 +178,9 @@ export function SettingsScreen({ navigation }: Props) {
               <Text style={S.title}>Updates from</Text>
               <Text style={S.subtle}>
                 {/* Baked in when the app was built, and app.config.ts says why. */}
-                {updatesEnabled() ? (ota?.machine ?? "a machine this device has not added") : "nowhere — this build takes none"}
+                {!updatesEnabled()
+                  ? "nowhere — this build takes none"
+                  : (ota?.machine ?? "a machine this bundle does not name")}
               </Text>
             </View>
           </Row>
