@@ -7,6 +7,7 @@ export {
   liveChoices, liveValueLabel, sessionMemoryLabel, type BudgetChoice,
 } from "./sessionBudget.js";
 export { tableAt, tableCells, type Align, type Table } from "./markdown.js";
+export { firstSentence, replyLead, threadActivity, type Activity, type ActivityState } from "./digest.js";
 export {
   NOTE_LEAD, chainLabel, chainsOf, foldsChains, noteFold, timelineRows,
   type ChainRow, type FoldOpts, type ItemRow, type SaidRow, type TimelineRow,

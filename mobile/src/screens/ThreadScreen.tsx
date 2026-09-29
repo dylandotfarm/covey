@@ -1,6 +1,23 @@
 /**
  * One conversation (issue #168).
  *
+ * Two things about the bottom of this screen are Android's, not React Native's,
+ * and both were wrong on the first build.
+ *
+ * **The keyboard does not move the window.** The manifest asks for
+ * `adjustResize` and it is ignored: an edge-to-edge app on Android 15 and later
+ * keeps its window the full height of the screen and hands the keyboard over as
+ * an inset instead. So the composer sat *behind* the keyboard. A
+ * `KeyboardAvoidingView` with `behavior="padding"` is what moves it, and it is
+ * safe precisely because the window does not resize — were it resizing too, the
+ * padding would be counted twice and the composer would float.
+ *
+ * **The gesture bar is inside the window.** Edge-to-edge again: the app draws
+ * under the navigation bar, so the composer has to hold `insets.bottom` itself
+ * or the home bar sits on top of it. That inset goes away when the keyboard is
+ * up, because the keyboard covers the gesture bar and the padding would
+ * otherwise become a gap.
+ *
  * The transcript is an **inverted** `FlatList`, and that is the answer to #114.
  * A streaming item is re-sent whole and longer, so the bottom moves under the
  * reader; the page keeps a count of lines from the bottom and an anchor to
@@ -11,18 +28,20 @@
  * `viewRows` decides the rows, at this device's level of detail, and it is
  * `timelineRows` underneath: the same fold as the TUI and the page (#149).
  */
-import { useCallback, useLayoutEffect, useMemo } from "react";
-import { FlatList, Pressable, Text, View } from "react-native";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { FlatList, Keyboard, KeyboardAvoidingView, Pressable, Text, useWindowDimensions, View } from "react-native";
 import { useFocusEffect } from "@react-navigation/native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { LOD_LABEL, LOD_ORDER, threadIsBusy, type Lod } from "@covey/protocol";
-import { isGitHubAttachment, mediaSrc, threadFileSrc, viewRows } from "@covey/web";
-import { store } from "../store";
+import { isGitHubAttachment, mediaSrc, orderedItems, threadFileSrc, viewRows, type MediaRef } from "@covey/web";
+import { store, ULTRA } from "../store";
 import { useStore } from "../useStore";
 import { SIZE, T, TONE } from "../theme";
 import { Empty, Notice, S, Spinner } from "../ui";
 import { TimelineRowView, type RowContext } from "../components/TimelineRowView";
 import { Composer } from "../components/Composer";
+import { UltraView } from "./UltraView";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "Thread">;
@@ -30,6 +49,21 @@ type Props = NativeStackScreenProps<Routes, "Thread">;
 export function ThreadScreen({ route, navigation }: Props) {
   const { machine, threadId } = route.params;
   useStore();
+  const insets = useSafeAreaInsets();
+  /**
+   * A cover screen is a few lines tall. 420 points is comfortably below any
+   * phone held open and comfortably above every cover screen, and the reader's
+   * own choice always wins — `suggestUltra` does nothing once they have chosen.
+   */
+  const { height } = useWindowDimensions();
+  useEffect(() => { store.suggestUltra(height < 420); }, [height]);
+  /** The keyboard covers the gesture bar, so its inset must not be held twice. */
+  const [keyboardUp, setKeyboardUp] = useState(false);
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", () => setKeyboardUp(true));
+    const hide = Keyboard.addListener("keyboardDidHide", () => setKeyboardUp(false));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
   const s = store.state;
   const slot = s.machines.get(machine);
   const thread = slot?.threads.get(threadId);
@@ -102,16 +136,23 @@ export function ThreadScreen({ route, navigation }: Props) {
   }
 
   return (
-    <View style={S.screen}>
+    <KeyboardAvoidingView style={S.screen} behavior="padding">
       {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
 
       {/* The level of detail is this device's preference and travels in no
           command — `prefs.lod` on the TUI, ctrl+o there, this row here (#149). */}
       <View style={[S.bar, { paddingVertical: 6 }]}>
         <Text style={S.subtle}>Detail</Text>
+        {/* Ultra first: it is the least of them, and on the screen it is for it
+            is the one the reader wants nearest the edge. */}
+        <Pressable onPress={() => store.setDetail(ULTRA)} hitSlop={6}>
+          <Text style={{ color: store.ultra ? T.accent : T.subtle, fontSize: SIZE.small, fontWeight: store.ultra ? "700" : "400" }}>
+            Ultra
+          </Text>
+        </Pressable>
         {LOD_ORDER.map((l: Lod) => (
-          <Pressable key={l} onPress={() => store.setLod(l)} hitSlop={6}>
-            <Text style={{ color: s.lod === l ? T.accent : T.subtle, fontSize: SIZE.small, fontWeight: s.lod === l ? "700" : "400" }}>
+          <Pressable key={l} onPress={() => store.setDetail(l)} hitSlop={6}>
+            <Text style={{ color: !store.ultra && s.lod === l ? T.accent : T.subtle, fontSize: SIZE.small, fontWeight: !store.ultra && s.lod === l ? "700" : "400" }}>
               {LOD_LABEL[l].label}
             </Text>
           </Pressable>
@@ -120,7 +161,17 @@ export function ThreadScreen({ route, navigation }: Props) {
         {busy ? <Spinner colour={TONE.busy} /> : null}
       </View>
 
-      {view?.loading && rows.length === 0 ? (
+      {store.ultra ? (
+        <View style={S.grow}>
+          <UltraView
+            thread={thread ?? null}
+            items={view ? orderedItems(view) : []}
+            srcOf={(m: MediaRef) => (m.source.at === "file" ? ctx.fileSrc(m.source.path) : ctx.src(m.source.url))}
+            onMedia={(src, label) => navigation.navigate("Media", { src, alt: label })}
+            onExpand={() => store.setDetail(s.lod)}
+          />
+        </View>
+      ) : view?.loading && rows.length === 0 ? (
         <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}><Spinner /></View>
       ) : view?.error ? (
         <Empty title="That conversation would not open." hint={view.error} />
@@ -158,7 +209,8 @@ export function ThreadScreen({ route, navigation }: Props) {
         onSend={store.send}
         onInterrupt={store.interrupt}
         onAttach={store.attachFiles}
+        bottomInset={keyboardUp ? 0 : insets.bottom}
       />
-    </View>
+    </KeyboardAvoidingView>
   );
 }

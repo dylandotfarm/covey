@@ -967,3 +967,63 @@ export function rowSignature(row: TimelineRow): string {
 export function viewRows(s: State, v: View): TimelineRow[] {
   return timelineRows(orderedItems(v), { lod: s.lod, toggled: s.toggledRows });
 }
+
+// ---- every picture in a conversation (#172) ---------------------------------
+
+/** One piece of media in a transcript, in the order it arrived. */
+export interface MediaRef {
+  kind: "image" | "video";
+  /** Where the bytes are: a URL in a reply, or a file in the thread's store. */
+  source: { at: "url"; url: string } | { at: "file"; path: string };
+  /** What to call it: an alt, a file name, or the URL's last segment. */
+  label: string;
+  /** The item it came from, so a tap can open the transcript at the right place. */
+  itemId: string;
+}
+
+/** `![alt](url)`, a bare media URL on its own line, and GitHub's own `<img>`. */
+const MEDIA_IN_TEXT = /!\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)|<img\b[^>]*\bsrc="(https?:\/\/[^"]+)"[^>]*>|(?:^|\s)(https?:\/\/[^\s<>"']+)/g;
+
+/**
+ * Every picture and video in a transcript, oldest first.
+ *
+ * A screen too small for the transcript shows these as thumbs instead (#172),
+ * and the web client's lightbox could walk the same list. It is pure and node
+ * tested for the usual reason: two clients that disagree about what counts as a
+ * picture show different numbers of them.
+ *
+ * Three places carry media, and all three are read: a reply's own markdown, the
+ * files on a message the reader attached, and the files on a note the agent
+ * wrote with `covey show` (#160).
+ */
+export function threadMedia(items: TimelineItem[]): MediaRef[] {
+  const out: MediaRef[] = [];
+  const seen = new Set<string>();
+  const add = (ref: MediaRef) => {
+    const key = ref.source.at === "url" ? `u:${ref.source.url}` : `f:${ref.source.path}`;
+    // The same picture shown twice is one thumb. A streaming reply re-sends its
+    // own text, and a note can name a file a message already carried.
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(ref);
+  };
+  const fromFiles = (files: Attachment[] | undefined, itemId: string) => {
+    for (const f of files ?? []) {
+      const kind = attachmentKind(f);
+      if (kind === "image" || kind === "video") add({ kind, source: { at: "file", path: f.name }, label: f.name, itemId });
+    }
+  };
+  for (const item of items) {
+    if (item.kind === "user") { fromFiles(item.attachments, item.id); continue; }
+    if (item.kind === "note") { fromFiles(item.files, item.id); continue; }
+    if (item.kind !== "assistant") continue;
+    for (const m of item.text.matchAll(MEDIA_IN_TEXT)) {
+      const url = m[2] ?? m[3] ?? m[4];
+      if (!url) continue;
+      const kind = mediaKind(url);
+      if (!kind) continue;
+      add({ kind, source: { at: "url", url }, label: m[1] || url.split("/").pop() || url, itemId: item.id });
+    }
+  }
+  return out;
+}

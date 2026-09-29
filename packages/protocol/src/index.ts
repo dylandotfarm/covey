@@ -725,6 +725,21 @@ export interface PullRequestWatch {
   endedAt: string | null;
   /** What the last poll could not read. Cleared by the next poll that can. */
   error: string | null;
+  /**
+   * Whether the pull request could be merged, as of the last poll (#172).
+   *
+   * The daemon's own gate, not a guess: it is `mergeReadiness`, the same
+   * function that decides whether an `auto` watch may merge, so a client that
+   * says "ready to merge" is saying exactly what covey would act on. It is
+   * computed under either policy — a `manual` watch is the one that most wants
+   * it, because telling a person the branch is ready is its whole purpose.
+   *
+   * Absent until the first poll, and on a daemon older than the field. A client
+   * with no readiness says the pull request is open and nothing more: telling a
+   * reader "ready" about a branch with a red check is the one thing this must
+   * never do.
+   */
+  readiness?: { ready: true } | { ready: false; why: string };
 }
 
 /**
@@ -984,6 +999,25 @@ export interface AssistantMessageItem extends ItemBase {
   text: string;
   streaming: boolean;
   model: string | null;
+  /**
+   * One sentence saying what this reply told the reader (#172).
+   *
+   * Written by a weak model when a turn ends, and only for the *last* thing the
+   * agent said in that turn — the reply a person is meant to read. The ones in
+   * the middle are steps, and summarising each would cost a query per message
+   * to say what the next message says better.
+   *
+   * It exists for a screen too small for the reply itself: the cover screen of
+   * a closed foldable shows this line and the reply is a tap away. Every other
+   * client ignores it, and a client older than the field simply does not see it
+   * — the same way `groupSummary` arrived.
+   *
+   * Absent until the query lands, and absent for good when
+   * `COVEY_DIGEST_MODEL=off`. A screen that needs a line falls back to the
+   * reply's own first sentence, which is what `replyLead` in `@covey/client`
+   * is for.
+   */
+  summary?: string;
 }
 
 export interface ThinkingItem extends ItemBase {

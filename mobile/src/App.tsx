@@ -14,6 +14,7 @@ import { store } from "./store";
 import { primeUpdateToken } from "./ota";
 import { T } from "./theme";
 import type { Routes } from "./nav";
+import { ErrorBoundary } from "./ErrorBoundary";
 import { ListScreen } from "./screens/ListScreen";
 import { ThreadScreen } from "./screens/ThreadScreen";
 import { ItemScreen } from "./screens/ItemScreen";
@@ -49,6 +50,12 @@ export function App() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
+        {/*
+          Outside the navigator, so a throw in any screen is caught rather than
+          unmounting the tree to a black screen. A release build has no red box,
+          and the first send from a phone proved what that costs.
+        */}
+        <ErrorBoundary>
         <StatusBar barStyle="light-content" backgroundColor={T.surface} />
         <NavigationContainer theme={theme}>
           <Stack.Navigator
@@ -81,6 +88,7 @@ export function App() {
             />
           </Stack.Navigator>
         </NavigationContainer>
+        </ErrorBoundary>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );
