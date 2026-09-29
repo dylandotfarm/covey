@@ -206,6 +206,9 @@ export function ThreadScreen({ route, navigation }: Props) {
         bottomInset={keyboardUp ? 0 : insets.bottom}
         leftInset={insets.left}
         rightInset={insets.right}
+        // The cover screen: the lenses take the bottom-right corner and the
+        // device reports nothing about them, so the controls move left.
+        compact={store.ultra}
       />
     </KeyboardAvoidingView>
   );

@@ -61,6 +61,21 @@ export interface ComposerProps {
   leftInset?: number;
   rightInset?: number;
   /**
+   * The cover screen of a closed foldable, where the camera is in the corner
+   * and the device does not admit it.
+   *
+   * On a Motorola Razr the lenses sit in the bottom right of the cover display
+   * and `WindowInsets` reports nothing about them: the panel declares its whole
+   * rectangle usable, so `insets.right` and `insets.bottom` come back as zero
+   * and a control laid out to that corner ends up under a lens. Insets are
+   * still preferred when the device does report them — this only decides what
+   * to do when it does not.
+   *
+   * So on this screen the controls move to the *left*, where nothing is, and
+   * the row keeps a corner clear on the right.
+   */
+  compact?: boolean;
+  /**
    * What the gesture bar takes at the bottom of the screen.
    *
    * An edge-to-edge app draws under the navigation bar, so without this the home
@@ -94,6 +109,17 @@ export function Composer(p: ComposerProps) {
     setText(next);
     p.onDraft(next);
   };
+
+  /**
+   * The corner to keep clear at the bottom right, in points.
+   *
+   * The inset when the device reports one, and otherwise a square the size of a
+   * control — which is the smallest reserve that can hold a button, and so the
+   * smallest that makes the corner safe to lay out around. It is a guess about
+   * *how big*, never about *where*: every foldable puts its cover camera in a
+   * corner, and this reserves that corner rather than a column of the screen.
+   */
+  const corner = p.compact ? Math.max(p.rightInset ?? 0, 56) : (p.rightInset ?? 0);
 
   const send = () => {
     const out = text.trim();
@@ -133,6 +159,25 @@ export function Composer(p: ComposerProps) {
       setPicking(false);
     }
   };
+
+  // Built once and placed on whichever side this screen wants them.
+  const buttons = (
+    <>
+      {p.busy ? (
+        <Pressable style={st.stop} onPress={p.onInterrupt} accessibilityLabel="Interrupt the turn">
+          <Text style={{ color: "#ffffff", fontSize: 15 }}>■</Text>
+        </Pressable>
+      ) : null}
+      <Pressable
+        style={[st.send, { opacity: text.trim() ? 1 : 0.4 }]}
+        onPress={send}
+        disabled={!text.trim()}
+        accessibilityLabel={p.busy ? "Send, and covey answers it after this turn" : "Send"}
+      >
+        <Text style={{ color: "#ffffff", fontSize: 17 }}>↑</Text>
+      </Pressable>
+    </>
+  );
 
   return (
     <View style={st.wrap}>
@@ -182,9 +227,12 @@ export function Composer(p: ComposerProps) {
       ) : null}
 
       <View style={[st.row, {
-        paddingBottom: 8 + (p.bottomInset ?? 0),
+        // On a cover screen the row lifts clear of the bottom edge as well:
+        // the lenses take a corner, not a line, so height bought here is height
+        // the text box is not in.
+        paddingBottom: (p.compact ? 14 : 8) + (p.bottomInset ?? 0),
         paddingLeft: 10 + (p.leftInset ?? 0),
-        paddingRight: 10 + (p.rightInset ?? 0),
+        paddingRight: 10 + corner,
       }]}>
         {/*
           One button, not three. Three lived on the composer of every
@@ -201,6 +249,8 @@ export function Composer(p: ComposerProps) {
         >
           <Text style={{ color: menu ? T.accent : T.muted, fontSize: 21, lineHeight: 24 }}>{menu ? "×" : "＋"}</Text>
         </Pressable>
+        {/* On a cover screen these sit on the left, away from the lenses. */}
+        {p.compact ? buttons : null}
 
         <TextInput
           style={st.input}
@@ -224,19 +274,7 @@ export function Composer(p: ComposerProps) {
           send for stop made the reader interrupt covey to say anything to it —
           and the web client has always shown both, hiding only the stop.
         */}
-        {p.busy ? (
-          <Pressable style={st.stop} onPress={p.onInterrupt} accessibilityLabel="Interrupt the turn">
-            <Text style={{ color: "#ffffff", fontSize: 15 }}>■</Text>
-          </Pressable>
-        ) : null}
-        <Pressable
-          style={[st.send, { opacity: text.trim() ? 1 : 0.4 }]}
-          onPress={send}
-          disabled={!text.trim()}
-          accessibilityLabel={p.busy ? "Send, and covey answers it after this turn" : "Send"}
-        >
-          <Text style={{ color: "#ffffff", fontSize: 17 }}>↑</Text>
-        </Pressable>
+        {p.compact ? null : buttons}
       </View>
     </View>
   );
