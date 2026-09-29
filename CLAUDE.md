@@ -148,7 +148,12 @@
   purpose — a picture, which is #167's lesson, and the settings sheet, which fixes a bug
   the page still has — and the transcript is an inverted `FlatList`, this platform's
   answer to #114. Relative imports carry no `.js`: Metro does not follow TypeScript's
-  convention. `pnpm run export` is the integration test that matters and CI runs it,
+  convention. There is no device in this loop, so `pnpm run web` renders the app in a
+  browser through `react-native-web` — not a platform covey ships, just a way to *look*:
+  the components, the styles and the gestures are the real ones, the two packages are
+  devDependencies Metro resolves for platform web alone, and the android bundle is the same
+  with or without them. Every layout bug this client has had is one a look would have
+  caught. `pnpm run export` is the integration test that matters and CI runs it,
   because it is the only thing that proves Metro still resolves the three shared packages
   from outside the workspace. `docs/MOBILE.md` holds the reasoning and the rules; no APK
   has been built yet.

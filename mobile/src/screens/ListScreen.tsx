@@ -10,7 +10,7 @@
  * A row is one target (#115). The chips are text, and a hold opens the
  * conversation's sheet — a thumb aimed at a row must not hit a chip inside it.
  */
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { FlatList, Pressable, RefreshControl, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { threadIsBusy } from "@covey/protocol";
@@ -23,12 +23,19 @@ import { useStore } from "../useStore";
 import { SIZE, T, TONE } from "../theme";
 import { Dot, Empty, Notice, Pill, Row, S, useContentInsets } from "../ui";
 import { Icon } from "../Icon";
+import { SwipeRow } from "../components/SwipeRow";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "List">;
 
 export function ListScreen({ navigation }: Props) {
   useStore();
+  /**
+   * The one row slid open, if any. The list holds it rather than the rows, so
+   * opening a second shuts the first — the page keeps the same rule, and two
+   * open rows is two Archive buttons a thumb can reach by accident.
+   */
+  const [swiped, setSwiped] = useState<string | null>(null);
   // A camera punch is inside the screen on Android 15 and later, and on a
   // Razr's cover display it is inside the only screen there is.
   const insets = useContentInsets();
@@ -37,6 +44,7 @@ export function ListScreen({ navigation }: Props) {
   const conn = connectionSummary(s);
 
   const openThread = useCallback((t: ThreadRef) => {
+    setSwiped(null);
     navigation.navigate("Thread", { machine: t.machine, threadId: t.thread.id });
   }, [navigation]);
 
@@ -85,6 +93,9 @@ export function ListScreen({ navigation }: Props) {
         data={rows}
         keyExtractor={(r) => r.key}
         refreshControl={<RefreshControl refreshing={false} onRefresh={store.retry} tintColor={T.accent} />}
+        // A row left open while the list scrolls is an Archive button a thumb
+        // meets by accident somewhere else entirely.
+        onScrollBeginDrag={() => setSwiped(null)}
         ListHeaderComponent={
           <Pressable onPress={() => navigation.navigate("Settings")} style={[S.row, { paddingBottom: 4 }]}>
             <Icon name="settings" size={16} colour={T.accent} />
@@ -98,7 +109,7 @@ export function ListScreen({ navigation }: Props) {
           const choosing = s.choosing === row.key;
           return (
             <View style={S.card}>
-              <Row first onPress={() => store.toggleFold(row.key)}>
+              <Row first onPress={() => { setSwiped(null); store.toggleFold(row.key); }}>
                 <Icon name={folded ? "shut" : "open"} size={17} colour={T.faint} />
                 <View style={S.grow}>
                   <Text style={[S.title, { fontWeight: "600" }]} numberOfLines={1}>{row.title}</Text>
@@ -139,13 +150,24 @@ export function ListScreen({ navigation }: Props) {
               {folded ? null : row.threads.map((t) => {
                 const tone = threadTone(t.thread);
                 const refs = threadRefs(t.thread);
+                const key = `${t.machine}:${t.thread.id}`;
                 return (
-                  <Row
-                    key={`${t.machine}:${t.thread.id}`}
+                  <SwipeRow
+                    key={key}
+                    open={swiped === key}
+                    onOpen={() => setSwiped(key)}
+                    onClose={() => setSwiped((k) => (k === key ? null : k))}
                     onPress={() => openThread(t)}
                     // A hold is the way to this conversation's settings (#115),
                     // because the chips on the row are text and not targets.
                     onLongPress={() => navigation.navigate("Sheet", { target: { kind: "thread", machine: t.machine, threadId: t.thread.id } })}
+                    action={{
+                      label: "Archive",
+                      onPress: () => {
+                        setSwiped(null);
+                        store.archiveThread(t.machine, t.thread.id);
+                      },
+                    }}
                   >
                     <Dot colour={TONE[tone]} />
                     <View style={S.grow}>
@@ -159,7 +181,7 @@ export function ListScreen({ navigation }: Props) {
                     {threadIsBusy(t.thread) ? null : (
                       <Text style={{ color: T.faint, fontSize: 10 }}>{relTime(t.thread.lastMessageAt ?? t.thread.updatedAt)}</Text>
                     )}
-                  </Row>
+                  </SwipeRow>
                 );
               })}
             </View>
