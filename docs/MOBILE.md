@@ -289,6 +289,35 @@ Two things it is not:
   `signingConfigs` change in the generated project, which means it belongs in a
   config plugin before anybody distributes this.
 
+## Looking at it, without a device
+
+There is no Android device in this loop and no emulator, and every layout change
+made without one was reasoned rather than seen. Several shipped wrong because of
+it: a composer behind the keyboard, a send button under a camera lens, a row of
+controls that were blank circles.
+
+`pnpm run web` renders the app in a browser through `react-native-web`. It is
+**not** a supported platform and nothing about it ships: the two packages are
+devDependencies, Metro resolves them for platform web alone, and the Android
+bundle is byte-identical with or without them. What it is good for is looking —
+the components, the styles and the gestures are the real ones, so a control laid
+out off the screen shows up as a control laid out off the screen.
+
+It is good enough to record with, too. `PanResponder` answers a real pointer
+drag in a browser, so a swipe captured there is `SwipeRow` doing the work rather
+than an animation of it. Point it at a throwaway daemon and nothing real is at
+risk:
+
+```sh
+COVEY_HOME=/tmp/h COVEY_CONFIG=/tmp/c node packages/daemon/dist/main.js --bind loopback --port 3799
+cd mobile && pnpm run web:export
+# serve the build, then drive the cached chromium over the DevTools protocol
+```
+
+What it is *not* is Android. The native modules take their web implementations,
+the fonts are the browser's, and nothing here says how a gesture feels in a
+hand. It catches the layout mistakes, which were most of them.
+
 ## What is not here
 
 - **iOS.** Nothing in the design excludes it and `expo export --platform ios`
