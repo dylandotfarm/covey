@@ -42,6 +42,7 @@
     "expo-image-manipulator": "57.0.19",
     "expo-image-picker": "57.0.19",
     "expo-secure-store": "~57.0.4",
+    "expo-speech-recognition": "57.1.0",
     "expo-system-ui": "57.0.4",
     "expo-updates": "~57.0.23",
     "expo-video": "57.0.4",

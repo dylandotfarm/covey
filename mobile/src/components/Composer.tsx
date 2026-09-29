@@ -17,6 +17,7 @@ import { cutTag, spliceTags, tagSpanAt } from "@covey/client";
 import { SIZE, T } from "../theme";
 import { Spinner } from "../ui";
 import { pickCamera, pickDocument, pickMedia, type DeviceFile } from "../attach";
+import { useDictation } from "../dictation";
 
 const st = StyleSheet.create({
   wrap: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: T.border, backgroundColor: T.surface },
@@ -37,7 +38,7 @@ const st = StyleSheet.create({
     alignSelf: "flex-start", backgroundColor: T.surfaceAlt, borderRadius: 10,
     marginTop: 8, marginBottom: 2, overflow: "hidden", minWidth: 180,
   },
-  menuRow: { paddingHorizontal: 14, paddingVertical: 11 },
+  menuRow: { paddingHorizontal: 16, paddingVertical: 14 },
   stop: { width: 38, height: 38, borderRadius: 19, alignItems: "center", justifyContent: "center", backgroundColor: T.danger },
 });
 
@@ -93,6 +94,51 @@ export function Composer(p: ComposerProps) {
   const [picking, setPicking] = useState(false);
   /** The attach menu, open only while the reader is choosing. */
   const [menu, setMenu] = useState(false);
+
+  /**
+   * What the draft was when dictation started.
+   *
+   * The recogniser revises the utterance as it hears more of it, so each result
+   * *replaces* the last one rather than adding to it. Without this the reader
+   * would watch their sentence written three times over.
+   */
+  const spokenFrom = useRef<string | null>(null);
+  const dictation = useDictation((spoken, final) => {
+    const base = spokenFrom.current ?? text;
+    if (spokenFrom.current === null) spokenFrom.current = base;
+    const joined = base && !base.endsWith(" ") ? `${base} ${spoken}` : `${base}${spoken}`;
+    caret.current = joined.length;
+    change(joined);
+    // The next utterance starts from what this one left.
+    if (final) spokenFrom.current = joined;
+  });
+
+  const micPress = () => {
+    if (dictation.listening) { dictation.stop(); return; }
+    spokenFrom.current = null;
+    void dictation.start();
+  };
+
+  /**
+   * The controls are bigger on a cover screen, not smaller.
+   *
+   * It is the screen most often used one-handed, at arm's length, on a device
+   * being held shut — and the one where a missed tap costs the most, because
+   * there is no room for a second try beside the first. The row of buttons
+   * moved off the message box precisely so both could have the space.
+   */
+  const big = Boolean(p.compact);
+  const control = big ? { width: 52, height: 52, borderRadius: 26 } : null;
+
+  const mic = (
+    <Pressable
+      style={[st.icon, control, dictation.listening ? { backgroundColor: T.danger } : null]}
+      onPress={micPress}
+      accessibilityLabel={dictation.listening ? "Stop dictating" : "Dictate a message"}
+    >
+      <Text style={{ fontSize: big ? 22 : 17 }}>{dictation.listening ? "◼" : "🎤"}</Text>
+    </Pressable>
+  );
 
   // A different thread is a different draft. Without this, opening a second
   // conversation would show the first one's half-written message.
@@ -164,17 +210,17 @@ export function Composer(p: ComposerProps) {
   const buttons = (
     <>
       {p.busy ? (
-        <Pressable style={st.stop} onPress={p.onInterrupt} accessibilityLabel="Interrupt the turn">
-          <Text style={{ color: "#ffffff", fontSize: 15 }}>■</Text>
+        <Pressable style={[st.stop, control]} onPress={p.onInterrupt} accessibilityLabel="Interrupt the turn">
+          <Text style={{ color: "#ffffff", fontSize: big ? 19 : 15 }}>■</Text>
         </Pressable>
       ) : null}
       <Pressable
-        style={[st.send, { opacity: text.trim() ? 1 : 0.4 }]}
+        style={[st.send, control, { opacity: text.trim() ? 1 : 0.4 }]}
         onPress={send}
         disabled={!text.trim()}
         accessibilityLabel={p.busy ? "Send, and covey answers it after this turn" : "Send"}
       >
-        <Text style={{ color: "#ffffff", fontSize: 17 }}>↑</Text>
+        <Text style={{ color: "#ffffff", fontSize: big ? 22 : 17 }}>↑</Text>
       </Pressable>
     </>
   );
@@ -226,6 +272,52 @@ export function Composer(p: ComposerProps) {
         </View>
       ) : null}
 
+      {dictation.error ? (
+        <Pressable onPress={dictation.clearError} style={{ paddingHorizontal: 14, paddingBottom: 4 }}>
+          <Text style={{ color: T.danger, fontSize: SIZE.small }}>{dictation.error}</Text>
+        </Pressable>
+      ) : null}
+
+      {p.compact ? (
+        /*
+          The cover screen, two rows.
+
+          The message box wants the width of the screen, and three controls
+          beside it leave it a third of one. So the box takes a row with the
+          microphone — the one control that is worth reaching for when there is
+          no room to type — and the rest go underneath, on the left, away from
+          the lenses.
+        */
+        <View style={{ paddingLeft: 10 + (p.leftInset ?? 0), paddingRight: 10 + corner, paddingBottom: 14 + (p.bottomInset ?? 0), gap: 8 }}>
+          <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8 }}>
+            <TextInput
+              // Three lines, because the controls left this row and the space
+              // they took is space a message can use. A dictated sentence in
+              // particular is longer than one typed on a screen this size.
+              style={[st.input, { minHeight: 84, maxHeight: 132, borderRadius: 20 }]}
+              value={text}
+              onChangeText={change}
+              onSelectionChange={(e) => { caret.current = e.nativeEvent.selection.end; }}
+              placeholder={dictation.listening ? "Listening…" : "Message"}
+              placeholderTextColor={T.faint}
+              multiline
+              returnKeyType="default"
+            />
+            {dictation.available ? mic : null}
+          </View>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Pressable
+              style={[st.icon, control]}
+              onPress={() => setMenu((open) => !open)}
+              disabled={picking}
+              accessibilityLabel={menu ? "Close the attach menu" : "Attach a photo, a picture or a file"}
+            >
+              <Text style={{ color: menu ? T.accent : T.muted, fontSize: big ? 26 : 21, lineHeight: big ? 30 : 24 }}>{menu ? "×" : "＋"}</Text>
+            </Pressable>
+            {buttons}
+          </View>
+        </View>
+      ) : (
       <View style={[st.row, {
         // On a cover screen the row lifts clear of the bottom edge as well:
         // the lenses take a corner, not a line, so height bought here is height
@@ -249,8 +341,6 @@ export function Composer(p: ComposerProps) {
         >
           <Text style={{ color: menu ? T.accent : T.muted, fontSize: 21, lineHeight: 24 }}>{menu ? "×" : "＋"}</Text>
         </Pressable>
-        {/* On a cover screen these sit on the left, away from the lenses. */}
-        {p.compact ? buttons : null}
 
         <TextInput
           style={st.input}
@@ -274,8 +364,9 @@ export function Composer(p: ComposerProps) {
           send for stop made the reader interrupt covey to say anything to it —
           and the web client has always shown both, hiding only the stop.
         */}
-        {p.compact ? null : buttons}
+        {buttons}
       </View>
+      )}
     </View>
   );
 }
