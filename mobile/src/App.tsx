@@ -12,6 +12,7 @@ import { DarkTheme, NavigationContainer } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { store } from "./store";
 import { primeUpdateToken } from "./ota";
+import { loadIconFont } from "./Icon";
 import { T } from "./theme";
 import type { Routes } from "./nav";
 import { ErrorBoundary } from "./ErrorBoundary";
@@ -44,6 +45,9 @@ export function App() {
     // Dial what this device remembers, then tell `expo-updates` the token for
     // the machine that serves bundles. In that order: the token comes from the
     // same store the machines do.
+    // Before anything draws: the font comes down with the bundle, and an icon
+    // that asks for it on mount draws nothing until it lands.
+    loadIconFont();
     void store.start().then(primeUpdateToken);
   }, []);
 

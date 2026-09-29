@@ -114,11 +114,6 @@ export function Composer(p: ComposerProps) {
     if (final) spokenFrom.current = joined;
   });
 
-  const micPress = () => {
-    if (dictation.listening) { dictation.stop(); return; }
-    spokenFrom.current = null;
-    void dictation.start();
-  };
 
   /**
    * The controls are bigger on a cover screen, not smaller.
@@ -131,11 +126,23 @@ export function Composer(p: ComposerProps) {
   const big = Boolean(p.compact);
   const control = big ? { width: 52, height: 52, borderRadius: 26 } : null;
 
+  /**
+   * Hold to talk, release to stop.
+   *
+   * A press that toggles is a microphone left on: the reader speaks, the phone
+   * goes into a pocket, and nothing says it is still listening. Holding puts the
+   * length of the recording into the gesture, which is what every other
+   * push-to-talk does and what a thumb already expects.
+   */
   const mic = (
     <Pressable
       style={[st.icon, control, dictation.listening ? { backgroundColor: T.danger } : null]}
-      onPress={micPress}
-      accessibilityLabel={dictation.listening ? "Stop dictating" : "Dictate a message"}
+      onPressIn={() => { spokenFrom.current = null; void dictation.start(); }}
+      onPressOut={() => dictation.stop()}
+      // The hold *is* the gesture, so Android must not also read it as a long press.
+      delayLongPress={100000}
+      accessibilityLabel="Hold to dictate a message"
+      accessibilityHint="Hold this button and speak. Let go when you have finished."
     >
       <Icon name={dictation.listening ? "micOff" : "mic"} size={big ? 26 : 20} colour={dictation.listening ? "#ffffff" : T.muted} />
     </Pressable>
@@ -224,8 +231,15 @@ export function Composer(p: ComposerProps) {
     </Pressable>
   );
 
-  // On any screen but the cover one these keep their usual place, on the right.
-  const buttons = <>{stopButton}{sendButton}</>;
+  /**
+   * On any screen but the cover one these keep their usual place, on the right.
+   *
+   * The microphone is among them. An open phone has a keyboard with a
+   * microphone key of its own, but covey's is push-to-talk and one tap nearer —
+   * and a reader who learns the gesture on the cover screen should find it on
+   * the other one rather than discover it was a small-screen affordance.
+   */
+  const buttons = <>{dictation.available ? mic : null}{stopButton}{sendButton}</>;
 
   return (
     <View style={st.wrap}>

@@ -18,7 +18,7 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { LOD_LABEL, LOD_ORDER, type Lod } from "@covey/protocol";
 import { bindLabel, relTime, updateLabel } from "@covey/web";
 import { store } from "../store";
-import { Icon } from "../Icon";
+import { Icon, iconFontFailure } from "../Icon";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
@@ -183,6 +183,11 @@ export function SettingsScreen({ navigation }: Props) {
               </Text>
             </View>
           </Row>
+          {iconFontFailure() ? (
+            <Row><Text style={[{ color: T.warning, fontSize: SIZE.small }, S.grow]}>
+              The icon font would not load, so the controls are plain characters. {iconFontFailure()}
+            </Text></Row>
+          ) : null}
           {/* A build whose two halves disagree says so here. It is the one
               failure a reader cannot diagnose from anything else on screen. */}
           {updateInconsistency() ? (
