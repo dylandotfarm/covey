@@ -18,6 +18,7 @@ import { Dimensions, Linking, Pressable, StyleSheet, Text, View } from "react-na
 import { Image } from "expo-image";
 import { markdownBlocks, type Block, type Span } from "../markdown";
 import { MONO, SIZE, T } from "../theme";
+import { Icon } from "../Icon";
 
 /** What the painter needs from the screen it is on. */
 export interface MarkdownContext {
@@ -91,9 +92,10 @@ function Media({ url, kind, ctx }: { url: string; kind: "image" | "video"; ctx: 
         // A first frame and a word. The full-size route plays it; a thumbnail
         // that played would cost the frame budget for something nobody asked to
         // watch yet.
-        <Text style={{ color: T.subtle, fontSize: SIZE.small, textAlign: "center", marginTop: -22, marginBottom: 8 }}>
-          ▶ video — tap to play
-        </Text>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 4, marginTop: -22, marginBottom: 8 }}>
+          <Icon name="play" size={15} colour={T.subtle} />
+          <Text style={{ color: T.subtle, fontSize: SIZE.small }}>video — tap to play</Text>
+        </View>
       ) : null}
     </Pressable>
   );

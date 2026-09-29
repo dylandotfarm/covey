@@ -18,6 +18,7 @@ import { SIZE, T } from "../theme";
 import { Spinner } from "../ui";
 import { pickCamera, pickDocument, pickMedia, type DeviceFile } from "../attach";
 import { useDictation } from "../dictation";
+import { Icon } from "../Icon";
 
 const st = StyleSheet.create({
   wrap: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: T.border, backgroundColor: T.surface },
@@ -136,7 +137,7 @@ export function Composer(p: ComposerProps) {
       onPress={micPress}
       accessibilityLabel={dictation.listening ? "Stop dictating" : "Dictate a message"}
     >
-      <Text style={{ fontSize: big ? 22 : 17 }}>{dictation.listening ? "◼" : "🎤"}</Text>
+      <Icon name={dictation.listening ? "micOff" : "mic"} size={big ? 26 : 20} colour={dictation.listening ? "#ffffff" : T.muted} />
     </Pressable>
   );
 
@@ -206,24 +207,25 @@ export function Composer(p: ComposerProps) {
     }
   };
 
-  // Built once and placed on whichever side this screen wants them.
-  const buttons = (
-    <>
-      {p.busy ? (
-        <Pressable style={[st.stop, control]} onPress={p.onInterrupt} accessibilityLabel="Interrupt the turn">
-          <Text style={{ color: "#ffffff", fontSize: big ? 19 : 15 }}>■</Text>
-        </Pressable>
-      ) : null}
-      <Pressable
-        style={[st.send, control, { opacity: text.trim() ? 1 : 0.4 }]}
-        onPress={send}
-        disabled={!text.trim()}
-        accessibilityLabel={p.busy ? "Send, and covey answers it after this turn" : "Send"}
-      >
-        <Text style={{ color: "#ffffff", fontSize: big ? 22 : 17 }}>↑</Text>
-      </Pressable>
-    </>
+  const stopButton = p.busy ? (
+    <Pressable style={[st.stop, control]} onPress={p.onInterrupt} accessibilityLabel="Interrupt the turn">
+      <Icon name="stop" size={big ? 24 : 18} colour="#ffffff" />
+    </Pressable>
+  ) : null;
+
+  const sendButton = (
+    <Pressable
+      style={[st.send, control, { opacity: text.trim() ? 1 : 0.4 }]}
+      onPress={send}
+      disabled={!text.trim()}
+      accessibilityLabel={p.busy ? "Send, and covey answers it after this turn" : "Send"}
+    >
+      <Icon name="send" size={big ? 26 : 20} colour="#ffffff" />
+    </Pressable>
   );
+
+  // On any screen but the cover one these keep their usual place, on the right.
+  const buttons = <>{stopButton}{sendButton}</>;
 
   return (
     <View style={st.wrap}>
@@ -246,7 +248,7 @@ export function Composer(p: ComposerProps) {
                 hitSlop={8}
                 style={{ paddingHorizontal: 4 }}
               >
-                <Text style={{ color: T.subtle, fontSize: 15 }}>×</Text>
+                <Icon name="close" size={15} colour={T.subtle} />
               </Pressable>
             </View>
           ))}
@@ -303,7 +305,13 @@ export function Composer(p: ComposerProps) {
               multiline
               returnKeyType="default"
             />
+            {/*
+              Speak or send, both beside the box they act on. They are the two
+              things a reader reaches for having written something, so they sit
+              together and at the end of the writing rather than under it.
+            */}
             {dictation.available ? mic : null}
+            {sendButton}
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <Pressable
@@ -312,9 +320,11 @@ export function Composer(p: ComposerProps) {
               disabled={picking}
               accessibilityLabel={menu ? "Close the attach menu" : "Attach a photo, a picture or a file"}
             >
-              <Text style={{ color: menu ? T.accent : T.muted, fontSize: big ? 26 : 21, lineHeight: big ? 30 : 24 }}>{menu ? "×" : "＋"}</Text>
+              <Icon name={menu ? "close" : "attach"} size={big ? 28 : 22} colour={menu ? T.accent : T.muted} />
             </Pressable>
-            {buttons}
+            {/* Stop is not a writing control: it stays on the row below, and is
+                there only while there is a turn to stop. */}
+            {stopButton}
           </View>
         </View>
       ) : (
@@ -339,7 +349,7 @@ export function Composer(p: ComposerProps) {
           disabled={picking}
           accessibilityLabel={menu ? "Close the attach menu" : "Attach a photo, a picture or a file"}
         >
-          <Text style={{ color: menu ? T.accent : T.muted, fontSize: 21, lineHeight: 24 }}>{menu ? "×" : "＋"}</Text>
+          <Icon name={menu ? "close" : "attach"} size={22} colour={menu ? T.accent : T.muted} />
         </Pressable>
 
         <TextInput

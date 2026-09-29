@@ -24,6 +24,7 @@ import { threadMedia, type MediaRef } from "@covey/web";
 import type { Thread, TimelineItem } from "@covey/protocol";
 import { SIZE, T } from "../theme";
 import { useContentInsets } from "../ui";
+import { Icon } from "../Icon";
 
 /** One colour per state. The chip is the only colour on this screen. */
 const COLOUR: Record<Activity, string> = {
@@ -68,7 +69,7 @@ const Thumb = memo(function Thumb({ media, src, onPress }: { media: MediaRef; sr
       <Image source={{ uri: src }} style={st.thumb} contentFit="cover" transition={100} />
       {media.kind === "video" ? (
         <View style={st.play} pointerEvents="none">
-          <Text style={{ color: "#ffffff", fontSize: 19, textShadowColor: "#000", textShadowRadius: 4 }}>▶</Text>
+          <Icon name="play" size={24} colour="#ffffff" />
         </View>
       ) : null}
     </Pressable>
@@ -105,7 +106,7 @@ export function UltraView({ thread, items, srcOf, onMedia, onExpand }: UltraProp
         <Text style={[st.state, { color: COLOUR[state.activity] }]}>{state.label}</Text>
         {state.detail ? <Text style={st.detail} numberOfLines={1}>{state.detail}</Text> : null}
         <View style={{ flex: 1 }} />
-        <Text style={{ color: T.faint, fontSize: 17 }}>›</Text>
+        <Icon name="chevron" size={20} colour={T.faint} />
       </Pressable>
 
       {lead ? (

@@ -18,6 +18,7 @@ import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { LOD_LABEL, LOD_ORDER, type Lod } from "@covey/protocol";
 import { bindLabel, relTime, updateLabel } from "@covey/web";
 import { store } from "../store";
+import { Icon } from "../Icon";
 import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
@@ -112,7 +113,7 @@ export function SettingsScreen({ navigation }: Props) {
                 <Text style={S.title}>{LOD_LABEL[l].label}</Text>
                 <Text style={S.subtle}>{LOD_LABEL[l].hint}</Text>
               </View>
-              {s.lod === l ? <Text style={{ color: T.accent, fontSize: 17 }}>✓</Text> : null}
+              {s.lod === l ? <Icon name="tick" size={20} colour={T.accent} /> : null}
             </Row>
           ))}
         </View>
@@ -140,7 +141,7 @@ export function SettingsScreen({ navigation }: Props) {
                   {m.info?.settings.bind ? <Text style={S.subtle}>{bindLabel(m.info.settings.bind)}</Text> : null}
                   {m.update ? <Text style={{ color: T.warning, fontSize: SIZE.small }}>{updateLabel(m.update)}</Text> : null}
                 </View>
-                <Text style={{ color: T.faint, fontSize: 17 }}>›</Text>
+                <Icon name="chevron" size={20} colour={T.faint} />
               </Row>
               <View style={[S.row, S.rowDivider, { gap: 8, flexWrap: "wrap" }]}>
                 <Button label="Update" onPress={() => update(m.key, m.name)} disabled={m.conn !== "connected"} />

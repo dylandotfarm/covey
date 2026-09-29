@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { mediaKind } from "@covey/web";
 import { SIZE, T } from "../theme";
+import { Icon } from "../Icon";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "Media">;
@@ -75,7 +76,7 @@ export function MediaScreen({ route, navigation }: Props) {
         accessibilityLabel="Close"
         style={{ position: "absolute", top: insets.top + 8, right: 16 + insets.right, width: 36, height: 36, borderRadius: 18, backgroundColor: "#00000099", alignItems: "center", justifyContent: "center" }}
       >
-        <Text style={{ color: "#ffffff", fontSize: 19 }}>✕</Text>
+        <Icon name="close" size={22} colour="#ffffff" />
       </Pressable>
 
       <Text
