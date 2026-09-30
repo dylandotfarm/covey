@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wrapSpans, markdownToLines, renderItem, truncate, width, selectedText, highlightLine, colToIndex, isSystemMessage, lineText, lineWidth } from "./lines.js";
+import { wrapSpans, markdownToLines, renderItem, elide, truncate, width, selectedText, highlightLine, colToIndex, isSystemMessage, lineText, lineWidth } from "./lines.js";
 import { T } from "./theme.js";
 
 const text = (l: { text: string }[]) => l.map((s) => s.text).join("");
@@ -49,6 +49,25 @@ test("renderItem tool row is a single line when collapsed", () => {
 test("truncate and width", () => {
   assert.equal(truncate("hello world", 8), "hello w…");
   assert.equal(width("日本"), 4);
+});
+
+test("elide keeps both ends of a line and loses its middle", () => {
+  // A notice reads "what failed: why". The repository is fifty columns the
+  // reader chose two keys ago; the reason is what they can act on, so the
+  // back keeps the larger share (#176).
+  const notice = "could not clone github.com/dylandotfarm/hardware: no commits yet; push one first";
+  const cut = elide(notice, 60);
+  assert.equal(width(cut), 60, "it fills the room it was given and not a column more");
+  assert.ok(cut.includes("no commits yet; push one first"), "the reason survives whole");
+  assert.ok(cut.startsWith("could not clone"), "and the reader still knows what failed");
+  const [front, back] = cut.split("…");
+  assert.ok(notice.startsWith(front!) && notice.endsWith(back!), "nothing is invented between the ends");
+
+  assert.equal(elide("hello world", 11), "hello world", "a line that fits is left alone");
+  assert.equal(elide("hello world", 20), "hello world");
+  assert.equal(width(elide("日本語のテキストはここにあります", 9)), 9, "a wide character never overruns the room");
+  assert.equal(elide("anything", 2), "…", "and there is always an answer, however little room there is");
+  assert.equal(elide("anything", 0), "");
 });
 
 const L = (s: string) => [{ text: s }];

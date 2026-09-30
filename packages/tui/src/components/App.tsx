@@ -6,7 +6,7 @@ import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabe
 import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
-import { ItemLines, diffToLines, selectedText, activityLine, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
+import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
 import { ASSUMED_CELL, CELL_SIZE_QUERY, graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, parseCellSize, type CellSize } from "../media.js";
@@ -2333,6 +2333,9 @@ export function App({ store }: { store: Store }) {
 
   // ---- render ---------------------------------------------------------------------
   const notice = state.notice;
+  // The title bar's own width: `mainW`, less the four columns its
+  // `paddingX={2}` takes. `barNotice` below cuts the right-hand side to it.
+  const barRoom = Math.max(0, mainW - 4);
   // Overlays that belong to a machine (update progress, directory browsing)
   // read their live data from that machine's state, not from the overlay.
   const overlayMachine = state.overlay && state.overlay.kind === "update" ? state.machines.get(state.overlay.machine) : undefined;
@@ -2346,6 +2349,25 @@ export function App({ store }: { store: Store }) {
   const summaryTitle = summaryRow && (summaryRow.kind === "project" ? summaryRow.project!.title : summaryRow.kind === "machines" ? "machines" : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
   // A project's subtitle names its pool; a machine's says what it is.
   const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => machineLabel(state, x.machine)).join(" · ") : summaryRow.kind === "machines" ? `${state.order.length}` : "machine");
+  // The hint the bar shows when nothing was raised. Each is short, so it
+  // keeps its own width and only a notice ever takes the bar's two thirds.
+  const barHint = state.diffView ? "diff: j/k scroll · d close"
+    : scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows"
+    : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too"
+    : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands"
+    : "esc esc rewind · ↑ recall · ctrl+k";
+  // An error or a warning takes the whole bar and the title steps aside: it
+  // lasts eight seconds, it is the only channel a failure has, and the row
+  // the title names is on the screen in front of the reader anyway. Anything
+  // else keeps to two thirds, so the title beside it stays worth reading.
+  // The two columns are the gap the notice's own box holds open.
+  // `elide`, not `truncate`: a failure reads "what failed: why", and at any
+  // pane narrow enough to matter the repository's name is longer than the
+  // room. Cut from the end and every clone failure reads the same — "could
+  // not clone github.com/owner/repo: no co…" — which is the reader back
+  // where they started.
+  const loud = notice?.tone === "error" || notice?.tone === "warning";
+  const barNotice = elide(notice?.text ?? barHint, loud ? Math.max(0, barRoom - 2) : Math.max(24, Math.floor((barRoom * 2) / 3)));
   return (
     /* One invariant holds this screen together: nothing covey paints may be
        wider than the terminal it is painted into. Ink's incremental renderer
@@ -2382,13 +2404,28 @@ export function App({ store }: { store: Store }) {
           in a frame whose `size` is current, and the right one in a frame whose
           `size` is a terminal ago. */}
       <Box flexDirection="column" flexGrow={1}>
+        {/* Every `Text` on this row is cut, never wrapped. The row is one
+            line, and a `Text` that overruns a `height={1}` box wraps inside
+            it: Ink lays the extra rows out and the frame paints over them, so
+            what the reader keeps is the *last* few columns of the text and
+            not the first. A notice then reads “… again” for a sentence that
+            named the repository and the one thing that would fix it (#176).
+            `truncate` keeps the front and says there is more, which is the
+            half a reader can act on. */}
         <Box height={1} paddingX={2} justifyContent="space-between">
           <Box>
-            {summaryRow ? (<><Text color={T.text} bold>{truncate(summaryTitle || "", Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {summarySub}</Text></>)
-              : header ? (<><Text color={T.text} bold>{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle}>  {headerProject?.title}</Text>{header.pullRequest && <Text color={T.awaiting}>  {HYPERLINKS ? osc8(header.pullRequest.url, `PR #${header.pullRequest.number}`) : `PR #${header.pullRequest.number}`}</Text>}{header.movedTo && <Text color={T.warning}>  moved</Text>}</>)
-              : <Text color={T.subtle}>covey — multi-agent TUI</Text>}
+            {summaryRow ? (<><Text color={T.text} bold wrap="truncate">{truncate(summaryTitle || "", Math.max(10, mainW - 40))}</Text><Text color={T.subtle} wrap="truncate">  {summarySub}</Text></>)
+              : header ? (<><Text color={T.text} bold wrap="truncate">{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle} wrap="truncate">  {headerProject?.title}</Text>{header.pullRequest && <Text color={T.awaiting} wrap="truncate">  {HYPERLINKS ? osc8(header.pullRequest.url, `PR #${header.pullRequest.number}`) : `PR #${header.pullRequest.number}`}</Text>}{header.movedTo && <Text color={T.warning} wrap="truncate">  moved</Text>}</>)
+              : <Text color={T.subtle} wrap="truncate">covey — multi-agent TUI</Text>}
           </Box>
-          <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "warning" ? T.warning : notice.tone === "success" ? T.success : T.muted) : T.faint}>{notice?.text ?? (state.diffView ? "diff: j/k scroll · d close" : scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows" : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too" : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands" : "esc esc rewind · ↑ recall · ctrl+k")}</Text>
+          {/* Its own box, and one that never shrinks: `space-between`
+              otherwise takes the room off both sides at once, and the two
+              texts end up against each other with the reason half gone.
+              The title gives way instead, because the reader can see the
+              row the title names and cannot see the reason. */}
+          <Box flexShrink={0} marginLeft={2}>
+            <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "warning" ? T.warning : notice.tone === "success" ? T.success : T.muted) : T.faint} wrap="truncate">{barNotice}</Text>
+          </Box>
         </Box>
         {/* Truncated because this is a length, not a box: laid out with a
             `mainW` from the terminal before last it would wrap onto a second row

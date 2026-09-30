@@ -49,11 +49,22 @@ test("createRepo refuses a path or a flag as a name, and allows what GitHub allo
   assert.equal(made.nameWithOwner, "acme/.github");
 });
 
+test("createRepo asks for a README, because a repository with no commits is no project", async () => {
+  // A repository with no commits has no branch, so the clone covey runs next
+  // fails and no thread could ever branch from it (#176). The first commit is
+  // what makes the new repository usable, and `--add-readme` is how `gh`
+  // writes one.
+  const seen: string[][] = [];
+  const fake = async (args: string[]) => { seen.push(args); return { stdout: "https://github.com/acme/api\n" }; };
+  await createRepo({ name: "api", visibility: "private" }, { exec: fake, protocol: "https" });
+  assert.ok(seen[0]!.includes("--add-readme"), `gh was asked for a README: ${JSON.stringify(seen[0])}`);
+});
+
 test("createRepo reads the URL gh prints and answers with the clone URL in the protocol", async () => {
   const seen: string[][] = [];
   const fake = async (args: string[]) => { seen.push(args); return { stdout: "https://github.com/acme/api\n" }; };
   const ssh = await createRepo({ name: "acme/api", visibility: "public", description: "the api" }, { exec: fake, protocol: "ssh" });
-  assert.deepEqual(seen, [["repo", "create", "acme/api", "--public", "--description", "the api"]]);
+  assert.deepEqual(seen, [["repo", "create", "acme/api", "--public", "--add-readme", "--description", "the api"]]);
   assert.deepEqual(ssh, { nameWithOwner: "acme/api", cloneUrl: "git@github.com:acme/api.git" });
   const https = await createRepo({ name: "api", visibility: "private" }, { exec: fake, protocol: "https" });
   assert.equal(https.cloneUrl, "https://github.com/acme/api.git", "the owner comes from what gh printed, not from the name");
