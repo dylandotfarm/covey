@@ -321,3 +321,46 @@ test("so is the diff panel", async () => {
   assert.deepEqual(overflow(await app.resize(80), 80), [],
     "rows too wide for 80 columns with the diff panel open");
 });
+
+/**
+ * The title bar's notice, which is a width bug of the other kind.
+ *
+ * Nothing here is too wide for the terminal. The notice simply overran its
+ * row inside a `height={1}` box and lost the half that matters. Which half
+ * depended on what sat beside it: against a short title Ink wrapped the text,
+ * laid the remainder out as a second row and painted over it, so the reader
+ * kept the last two words — "… again" for a sentence that named the
+ * repository and the fix. Against a long title the two shrank together, met
+ * with no gap, and the notice stopped at the repository's name.
+ *
+ * Either way the *reason* was the part that went, and the reason is the whole
+ * point: a notice is the only channel a failure has. So a loud one takes the
+ * bar, the title steps aside, and what will not fit goes from the middle —
+ * a repository's name is fifty columns the reader chose two keys ago, and the
+ * reason is what they can act on (#176).
+ */
+test("a loud notice keeps its reason, on one row, with a gap before it", async () => {
+  app.store.state.diffView = null;
+  app.store.setOverlay(null);
+  const reason = "no commits yet; push one first";
+  const text = `could not clone github.com/dylandotfarm/hardware: ${reason}`;
+  app.store.notify(text, "error");
+  // Painted at 100 columns, where the bar is too narrow for the sentence and
+  // something has to go. At 120 it fits whole and this case would measure
+  // nothing.
+  await show(100, "could not clone");
+  const written = app.written().flatMap(rows);
+  const holding = written.filter((r) => r.includes("could not clone"));
+  assert.equal(holding.length, 1, "the notice is one row");
+  const row = holding[0]!;
+  assert.match(row, /\s{2}could not clone/, "two columns hold the title off it, however long the title is");
+  assert.ok(row.includes(reason), `the reason is on screen whole, not just the repository: ${JSON.stringify(row)}`);
+  // What is painted is the front and the back of the sentence with one
+  // ellipsis between them, and nothing invented in the middle.
+  const shown = row.slice(row.indexOf("could not clone")).trimEnd();
+  const [front, back] = shown.split("…");
+  assert.ok(back !== undefined, `the cut is marked: ${JSON.stringify(shown)}`);
+  assert.ok(text.startsWith(front!), `the front is the sentence's own: ${JSON.stringify(front)}`);
+  assert.ok(text.endsWith(back!), `and so is the back: ${JSON.stringify(back)}`);
+  assert.deepEqual(overflow(await app.resize(80), 80), [], "rows too wide for 80 columns with a notice on the bar");
+});

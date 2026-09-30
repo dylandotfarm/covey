@@ -592,6 +592,35 @@ export function truncate(s: string, n: number): string {
   return out + "…";
 }
 
+/**
+ * `s` in `n` columns, keeping both ends and losing the middle.
+ *
+ * Every notice covey raises reads "what failed: why", and in a bar of one row
+ * neither end alone will do. Cut from the end and the reader keeps the
+ * repository and never the reason — "could not clone
+ * github.com/owner/repo: no co…". Cut from the front and they keep a fix with
+ * nothing to apply it to. So both ends stay and the ellipsis sits between
+ * them, with the larger share to the back, because the reason is the half a
+ * reader acts on (#176).
+ */
+export function elide(s: string, n: number): string {
+  if (n <= 0) return "";
+  if (width(s) <= n) return s;
+  if (n <= 3) return "…";
+  const back = Math.floor((n - 1) * 0.6);
+  const front = n - 1 - back;
+  let head = "";
+  for (const ch of s) { if (width(head + ch) > front) break; head += ch; }
+  const chars = [...s];
+  let tail = "";
+  for (let i = chars.length - 1; i >= 0; i--) {
+    const next = chars[i]! + tail;
+    if (width(next) > back) break;
+    tail = next;
+  }
+  return head + "…" + tail;
+}
+
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /**

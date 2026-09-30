@@ -68,6 +68,40 @@ test("cloneBare tries each URL of a repository and keeps the one that answered",
   assert.ok("error" in none && none.error.includes(gone) && none.error.includes("nor-here.git"), `every URL tried is in the reason: ${JSON.stringify(none)}`);
 });
 
+test("a repository with no commits is refused by what is wrong with it, not by what git said", async (t) => {
+  // What `New repository…` used to make: `gh repo create` without a README
+  // leaves a repository with no commits and no branches (#176). The fetch
+  // works — the repository is there — and `git remote set-head origin --auto`
+  // is the call that fails, with "error: Cannot determine remote HEAD". That
+  // line names neither the repository nor the one thing that fixes it, and
+  // the reader saw it at the end of a notice the title bar had already cut.
+  const dir = mkdtempSync(join(tmpdir(), "covey-empty-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const empty = join(dir, "empty.git");
+  await execFile("git", ["init", "-q", "--bare", "-b", "main", empty]);
+
+  const made = await cloneBare([empty], join(dir, "clone.git"));
+  assert.ok("error" in made, "a repository nothing can branch from is not a project");
+  assert.match((made as { error: string }).error, /no commits yet/, "the reason names the commit the repository wants");
+  assert.doesNotMatch((made as { error: string }).error, /remote HEAD/, "and not git's own line, which says nothing the reader can act on");
+});
+
+test("branches but no default is a clone that stands: main is still there to start from", async (t) => {
+  // `origin/HEAD` can name a branch the remote no longer has, and then
+  // `set-head --auto` fails on a repository that is otherwise whole.
+  // `remoteDefaultRef` reads main and then master, so there is a base here
+  // and refusing the project would throw away a repository that works.
+  const remote = await scratchRemote();
+  t.after(() => remote.drop());
+  await execFile("git", ["symbolic-ref", "HEAD", "refs/heads/gone"], { cwd: remote.url });
+  const dir = mkdtempSync(join(tmpdir(), "covey-nohead-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const bare = join(dir, "repo.git");
+
+  assert.deepEqual(await cloneBare([remote.url], bare), { ok: true, url: remote.url });
+  assert.ok((await execFile("git", ["rev-parse", "origin/main"], { cwd: bare })).stdout.trim(), "and main came down with it");
+});
+
 /** A throwaway repo with one commit, the smallest thing a worktree can hang off. */
 async function scratchRepo(): Promise<string> {
   const dir = mkdtempSync(join(tmpdir(), "covey-git-"));

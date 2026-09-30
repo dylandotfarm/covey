@@ -226,7 +226,28 @@ export async function cloneBare(url: string | string[], dir: string): Promise<{ 
     const fetch = await gitTry(dir, ["fetch", "--no-tags", "--quiet", "origin"], Math.max(left, LAST_CHANCE_MS), remoteEnv());
     if (!fetch.ok) { failures.push(`${candidate}: ${fetch.err}`); continue; }
     const head = await gitTry(dir, ["remote", "set-head", "origin", "--auto"]);
-    if (!head.ok) return { error: head.err };
+    // The fetch worked, so the repository is there and this machine can reach
+    // it. What `set-head` says next is about the remote's own state, and only
+    // one of its answers means there is no project here.
+    if (!head.ok) {
+      // No refs at all. A repository with no commits has no branch, so no
+      // thread could ever branch from it, and the reader has to be told the
+      // one thing that fixes it. Without this they get git's own line,
+      // "error: Cannot determine remote HEAD", which names neither the
+      // repository nor the commit it wants. A repository covey made through
+      // `New repository…` used to land here every time (#176).
+      if ((await git(dir, ["for-each-ref", "--count=1", "refs/remotes/origin"])) === "") {
+        // Short on purpose. The line the reader sees is this one behind
+        // "could not clone <repository>: ", in a title bar of one row, and
+        // the repository's name alone can be fifty columns of it. `elide`
+        // keeps the end of that line, so a reason this length arrives whole
+        // on a narrow pane and a longer one would not.
+        return { error: "no commits yet; push one first" };
+      }
+      // Branches, but no default among them. `remoteDefaultRef` reads
+      // `origin/HEAD` first and falls back to main and then master, so the
+      // clone is still one a thread can start from. It stands.
+    }
     // A whole fetch just happened. The next thread must not pay for another.
     markFetched(dir);
     return { ok: true, url: candidate };

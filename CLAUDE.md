@@ -226,6 +226,20 @@
   project on a base another one already holds. Never key any of this on
   `repositoryIdentity` alone: a thread would start from the wrong commit and open its pull
   request against the wrong base.
+- A project needs a commit to exist (#176). A repository with no commits has no branch,
+  so `git remote set-head origin --auto` fails after a fetch that worked, and nothing
+  could branch a worktree from it anyway — so `cloneBare` refuses it by name rather than
+  pass on git's "Cannot determine remote HEAD", and `New repository…` passes
+  `--add-readme` to `gh repo create` so covey never makes one it cannot use. A remote
+  that has branches but no *default* is not that case: `remoteDefaultRef` falls back to
+  main and then master, and that clone stands.
+- A notice is the only channel a failure has, and it lives on the title bar's one row.
+  So it is measured before it is painted (`barNotice` in `App.tsx`): an error or a
+  warning takes the whole bar and the title steps aside, and what will not fit goes from
+  the *middle* (`elide`), because a line reads "what failed: why" and the repository's
+  name alone can be fifty columns. Never hand that row an unbounded `Text` — Ink wraps it
+  inside the `height={1}` box, paints the remainder over the transcript, and the reader
+  keeps the last two words of the sentence and none of the reason.
 - A project's URL names the *repository*; how to reach it is each machine's own business
   (#157). The client sends one URL to the whole pool, and every daemon works out its own
   clone URL with `cloneUrlsFor` — two machines may be set up for different styles of

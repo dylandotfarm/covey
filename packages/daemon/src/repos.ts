@@ -138,7 +138,13 @@ export async function createRepo(o: { name: string; visibility: "private" | "pub
   const parts = name.split("/");
   if (!name || parts.length > 2 || !parts.every((p) => segment.test(p))) throw new Error(`${o.name} is not a repository name; use name or owner/name`);
   const description = o.description?.trim();
-  const args = ["repo", "create", name, `--${o.visibility}`, ...(description ? ["--description", description] : [])];
+  // `--add-readme`, because a repository with no commits has no branch, and a
+  // thread's worktree has nothing to start from. `gh repo create` alone makes
+  // an empty one: the clone covey runs next then fails on `git remote
+  // set-head`, and the repository the reader just asked for becomes no
+  // project at all. The README is the first commit, and it is the same thing
+  // GitHub's own form offers on the page that makes a repository.
+  const args = ["repo", "create", name, `--${o.visibility}`, "--add-readme", ...(description ? ["--description", description] : [])];
   const exec = deps.exec ?? ((a) => run("gh", a, { cwd: GH_CWD, timeout: 30_000 }));
   let out: string;
   try {
