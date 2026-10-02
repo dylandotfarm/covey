@@ -19,6 +19,7 @@ import { promisify } from "node:util";
 import type { BaseHead, GitHubComment, GitHubIssue, GitHubPullRequest, GitHubReview, MemberDiff } from "@covey/protocol";
 import type { OwnerPlan } from "./attach.js";
 import { summariseCheck } from "./checks.js";
+import { unsign } from "./sign.js";
 
 const run = promisify(execFile);
 
@@ -338,9 +339,13 @@ function itemBase(j: any, ctx: ItemContext) {
     createdAt: j.createdAt ?? null,
     closedAt: j.closedAt ?? null,
     labels: (j.labels ?? []).map((l: any) => String(l?.name ?? l ?? "")).filter(Boolean),
+    // The signature covey writes into a comment is for the watch to read, and
+    // GitHub renders it as nothing. Covey's own markdown escapes it, so it is
+    // taken out here: `itemBase` is the one place a client's comment body comes
+    // from, which is why it is the one place that strips it.
     comments: (j.comments ?? []).map((c: any): GitHubComment => ({
       author: String(c.author?.login ?? ""),
-      body: String(c.body ?? ""),
+      body: unsign(String(c.body ?? "")),
       createdAt: c.createdAt ?? null,
       url: c.url ?? null,
     })),

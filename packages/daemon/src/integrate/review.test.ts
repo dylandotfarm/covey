@@ -115,7 +115,8 @@ test("the brief names the pull request, the two commands, and the three rules", 
   assert.match(brief, /covey review changes --body/);
   assert.match(brief, /covey review approve/);
   assert.match(brief, /never merge/i);
-  assert.match(brief, /Do not write that tagline yourself/);
+  assert.match(brief, /Do not write either marker yourself/, "the tagline and the signature are both covey's");
+  assert.match(brief, /signs it with this thread's id/, "it is told why its own review never comes back to it");
   assert.match(brief, /covey sends you none of them/, "the checks are the author's work");
 });
 
