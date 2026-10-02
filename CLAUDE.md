@@ -467,7 +467,17 @@
   scope cannot read the plan, so keep a demo video under 10 MB. The daemon hands `plugin/` to every session as a local plugin
   (`plugin.ts`); a personal skill in `~/.claude/skills` does not reach a resumed session,
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
-  Change the CLI and the skill together.
+  Change the CLI and the skill together. The plugin only *offers* the skill, and the
+  model chose per turn whether to read it, so a thread that opened with "fix this bug"
+  pushed with `git` and opened with `gh` and no watch ever started. `COVEY_PREAMBLE` in
+  `plugin.ts` is what makes the loop the default: the engine sends it as
+  `systemPrompt.append` beside the plugin, together or neither, because a note naming a
+  skill the session cannot load is worse than no note. Keep it a pointer and not a copy
+  of the skill — it rides on every turn of every thread, and the skill costs nothing
+  until the model loads it — and keep the two rules a reader cannot undo in it, because
+  the session reads the note before it decides to read the skill. The SDK records the
+  rendered prompt at a conversation's first request, so an edit reaches a running thread
+  only at its next compaction; a new thread takes it at once.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon
   merges the two into `options.env` of the Claude session, so a tool call reads `$STRIPE_KEY`
   like `$PATH`. `e` on a sidebar row is the editor, and a project's panel writes to every
