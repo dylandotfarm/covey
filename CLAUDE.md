@@ -467,6 +467,15 @@
   scope cannot read the plan, so keep a demo video under 10 MB. The daemon hands `plugin/` to every session as a local plugin
   (`plugin.ts`); a personal skill in `~/.claude/skills` does not reach a resumed session,
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
+  A body on its way to GitHub is unwrapped first (`integrate/reflow.ts`, #189): GitHub
+  reads one newline inside a paragraph as a line break, and a model writes its prose
+  wrapped at about eighty columns. The unwrap runs before `attachMedia`, never after,
+  or the attachment URLs that go in one per line would be joined into the prose. It
+  joins a run of lines only on the signature of a wrap — the widest line between 60 and
+  120 columns, and every line but the last too long to hold the next line's first word —
+  so a column of short lines, a column of paths and every fence, table, list and
+  indented block stand. `gh issue create` is the agent's own call and gets none of it,
+  which is why the skill asks for one line per paragraph as well.
   Change the CLI and the skill together. The plugin only *offers* the skill, and the
   model chose per turn whether to read it, so a thread that opened with "fix this bug"
   pushed with `git` and opened with `gh` and no watch ever started. `COVEY_PREAMBLE` in

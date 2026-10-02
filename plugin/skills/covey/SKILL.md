@@ -27,6 +27,27 @@ the work the ordinary way, with `gh`.
 Never merge a pull request yourself, and never run `covey pr policy auto`
 unless the user told you to merge on their behalf.
 
+## When there is no issue yet
+
+The steps below start at an issue number. When the user describes a bug or a
+change in conversation and names no number, file the issue yourself, then
+follow the steps from step 1.
+
+```
+gh issue create --title "<one line, what is wrong>" --body-file /tmp/issue.md
+```
+
+- File it before you write the code, so the number you take is the number
+  your commits, your comments and your pull request name.
+- **Never write an issue number into code, a comment or a document before
+  the issue exists.** A number you guessed is wrong as soon as somebody else
+  files one, and it leaves you asking the user a question only the number can
+  answer.
+- Some work needs no issue: a question, a one-line fix the user watched you
+  make, or work the user asked you to keep on this machine. Say which you
+  think it is and go on; ask only when the two readings lead to different
+  work.
+
 ## Steps
 
 1. **Take the issue.** Run `covey issue take <n>`. If covey answers that
@@ -72,6 +93,21 @@ unless the user told you to merge on their behalf.
    - *Blocked*: covey sent as many rounds as it may, or watched for too long.
      Stop. Tell the user what still fails and what you tried.
 7. **Check the state** at any time with `covey pr status`.
+
+## Write a body as paragraphs, not as wrapped lines
+
+GitHub renders one newline inside a paragraph as a line break. Prose wrapped
+at eighty columns therefore reaches the reader broken after every eightieth
+character. Write each paragraph on one line, however long that line is, and
+let the browser wrap it. This holds for a pull request body, an issue body, a
+review and every comment.
+
+Covey unwraps a `covey pr open` or `covey pr comment` body when it can read
+the break as a wrap, and leaves the rest alone. A fenced block, a table, a
+list and an indented block are never touched. A column of lines you mean to
+keep apart belongs in a list or in a fenced block. An issue you open with
+`gh issue create` gets no such help, so write that body on one line per
+paragraph yourself.
 
 ## Media on the pull request
 
