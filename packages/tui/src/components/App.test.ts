@@ -44,7 +44,7 @@ function appState(threads: Thread[]): AppState {
   return {
     machines: new Map([["pi", m]]), order: ["pi"], selected: null, view: null, focus: "sidebar",
     sidebarCollapsed: false, expanded: {}, toggledRows: new Set(), lod: "compact",
-    overlay: null, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(),
+    overlay: null, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), pendingPastes: new Map(),
     tick: 0, diffView: null, attention: new Map(), selection: null, relaunch: null,
     // A client that does not run from a checkout, which is what Store starts
     // with. This test says nothing about builds.
@@ -66,7 +66,7 @@ function fakeStore(initial: AppState) {
     subscribe: (l: () => void) => { listeners.add(l); return () => { listeners.delete(l); }; },
     getState: () => state,
     pendingRequest: () => null,
-    attachments: () => [],
+    attachments: () => [], pastes: () => [],
     draft: () => "",
     setDraft: () => {},
     setFocus: () => {},

@@ -86,6 +86,17 @@ export function tempDir(prefix: string): string {
  * pick the same one, and the daemon that lost exited on EADDRINUSE while the
  * run that started it waited out its whole budget for a corpse.
  */
+/**
+ * A port is not a name. `freePort` lets go of the port before the daemon binds
+ * it, so between the two another process on the machine — another test file of
+ * this very run, which CI runs in parallel — can take it and answer `/health`
+ * itself. The caller would then be handed a `TestDaemon` whose `proc` is one
+ * process and whose `port` belongs to another, and would stop the first and
+ * leave the second. So the probe reads the pid out of the answer and takes it
+ * as its own only when it matches: the same rule `covey stop` follows, and the
+ * same rule `stopDaemon` follows when it signals the handle rather than the
+ * port.
+ */
 export function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const probe = createServer();
@@ -166,12 +177,21 @@ export async function startDaemon(opts: {
   const budget = opts.startBudgetMs ?? START_BUDGET_MS;
   const deadline = Date.now() + budget;
   let diedWhileStarting = false;
+  let stranger: number | null = null;
   while (Date.now() < deadline) {
     // A process that has already exited is never going to answer. Say so now
     // rather than spending the rest of the budget polling a dead port.
     if (exited(proc)) { diedWhileStarting = true; break; }
     try {
-      if ((await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) })).ok) return daemon;
+      const res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2000) });
+      if (res.ok) {
+        const pid = (await res.json() as { pid?: number }).pid ?? null;
+        if (pid === proc.pid) return daemon;
+        // Somebody else holds the port. Ours cannot bind it, so it will not
+        // answer inside the budget either; keep polling, in case the stranger
+        // lets go, and name it in the failure if it does not.
+        stranger = pid;
+      }
     } catch { /* not up yet */ }
     await new Promise((r) => setTimeout(r, 100));
   }
@@ -180,7 +200,9 @@ export async function startDaemon(opts: {
   // answered" sends you to the port, or to the budget.
   const how = diedWhileStarting
     ? `it exited while starting (code=${proc.exitCode} signal=${proc.signalCode})`
-    : `it never answered in ${budget / 1000}s`;
+    : stranger !== null
+      ? `it never answered in ${budget / 1000}s; another process (pid ${stranger}) holds that port`
+      : `it never answered in ${budget / 1000}s`;
   // A daemon that would not start must not also be left behind — the old code
   // threw here and walked away from the process it had spawned. Trouble
   // stopping it is not the news; why it would not start is.

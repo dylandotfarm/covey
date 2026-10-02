@@ -162,6 +162,29 @@ test("a daemon that dies at birth is reported at once, not at the end of the bud
   }
 });
 
+test("another daemon answering on the port is never taken for the one that was started", async (t) => {
+  // The flake of 2026-10-02, on the very test below: `startDaemon` resolved for
+  // a process that cannot serve anything. `freePort` lets go of the port before
+  // the daemon binds it, and CI runs the test files at once, so another file's
+  // daemon took the number in between and answered `/health` on it. A port is
+  // not a name; the pid is.
+  const stranger = await startDaemon({ name: "stranger" });
+  t.after(() => stranger.stop());
+  const failure = await startDaemon({
+    name: "impostor",
+    port: stranger.port,
+    startBudgetMs: 2000,
+    argv: ["-e", "setTimeout(() => {}, 600_000)"],
+  }).then(
+    (d) => { void d.stop(); throw new Error(`a stranger's daemon must not count as started (port ${d.port})`); },
+    (e: Error) => e,
+  );
+  assert.match(failure.message, new RegExp(`another process \\(pid ${stranger.proc.pid}\\) holds that port`),
+    `the failure must name the process that answered, not read as a budget nobody can explain. Got:\n${failure.message}`);
+  const res = await fetch(`http://127.0.0.1:${stranger.port}/health`);
+  assert.equal(res.ok, true, "and the stranger is left alone: the failed start must stop its own process only");
+});
+
 test("a process that never opens the port is stopped when the budget runs out", async () => {
   // The original defect: `startDaemon` allowed 10s against a boot that takes
   // 13-16s here, so it threw while the process was alive and on its way up, and

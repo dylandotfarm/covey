@@ -105,8 +105,13 @@ export function spliceTags(value: string, caret: number, tags: string[]): { valu
   return { value: before + chunk + after, caret: caret + chunk.length };
 }
 
-/** Keep the attachments whose tag is still in the text. */
-export function keepTagged<T extends TaggedAttachment>(text: string, atts: T[]): T[] {
+/**
+ * Keep the things whose tag is still in the text.
+ *
+ * Any tagged thing, not an attachment alone: a held paste reads as a chip by
+ * the same rules (`paste.ts`), and the rule is the same one — no tag, no thing.
+ */
+export function keepTagged<T extends { tag: string }>(text: string, atts: T[]): T[] {
   return atts.filter((a) => text.includes(a.tag));
 }
 

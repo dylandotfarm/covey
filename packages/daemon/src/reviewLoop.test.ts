@@ -296,7 +296,26 @@ test("signing off records the verdict, archives the review thread, and lets the 
   await s.poll();
   assert.deepEqual(s.thread("t1").watch!.readiness, { ready: true });
   assert.deepEqual(s.host.merges, [{ number: 101, method: "merge" }], "covey merges, now that the review is in");
-  assert.ok(s.turns("t1").some((x) => /Every automated review has signed off \(1 of 1\)/.test(x)), s.turns("t1").join("\n---\n"));
+  // One turn carries both: the reviewer's own words, and the pass that is no
+  // longer blocked by the review. The review is a `mergeBlock`, so the verdict
+  // is re-delivered the moment the block goes.
+  const told = s.turns("t1").find((x) => /which signed off/.test(x))!;
+  assert.ok(told, s.turns("t1").join("\n---\n"));
+  assert.match(told, /The checks passed on .*There is nothing to fix/s);
+});
+
+test("before the sign-off, a green pull request reads as blocked by the review", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  await settle();
+  await s.poll();
+  const told = s.turns("t1").find((x) => /The checks passed/.test(x))!;
+  assert.ok(told, s.turns("t1").join("\n---\n"));
+  // The one thing this must never say over a review that has not finished.
+  assert.doesNotMatch(told, /nothing to fix/);
+  assert.match(told, /Covey will not call the pull request ready yet: 0 of 1 automated reviews have signed off/);
 });
 
 test("under manual, a signed-off pull request is ready for a person and covey merges nothing", async (t) => {
@@ -310,7 +329,9 @@ test("under manual, a signed-off pull request is ready for a person and covey me
   await s.poll();
   assert.deepEqual(s.thread("t1").watch!.readiness, { ready: true });
   assert.equal(s.host.merges.length, 0, "manual: a person merges");
-  assert.ok(s.turns("t1").some((x) => /ready for a person to merge/.test(x)), s.turns("t1").join("\n---\n"));
+  const told = s.turns("t1").find((x) => /which signed off/.test(x))!;
+  assert.ok(told, s.turns("t1").join("\n---\n"));
+  assert.match(told, /There is nothing to fix. The merge policy is manual: a person merges/);
 });
 
 test("two reviewers both have to sign off", async (t) => {

@@ -698,6 +698,23 @@ they need nothing installed in the agent's shell. The `/covey` skill
 open through covey, stop the turn, and act on each `covey watch:` message; `--auto` only when
 the user said to merge on their behalf.
 
+**Work the user only described takes the same loop without the issue (#191).** The skill began
+at an issue number, so a bug a person described in conversation fell outside it, and the first
+answer to that was to have the agent file the issue itself. That was the wrong default: most of
+what a user asks for in conversation is not issue-shaped — a fix they watched happen, a rename,
+a change named in one sentence — and an issue filed for each one is opened and closed inside the
+minute by the same agent, with no reader in between. So the skill holds two loops that differ in
+one step, and one rule that picks between them: a number the user named, or an issue the user
+asked for, is the issue loop; anything else is the no-issue loop and files nothing. The pull
+request is the record either way, which is why the body of one opened with no issue says what
+the user asked for as well as what changed. Everything after `covey pr open` is the same text
+for both. The daemon needs none of it: `Closes #N` is added only `if (t.issue && …)`, so a
+thread that holds no issue already opens a pull request with no `Closes` line, and
+`watch.test.ts` holds that. What the daemon does carry is the reach of the skill — the
+frontmatter `description` is the whole of what a plugin puts in a session's context, so it names
+the second loop as well, or the model never loads the skill for the work that has no number
+(`plugin.test.ts`).
+
 The skill reaches a session as a **plugin**, not as a personal skill. The daemon hands
 `plugin/` from its own checkout to every session it starts (`plugin.ts`, the SDK's `plugins`
 option, one `--plugin-dir` on the process), so a pull updates it and the internal update
@@ -796,13 +813,21 @@ holds the URLs the thread wrote; the URL is the key rather than the id because `
 comment` answers with a URL and `gh pr view` lists a node id, and only the URL is on both
 sides.
 
-**The settled state is one turn.** When the last reviewer signs off, the author's next poll
-delivers the sign-off comment and a `reviewed` event in the same turn: the reviewer's words
-and what they add up to, together. It is delivered once, and keyed on the *state* rather
-than on a "sent" flag, because asking for another reviewer makes the review unsatisfied
-again and the next sign-off is news again. `mergeReadiness` checks the review **last**, after
-every fact GitHub reported, because a reader told "the review has not signed off" about a
-branch with a red check has been told the wrong thing.
+**The review is a `mergeBlock`, and needs no event of its own.** A green check is not a
+merge, and the watch already carries what stands between the two — a draft, a conflict, a
+base that has moved, a branch rule. The automated review is one more of those, under the code
+`unreviewed`, and it is the only one that is covey's own refusal rather than GitHub's; that is
+what `blockLead` is for, because "GitHub will not merge this" would send the agent looking for
+a branch rule that is not there. Everything else follows from the mechanism that was already
+built: the checks verdict is keyed on the block, so the pass is re-delivered the moment the
+review signs off, in the same turn as the sign-off comment — the reviewer's words and what
+they add up to, together, and the "ready for a person" sentence comes from the same place it
+always did. Asking for another reviewer blocks the pass again, and the next sign-off clears
+it again, with no state to keep. The block waits for a machine rather than for a person, so it
+costs no round: there is nothing the author can push that makes a reviewer finish sooner.
+`mergeReadiness` reads the review **last** for the same reason `mergeBlock` does — a reader
+told "the review has not signed off" about a branch with a red check has been told the wrong
+thing.
 
 **A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
 archives its reviewers: a session is 300 MB and a worktree is a checkout, and the change
@@ -1446,6 +1471,30 @@ deleted is a file dropped with nothing said. Every file of one directory shares 
 **Not yet:** the bytes live on exactly one machine. A thread that moves takes its timeline but
 not its files, and no client can ask for a file back. #85 has the shape of the content-addressed
 store that would fix both.
+
+### A pasted block is a chip too
+
+A stack trace, a log, a whole file: a person pastes one so the agent will *read* it, not so
+they can look at it. Two hundred lines in the draft push the transcript off the screen and
+scroll the composer's own window, so the sentence being written goes with them. So a paste of
+**more than two lines** goes aside and the draft gets `[pasted 200 lines]` in its place
+(`packages/client/src/paste.ts`, `AppState.pendingPastes`). `sendTurn` puts the lines back
+where the chip stood (`expandPastes`), so the agent reads what was pasted and never the chip.
+
+Three lines, because one line and two read as part of the sentence: a path, a branch name or a
+two-line error is something the reader is writing *with*, and a chip there hides text they
+want to edit.
+
+It is the same chip as a drop's, by the same rules and in the same code — one tag, ordinary
+text, and the tag the only record of what stands behind it. One key deletes it, and one arrow
+key walks over it, because a chip is one thing on the screen. A chunk the terminal wrote in
+two goes joins onto the seam the last paste left, as a cut path does, so one block makes one
+chip and not two.
+
+**Paste the same block again and the chip becomes the text**, where it stands. That is the one
+way back to what a chip holds, and the reason a second paste never holds the same lines twice.
+The reveal is decided before the seam, because two pastes inside a second is exactly what a
+person does when they want to see one.
 
 ## Showing a file: the other direction through the same store (#160)
 

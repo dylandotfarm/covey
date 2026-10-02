@@ -64,7 +64,20 @@
   (`readSplitDrop`, #130), because a terminal can write one path in two goes — and a path that
   ends at a separator is never a directory drop, because that is exactly what the front half
   of a cut path looks like. Both routes end at the same `attach`, so a change to one wants the
-  other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`).
+  other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`),
+  and one arrow key to walk over.
+- A paste of more than two lines is a chip as well: the draft gets `[pasted 200 lines]`
+  and `AppState.pendingPastes` holds the lines, which `sendTurn` puts back where the chip
+  stood (`expandPastes`). The rules are `packages/client/src/paste.ts`, beside the drop's
+  own, because a chip is a chip whatever stands behind it — one tag, ordinary text, one key
+  to delete. Three lines is the floor because one line and two are something the reader
+  writes *with*: a path, a branch, a two-line error. Nothing of a paste is a file — no
+  bytes on the wire, no cap, no file store — so it is held beside the attachments and
+  never inside them. Two rules a reader cannot undo: **paste the same block again and the
+  chip becomes the text**, in place, which is the only way back to what it holds; and that
+  reveal is decided *before* the seam, because two pastes inside `PASTE_SEAM_MS` is exactly
+  what a person does when they want to see one, and the seam would have joined them into
+  one chip of twice the lines.
 - The agent shows its own work the same way the reader drops one (#160): `covey show
   shot.png --text "…"` copies the file into that one store and writes a `note` carrying
   `SystemNoteItem.files`, which the web client paints inline and the TUI names with an
@@ -469,9 +482,26 @@
   end — `watch.test.ts` and `news.test.ts` hold the rules. An engine test passes
   `EngineOptions.ghHost` so no test reaches GitHub. A watch's merge policy is `manual` unless
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
-  ready, and never under a running turn. An agent asks with `covey issue …` and `covey pr …`
+  ready, and never under a running turn. A green check is not a merge, and the other half
+  of the verdict is `mergeBlock`: a draft, a conflict, a base that has moved, a review the
+  repository asks for, or GitHub's own `BLOCKED` all leave the merge button grey with
+  every check passing, and a watch that said only "the checks passed" taught the agent to
+  answer "ready to merge" about a pull request GitHub refuses. That block *is* part of the
+  checks cursor's key, never a note beside it, because the base branch moves under a pass
+  the thread has already heard. `mergeStateStatus` is still never a checks verdict: GitHub
+  answers `BLOCKED` while the checks run, so every reader of it here waits for them first.
+  The base head is read on every poll under either policy — `isStale` refuses on doubt, so
+  an unknown base made `PullRequestWatch.readiness` (#172) call every `manual` watch not
+  ready, with a reason naming the base it could not read. An agent asks with `covey issue …` and `covey pr …`
   (`packages/cli/src/loop.ts`), and the `/covey` skill in `plugin/skills/covey/SKILL.md`
-  tells it the loop. `--attach F` on `covey pr open` and `covey pr comment` puts a video or
+  tells it the loop. There are two (#191) and they differ in one step, whether the thread
+  takes an issue: a number the user named takes the issue loop, and everything the user
+  only described takes the no-issue loop, which files *nothing* — an issue opened and
+  closed inside the minute by the same agent is a row no reader saw. The skill's
+  frontmatter `description` is the whole of what a plugin puts in a session's context, so
+  it names both loops or the model never loads the skill for work that has no number
+  (`plugin.test.ts`). The daemon carries none of this: `Closes #N` goes on only
+  `if (t.issue && …)`. `--attach F` on `covey pr open` and `covey pr comment` puts a video or
   an image on the pull request as a GitHub *user attachment*, the only kind that renders
   inline (`integrate/attach.ts` holds the rules; the route is undocumented and
   `uploadAttachment` fails closed on anything but 201, before the push). A video over 10 MB
@@ -517,9 +547,13 @@
   the reviewer owns the code and hears the *push* and no checks at all. `WatchCursor.posted`
   is why no thread hears a comment it wrote itself — every thread of one pull request writes
   from one account, and without it a reviewer was woken by its own review for ever.
-  `mergeReadiness` checks the review last, after every fact GitHub reported. A reviewer that
-  ends with no verdict is reported to the author by the daemon and not by a poll, because
-  there is no artefact to read it from; one that signed off is archived by covey itself and
+  The review needs no watch event of its own: it is a `mergeBlock` under the code
+  `unreviewed`, so the checks verdict is keyed on it and the pass is re-delivered the moment
+  the review signs off. It is the one block that is covey's refusal and not GitHub's, which
+  is what `blockLead` is for, and it costs no round because no push makes a reviewer finish
+  sooner. `mergeReadiness` and `mergeBlock` both read the review last, after every fact
+  GitHub reported. A reviewer that ends with no verdict is reported to the author by the
+  daemon and not by a poll, because there is no artefact to read it from; one that signed off is archived by covey itself and
   is never a drop. Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
   with the loop and `covey env`.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon
