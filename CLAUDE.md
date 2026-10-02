@@ -157,6 +157,44 @@
   because it is the only thing that proves Metro still resolves the three shared packages
   from outside the workspace. `docs/MOBILE.md` holds the reasoning and the rules; no APK
   has been built yet.
+- `firmware/` is the covey device (#178), a Waveshare ESP32-S3 1.54inch e-Paper
+  board: 200x200, two buttons, an ES8311 microphone, ESP-IDF 5.5 and its own
+  toolchain outside both the pnpm and the cargo workspace. It is a *peripheral
+  of the phone* and never a fourth client: it holds no covey state, no socket
+  and no token, so unplug the app and it is a screen with two buttons. Hold
+  talk and it records, let go and the utterance goes to the phone; the phone
+  writes the words with Android's own recogniser, sends them to the thread as
+  an ordinary turn, and sends the answer back to be painted. The chip has
+  Bluetooth Low Energy and no Classic, so the link is GATT and never a serial
+  port profile. One wire definition, in `packages/client/src/device.ts`, which
+  node tests — the other end is C that can never run beside it, so the device
+  prints its own encoder's bytes over USB (`console.py key t`) and
+  `device.test.ts` holds them; if that fails the two drifted and the words
+  stopped arriving. Audio is IMA ADPCM at 16 kHz because 16-bit samples are ten
+  times the radio time BLE has, and it is *block based* so a block lost on the
+  air costs its own 32 ms and not the sentence. The last block is padded, so
+  the message carries the **count of samples** — without it the recogniser is
+  handed up to 31 ms of sound nobody made at the end of every utterance. Android
+  transcribes a file and takes one shape of it, 16 kHz 16-bit mono PCM in a WAV,
+  and answers `audio-capture` to everything else — which reads as a broken
+  microphone rather than a wrong header, so `wavFromPcm16` writes that one shape.
+  Never write a second copy of a decision: the menu is `projectRows` flattened,
+  busy is `threadIsBusy`, and the reply is `replyLead`'s rule. The device answers
+  a pick with a *position and the generation it belonged to*, never a thread id,
+  and a pick against a list that has since changed is refused. A `MachineClient`
+  holds one thread subscription, so the device and the phone cannot look at
+  different threads and the device wins — it is a remote control for the phone,
+  which is why it needs no credentials. A refresh is 300 ms partial and 2 s full
+  and the panel ghosts, so one task paints, nothing paints from a radio callback,
+  nothing animates, and the reply lands once when the turn ends rather than forty
+  times a second while it streams. The talk button is PWR and not BOOT because
+  GPIO0 is sampled at reset and the button held for seconds must not be the one
+  that lands a reader in the bootloader. `tools/console.py` drives the device
+  over USB and `>` plus base64 is one downlink message — the real protocol over a
+  second transport, not a fixture, which is how a change is tried with no phone
+  in the room and how every picture of a screen was made. `react-native-ble-plx`
+  is native, so `mobile/app.config.ts` moved to `0.3.0` and every install needs
+  one more sideload. `docs/DEVICE.md` holds the reasoning and the rules.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled
