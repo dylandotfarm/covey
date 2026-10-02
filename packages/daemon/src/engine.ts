@@ -2428,6 +2428,25 @@ export class Engine {
         if (status === "error" && wasRunning && t.latestTurn) void this.finishTurn(threadId, t.latestTurn.turnId);
         if (status === "error" && isAuthFailure(error)) this.onAuthFailure(threadId, t.latestTurn?.turnId ?? null, error!);
       },
+      onUnpromptedTurn: () => {
+        const t = this.db.getThread(threadId);
+        if (!t || t.movedTo) return null;
+        const turnId = randomUUID();
+        const now = new Date().toISOString();
+        // An ordinary running turn with one mark on it: no message asked for
+        // the work (#156). Everything downstream then treats it as a turn —
+        // `sessionBusy` holds the session, the thread says running, and
+        // `onTurnComplete` records the row and the tokens.
+        //
+        // It takes no checkpoint, so it reports no diff. A `before` tree
+        // captured here would be a snapshot of a working tree the agent has
+        // already changed, which reads as a diff and is not one, and
+        // `turn.revert` refuses a turn with no checkpoint for the same reason.
+        t.latestTurn = { turnId, state: "running", startedAt: now, completedAt: null, unprompted: true };
+        t.status = "running";
+        this.putThreadAndEmit(t);
+        return turnId;
+      },
       onTurnComplete: (info) => {
         const t = this.db.getThread(threadId);
         if (!t) return;
