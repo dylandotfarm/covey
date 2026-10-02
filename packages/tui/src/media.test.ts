@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import stringWidth from "string-width";
 import {
   ASSUMED_CELL, CELL_SIZE_QUERY, CHUNK_BYTES, MAX_CELLS, PLACEHOLDER,
-  graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, parseCellSize, placeholderRows, pngSize,
+  graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, parseCellSize, placeholderRows, pngSize, takeWindowReports,
 } from "./media.js";
 import { width } from "./lines.js";
 
@@ -111,6 +111,29 @@ test("parseCellSize reads the answer to the query, and nothing else", () => {
   assert.equal(parseCellSize(ESC + "[8;45;120t"), undefined);
   assert.equal(parseCellSize(ESC + "[6;0;9t"), undefined);
   assert.equal(parseCellSize("hello"), undefined);
+  // `useInput` takes the first escape of a chunk off before covey sees it.
+  assert.deepEqual(parseCellSize("[6;18;9t"), { w: 9, h: 18 });
+});
+
+test("takeWindowReports takes every report out of a chunk, and nothing else", () => {
+  // One answer, as `useInput` hands it over: the leading escape is gone.
+  assert.deepEqual(takeWindowReports("[6;34;16t"), { cell: { w: 16, h: 34 }, rest: "" });
+  // A resize drags for a second, so the answers arrive many to a chunk. The
+  // reader saw every one of them in the composer before they went this way.
+  const many = "[6;34;16t" + (ESC + "[6;34;16t").repeat(37);
+  assert.deepEqual(takeWindowReports(many), { cell: { w: 16, h: 34 }, rest: "" });
+  // The window reports a terminal sends unasked go too, and size nothing.
+  assert.deepEqual(takeWindowReports(ESC + "[4;1080;1920t" + ESC + "[8;45;120t"), { cell: undefined, rest: "" });
+  // The last answer is the one that describes the window now.
+  assert.deepEqual(takeWindowReports("[6;34;16t" + ESC + "[6;40;20t").cell, { w: 20, h: 40 });
+  // A key typed while the window moved is still the reader's.
+  assert.deepEqual(takeWindowReports("[6;34;16t" + ESC + "[6;34;16tq").rest, "q");
+  // Everything else is the reader's, whole.
+  assert.deepEqual(takeWindowReports("hello"), { cell: undefined, rest: "hello" });
+  assert.deepEqual(takeWindowReports("the cost is 16t"), { cell: undefined, rest: "the cost is 16t" });
+  // A mouse report and a kitty key report are not window reports.
+  assert.deepEqual(takeWindowReports(ESC + "[<0;45;8M").rest, ESC + "[<0;45;8M");
+  assert.deepEqual(takeWindowReports(ESC + "[116;1u").rest, ESC + "[116;1u");
 });
 
 test("mediaBox keeps the picture's shape", () => {

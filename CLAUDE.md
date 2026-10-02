@@ -102,8 +102,15 @@
   the stream ink owns and never inside a span; a placeholder cell costs 1 and a combining
   mark 0, so a painted row measures exactly the cells it covers. Every escape carries
   `q=2`, because the terminal's answer would arrive on stdin and `useInput` would read it
-  as typing — which is also why `CELL_SIZE_QUERY`'s reply is picked off in `App.tsx`
-  before the mouse parse. Inline in the transcript is the next step and it waits on #24:
+  as typing — which is also why every `CSI … t` the terminal writes back, covey's own
+  cell size answer and the window reports some terminals send unasked, is taken out in
+  `App.tsx` (`takeWindowReports`) before the mouse parse. Match one whole and you match
+  nothing: ink splits a chunk into one event per escape sequence and then drops that
+  event's *leading* escape, so the answer arrives as `[6;34;16t`, and the guard that
+  wanted the escape put thirty-eight of them in a reader's composer. The question is
+  asked once the resize stops (`CELL_SIZE_DELAY_MS`), because a window dragged by its
+  corner resizes tens of times and every question is answered.
+  Inline in the transcript is the next step and it waits on #24:
   `width()` counts a combining mark as a column, so `wrapSpans` would misjudge a row. The
   overlay builds its own rows and never calls it. kitty takes PNG and raw RGB alone, so
   `mediaView.ts` converts with the four tools `attachments.ts` already looks for, and a

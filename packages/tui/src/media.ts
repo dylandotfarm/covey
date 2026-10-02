@@ -188,12 +188,15 @@ export const CELL_SIZE_QUERY = `${ESC}[16t`;
 /**
  * Read the answer to `CELL_SIZE_QUERY`, which is `CSI 6 ; height ; width t`.
  *
+ * The escape is optional, because `useInput` takes the leading one off the
+ * chunk it hands over — the same thing `parseMouse` works around.
+ *
  * Answers undefined for anything else, including the `CSI 4 ; …` and
  * `CSI 8 ; …` reports a terminal may send unasked on a resize: the height and
  * the width of the *window* would size a picture to the whole screen.
  */
 export function parseCellSize(reply: string): CellSize | undefined {
-  const m = /\u001b\[6;(\d+);(\d+)t/.exec(reply);
+  const m = /\u001b?\[6;(\d+);(\d+)t/.exec(reply);
   if (!m) return undefined;
   const h = Number(m[1]);
   const w = Number(m[2]);
@@ -201,6 +204,49 @@ export function parseCellSize(reply: string): CellSize | undefined {
   // pixels is a terminal answering a different question.
   if (!(h > 0 && h < 1000 && w > 0 && w < 1000)) return undefined;
   return { w, h };
+}
+
+/**
+ * One report a terminal may write to stdin about its window: `CSI <numbers> t`.
+ * The answer to `CELL_SIZE_QUERY` is one of these, and so are the window size
+ * reports a terminal sends unasked when the reader drags a corner.
+ *
+ * The leading escape is optional for the reason `parseCellSize` gives, and the
+ * match is not anchored at the end: a terminal writes a report and the next
+ * keystroke into the same read, and `useInput` hands covey the pair.
+ */
+const WINDOW_REPORT = /(?:\u001b|^)\[\d+(?:;\d+)*t/g;
+
+export interface WindowReports {
+  /** The cell the terminal reported, if one of the reports was that. The last
+   *  of them: a chunk may carry the answers to several questions, and the one
+   *  that arrived last is the one that describes the window now. */
+  cell?: CellSize;
+  /** The chunk with the reports taken out — the reader's own typing, and
+   *  nothing of the terminal's. */
+  rest: string;
+}
+
+/**
+ * Take the terminal's window reports out of a chunk of input.
+ *
+ * Ink leaves an unrecognised CSI in the string it gives `useInput`, so a
+ * report covey does not pick off is a report the reader finds in the composer.
+ * Drag a window by its corner and covey asks for the cell size again, so the
+ * answers arrive many to a chunk and glued to whatever was typed with them —
+ * which is why this reads every report of a chunk rather than the whole of it.
+ *
+ * `CSI <numbers> t` is the terminal's answer about its window and is never a
+ * key: a kitty key report ends in `u`, a legacy one in `~` or a letter after
+ * `CSI 1 ;`, and a mouse report carries a `<`.
+ */
+export function takeWindowReports(input: string): WindowReports {
+  let cell: CellSize | undefined;
+  // Nearly every chunk is one keystroke, and every report ends in a `t`.
+  const rest = input.includes("t")
+    ? input.replace(WINDOW_REPORT, (report) => { cell = parseCellSize(report) ?? cell; return ""; })
+    : input;
+  return { cell, rest };
 }
 
 export interface Box {
