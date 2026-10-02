@@ -447,6 +447,26 @@ test("an interrupted session stops counting as busy, so it can be released", asy
   assert.deepEqual(s.engine.sweepSessions(), ["t1"], "an interrupted session is not busy for ever");
 });
 
+test("a result that lands after an interrupt still leaves the session releasable", async (t) => {
+  const s = setup({ sessionIdleMinutes: 15 });
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.send("t1", "read every file in the repository");
+  await settle();
+  await s.engine.dispatch({ commandId: randomUUID(), type: "turn.interrupt", threadId: "t1" });
+  await settle();
+
+  // The interrupted CLI now reports the result of the turn it abandoned. The
+  // turn is already over, so that result must not read as the start of work:
+  // the thread stays interrupted and the session stays releasable.
+  s.clis[0]!.reply("aborted");
+  await settle();
+  assert.equal(s.db.getThread("t1")!.latestTurn?.state, "interrupted");
+
+  s.advance(20);
+  assert.deepEqual(s.engine.sweepSessions(), ["t1"], "the tail of an interrupted turn pins nothing");
+});
+
 test("a thread row that has gone stale does not release a session that is working", async (t) => {
   const s = setup({ sessionIdleMinutes: 15 });
   t.after(s.cleanup);
