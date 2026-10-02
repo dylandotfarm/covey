@@ -7,6 +7,7 @@ import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, 
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
+import { layoutTitleBar, type BarPart } from "../titleBar.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
 import { ASSUMED_CELL, CELL_SIZE_QUERY, graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, parseCellSize, type CellSize } from "../media.js";
@@ -2415,7 +2416,7 @@ export function App({ store }: { store: Store }) {
   // ---- render ---------------------------------------------------------------------
   const notice = state.notice;
   // The title bar's own width: `mainW`, less the four columns its
-  // `paddingX={2}` takes. `barNotice` below cuts the right-hand side to it.
+  // `paddingX={2}` takes. `layoutTitleBar` shares it out (#87).
   const barRoom = Math.max(0, mainW - 4);
   // Overlays that belong to a machine (update progress, directory browsing)
   // read their live data from that machine's state, not from the overlay.
@@ -2430,13 +2431,15 @@ export function App({ store }: { store: Store }) {
   const summaryTitle = summaryRow && (summaryRow.kind === "project" ? summaryRow.project!.title : summaryRow.kind === "machines" ? "machines" : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
   // A project's subtitle names its pool; a machine's says what it is.
   const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => machineLabel(state, x.machine)).join(" · ") : summaryRow.kind === "machines" ? `${state.order.length}` : "machine");
-  // The hint the bar shows when nothing was raised. Each is short, so it
-  // keeps its own width and only a notice ever takes the bar's two thirds.
-  const barHint = state.diffView ? "diff: j/k scroll · d close"
-    : scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows"
-    : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too"
-    : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands"
-    : "esc esc rewind · ↑ recall · ctrl+k";
+  // The hint the bar shows when nothing was raised, longest form first. The
+  // bar takes the longest one that fits whole beside the title and shows
+  // nothing when none does, so a hint is never cut (`layoutTitleBar`, #87).
+  // Each ladder keeps the one key a reader cannot guess at its foot.
+  const barHints = state.diffView ? ["diff: j/k scroll · d close", "d close"]
+    : scrollFromBottom > 0 ? ["scrolled · cmd+shift+g follows", "scrolled"]
+    : state.focus === "sidebar" ? ["↑↓ browse · enter open · click works too", "↑↓ browse · enter open", "enter open"]
+    : state.view?.thread?.latestTurn?.state === "running" ? ["esc interrupt · ctrl+k commands", "esc interrupt"]
+    : ["esc esc rewind · ↑ recall · ctrl+k", "↑ recall · ctrl+k", "ctrl+k"];
   // An error or a warning takes the whole bar and the title steps aside: it
   // lasts eight seconds, it is the only channel a failure has, and the row
   // the title names is on the screen in front of the reader anyway. Anything
@@ -2446,9 +2449,27 @@ export function App({ store }: { store: Store }) {
   // pane narrow enough to matter the repository's name is longer than the
   // room. Cut from the end and every clone failure reads the same — "could
   // not clone github.com/owner/repo: no co…" — which is the reader back
-  // where they started.
+  // where they started. A hint gets none of this: it is cut from neither end.
   const loud = notice?.tone === "error" || notice?.tone === "warning";
-  const barNotice = elide(notice?.text ?? barHint, loud ? Math.max(0, barRoom - 2) : Math.max(24, Math.floor((barRoom * 2) / 3)));
+  const barNotice = notice ? elide(notice.text, loud ? Math.max(0, barRoom - 2) : Math.max(24, Math.floor((barRoom * 2) / 3))) : "";
+  // The pane's own name first and `keep`, so it is the part that is truncated
+  // when the row runs out; everything beside it is shown whole or dropped.
+  const barParts: BarPart[] = summaryRow ? [{ text: summaryTitle || "", keep: true }, { text: summarySub || "" }]
+    : header ? [
+        { text: header.title, keep: true },
+        { text: headerProject?.title ?? "" },
+        { text: header.pullRequest ? `PR #${header.pullRequest.number}` : "" },
+        { text: header.movedTo ? "moved" : "" },
+      ]
+    : [{ text: "covey — multi-agent TUI", keep: true }];
+  // How each part is painted, one entry per part. A parallel list and not a
+  // field on `BarPart`, because `layoutTitleBar` is about columns alone. The
+  // link belongs here rather than in the row below: a part is painted by the
+  // entry beside it, and nothing has to know which index the pull request is.
+  const barTones: { color: string; bold?: boolean; link?: string }[] = summaryRow ? [{ color: T.text, bold: true }, { color: T.subtle }]
+    : header ? [{ color: T.text, bold: true }, { color: T.subtle }, { color: T.awaiting, link: header.pullRequest?.url }, { color: T.warning }]
+    : [{ color: T.subtle }];
+  const bar = layoutTitleBar(barParts, notice ? { kind: "notice", text: barNotice } : { kind: "hint", forms: barHints }, barRoom);
   return (
     /* One invariant holds this screen together: nothing covey paints may be
        wider than the terminal it is painted into. Ink's incremental renderer
@@ -2494,19 +2515,29 @@ export function App({ store }: { store: Store }) {
             `truncate` keeps the front and says there is more, which is the
             half a reader can act on. */}
         <Box height={1} paddingX={2} justifyContent="space-between">
+          {/* Every part is already cut to the columns it was given, so this
+              box asks for no more than the row has and nothing here shrinks
+              by design. It keeps its own shrink as a net all the same: Ink
+              measures with `string-width` and `layoutTitleBar` with covey's
+              own `width`, and the two read a handful of characters — a
+              combining mark, some of the emoji — differently. */}
           <Box>
-            {summaryRow ? (<><Text color={T.text} bold wrap="truncate">{truncate(summaryTitle || "", Math.max(10, mainW - 40))}</Text><Text color={T.subtle} wrap="truncate">  {summarySub}</Text></>)
-              : header ? (<><Text color={T.text} bold wrap="truncate">{header.title.slice(0, Math.max(10, mainW - 40))}</Text><Text color={T.subtle} wrap="truncate">  {headerProject?.title}</Text>{header.pullRequest && <Text color={T.awaiting} wrap="truncate">  {HYPERLINKS ? osc8(header.pullRequest.url, `PR #${header.pullRequest.number}`) : `PR #${header.pullRequest.number}`}</Text>}{header.movedTo && <Text color={T.warning} wrap="truncate">  moved</Text>}</>)
-              : <Text color={T.subtle} wrap="truncate">covey — multi-agent TUI</Text>}
+            {bar.parts.map((part, i) => part && (
+              <Text key={i} color={barTones[i]?.color} bold={barTones[i]?.bold} wrap="truncate">
+                {part.gap ? "  " : ""}{barTones[i]?.link && HYPERLINKS ? osc8(barTones[i]!.link!, part.text) : part.text}
+              </Text>
+            ))}
           </Box>
           {/* Its own box, and one that never shrinks: `space-between`
               otherwise takes the room off both sides at once, and the two
               texts end up against each other with the reason half gone.
               The title gives way instead, because the reader can see the
               row the title names and cannot see the reason. */}
-          <Box flexShrink={0} marginLeft={2}>
-            <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "warning" ? T.warning : notice.tone === "success" ? T.success : T.muted) : T.faint} wrap="truncate">{barNotice}</Text>
-          </Box>
+          {bar.right && (
+            <Box flexShrink={0} marginLeft={2}>
+              <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "warning" ? T.warning : notice.tone === "success" ? T.success : T.muted) : T.faint} wrap="truncate">{bar.right}</Text>
+            </Box>
+          )}
         </Box>
         {/* Truncated because this is a length, not a box: laid out with a
             `mainW` from the terminal before last it would wrap onto a second row
