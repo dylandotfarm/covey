@@ -629,8 +629,12 @@ export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
  * Responses arrive whole rather than token by token, so without this the
  * transcript sits still between sending and the reply landing. It reports the
  * running tool by name when there is one, so you can see what it is doing.
+ *
+ * `unprompted` says the turn answers no message of the reader's: a background
+ * task woke the agent (#156). The row says so, because a thread at work on
+ * nothing the reader sent reads as a thread that lost its place.
  */
-export function activityLine(o: { tick: number; elapsedMs: number; tools: number; toolActive: boolean }): Line {
+export function activityLine(o: { tick: number; elapsedMs: number; tools: number; toolActive: boolean; unprompted?: boolean }): Line {
   const spin = SPINNER[o.tick % SPINNER.length]!;
   const line: Line = [
     { text: "  " },
@@ -639,6 +643,7 @@ export function activityLine(o: { tick: number; elapsedMs: number; tools: number
     // *kind* of work is in flight, since text only lands when it is finished.
     { text: o.toolActive ? " running tool" : " writing response", color: T.muted },
   ];
+  if (o.unprompted) line.push({ text: "  ·  a background task woke this", color: T.faint });
   if (o.tools > 0) line.push({ text: `  ·  ${o.tools} tool${o.tools === 1 ? "" : "s"}`, color: T.faint });
   line.push({ text: `  ·  ${fmtMs(o.elapsedMs)}`, color: T.faint });
   line.push({ text: "  esc to interrupt", color: T.faint });

@@ -780,6 +780,18 @@ export interface LatestTurn {
   state: "running" | "interrupted" | "completed" | "error";
   startedAt: string;
   completedAt: string | null;
+  /**
+   * The turn is work no message asked for (#156). A background task reports,
+   * the CLI hands the notification to the agent, and the agent reads files,
+   * runs commands and writes prose with no turn in flight. covey opens a turn
+   * for that work, so the thread does not read idle while the agent writes and
+   * the tokens are accounted; this mark is what lets a client say why a thread
+   * nobody wrote to is busy. Absent on every turn a message started.
+   *
+   * Such a turn carries no `diff`: it has no checkpoint, because the work had
+   * already begun when covey saw the first line of it.
+   */
+  unprompted?: boolean;
   /** This turn's estimated cost. See `TokenCounts.estimatedCostUsd`. */
   costUsd?: number;
   inputTokens?: number;

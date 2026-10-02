@@ -1,6 +1,6 @@
 ---
 name: covey
-description: Take a GitHub issue to completion inside a covey thread. Take the issue, do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. Use when the user types /covey, names an issue to take or finish, or asks for a pull request that covey should watch or merge.
+description: Take work to a merged pull request inside a covey thread, from a GitHub issue number or from the user's own words. Do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. File no issue unless the user asks for one. Use when the user types /covey, names an issue to take or finish, describes a bug or a change to make here, or asks for a pull request that covey should watch or merge.
 ---
 
 # The covey loop
@@ -15,6 +15,32 @@ starts with `covey watch:`. You never poll.
 If `COVEY_THREAD_ID` is not set, you are not in a covey thread. Say so and do
 the work the ordinary way, with `gh`.
 
+## Which loop
+
+There are two loops and they differ in one step: whether the thread takes an
+issue. Both end at a pull request covey watches. Pick by what the user said:
+
+- **The user names an issue number, or asks you to take one.** The issue
+  loop.
+- **The user asks you to file an issue, or to write something up.** File it,
+  say the number, and stop. Do not take it and do not start the work unless
+  the user says so.
+- **Anything else** — a bug the user describes, a fix they watched you make, a
+  rename, a change named in one sentence. The no-issue loop.
+
+Never file an issue to hold work you are about to do. Most of what a user
+asks for in conversation is not issue-shaped, and an issue opened and closed
+inside the minute by the same agent is a row no reader ever saw.
+
+**Never write an issue number into code, a comment or a document before the
+issue exists.** A number you guessed is wrong as soon as somebody else files
+one, and it leaves you asking the user a question only the number can answer.
+So when the user does ask for an issue, file it first:
+
+```
+gh issue create --title "<one line, what is wrong>" --body-file /tmp/issue.md
+```
+
 ## The user's words decide who merges
 
 - "merge when you're done", "automerge", "land it": open with `--auto`.
@@ -27,7 +53,7 @@ the work the ordinary way, with `gh`.
 Never merge a pull request yourself, and never run `covey pr policy auto`
 unless the user told you to merge on their behalf.
 
-## Steps
+## The issue loop
 
 1. **Take the issue.** Run `covey issue take <n>`. If covey answers that
    another thread holds it, stop and tell the user: two agents must not work
@@ -72,6 +98,40 @@ unless the user told you to merge on their behalf.
    - *Blocked*: covey sent as many rounds as it may, or watched for too long.
      Stop. Tell the user what still fails and what you tried.
 7. **Check the state** at any time with `covey pr status`.
+
+## The no-issue loop
+
+The same loop without step 1 and step 2. The user's words are the brief;
+there is no issue to read and none to file.
+
+1. **Do the work** on the branch you are on, and commit as you go with a
+   message that says what changed and why. Run no `covey issue take`: that
+   command is for a number the user named.
+2. **Prove it**, as step 3 above: the project's build and tests.
+3. **Open the pull request** with `covey pr open`, as step 4 above. No issue
+   stands behind this one, so the body says what the user asked for as well
+   as what changed and how you tested it — it is the only record a reader
+   has. Covey adds no `Closes` line, because the thread holds no issue.
+4. **Stop the turn**, and act on each `covey watch:` message exactly as step
+   6 above says. Nothing after the pull request differs between the loops.
+
+Say in your reply that you opened the pull request against no issue, so the
+user can ask for one if they want the work tracked.
+
+## Write a body as paragraphs, not as wrapped lines
+
+GitHub renders one newline inside a paragraph as a line break. Prose wrapped
+at eighty columns therefore reaches the reader broken after every eightieth
+character. Write each paragraph on one line, however long that line is, and
+let the browser wrap it. This holds for a pull request body, an issue body, a
+review and every comment.
+
+Covey unwraps a `covey pr open` or `covey pr comment` body when it can read
+the break as a wrap, and leaves the rest alone. A fenced block, a table, a
+list and an indented block are never touched. A column of lines you mean to
+keep apart belongs in a list or in a fenced block. An issue you open with
+`gh issue create` gets no such help, so write that body on one line per
+paragraph yourself.
 
 ## Media on the pull request
 
@@ -192,6 +252,7 @@ covey env exec -- <cmd>    run one command with those secrets in its environment
 - Do not poll `gh pr view`, `gh pr checks` or `gh run list` in a loop. Covey
   wakes you when there is news, even when your session was released.
 - Do not open a second pull request for the same thread.
+- Do not file an issue for work the user did not ask you to file.
 - Do not push to the base branch, and do not merge.
 - Do not stop covey's watch (`covey pr watch --stop`) unless the user asks.
 

@@ -31,6 +31,7 @@ import { gateMember } from "./integrate/gate.js";
 import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
+import { unwrapMarkdown } from "./integrate/reflow.js";
 import { news, emptyCursor, describeNews, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 
 export class EngineError extends Error {
@@ -1183,10 +1184,14 @@ export class Engine {
     const host = this.hostFor({ cwd, allowCreate: true, allowAttach: true });
     if (!host.createPullRequest) throw new EngineError("unsupported", "this host cannot open a pull request");
     const base = await this.baseBranch(p, cwd);
+    // The body is unwrapped first (#189): GitHub renders one newline inside a
+    // paragraph as a line break, and an agent writes its prose wrapped at a
+    // terminal's width. The media goes on after, so the URLs it adds, one per
+    // line, are never joined into the prose.
     // The media goes up before the push, so a refused file or a refused
     // upload leaves nothing behind: no branch on the remote, no pull request
     // with a path in its body.
-    let body = await this.attachMedia(t, host, (params.body ?? "").trim(), params.attachments ?? []);
+    let body = await this.attachMedia(t, host, unwrapMarkdown((params.body ?? "").trim()), params.attachments ?? []);
     // The issue is the durable place to report, and `Closes #N` closes the
     // loop when the change lands. A body that names the issue is left alone.
     if (t.issue && !new RegExp(`#${t.issue.number}\\b`).test(body)) body = body ? `${body}\n\nCloses #${t.issue.number}` : `Closes #${t.issue.number}`;
@@ -1220,7 +1225,7 @@ export class Engine {
     const cwd = t.worktreePath ?? p.workspaceRoot;
     const host = this.hostFor({ cwd, allowComment: true, allowAttach: true });
     if (!host.commentPullRequest) throw new EngineError("unsupported", "this host cannot comment on a pull request");
-    const body = await this.attachMedia(t, host, (params.body ?? "").trim(), params.attachments ?? []);
+    const body = await this.attachMedia(t, host, unwrapMarkdown((params.body ?? "").trim()), params.attachments ?? []);
     if (!body) throw new EngineError("bad_body", "a comment needs a body or a file to attach");
     let left: { url: string };
     try {
@@ -2427,6 +2432,25 @@ export class Engine {
         this.putThreadAndEmit(t);
         if (status === "error" && wasRunning && t.latestTurn) void this.finishTurn(threadId, t.latestTurn.turnId);
         if (status === "error" && isAuthFailure(error)) this.onAuthFailure(threadId, t.latestTurn?.turnId ?? null, error!);
+      },
+      onUnpromptedTurn: () => {
+        const t = this.db.getThread(threadId);
+        if (!t || t.movedTo) return null;
+        const turnId = randomUUID();
+        const now = new Date().toISOString();
+        // An ordinary running turn with one mark on it: no message asked for
+        // the work (#156). Everything downstream then treats it as a turn —
+        // `sessionBusy` holds the session, the thread says running, and
+        // `onTurnComplete` records the row and the tokens.
+        //
+        // It takes no checkpoint, so it reports no diff. A `before` tree
+        // captured here would be a snapshot of a working tree the agent has
+        // already changed, which reads as a diff and is not one, and
+        // `turn.revert` refuses a turn with no checkpoint for the same reason.
+        t.latestTurn = { turnId, state: "running", startedAt: now, completedAt: null, unprompted: true };
+        t.status = "running";
+        this.putThreadAndEmit(t);
+        return turnId;
       },
       onTurnComplete: (info) => {
         const t = this.db.getThread(threadId);

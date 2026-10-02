@@ -86,6 +86,7 @@ function session() {
     getItemByToolUse: () => null,
     onStatus: () => {},
     onTurnComplete: (info) => { turns.push(turnFigures(info)); },
+    onUnpromptedTurn: () => null,
     onSessionInit: () => {},
     onModelUsed: () => {},
     onCommands: () => {},

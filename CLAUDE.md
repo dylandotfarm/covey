@@ -404,6 +404,18 @@
   covey never stops: `ClaudeSession.answering` is the second half of `busy`, because the CLI
   ends turns covey never started — a resumed session answers the background-task
   notifications it inherits, and covey reads that result as the end of its own turn.
+- The CLI also *starts* work covey never asked for, and that work gets a turn of its own
+  (#156). A background task reports, the agent reads files and writes prose, and
+  `currentTurnId` is already `null` from the earlier result — so the first line the CLI
+  writes opens a turn (`openUnpromptedTurn`, `SessionSink.onUnpromptedTurn`) and the next
+  result ends it like any other. Without it 52 items landed under no turn, the `turns`
+  table held no row for 34 minutes of real work, and the thread read idle while the agent
+  wrote. The turn is marked, because a reader has to be told why a thread nobody wrote to
+  is busy: `LatestTurn.unprompted` is the TUI's "a background task woke this" and the
+  page's "background work". It takes no checkpoint and so reports no diff — a `before`
+  tree read after the agent started would be a diff that is not one. And the tail of an
+  interrupted turn opens nothing (`ClaudeSession.interrupted`), or esc would leave the
+  thread running.
 - The model picker is read from the Claude Code covey runs, not from a list covey ships:
   the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
   no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The
@@ -472,7 +484,14 @@
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
   ready, and never under a running turn. An agent asks with `covey issue …` and `covey pr …`
   (`packages/cli/src/loop.ts`), and the `/covey` skill in `plugin/skills/covey/SKILL.md`
-  tells it the loop. `--attach F` on `covey pr open` and `covey pr comment` puts a video or
+  tells it the loop. There are two (#191) and they differ in one step, whether the thread
+  takes an issue: a number the user named takes the issue loop, and everything the user
+  only described takes the no-issue loop, which files *nothing* — an issue opened and
+  closed inside the minute by the same agent is a row no reader saw. The skill's
+  frontmatter `description` is the whole of what a plugin puts in a session's context, so
+  it names both loops or the model never loads the skill for work that has no number
+  (`plugin.test.ts`). The daemon carries none of this: `Closes #N` goes on only
+  `if (t.issue && …)`. `--attach F` on `covey pr open` and `covey pr comment` puts a video or
   an image on the pull request as a GitHub *user attachment*, the only kind that renders
   inline (`integrate/attach.ts` holds the rules; the route is undocumented and
   `uploadAttachment` fails closed on anything but 201, before the push). A video over 10 MB
@@ -480,6 +499,15 @@
   scope cannot read the plan, so keep a demo video under 10 MB. The daemon hands `plugin/` to every session as a local plugin
   (`plugin.ts`); a personal skill in `~/.claude/skills` does not reach a resumed session,
   because the SDK resumes into a temporary `CLAUDE_CONFIG_DIR` that carries no skills.
+  A body on its way to GitHub is unwrapped first (`integrate/reflow.ts`, #189): GitHub
+  reads one newline inside a paragraph as a line break, and a model writes its prose
+  wrapped at about eighty columns. The unwrap runs before `attachMedia`, never after,
+  or the attachment URLs that go in one per line would be joined into the prose. It
+  joins a run of lines only on the signature of a wrap — the widest line between 60 and
+  120 columns, and every line but the last too long to hold the next line's first word —
+  so a column of short lines, a column of paths and every fence, table, list and
+  indented block stand. `gh issue create` is the agent's own call and gets none of it,
+  which is why the skill asks for one line per paragraph as well.
   Change the CLI and the skill together. The plugin only *offers* the skill, and the
   model chose per turn whether to read it, so a thread that opened with "fix this bug"
   pushed with `git` and opened with `gh` and no watch ever started. `COVEY_PREAMBLE` in

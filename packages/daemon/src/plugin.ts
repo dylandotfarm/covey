@@ -30,12 +30,14 @@ export function coveyPlugin(root: string | null): string | null {
  *
  * The plugin on its own puts the skill's name and its description in the
  * session's context and nothing more, so the model decides turn by turn whether
- * to read it. The description asks for the words of an issue, so a thread that
- * opens with "fix this bug" never reaches for the skill: it pushes with `git`
- * and opens with `gh`, and the daemon then watches no pull request. A reader had
- * to type `/covey` to get the loop. This note is what makes the loop the
+ * to read it. The description asked for the words of an issue, so a thread that
+ * opened with "fix this bug" never reached for the skill: it pushed with `git`
+ * and opened with `gh`, and the daemon then watched no pull request. A reader
+ * had to type `/covey` to get the loop. This note is what makes the loop the
  * default, and it goes in the system prompt because that is the one text a
- * session reads before its first turn, on a resume as well as on a start.
+ * session reads before its first turn, on a resume as well as on a start. The
+ * description now names the second loop too (#191), the one for work the user
+ * only described, so the two say the same thing from either side.
  *
  * Keep it a pointer, not a copy. The loop itself lives in
  * `plugin/skills/covey/SKILL.md`, which costs nothing until the model loads it,

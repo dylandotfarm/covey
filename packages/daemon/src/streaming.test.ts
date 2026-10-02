@@ -58,7 +58,7 @@ function harness(streaming: boolean): Harness {
   const sink: SessionSink = {
     upsertItem: (item) => { sent.push(item); },
     getItemByToolUse: (id) => (sent.filter((i) => i.kind === "tool" && i.toolUseId === id).pop() as ToolCallItem) ?? null,
-    onStatus: () => {}, onTurnComplete: () => {}, onSessionInit: () => {}, onModelUsed: () => {},
+    onStatus: () => {}, onTurnComplete: () => {}, onUnpromptedTurn: () => null, onSessionInit: () => {}, onModelUsed: () => {},
     onCommands: () => {},
     now: () => "2026-09-15T00:00:00.000Z",
   };

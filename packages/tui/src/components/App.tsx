@@ -309,6 +309,7 @@ export function App({ store }: { store: Store }) {
         elapsedMs: Date.now() - Date.parse(turn.startedAt),
         tools: tools.length,
         toolActive: !!active,
+        unprompted: turn.unprompted,
       })],
     };
   }, [baseLayout, state.view, state.tick]);
