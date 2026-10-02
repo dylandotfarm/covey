@@ -13,7 +13,7 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsHidden, threadReviewing, type Lod,
+  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadReviewing, type Lod,
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
@@ -216,12 +216,16 @@ export function orderedItems(v: View): TimelineItem[] {
 export type Tone = "busy" | "waiting" | "error" | "done" | "idle";
 
 /** One word for the dot beside a thread. `waiting` wins, because it is the
- *  one the reader can do something about. */
+ *  one the reader can do something about.
+ *
+ *  `done` asks `threadIsFinished` and not the turn alone: a thread whose turn
+ *  ended into an automated review is not the reader's again yet, and the green
+ *  dot said it was while the line beside it said "under review". */
 export function threadTone(t: Thread): Tone {
   if (t.pendingApprovals > 0 || t.status === "waiting") return "waiting";
   if (t.status === "error" || t.latestTurn?.state === "error") return "error";
   if (threadIsBusy(t)) return "busy";
-  if (t.latestTurn?.state === "completed") return "done";
+  if (threadIsFinished(t)) return "done";
   return "idle";
 }
 
@@ -946,7 +950,7 @@ export function sheetNote(s: State, sheet: SheetState): string {
   if (sheet.page === "web") return `Whether ${name} serves the phone client.`;
   // Neither session limit is a default a new thread inherits: both apply to
   // every thread on the machine, and to the ones running now.
-  if (sheet.page === "live") return `How much memory ${name} may hold in live sessions. A session is about 300 MB.`;
+  if (sheet.page === "live") return `How much memory ${name} may hold in live sessions. A session is about 250 MB.`;
   if (sheet.page === "idle") return `When ${name} stops the session of a thread nobody is using. The next message resumes it from the transcript.`;
   return `Every new thread on ${name} starts with this. A thread that runs keeps what it has.`;
 }

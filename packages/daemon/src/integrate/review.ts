@@ -44,7 +44,7 @@ export const REVIEW_TAGLINE = "from an automated covey review";
  * How many reviewers a pull request gets when the caller says nothing.
  *
  * One. A reviewer is a thread, which is a worktree and a session of about
- * 300 MB, so the number that is safe to spend on every pull request is the
+ * 250 MB, so the number that is safe to spend on every pull request is the
  * smallest one that still reads the change. A caller that wants two says two.
  */
 export const DEFAULT_REVIEWS = 1;
@@ -189,9 +189,10 @@ export function reviewBrief(b: ReviewBrief): string {
     "",
     "The rules of this thread:",
     "",
-    "- Covey puts the comment on the pull request and adds the tagline that says a",
-    "  machine wrote it. Do not write that tagline yourself, and do not use",
-    "  `gh pr comment` or `gh pr review`.",
+    "- Covey puts the comment on the pull request, adds the tagline that says a",
+    "  machine wrote it, and signs it with this thread's id so your own review is",
+    "  never sent back to you as news. Do not write either marker yourself, and do",
+    "  not use `gh pr comment` or `gh pr review`.",
     "- Never commit to this branch, never push it, and never merge. The author makes",
     "  every change. You read and you say.",
     "- Name the file and the line for each thing you want changed, and say why it",

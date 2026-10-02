@@ -37,6 +37,7 @@ import { mergeMember } from "./integrate/merge.js";
 import { unwrapMarkdown } from "./integrate/reflow.js";
 import { news, emptyCursor, describeNews, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
+import { signComment } from "./integrate/sign.js";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -1265,8 +1266,11 @@ export class Engine {
   /**
    * Put one comment on the thread's pull request, tagged or plain.
    *
-   * The tagline goes on last, after the unwrap and after the attachment URLs,
-   * so it is the final line of the comment whatever else is in it.
+   * The tagline goes on after the unwrap and after the attachment URLs, so it
+   * is the last line a reader sees whatever else is in the comment. The
+   * signature goes on after that and renders as nothing, so every comment covey
+   * posts names the thread that wrote it and no thread ever hears its own words
+   * back as news (`integrate/sign.ts`).
    */
   private async postComment(t: Thread, rawBody: string, attachments: PullRequestAttachment[], tag: ReviewVerdict | null): Promise<{ number: number; url: string }> {
     if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
@@ -1280,6 +1284,7 @@ export class Engine {
     let body = await this.attachMedia(t, host, unwrapMarkdown(rawBody.trim()), attachments);
     if (!body && !tag) throw new EngineError("bad_body", "a comment needs a body or a file to attach");
     if (tag && t.reviewOf) body = tagComment(body, tag, { index: t.reviewOf.index, of: t.reviewOf.of });
+    body = signComment(body, t.id);
     let left: { url: string };
     try {
       left = await host.commentPullRequest(number, body);
@@ -1293,9 +1298,11 @@ export class Engine {
 
   /**
    * Record a comment this thread wrote, so its own watch never delivers it back
-   * as news. Without this a reviewer is woken by its own review, and asked to
-   * answer itself: every thread of one pull request writes from one GitHub
-   * account, so no author login can tell the two apart.
+   * as news. The signature on the comment is the first answer to that and this
+   * is the second: it covers a comment covey posted before it signed them, and
+   * costs one write. It is the weaker half — a cursor holds nothing for a watch
+   * that has not started, and `gh` lists plenty of comments with no URL — so
+   * never read it as the only guard.
    */
   private rememberPosted(threadId: string, url: string): void {
     if (!url) return;
@@ -1520,7 +1527,7 @@ export class Engine {
   /**
    * Archive every reviewer of a thread that is itself being put away.
    *
-   * A reviewer outlives nothing: its session is 300 MB and its worktree is a
+   * A reviewer outlives nothing: its session is 250 MB and its worktree is a
    * checkout, and the change it was reading is no longer anybody's work. With
    * `record` the verdict is marked `dropped` first, which also keeps the
    * reviewer's own archive from raising a turn on a thread the reader just
@@ -1811,7 +1818,7 @@ export class Engine {
       // at their fastest.
       const base = facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
       const role: WatchRole = live.role === "reviewer" ? "reviewer" : "author";
-      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base, role, review: live.review });
+      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base, role, review: live.review, self: fresh.id });
       live.cursor = cursor;
       live.polledAt = nowIso;
       live.error = null;

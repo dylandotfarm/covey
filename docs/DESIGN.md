@@ -155,9 +155,10 @@ The engine therefore releases a session that nobody needs. Two rules, in this or
    the agent.
 2. **The budget.** While more sessions are live than `MachineSettings.maxLiveSessions`
    allows, the least recently used ones go. The default comes from the machine's own memory:
-   15% of it at 300 MB a session, and never fewer than two nor more than eight. The budget is
-   a target, not a promise — a machine with more turns in flight than memory keeps every
-   running turn.
+   a quarter of it at 250 MB a session, and never fewer than two. Nothing bounds it from
+   above, because the memory is the bound — a cap of eight made every machine over 16 GiB
+   hold the same eight sessions. The budget is a target, not a promise: a machine with more
+   turns in flight than memory keeps every running turn.
 
 A session is never released while it owes somebody an answer: a turn in flight, a tool
 approval on screen, a question in front of the user, or a background task that still runs. A
@@ -171,7 +172,7 @@ The work is a child of the session subprocess and only that subprocess reads the
 `task_notification` that ends it. Measured against a live daemon: a `sleep 100` handed to the
 background died with the released session, its output file was never written, and the tool row
 still read "running in the background" five minutes later. So a live background task holds its
-session, and a task that never reports holds it for ever — 300 MB costs less than the build.
+session, and a task that never reports holds it for ever — 250 MB costs less than the build.
 
 Nothing is lost. The transcript lives in the session store, keyed by thread id, so the next
 message starts a new process with `resume` and the model reads the whole conversation back.
@@ -872,13 +873,23 @@ author already has in hand, and a round of a reviewer's budget spent on it is a 
 cannot spend on the code. Both hear every comment and the merge, because a reviewer with
 nothing left to review has to stop.
 
-**No thread hears a comment it wrote itself.** Every thread of one pull request writes from
-one GitHub account, so no author login can tell a reviewer's comment from the author's.
-Without this the reviewer's own review came back to it on the next poll as a turn asking it
-to answer itself, and a comment costs no round, so nothing bounded it. `WatchCursor.posted`
-holds the URLs the thread wrote; the URL is the key rather than the id because `gh pr
-comment` answers with a URL and `gh pr view` lists a node id, and only the URL is on both
-sides.
+**No thread hears a comment it wrote itself, and the proof is on the comment.** Every thread
+of one pull request writes from one GitHub account, so no author login can tell a reviewer's
+comment from the author's. Without this the reviewer's own review came back to it on the next
+poll as a turn asking it to answer itself, and a comment costs no round, so nothing bounded
+it. So covey signs every comment it posts with the id of the thread that wrote it
+(`integrate/sign.ts`), and the watch drops a comment carrying its own signature. The marker
+is an HTML comment, which GitHub renders as nothing; covey's own markdown escapes it, so
+`itemBase` strips it from what a client shows and `quote` strips it from what an agent is
+told. Covey writes it and the agent never does, for the reason the review tagline is covey's:
+a marker an agent had to remember is a marker that one day reads differently.
+
+`WatchCursor.posted` is the second half and was the first attempt. It holds the URLs the
+thread wrote, and a URL is on both sides only when GitHub lists one — it lists plenty of
+comments with none, and that is where the reviewer heard itself. It is also a bounded list on
+the thread row, so it holds nothing for a comment written before the watch started and
+nothing after a watch is stopped and started again. It stays, because a comment covey posted
+before it signed them carries no signature; it is never the only guard.
 
 **The review is a `mergeBlock`, and needs no event of its own.** A green check is not a
 merge, and the watch already carries what stands between the two — a draft, a conflict, a
@@ -913,14 +924,28 @@ the reader cannot reconcile with what is above it is worse than no number.
 pull request open sits still for minutes: without a mark it reads as stalled, which is the one
 thing hiding must not cause. `threadReviewing` counts the reviewers still working — one that
 asked for changes counts too, because it waits on the author and the loop is as live as when
-it was reading — and the TUI paints `⊙` beside the title, with the count when there is more
-than one. A glyph and not a colour, for the reason the agent mark is one: covey runs over ssh,
-in tmux, and on terminals with a narrow palette. The web client says it in words instead,
-through `threadStatusLabel`, which answered `idle` for the whole review before this; it comes
-after every state that needs the reader, because being reviewed is not something to act on.
+it was reading — and the TUI paints `⊙` in the status cell of the row, where the `●` of a
+thread at work and the `✓` of one that finished go. A glyph and not a colour, for the reason
+the agent mark is one: covey runs over ssh, in tmux, and on terminals with a narrow palette.
+The web client says it in words instead, through `threadStatusLabel`, which answered `idle`
+for the whole review before this; it comes after every state that needs the reader, because
+being reviewed is not something to act on.
+
+**And a thread under review is not finished.** The `✓` in the sidebar and the green dot on
+the phone both say one thing: this thread is yours again, so settle it, ask more of it, or
+leave it. A turn that ended is not that. Covey's own reviewers read the change after the
+author stops and the next turn comes from them, so a thread that painted both marks at once
+sent the reader to a thread with nothing in it to do. `threadIsFinished` is the one rule —
+the turn completed *and* no reviewer is still reading — and the three places that said a
+thread was done now ask it: the glyph (where the review comes first, because the cell paints
+one), the tone of the dot on the phone, and the bell. The bell is the same claim in another
+channel, so a turn that ends into a review rings nothing and says `under review` instead; the
+record is kept, and the turn that ends the review lands the `✓` it was holding. What the
+reader has to act on is nearer than any of this and is asked first: a failure and an approval
+come through whatever covey is doing with the change.
 
 **A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
-archives its reviewers: a session is 300 MB and a worktree is a checkout, and the change
+archives its reviewers: a session is 250 MB and a worktree is a checkout, and the change
 they were reading is nobody's work any more. The record is marked `dropped` first, so the
 reviewer's own archive raises no "the review did not finish" turn on a thread the reader
 has just put away.
@@ -1266,11 +1291,13 @@ daemon current does not mean finding an ssh session for it:
 
   A `null` in either setting means "the daemon's own default", and no client can work out
   what that resolves to — the ceiling's default is read from the machine's memory, so it is 4
-  on a Pi and 8 on a workstation. So the daemon says: `MachineInfo.sessionBudget` carries the
-  two resolved figures and what one session costs, and it is re-sent with every
+  on a Pi and 31 on a 31 GiB workstation. So the daemon says: `MachineInfo.sessionBudget`
+  carries the two resolved figures and what one session costs, and it is re-sent with every
   `machine.updated`. The panel therefore reads `from memory (4)` and `default (2 hours)`
   rather than the bare word, and every row of the ceiling's picker is priced
-  (`4 sessions · about 1.3 GB`) — the count of sessions is not what the reader is choosing.
+  (`4 sessions · about 1 GB`) — the count of sessions is not what the reader is choosing.
+  The rows run to 32, because the default does: a list that stopped at 12 offered a reader on
+  a workstation nothing near the number their own machine had picked.
   A daemon built before that field says "default" with no number, rather than a guess made
   from the memory of the machine the *client* runs on.
 

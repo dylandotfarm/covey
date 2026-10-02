@@ -3,7 +3,7 @@
  *
  * A test about the watch, the review or any other turn the daemon sends itself
  * needs a session that completes, and starting a real one costs a subprocess of
- * about 300 MB and a credential. This stands in for the whole CLI: it reads the
+ * about 250 MB and a credential. This stands in for the whole CLI: it reads the
  * prompt stream, answers each message with one assistant block and one result,
  * and can be held so a turn stays running while a test looks at the row.
  *

@@ -388,7 +388,13 @@
   key: a chain's is `chain:<id>`, never its head item's own id, or one tap opens both.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
-- A thread's session is a subprocess of about 300 MB. The engine releases one after
+- A thread's session is a subprocess of about 250 MB. That figure is `Pss` and never `Rss`:
+  about 100 MB of every process is the binary's own code pages, which every session on the
+  machine shares, so `Rss` counts them once per process and reads eight sessions as most of a
+  gigabyte more than they cost. The 300 MB covey assumed before was the `Rss` of a session
+  with no sibling. The default ceiling is a quarter of the machine's memory at that figure,
+  with a floor of two and nothing above — 31 sessions on a 31 GiB workstation, where the old
+  cap of eight made the memory this rule reads decide nothing. The engine releases one after
   `sessionIdleMinutes` (default 120) and holds at most `maxLiveSessions`; the next message
   resumes it from the transcript. `maxLiveSessions` is what bounds the memory, so the idle
   timer only gives memory back under that ceiling — and it charges for it, because the
@@ -570,9 +576,17 @@
   covey review`), which covey writes and the reviewer never does, anchored to the start
   of a line so a comment that *quotes* a review is not read as one. `PullRequestWatch.role`
   splits what the two sides hear: the author owns the build and hears every checks verdict,
-  the reviewer owns the code and hears the *push* and no checks at all. `WatchCursor.posted`
-  is why no thread hears a comment it wrote itself — every thread of one pull request writes
-  from one account, and without it a reviewer was woken by its own review for ever.
+  the reviewer owns the code and hears the *push* and no checks at all. No thread hears a comment it wrote itself, and the proof is
+  on the comment: covey signs every comment it posts with the id of the thread that wrote it
+  (`integrate/sign.ts`), and the watch drops a comment carrying its own signature. Every
+  thread of one pull request writes from one account, so no author login can tell them apart,
+  and without this a reviewer was woken by its own review for ever. The marker is an HTML
+  comment — nothing on GitHub — and covey's own markdown escapes it, so `itemBase` strips it
+  from what a client shows and `quote` from what an agent is told. `WatchCursor.posted` is
+  the second half and was the first attempt: a URL is a key only when GitHub lists one, and a
+  cursor is a bounded list on the row, so it covered neither a comment GitHub listed with no
+  URL nor a watch stopped and started again. It stays for a comment covey posted before it
+  signed them, and is never the only guard.
   The review needs no watch event of its own: it is a `mergeBlock` under the code
   `unreviewed`, so the checks verdict is keyed on it and the pass is re-delivered the moment
   the review signs off. It is the one block that is covey's refusal and not GitHub's, which
