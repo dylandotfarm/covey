@@ -1184,13 +1184,13 @@ export class Engine {
     const host = this.hostFor({ cwd, allowCreate: true, allowAttach: true });
     if (!host.createPullRequest) throw new EngineError("unsupported", "this host cannot open a pull request");
     const base = await this.baseBranch(p, cwd);
-    // The media goes up before the push, so a refused file or a refused
-    // upload leaves nothing behind: no branch on the remote, no pull request
-    // with a path in its body.
     // The body is unwrapped first (#189): GitHub renders one newline inside a
     // paragraph as a line break, and an agent writes its prose wrapped at a
     // terminal's width. The media goes on after, so the URLs it adds, one per
     // line, are never joined into the prose.
+    // The media goes up before the push, so a refused file or a refused
+    // upload leaves nothing behind: no branch on the remote, no pull request
+    // with a path in its body.
     let body = await this.attachMedia(t, host, unwrapMarkdown((params.body ?? "").trim()), params.attachments ?? []);
     // The issue is the durable place to report, and `Closes #N` closes the
     // loop when the change lands. A body that names the issue is left alone.
