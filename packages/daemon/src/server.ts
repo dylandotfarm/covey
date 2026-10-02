@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage } from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { PROTOCOL_VERSION, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon, type PullRequestAttachment } from "@covey/protocol";
 import { Engine, EngineError } from "./engine.js";
+import { transcribe, TranscribeError } from "./transcribe.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
 import { readFleet, type DaemonConfig } from "./config.js";
@@ -245,6 +246,25 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return engine.projectGit(p.projectId);
       case "secrets.list":
         return { secrets: engine.secretsList({ threadId: p.threadId, projectId: p.projectId }) };
+      case "transcribe": {
+        // The daemon writes out speech for its clients (#180): the key that
+        // reaches a service is a secret, and a secret belongs to the machine
+        // that runs the work rather than to a phone. A machine with no service
+        // answers `unavailable`, which tells the client to fall back to
+        // whatever it can do itself rather than to say covey is broken.
+        try {
+          return await transcribe({
+            audio: String(p.audio),
+            codec: p.codec === "pcm16" ? "pcm16" : "ima-adpcm",
+            sampleRate: Number(p.sampleRate) || 16000,
+            samples: Number(p.samples) || 0,
+            blockBytes: p.blockBytes === undefined ? undefined : Number(p.blockBytes),
+          });
+        } catch (e) {
+          if (e instanceof TranscribeError) throw new EngineError(e.code, e.message);
+          throw e;
+        }
+      }
       case "secrets.env":
         // The one call that answers with a value, and the one that a token
         // does not open (#126). A secret belongs to the machine that runs the

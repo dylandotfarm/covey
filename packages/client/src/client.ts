@@ -355,6 +355,19 @@ export class MachineClient {
     const env: CommandEnvelope = { ...cmd, commandId: uuid() } as CommandEnvelope;
     return this.rpc("command", env, timeoutMs);
   }
+
+  /**
+   * Ask the daemon to write out what somebody said (#180).
+   *
+   * The timeout is the caller's longest wait, and it is generous on purpose:
+   * the service is usually under a second, but a phone on a mobile link has to
+   * carry the recording there first. A daemon with nothing set up answers the
+   * code `unavailable`, which a caller should read as "do it yourself" rather
+   * than as a failure to show anybody.
+   */
+  transcribe(params: RpcMethods["transcribe"]["params"], timeoutMs = 30000) {
+    return this.rpc("transcribe", params, timeoutMs);
+  }
 }
 
 /** The words for a handshake the daemon refused, where the socket says the status. */

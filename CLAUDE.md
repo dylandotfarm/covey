@@ -163,8 +163,8 @@
   of the phone* and never a fourth client: it holds no covey state, no socket
   and no token, so unplug the app and it is a screen with two buttons. Hold
   talk and it records, let go and the utterance goes to the phone; the phone
-  writes the words with Android's own recogniser, sends them to the thread as
-  an ordinary turn, and sends the answer back to be painted. The chip has
+  passes it to the daemon, which writes out the words (#180), sends them to the
+  thread as an ordinary turn, and sends the answer back to be painted. The chip has
   Bluetooth Low Energy and no Classic, so the link is GATT and never a serial
   port profile. One wire definition, in `packages/client/src/device.ts`, which
   node tests — the other end is C that can never run beside it, so the device
@@ -194,7 +194,16 @@
   second transport, not a fixture, which is how a change is tried with no phone
   in the room and how every picture of a screen was made. `react-native-ble-plx`
   is native, so `mobile/app.config.ts` moved to `0.3.0` and every install needs
-  one more sideload. `docs/DEVICE.md` holds the reasoning and the rules.
+  one more sideload. **The daemon writes out speech, not the phone** (#180): the
+  `transcribe` RPC takes the device's own ADPCM — a quarter of the bytes of the
+  samples — and `packages/daemon/src/transcribe.ts` hands a WAV to a service at
+  `COVEY_TRANSCRIBE_URL` (default `http://127.0.0.1:8790`; the *empty string*
+  turns it off, which is not the same as unset). It is the daemon's job because
+  the key is a secret and secrets live on the machine that runs the work, and
+  because a service can then change with no new app. `unavailable` is the one
+  code that makes a client fall back to its own recogniser; every other failure
+  carries the service's own sentence to the screen, because those sentences were
+  written for it. `docs/DEVICE.md` holds the reasoning and the rules.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled

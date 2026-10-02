@@ -1,5 +1,22 @@
 /**
- * Turning an utterance into words, on the phone (#178).
+ * Turning an utterance into words (#178, #180).
+ *
+ * Two routes, and the daemon's is the one covey wants. The daemon hands the
+ * recording to a transcription service on its own machine (#180): the key that
+ * reaches such a service is a secret, and covey keeps secrets on the machine
+ * that runs the work and never on a phone. It also means the service can change
+ * without anybody installing an app, which matters because an app changes only
+ * by somebody installing one.
+ *
+ * The phone's own recogniser stays as the fallback, for a daemon that has
+ * nothing set up and for a phone with no way to reach one. It is worse - it is
+ * what #180 was raised about - but a device whose button does nothing is worse
+ * still.
+ *
+ * What goes over the wire to the daemon is the device's **own** blocks, not the
+ * samples: four bits a sample rather than sixteen, which on a phone's mobile
+ * link is four times less of a wait. The daemon decodes with the same decoder
+ * the firmware's encoder was written against.
  *
  * Android will transcribe a *file*, and it takes one shape of it: 16 kHz,
  * 16-bit, one channel, PCM in a WAV container. That is exactly what the device
@@ -18,11 +35,13 @@
  * That one listens to a live microphone and this one reads a file; they share
  * the module and nothing else.
  */
+import type { MachineClient, Utterance } from "@covey/client";
 import { File, Paths } from "expo-file-system";
 import {
   AudioEncodingAndroid, ExpoSpeechRecognitionModule,
 } from "expo-speech-recognition";
 import { SAMPLE_RATE, wavFromPcm16 } from "@covey/client";
+import { toBase64 } from "./ble";
 
 /** What came back. `text` is empty when nothing was understood. */
 export interface Transcription {
@@ -73,7 +92,42 @@ async function writeWav(pcm: Int16Array): Promise<File> {
   return file;
 }
 
-export async function transcribe(pcm: Int16Array): Promise<Transcription> {
+/**
+ * Ask the daemon, and fall back to this phone when it has nothing set up.
+ *
+ * `unavailable` is the one code that means "do it yourself". Every other
+ * failure is a real one and is shown to the reader as it came: the service
+ * writes its sentences for this screen, and covey has nothing better to say
+ * about silence than the thing that heard it.
+ */
+export async function transcribeUtterance(
+  client: MachineClient | undefined,
+  utterance: Utterance,
+  pcm: Int16Array,
+): Promise<Transcription & { backend: string }> {
+  if (client) {
+    try {
+      const out = await client.transcribe({
+        audio: toBase64(utterance.audio),
+        codec: "ima-adpcm",
+        sampleRate: utterance.sampleRate,
+        samples: utterance.samples,
+        blockBytes: utterance.blockBytes,
+      });
+      return { text: out.text, error: null, backend: out.backend };
+    } catch (e) {
+      const err = e as { code?: string; message?: string };
+      if (err.code !== "unavailable") {
+        return { text: "", error: err.message || "The words could not be made out.", backend: "daemon" };
+      }
+      // Nothing is set up on that machine. Fall through to this phone.
+    }
+  }
+  const out = await transcribeOnDevice(pcm);
+  return { ...out, backend: "phone" };
+}
+
+export async function transcribeOnDevice(pcm: Int16Array): Promise<Transcription> {
   if (pcm.length === 0) return { text: "", error: "Nothing was recorded." };
 
   let file: File;

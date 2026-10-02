@@ -137,18 +137,50 @@ the two drifted and the words stopped arriving.
 
 ## Transcription
 
-Android's own recogniser, through `expo-speech-recognition` — the same native
-module the composer's microphone button uses (#172). There is no audio API in
-covey and no key to keep.
+**The daemon writes out the words, not the phone** (#180). The phone carries
+the recording to the daemon that holds the thread; the daemon hands it to a
+transcription service on its own machine and sends the words back.
 
-It needs **Android 13**. Below that the recogniser answers `audio-capture`, and
-the device is told which of the two it is rather than being given one word for
-both. A recording covey could not read never becomes a turn: an agent asked a
-question nobody checked is worse than an agent asked nothing.
+Three reasons it belongs there:
 
-When no words come back, the **loudness decides the sentence** — a microphone
-that heard nothing and a recogniser that understood nothing are the same blank
-screen and two different things to fix. That is the #132 rule, kept.
+- The key that reaches a transcription service is a secret, and covey keeps
+  secrets on the machine that runs the work (#126). A phone is not that machine.
+- The service can be changed without anybody installing an app — and an app
+  changes only by somebody installing one.
+- The TUI and the web client get dictation from the same call.
+
+What travels is the device's **own ADPCM blocks**, not the samples: a quarter of
+the bytes, which on a phone's mobile link is a quarter of the wait. The daemon
+decodes with `pcmFromAdpcm` from `@covey/client` — the same decoder the
+firmware's encoder was written against, so there is one definition of the format.
+
+The RPC is `transcribe` and `packages/daemon/src/transcribe.ts` answers it.
+`COVEY_TRANSCRIBE_URL` names the service and defaults to
+`http://127.0.0.1:8790`. Setting it to the **empty string** turns the feature
+off, which is not the same as leaving it unset.
+
+Measured, machine to service and back: a 5-second utterance in about 600 ms, an
+11-second one in about 840 ms; over the daemon's socket end to end, 933 ms for
+11 seconds.
+
+### When it cannot
+
+A daemon with nothing set up answers the code `unavailable`, and **only that
+code** makes the phone fall back to its own recogniser (Android's, which is what
+#180 was raised about — worse, but a device whose button does nothing is worse
+still). Every other failure is real and its sentence goes to the device's screen
+as it came: the service writes its sentences for that screen, and covey has
+nothing better to say about silence than the thing that heard it.
+
+A recording covey could not read never becomes a turn. When no words come back
+the **loudness decides the sentence** — a microphone that heard nothing and a
+recogniser that understood nothing are the same blank screen and two different
+things to fix. That is the #132 rule, kept.
+
+The settings screen names which of the two wrote the last words, because the
+quality gap between them is wide enough that a reader seeing a bad transcript
+should be able to tell, and a daemon that quietly stopped answering would
+otherwise look like a recogniser that suddenly got worse.
 
 ## One thread at a time
 
