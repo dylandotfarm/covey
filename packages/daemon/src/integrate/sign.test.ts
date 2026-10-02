@@ -48,3 +48,12 @@ test("unsigning leaves no blank tail behind", () => {
   assert.equal(unsign(signComment("one line.", ID)), "one line.");
   assert.equal(unsign(`words\n\n<!-- covey-thread: ${ID} -->\n`), "words");
 });
+
+test("a marker in the middle of a body leaves no gap behind", () => {
+  // Covey writes one at the end and nowhere else. An agent that pasted the
+  // source of a comment it was answering can put one anywhere, and a blank
+  // line where it stood would read as a mistake.
+  const body = `First.\n\n<!-- covey-thread: ${ID} -->\n\nSecond.`;
+  assert.equal(unsign(body), "First.\n\nSecond.");
+  assert.equal(unsign(signComment(body, "mine")), "First.\n\nSecond.");
+});

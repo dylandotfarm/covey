@@ -42,6 +42,9 @@
  */
 const MARK = "covey-thread";
 
+/** The marker itself, named once so the reader and the strip cannot drift. */
+const LINE = `<!-- ${MARK}: ([^\\s>]{1,128}) -->`;
+
 /**
  * The marker, at the start of its own line.
  *
@@ -49,13 +52,25 @@ const MARK = "covey-thread";
  * a comment quotes the comment, and `describeEvent` quotes with `  > `, so a
  * signature a thread was *shown* can never be read as a signature it wrote.
  */
-const SIGNATURE = new RegExp(`^<!-- ${MARK}: ([^\\s>]{1,128}) -->$`, "gm");
+const SIGNATURE = new RegExp(`^${LINE}$`, "gm");
+
+/**
+ * The marker and the blank line above it, which is what `unsign` takes out. A
+ * marker in the middle of a body — nothing covey writes, but an agent may paste
+ * one — would otherwise leave its gap behind.
+ */
+const SIGNATURE_BLOCK = new RegExp(`(?:\\r?\\n)*^${LINE}$`, "gm");
 
 /**
  * Put the thread's id at the end of a comment.
  *
  * It goes on after the review tagline, so the tagline stays the last line a
  * reader sees and this is the last line in the source.
+ *
+ * Every comment a *thread* writes is signed, and only those. The comment bar of
+ * the web client (`github.act` in `engine.ts`) leaves its comment unsigned on
+ * purpose: a person wrote it, so the thread watching that pull request has to
+ * hear it as news.
  */
 export function signComment(body: string, threadId: string): string {
   if (!threadId) return body;
@@ -85,5 +100,5 @@ export function signedBy(body: string): string | null {
  * transcript. The watch reads the signed body and every reader gets this one.
  */
 export function unsign(body: string): string {
-  return body.replace(SIGNATURE, "").replace(/\s+$/, "");
+  return body.replace(SIGNATURE_BLOCK, "").replace(/\s+$/, "");
 }
