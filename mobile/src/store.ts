@@ -26,7 +26,7 @@
  * goes.
  */
 import { AppState } from "react-native";
-import { applyDrop, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
+import { applyDrop, coveyCommand, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
 import {
   APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type FleetMember, type GitHubAction, type Lod, type QuestionItem,
 } from "@covey/protocol";
@@ -326,6 +326,17 @@ class Store {
     const v = this.state.view;
     if (!v) return;
     const { machine, threadId } = v;
+    // A covey command is the app's own work and never reaches the agent (#16).
+    // There is no `/` menu on this screen yet, so the command is typed whole.
+    const own = coveyCommand(text);
+    if (own) {
+      this.state.drafts.delete(composerKey(machine, threadId));
+      setPendingAttachments(this.state, machine, threadId, []);
+      this.schedule();
+      if (own.name === "clear") this.clients.get(machine)?.command({ type: "thread.clear", threadId }).catch(this.fail);
+      else this.fail(new Error(`/${own.name} is not a command covey answers`));
+      return;
+    }
     // The tag in the text is the file. Whatever lost its tag does not go.
     const attachments = sendableAttachments(syncAttachments(this.state, machine, threadId, text));
     this.state.drafts.delete(composerKey(machine, threadId));

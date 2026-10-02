@@ -5,7 +5,7 @@
  * re-sends an item every few tens of milliseconds and the phone has one
  * thread for the paint and the keyboard.
  */
-import { applyDrop, budgetValue, MachineClient, uuid } from "@covey/client";
+import { applyDrop, budgetValue, coveyCommand, MachineClient, uuid } from "@covey/client";
 import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
 import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, baseHash, composerKey, emptyState, itemHash, mediaHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
@@ -258,6 +258,18 @@ const actions: Actions = {
     const v = state.view;
     if (!v) return;
     const { machine, threadId } = v;
+    // A covey command is the page's own work and never reaches the agent (#16).
+    const own = coveyCommand(text);
+    if (own) {
+      state.drafts.delete(composerKey(machine, threadId));
+      // The draft went with the command, so its chips go too: a chip for a
+      // file nothing will send is a chip the reader cannot use.
+      setPendingAttachments(state, machine, threadId, []);
+      schedule();
+      if (own.name === "clear") clients.get(machine)?.command({ type: "thread.clear", threadId }).catch(fail);
+      else fail(new Error(`/${own.name} is not a command covey answers`));
+      return;
+    }
     // The tag in the text is the file. Whatever lost its tag does not go.
     const attachments = sendableAttachments(syncAttachments(state, machine, threadId, text));
     state.drafts.delete(composerKey(machine, threadId));

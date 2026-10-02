@@ -729,6 +729,16 @@ export class Engine {
         return this.emitShell({ kind: "thread.upserted", thread: this.db.getThread(t.id) ?? t });
       }
       case "thread.rename": return this.mutateThread(cmd.threadId, (t) => { t.title = cmd.title; t.titleAuto = false; });
+      case "thread.clear": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
+        // The same two guards `turn.revert` keeps, for the same reason: the
+        // rows this removes are the ones a running turn is still writing.
+        if (t.latestTurn?.state === "running") throw new EngineError("busy", "interrupt the running turn first");
+        if ((this.queues.get(t.id)?.length ?? 0) > 0) throw new EngineError("busy", "cancel queued messages first");
+        return this.clearThread(t);
+      }
       case "thread.takeIssue": {
         const t = this.db.getThread(cmd.threadId);
         if (!t) throw new EngineError("not_found", "thread not found");
@@ -2131,6 +2141,47 @@ export class Engine {
     if (!t) throw new EngineError("not_found", "thread not found");
     fn(t);
     return this.putThreadAndEmit(t);
+  }
+
+  /**
+   * Empty a thread's conversation and keep the thread (#16).
+   *
+   * What goes is the conversation and the memory of it: every item, the live
+   * process, and the transcript that process would otherwise resume from. What
+   * stays is everything else the thread is — its id, its project, its
+   * worktree, its branch, its secrets, its issue and its pull request. The
+   * turn checkpoints stay as well, because they name real commits.
+   *
+   * The next message names the thread again, and `startTurn` needs no change
+   * for that: it asks `titleIsAuto(t) && (firstMessage || t.title === "New
+   * thread")`, and the title alone answers both halves. So `lastMessageAt`
+   * stands, which is what keeps the thread where the reader left it — the
+   * sidebar orders by that field, and a cleared thread must not fall to the
+   * bottom of its project.
+   */
+  private clearThread(t: Thread): number {
+    // The live process holds the conversation in its own memory, so it goes
+    // with the rows. The next turn starts a fresh one: `startSession` reads
+    // the transcript of `sessionId` to decide whether to resume, and the new
+    // id has none.
+    this.dropSession(t.id);
+    this.db.clearItems(t.id);
+    this.db.deleteTranscript(t.sessionId);
+    this.chains.forget(t.id);
+    this.forgetAuthFailure(t.id);
+    // A title query in flight was written for the conversation that has gone,
+    // and `titleIsAuto` is true again, so it would land on the empty thread.
+    this.titling.get(t.id)?.abort();
+    this.emitThread(t.id, { kind: "thread.cleared" });
+    return this.mutateThread(t.id, (x) => {
+      x.sessionId = randomUUID();
+      x.title = "New thread";
+      x.titleAuto = true;
+      x.latestTurn = null;
+      x.status = "idle";
+      x.lastError = null;
+      x.pendingApprovals = 0;
+    });
   }
 
   // ---- worktrees ------------------------------------------------------------

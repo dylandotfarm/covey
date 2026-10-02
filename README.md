@@ -162,6 +162,7 @@ when the daemon is somewhere else. Nothing goes to GitHub and nothing is committ
 | `m` | sidebar | move thread to another machine |
 | `r` `x` `D` | sidebar | rename, archive, delete |
 | `enter` / `ctrl+j` | composer | send (a turn already running picks it up at its next tool call) / newline |
+| `/` at the start | composer | commands: Claude Code's own, and covey's `/clear` — empty this conversation and keep the thread, its branch and its place in the sidebar |
 | `cmd+d` / `d` | anywhere / sidebar | show the last turn's diff; `j/k` scroll, `d` or `esc` close |
 | `ctrl+k` → Revert | anywhere | restore files and conversation to before a chosen turn |
 | `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode, this client's settings |

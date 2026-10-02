@@ -200,6 +200,9 @@ export function applyThreadEvent(s: State, machine: string, threadId: string, ev
     case "item.upserted": v.items.set(ev.item.id, ev.item); break;
     case "item.removed": v.items.delete(ev.itemId); break;
     case "thread.updated": v.thread = ev.thread; s.machines.get(machine)?.threads.set(ev.thread.id, ev.thread); break;
+    // `/clear` (#16): the whole transcript at once, and there is no older page
+    // behind an empty one.
+    case "thread.cleared": v.items.clear(); v.hasMore = false; break;
     case "commands.updated": v.commands = ev.commands; break;
   }
   // A resent snapshot carries each item's own seq, older than the
