@@ -92,7 +92,7 @@ function initialState(): AppState {
     machines: new Map([["pi", machine]]), order: ["pi"], selected: { machine: "pi", threadId: "alpha" },
     view, focus: "composer", sidebarCollapsed: false, expanded: {}, toggledRows: new Set(),
     lod: "steps", overlay: null, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(),
-    pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(), selection: null,
+    pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(), selection: null,
     relaunch: null, clientBuild: null, clientStale: false,
   };
 }
@@ -105,7 +105,7 @@ function fakeStore() {
     subscribe: (l: () => void) => { listeners.add(l); return () => { listeners.delete(l); }; },
     getState: () => state,
     pendingRequest: () => null,
-    attachments: () => [],
+    attachments: () => [], pastes: () => [],
     draft: () => "",
     setDraft: () => {},
     setFocus: () => {},
