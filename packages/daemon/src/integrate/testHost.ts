@@ -229,6 +229,7 @@ export function pr(over: Partial<PullRequestFacts> & { number: number }): PullRe
   return {
     number: over.number,
     url: over.url ?? `https://github.com/o/r/pull/${over.number}`,
+    title: over.title ?? `change ${over.number}`,
     author: over.author ?? "agent",
     headRefName: over.headRefName ?? "branch",
     baseRefName: over.baseRefName ?? "main",

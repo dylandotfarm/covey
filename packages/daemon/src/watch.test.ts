@@ -114,8 +114,15 @@ function setup() {
     async command(cmd: Record<string, unknown>) {
       return engine.dispatch({ commandId: randomUUID(), ...cmd } as never);
     },
+    /**
+     * Open a pull request with *no* automated review unless the case asks for
+     * one. Every case below is about the watch, and a reviewer of its own would
+     * put a second thread, a second worktree and a merge gate into a test that
+     * is not about any of them. `reviewLoop.test.ts` is where the review is the
+     * subject, and it passes `reviews`.
+     */
     async open(threadId: string, over: Record<string, unknown> = {}) {
-      return engine.openPullRequest({ threadId, title: "Take issue 94", body: "The change.", ...over });
+      return engine.openPullRequest({ threadId, title: "Take issue 94", body: "The change.", reviews: 0, ...over });
     },
     /** One poll, with the clock moved past the longest back-off first. */
     async poll() {
@@ -174,7 +181,7 @@ test("a thread opens a pull request through covey, and covey records the number 
   s.newThread("t1");
   await s.command({ type: "thread.takeIssue", threadId: "t1", issue: 94 });
   const opened = await s.open("t1");
-  assert.deepEqual(opened, { number: 101, url: "https://github.com/o/r/pull/101" });
+  assert.deepEqual(opened, { number: 101, url: "https://github.com/o/r/pull/101", reviewers: [] }, "no reviewer: this case passed `reviews: 0`");
   assert.equal(s.host.opened.length, 1, "one pull request, in memory");
   assert.equal(s.host.opened[0]!.branch, "covey/t1");
   assert.equal(s.host.opened[0]!.base, "main");

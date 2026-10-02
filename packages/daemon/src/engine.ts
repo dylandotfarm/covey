@@ -14,7 +14,7 @@ import { makeSessionStore } from "./sessionStore.js";
 import { COVEY_PREAMBLE } from "./plugin.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
 import { redactDeep, redactor } from "./redact.js";
-import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
+import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
@@ -22,7 +22,8 @@ import { ChainTracker, summariseActivity } from "./activity.js";
 import { summariseReply } from "./digest.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { ClaudeModels } from "./models.js";
-import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, MergePolicy, MergeMethod, GitHubAction, GitHubItem } from "@covey/protocol";
+import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, WatchRole, MergePolicy, MergeMethod, GitHubAction, GitHubItem, ReviewRequirement, ReviewerRecord, ReviewerState } from "@covey/protocol";
+import { reviewStanding } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { cloneUrlsFor } from "./repos.js";
 import { realGhHost, UploadRefused, type GhHost, type RealHostOptions } from "./integrate/gh.js";
@@ -33,6 +34,7 @@ import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
 import { unwrapMarkdown } from "./integrate/reflow.js";
 import { news, emptyCursor, describeNews, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
+import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -778,6 +780,11 @@ export class Engine {
           // "I am done here" says otherwise. The record stays for the reader.
           const fresh = this.db.getThread(t.id);
           if (fresh?.watch?.state === "watching") { this.endWatch(fresh, "dropped", "The thread was archived, so the watch stopped."); this.db.putThread(fresh); }
+          // A review thread archived before it decided leaves the author
+          // waiting on a verdict that is never coming, so the author is told.
+          // One that signed off is already recorded, and `dropReviewer` leaves
+          // it alone: covey archives a reviewer itself the moment it signs off.
+          if (fresh?.reviewOf) void this.dropReviewer(fresh, "somebody archived the review thread before it decided");
         }
         return this.mutateThread(cmd.threadId, (x) => { x.archivedAt = cmd.archived ? now : null; });
       }
@@ -788,6 +795,9 @@ export class Engine {
         this.dropSession(t.id);
         this.queues.delete(t.id);
         this.forgetAuthFailure(t.id);
+        // Told before the row goes: `dropReviewer` reads this thread to find the
+        // author, and a thread already deleted names nobody.
+        if (t.reviewOf) await this.dropReviewer(t, "somebody deleted the review thread before it decided");
         const proj = this.db.getProject(t.projectId);
         if (proj) void deleteCheckpointRefs(this.gitCwd(t, proj), t.id);
         // The worktree goes with the thread; the branch stays, as it does on
@@ -1170,7 +1180,7 @@ export class Engine {
    * The daemon does it because the daemon has the branch, the `gh` login and
    * the `PATH`; the agent only has to ask.
    */
-  async openPullRequest(params: { threadId: string; title: string; body?: string; draft?: boolean; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod; attachments?: PullRequestAttachment[] }): Promise<{ number: number; url: string }> {
+  async openPullRequest(params: { threadId: string; title: string; body?: string; draft?: boolean; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod; attachments?: PullRequestAttachment[]; reviews?: number }): Promise<{ number: number; url: string; reviewers: string[] }> {
     const t = this.db.getThread(params.threadId);
     if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
     if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
@@ -1206,7 +1216,15 @@ export class Engine {
     fresh.pullRequest = { number: opened.number, url: opened.url, branch: t.branch, base, openedAt: new Date().toISOString() };
     this.startWatch(fresh, opened.number, { maxRounds: params.maxRounds, merge: params.merge, mergeMethod: params.mergeMethod });
     this.putThreadAndEmit(fresh);
-    return opened;
+    // The reviewers start last, and their failure is a note rather than a
+    // throw: the pull request is already open on GitHub, and an error here
+    // would tell the agent its own work failed. A review nobody could start
+    // is a review nobody is waiting for, so the requirement is not raised.
+    const reviewers = await this.startReviewers(fresh.id, reviewCount(params.reviews)).catch((e: any) => {
+      this.note(fresh.id, "warning", `Could not start the automated review of pull request #${opened.number}: ${e?.message ?? String(e)}. The pull request stands, with no review required. Ask again with \`covey pr review\`.`);
+      return [] as string[];
+    });
+    return { ...opened, reviewers };
   }
 
   /**
@@ -1217,24 +1235,280 @@ export class Engine {
   async commentPullRequest(params: { threadId: string; body?: string; attachments?: PullRequestAttachment[] }): Promise<{ number: number; url: string }> {
     const t = this.db.getThread(params.threadId);
     if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
+    // A review thread's comment carries the tagline whichever command asked for
+    // it. A reader has to be able to tell a machine's review from a person's,
+    // and a reviewer that had to remember the marker would one day write a
+    // different one — so covey writes it and the reviewer cannot.
+    return this.postComment(t, params.body ?? "", params.attachments ?? [], t.reviewOf ? "comment" : null);
+  }
+
+  /**
+   * Put one comment on the thread's pull request, tagged or plain.
+   *
+   * The tagline goes on last, after the unwrap and after the attachment URLs,
+   * so it is the final line of the comment whatever else is in it.
+   */
+  private async postComment(t: Thread, rawBody: string, attachments: PullRequestAttachment[], tag: ReviewVerdict | null): Promise<{ number: number; url: string }> {
     if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
-    const number = t.pullRequest?.number ?? t.watch?.number;
+    const number = t.pullRequest?.number ?? t.watch?.number ?? t.reviewOf?.number;
     if (!number) throw new EngineError("no_pull_request", "this thread has no pull request: open one with `covey pr open`, or hand one to covey with `covey pr watch <n>`");
     const p = this.db.getProject(t.projectId);
     if (!p) throw new EngineError("not_found", "project not found");
     const cwd = t.worktreePath ?? p.workspaceRoot;
     const host = this.hostFor({ cwd, allowComment: true, allowAttach: true });
     if (!host.commentPullRequest) throw new EngineError("unsupported", "this host cannot comment on a pull request");
-    const body = await this.attachMedia(t, host, unwrapMarkdown((params.body ?? "").trim()), params.attachments ?? []);
-    if (!body) throw new EngineError("bad_body", "a comment needs a body or a file to attach");
+    let body = await this.attachMedia(t, host, unwrapMarkdown(rawBody.trim()), attachments);
+    if (!body && !tag) throw new EngineError("bad_body", "a comment needs a body or a file to attach");
+    if (tag && t.reviewOf) body = tagComment(body, tag, { index: t.reviewOf.index, of: t.reviewOf.of });
     let left: { url: string };
     try {
       left = await host.commentPullRequest(number, body);
     } catch (e: any) {
       throw new EngineError("gh", `could not comment on pull request #${number}: ${(e?.stderr ?? e?.message ?? String(e)).toString().trim().split("\n")[0]}`);
     }
+    this.rememberPosted(t.id, left.url);
     this.note(t.id, "info", `Commented on pull request #${number}${left.url ? ` (${left.url})` : ""}.`);
     return { number, url: left.url };
+  }
+
+  /**
+   * Record a comment this thread wrote, so its own watch never delivers it back
+   * as news. Without this a reviewer is woken by its own review, and asked to
+   * answer itself: every thread of one pull request writes from one GitHub
+   * account, so no author login can tell the two apart.
+   */
+  private rememberPosted(threadId: string, url: string): void {
+    if (!url) return;
+    const fresh = this.db.getThread(threadId);
+    if (!fresh?.watch) return;
+    const posted = [...(fresh.watch.cursor.posted ?? []), url];
+    fresh.watch.cursor.posted = posted.slice(-POSTED_KEPT);
+    this.db.putThread(fresh);
+  }
+
+  // ---- the automated review: a second thread that reads the change ----
+  //
+  // A thread that opens a pull request gets a reviewer of its own. The reviewer
+  // is an ordinary covey thread — a worktree, a session, a row in the sidebar
+  // under the thread that asked for it — with a worktree at the pull request's
+  // head, a `reviewer` watch on the same number, and a brief that says what it
+  // is for. It comments on the pull request and signs off or asks for changes,
+  // and until it signs off covey does not call the pull request ready and an
+  // `auto` watch does not merge it. `integrate/review.ts` holds the words and
+  // the gate; this part starts the threads and talks to `gh`.
+
+  /**
+   * Start automated reviewers on a thread's pull request, and raise what the
+   * pull request requires by the same number.
+   *
+   * @returns the thread id of each reviewer started.
+   */
+  async requestReview(params: { threadId: string; count?: number }): Promise<{ number: number; reviewers: string[]; required: number }> {
+    const t = this.db.getThread(params.threadId);
+    if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
+    if (t.reviewOf) throw new EngineError("is_review", "this thread is itself a review: a reviewer does not ask for a reviewer");
+    const number = t.pullRequest?.number ?? t.watch?.number;
+    if (!number) throw new EngineError("no_pull_request", "this thread has no pull request: open one with `covey pr open`, or hand one to covey with `covey pr watch <n>`");
+    const count = params.count === undefined ? DEFAULT_REVIEWS : Math.floor(params.count);
+    if (!Number.isFinite(count) || count < 1) throw new EngineError("bad_count", "`covey pr review` starts at least one reviewer");
+    const reviewers = await this.startReviewers(t.id, count);
+    const after = this.db.getThread(t.id);
+    return { number, reviewers, required: after?.watch?.review?.required ?? reviewers.length };
+  }
+
+  /**
+   * Make `count` review threads for one thread's pull request.
+   *
+   * Each reviewer is created and briefed on its own, and a reviewer that fails
+   * to start leaves the ones before it alone: a pull request with one reviewer
+   * of two is reviewed less well than asked for, and that is a fact the author
+   * is told, while a rollback would leave it reviewed not at all. The
+   * requirement counts the reviewers that really started, so the merge gate can
+   * never wait for a thread that does not exist.
+   */
+  private async startReviewers(threadId: string, count: number): Promise<string[]> {
+    if (count <= 0) return [];
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const pr = t.pullRequest;
+    const number = pr?.number ?? t.watch?.number;
+    if (!pr || !number) throw new EngineError("no_pull_request", "this thread has no pull request to review");
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    const already = t.watch?.review?.reviewers.length ?? 0;
+    if (already + count > MAX_REVIEWS) {
+      throw new EngineError("too_many", `one pull request may have ${MAX_REVIEWS} automated reviewers at once, and #${number} has ${already}`);
+    }
+    const title = (await this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot }).pullRequestByNumber(number).catch(() => null))?.title ?? t.title;
+    const started: string[] = [];
+    for (let i = 0; i < count; i++) {
+      // The seat is read fresh each time: `of` has to count every reviewer the
+      // pull request ends up with, so a brief can say "reviewer 2 of 2".
+      const live = this.db.getThread(threadId);
+      if (!live?.watch || live.watch.state !== "watching") break;
+      const index = (live.watch.review?.reviewers.length ?? 0) + 1;
+      const of = Math.max(already + count, index);
+      const id = randomUUID();
+      try {
+        await this.createReviewThread(id, live, p, { number, url: pr.url, branch: pr.branch, base: pr.base, index, of, title });
+      } catch (e: any) {
+        this.note(threadId, "warning", `Could not start reviewer ${index} on pull request #${number}: ${e?.message ?? String(e)}`);
+        break;
+      }
+      this.addReviewer(threadId, { threadId: id, index, state: "reviewing", note: null, startedAt: new Date(this.now()).toISOString(), decidedAt: null });
+      started.push(id);
+    }
+    if (started.length === 0) return [];
+    const fresh = this.db.getThread(threadId);
+    if (fresh) {
+      const standing = reviewStanding(fresh.watch?.review);
+      this.note(threadId, "info", `Started ${started.length} automated review${started.length === 1 ? "" : "s"} of pull request #${number}. Covey will not call it ready to merge until ${standing.required} sign${standing.required === 1 ? "s" : ""} off. Each reviewer is a thread of its own under this one.`);
+      this.putThreadAndEmit(fresh);
+    }
+    return started;
+  }
+
+  /** One review thread: a worktree at the head under review, a watch, a brief. */
+  private async createReviewThread(id: string, author: Thread, p: Project, r: { number: number; url: string; branch: string; base: string; index: number; of: number; title: string }): Promise<void> {
+    const tree = await this.newWorktree(p, id.slice(0, 8), null, r.branch);
+    const now = new Date(this.now()).toISOString();
+    const t: Thread = {
+      id, projectId: p.id, title: `review #${r.number}${r.of > 1 ? ` (${r.index} of ${r.of})` : ""}`, titleAuto: false, provider: "claude",
+      // `agent`, and a child of the thread that asked: the sidebar paints a
+      // reviewer under the author, which is where a reader looks for it.
+      origin: { by: "agent", client: "covey-review", parentThreadId: author.id },
+      sessionId: randomUUID(),
+      // The reviewer reads and comments. It never writes to the repository, so
+      // it inherits the author's model and the machine's own permission mode
+      // and asks for nothing more.
+      model: author.model ?? p.defaultModel ?? this.machine.settings.defaultModel,
+      permissionMode: author.permissionMode,
+      permissionModeExplicit: author.permissionModeExplicit,
+      streaming: author.streaming ?? this.machine.settings.defaultStreaming ?? false,
+      branch: tree.branch, worktreePath: tree.worktreePath, status: "idle", lastError: null,
+      pendingApprovals: 0, queuedTurns: 0, latestTurn: null, lastMessageAt: null, archivedAt: null,
+      pinnedAt: null, movedTo: null,
+      reviewOf: { authorThreadId: author.id, number: r.number, url: r.url, branch: r.branch, base: r.base, index: r.index, of: r.of, startedAt: now },
+      createdAt: now, updatedAt: now,
+    };
+    this.db.putThread(t);
+    this.startWatch(t, r.number, { role: "reviewer" });
+    this.putThreadAndEmit(t);
+    const brief = reviewBrief({
+      number: r.number, url: r.url, title: r.title, branch: r.branch, base: r.base,
+      authorThreadId: author.id, seat: { index: r.index, of: r.of }, issue: author.issue?.number ?? null,
+    });
+    // A turn, not a note: the brief is the reviewer's instruction, and only a
+    // turn starts the session that reads it.
+    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: id, turnId: randomUUID(), text: brief, system: true });
+  }
+
+  /** Add one reviewer to the author's record, and raise what the review requires. */
+  private addReviewer(authorThreadId: string, record: ReviewerRecord): void {
+    const t = this.db.getThread(authorThreadId);
+    if (!t?.watch) return;
+    const review = t.watch.review ?? { required: 0, reviewers: [] };
+    t.watch.review = { required: review.required + 1, reviewers: [...review.reviewers, record] };
+    this.db.putThread(t);
+  }
+
+  /**
+   * One reviewer's verdict, from the review thread itself.
+   *
+   * The words go on the pull request, where a person reads them beside the
+   * change, and the verdict goes on the author's watch, where the merge gate
+   * reads it. The comment goes up first: a verdict recorded for a comment that
+   * never landed would hold a merge for a reason nobody can see.
+   */
+  async reviewDecide(params: { threadId: string; verdict: "approve" | "changes"; body?: string; attachments?: PullRequestAttachment[] }): Promise<{ number: number; url: string; state: ReviewerState; signedOff: number; required: number }> {
+    const t = this.db.getThread(params.threadId);
+    if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
+    const r = t.reviewOf;
+    if (!r) throw new EngineError("not_a_review", "this thread reviews no pull request: `covey review` runs inside a review thread, which covey starts when a pull request is opened");
+    if (params.verdict !== "approve" && params.verdict !== "changes") throw new EngineError("bad_verdict", `${String(params.verdict)} is not a verdict; use approve or changes`);
+    const verdict: ReviewVerdict = params.verdict === "approve" ? "approved" : "changes";
+    if (verdict === "changes" && !(params.body ?? "").trim()) {
+      throw new EngineError("bad_body", "a review that asks for changes needs --body: say what to change and where");
+    }
+    const left = await this.postComment(t, params.body ?? "", params.attachments ?? [], verdict);
+    const state: ReviewerState = verdict === "approved" ? "signedOff" : "changesRequested";
+    const review = this.recordVerdict(t, state, firstLine(params.body ?? ""));
+    const standing = reviewStanding(review);
+    if (verdict === "approved") {
+      // The review is over, so the thread hands its worktree back. The author
+      // hears the sign-off through its own poll, with the comment beside it:
+      // what is on the pull request travels on one channel.
+      this.note(t.id, "info", `Signed off on pull request #${r.number}. ${standing.signedOff} of ${standing.required} automated reviews have signed off. This thread is archived; there is nothing more to do.`);
+      await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId: t.id, archived: true })
+        .catch((e: any) => this.note(t.id, "warning", `Could not archive this review thread: ${e?.message ?? String(e)}`));
+    } else {
+      this.note(t.id, "info", `Asked for changes on pull request #${r.number}. Covey holds the merge until you sign off, and wakes this thread when the author pushes.`);
+    }
+    return { number: left.number, url: left.url, state, signedOff: standing.signedOff, required: standing.required };
+  }
+
+  /**
+   * Write one reviewer's standing onto the author's watch.
+   *
+   * @returns the review as it stands after the write, so the caller can say
+   *          what it now adds up to.
+   */
+  private recordVerdict(reviewThread: Thread, state: ReviewerState, note: string | null): ReviewRequirement {
+    const empty: ReviewRequirement = { required: 0, reviewers: [] };
+    const r = reviewThread.reviewOf;
+    if (!r) return empty;
+    const author = this.db.getThread(r.authorThreadId);
+    const review = author?.watch?.review;
+    if (!author?.watch || !review) return empty;
+    const now = new Date(this.now()).toISOString();
+    const next: ReviewRequirement = {
+      required: review.required,
+      reviewers: review.reviewers.map((x) => x.threadId === reviewThread.id
+        ? { ...x, state, note: note ?? x.note, decidedAt: state === "reviewing" ? null : now }
+        : x),
+    };
+    author.watch.review = next;
+    this.putThreadAndEmit(author);
+    return next;
+  }
+
+  /**
+   * The pull request a reviewer was reading is merged or closed, so its seat is
+   * over. The record is marked `dropped` and the author is *not* told: it is
+   * reading the same merge on its own watch, and a turn saying the review will
+   * never finish on a pull request that has already landed reads as a failure.
+   */
+  private markReviewerOver(reviewThread: Thread, why: string): void {
+    const mine = this.reviewerRecord(reviewThread);
+    if (mine && mine.state === "reviewing") this.recordVerdict(reviewThread, "dropped", why);
+  }
+
+  /** This review thread's row on the author's watch, when both still exist. */
+  private reviewerRecord(reviewThread: Thread): ReviewerRecord | undefined {
+    const id = reviewThread.reviewOf?.authorThreadId;
+    if (!id) return undefined;
+    return this.db.getThread(id)?.watch?.review?.reviewers.find((x) => x.threadId === reviewThread.id);
+  }
+
+  /**
+   * A review that ended with no verdict: the thread was archived by hand or
+   * deleted, or its own watch ran out of rounds. The author is told, because a
+   * dropped reviewer can never sign off and the merge would wait for ever.
+   *
+   * A reviewer that already decided is left alone — archiving is exactly what
+   * covey does to a reviewer that signed off, and that is not a drop.
+   */
+  private async dropReviewer(reviewThread: Thread, why: string): Promise<void> {
+    const r = reviewThread.reviewOf;
+    if (!r) return;
+    const author = this.db.getThread(r.authorThreadId);
+    const mine = author?.watch?.review?.reviewers.find((x) => x.threadId === reviewThread.id);
+    if (!author || !mine || mine.state !== "reviewing") return;
+    const review = this.recordVerdict(reviewThread, "dropped", why);
+    const text = describeDropped({ seat: { index: r.index, of: r.of }, number: r.number, url: r.url, why, review });
+    if (author.watch?.state !== "watching") { this.note(author.id, "warning", text); return; }
+    await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: author.id, turnId: randomUUID(), text, system: true })
+      .catch((e: any) => this.note(author.id, "warning", `${text}\n\n(covey could not deliver this as a turn: ${e?.message ?? String(e)})`));
   }
 
   // ---- the item view (#108): one number, read and acted on from a client ----
@@ -1383,17 +1657,27 @@ export class Engine {
   }
 
   /** Begin, or begin again, the watch on a pull request. A note says so. */
-  private startWatch(t: Thread, number: number, o: { maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }): void {
+  private startWatch(t: Thread, number: number, o: { maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod; role?: WatchRole; review?: ReviewRequirement | null }): void {
     const now = new Date(this.now()).toISOString();
     const rounds = o.maxRounds !== undefined && Number.isFinite(o.maxRounds) ? Math.max(1, Math.floor(o.maxRounds)) : DEFAULT_MAX_ROUNDS;
+    const role: WatchRole = o.role === "reviewer" ? "reviewer" : "author";
     // Manual unless said otherwise: green is not an acceptance, and a merge
-    // is the one act in the loop that a person cannot take back.
-    const merge: MergePolicy = o.merge === "auto" ? "auto" : "manual";
+    // is the one act in the loop that a person cannot take back. A reviewer
+    // never merges at all — it reads and it says — so its policy is not a
+    // choice a caller gets to make.
+    const merge: MergePolicy = role === "author" && o.merge === "auto" ? "auto" : "manual";
     const mergeMethod = mergeMethodOf(o.mergeMethod, "merge");
     t.watch = {
-      number, state: "watching", reason: null, merge, mergeMethod, rounds: 0, maxRounds: rounds, quiet: 0,
+      number, state: "watching", reason: null, merge, mergeMethod, role, rounds: 0, maxRounds: rounds, quiet: 0,
       cursor: emptyCursor(), startedAt: now, polledAt: null, endedAt: null, error: null,
+      // The review record belongs to the thread that owns the pull request. A
+      // reviewer's own standing is one row inside it, on the author's watch.
+      ...(role === "author" ? { review: o.review ?? null } : {}),
     };
+    if (role === "reviewer") {
+      this.note(t.id, "info", `Reviewing pull request #${number}. Covey sends a turn each time the author pushes, and each comment on the pull request. It sends no checks verdict: the build is the author's work. At most ${rounds} push${rounds === 1 ? "" : "es"} wake this thread, and then a person has to look.`);
+      return;
+    }
     const who = merge === "auto"
       ? `Merge policy: auto. Covey merges (${mergeMethod}) once the checks pass against the current base and no review asks for changes, never under a running turn.`
       : "Merge policy: manual. A person merges, or switches this thread to auto.";
@@ -1468,7 +1752,8 @@ export class Engine {
       // between the thread and its merge. Under `manual` it is the person's
       // question, and one `gh` call fewer per poll.
       const base = live.merge === "auto" && facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
-      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base });
+      const role: WatchRole = live.role === "reviewer" ? "reviewer" : "author";
+      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base, role, review: live.review });
       live.cursor = cursor;
       live.polledAt = nowIso;
       live.error = null;
@@ -1483,10 +1768,13 @@ export class Engine {
       // watch is the one that most wants it: its whole purpose is to tell a
       // person the branch is ready, and a phone's cover screen has room for
       // that word and nothing else.
-      const ready = mergeReadiness(facts, base);
+      // The review is the one condition here that GitHub knows nothing about,
+      // so it is handed in. A `reviewer` watch carries none: a reviewer never
+      // merges, and the readiness of the change is the author's row to hold.
+      const ready = mergeReadiness(facts, base, live.review);
       live.readiness = ready;
 
-      if (live.merge === "auto" && facts.state === "OPEN" && !events.some(asksForWork) && cursor.mergeTried !== facts.headRefOid) {
+      if (live.merge === "auto" && facts.state === "OPEN" && !events.some((e) => asksForWork(e, role)) && cursor.mergeTried !== facts.headRefOid) {
         const running = fresh.latestTurn?.state === "running" || fresh.status === "running" || fresh.status === "starting";
         if (ready.ready && !running) {
           const merger = this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot, allowMerge: true });
@@ -1504,21 +1792,35 @@ export class Engine {
       }
       if (events.length === 0) { this.db.putThread(fresh); return; }
 
-      const work = events.some(asksForWork);
+      const work = events.some((e) => asksForWork(e, role));
       const end = events.find(endsWatch);
+      const ctx = {
+        branch: fresh.pullRequest?.branch ?? fresh.reviewOf?.branch ?? fresh.branch ?? "",
+        rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge,
+        role, review: live.review, base: fresh.reviewOf?.base ?? facts.baseRefName,
+      };
       if (work && live.rounds >= live.maxRounds) {
         // The budget is spent. The news goes in the transcript for the
         // reader, and the thread stops here rather than working for ever.
-        const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge });
-        this.note(fresh.id, "warning", text);
-        this.endWatch(fresh, "blocked", `The watch sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work, and the pull request still needs work. A person has to look at it.`);
+        this.note(fresh.id, "warning", describeNews(facts, events, ctx));
+        const why = role === "reviewer"
+          ? `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`
+          : `The watch sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work, and the pull request still needs work. A person has to look at it.`;
+        this.endWatch(fresh, "blocked", why);
         this.putThreadAndEmit(fresh);
+        // A reviewer that blocks can never sign off, and the author would wait
+        // for a verdict that is not coming.
+        if (role === "reviewer") await this.dropReviewer(fresh, "its own watch ran out of rounds");
         return;
       }
       if (work) live.rounds++;
-      const text = describeNews(facts, events, { branch: fresh.pullRequest?.branch ?? fresh.branch ?? "", rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge });
+      ctx.rounds = live.rounds;
+      const text = describeNews(facts, events, ctx);
       if (end) this.endWatch(fresh, end.kind, end.kind === "closed" ? "The pull request was closed without a merge." : end.by === "covey" ? `Covey merged the pull request (${end.method}) under the auto policy.` : "The pull request was merged.");
       this.putThreadAndEmit(fresh);
+      // The pull request is over, so the reviewer's seat is too. The author is
+      // not told: it is reading the same merge on its own watch.
+      if (end && role === "reviewer") this.markReviewerOver(fresh, end.kind === "closed" ? "the pull request was closed" : "the pull request was merged");
       this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
       // A turn, not a note: a note is read by a person, and a turn resumes a
       // session the engine released. This is the whole reason the watch exists.
@@ -1823,13 +2125,25 @@ export class Engine {
    * every thread there did before projects were clones. A clone without its
    * repository is an error, because a bare repository is nowhere to work.
    */
-  private async newWorktree(p: Project, name: string, carry: string | null): Promise<{ worktreePath: string | null; branch: string | null; cleanStart: CleanStart | null; carried: boolean }> {
+  private async newWorktree(p: Project, name: string, carry: string | null, review: string | null = null): Promise<{ worktreePath: string | null; branch: string | null; cleanStart: CleanStart | null; carried: boolean }> {
     const inPlace = async () => ({ worktreePath: null, branch: isGitRepo(p.workspaceRoot) ? await currentBranch(p.workspaceRoot) : null, cleanStart: null, carried: false });
     if (!isGitRepo(p.workspaceRoot)) {
       if (p.kind === "clone") throw new EngineError("git", `${p.workspaceRoot} is not a repository; the bare clone was deleted`);
       return inPlace();
     }
     const path = worktreePath(p, name);
+    // A review thread works *on the branch under review*, because the code it
+    // reads has to be the code on the pull request. The branch name is still
+    // its own: git refuses to check out a branch a second worktree already
+    // holds, and the author's worktree holds that one.
+    if (review) {
+      if (!(await fetchBranch(p.workspaceRoot, review))) throw new EngineError("git", `could not fetch origin/${review} to review it`);
+      const wt = await createWorktree(p.workspaceRoot, name, `origin/${review}`, path);
+      if ("error" in wt) throw new EngineError("git", `could not create a worktree from origin/${review}: ${wt.error}`);
+      const tracked = await trackBranch(wt.path, review);
+      if ("error" in tracked) throw new EngineError("git", `could not follow origin/${review} from the review worktree: ${tracked.error}`);
+      return { worktreePath: wt.path, branch: wt.branch, cleanStart: null, carried: false };
+    }
     if (carry?.startsWith("covey/") && (await fetchBranch(p.workspaceRoot, carry))) {
       const wt = await createWorktree(p.workspaceRoot, name, `origin/${carry}`, path, carry);
       if ("error" in wt) throw new EngineError("git", `could not create worktree from origin/${carry}: ${wt.error}`);
@@ -2710,6 +3024,26 @@ function rewriteCwd(entry: Record<string, unknown>, from: string, to: string): R
 export type { PermissionMode };
 
 /** A merge method a client named, or the fallback. Nonsense is the fallback. */
+/**
+ * How many reviewers `thread.openPullRequest` starts.
+ *
+ * Omitted means one: a change that nobody reads is the case this feature
+ * exists to end, so the review is what happens unless the caller says
+ * otherwise. `0` is that otherwise, and is the `--no-review` flag.
+ */
+function reviewCount(v: number | undefined): number {
+  if (v === undefined) return DEFAULT_REVIEWS;
+  if (!Number.isFinite(v)) return DEFAULT_REVIEWS;
+  return Math.min(MAX_REVIEWS, Math.max(0, Math.floor(v)));
+}
+
+/** A reviewer's last word, short enough for a row on a panel. */
+function firstLine(body: string): string | null {
+  const line = body.trim().split("\n").map((l) => l.trim()).find(Boolean);
+  if (!line) return null;
+  return line.length > 120 ? `${line.slice(0, 117)}...` : line;
+}
+
 function mergeMethodOf(v: unknown, fallback: MergeMethod): MergeMethod {
   return v === "merge" || v === "squash" || v === "rebase" ? v : fallback;
 }

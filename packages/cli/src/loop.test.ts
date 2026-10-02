@@ -122,7 +122,7 @@ test("the thread goes into hello, and each request becomes the right method", as
   assert.match(open.lines[1]!, /merge policy: auto.*do not poll/);
   assert.deepEqual(d.calls[0], { method: "hello", params: { protocolVersion: 1, client: LOOP_CLIENT, threadId: "t-1" } });
   assert.equal(d.calls[1]!.method, "thread.openPullRequest");
-  assert.deepEqual(d.calls[1]!.params, { threadId: "t-1", title: "Fix", body: "Body", draft: false, merge: "auto", mergeMethod: "squash", maxRounds: 2 });
+  assert.deepEqual(d.calls[1]!.params, { threadId: "t-1", title: "Fix", body: "Body", draft: false, merge: "auto", mergeMethod: "squash", maxRounds: 2 }, "no `reviews`: the daemon's own default, which is one reviewer");
 
   const media = [{ name: "demo.mp4", path: "/tmp/demo.mp4" }];
   const withMedia = await runLoop({ kind: "pr.open", title: "Fix", body: "", draft: false, merge: "manual", mergeMethod: "merge", attachments: media }, env);
@@ -178,6 +178,7 @@ test("status reads as lines an agent can act on", () => {
     "watch: blocked (the rounds ran out)",
     "merge policy: auto (merge); rounds used: 3 of 3",
     "last poll error: gh: not logged in",
+    "review: none required",
   ]);
-  assert.deepEqual(describeThread({ id: "t", branch: null } as unknown as Thread), ["issue: none taken", "branch: none", "pull request: none opened through covey", "watch: none"]);
+  assert.deepEqual(describeThread({ id: "t", branch: null } as unknown as Thread), ["issue: none taken", "branch: none", "pull request: none opened through covey", "watch: none", "review: none required"]);
 });

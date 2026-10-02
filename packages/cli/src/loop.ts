@@ -12,36 +12,56 @@
  */
 import { readFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import { DEFAULT_PORT, PROTOCOL_VERSION, type MergeMethod, type MergePolicy, type PullRequestAttachment, type Thread } from "@covey/protocol";
+import { DEFAULT_PORT, PROTOCOL_VERSION, reviewStanding, type MergeMethod, type MergePolicy, type PullRequestAttachment, type ReviewerRecord, type Thread } from "@covey/protocol";
 
 /** What one invocation asks the daemon for. */
 export type LoopRequest =
   | { kind: "issue.take"; issue: number | null }
-  | { kind: "pr.open"; title: string; body: string; draft: boolean; merge: MergePolicy; mergeMethod: MergeMethod; maxRounds?: number; attachments: PullRequestAttachment[] }
+  | { kind: "pr.open"; title: string; body: string; draft: boolean; merge: MergePolicy; mergeMethod: MergeMethod; maxRounds?: number; attachments: PullRequestAttachment[]; reviews?: number }
   | { kind: "pr.comment"; body: string; attachments: PullRequestAttachment[] }
   | { kind: "pr.watch"; number: number | null; merge: MergePolicy; mergeMethod: MergeMethod; maxRounds?: number }
   | { kind: "pr.policy"; merge: MergePolicy; mergeMethod?: MergeMethod }
-  | { kind: "pr.status" };
+  | { kind: "pr.review"; count?: number }
+  | { kind: "pr.status" }
+  /** From a review thread: the verdict that ends or holds the review. */
+  | { kind: "review.decide"; verdict: "approve" | "changes"; body: string; attachments: PullRequestAttachment[] }
+  | { kind: "review.status" };
 
 /** The name this command gives at `hello`. A program, so its threads are an agent's. */
 export const LOOP_CLIENT = "covey-cli";
 
 export const LOOP_USAGE = `  covey issue take <n>       record the issue this thread owns (refused when another thread holds it)
   covey issue drop           clear it
-  covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N] [--attach F]...
+  covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N] [--attach F]... [--reviews N | --no-review]
                              push this thread's branch, open the pull request, and watch it.
-                             --auto: covey merges when the checks pass; else a person merges
+                             --auto: covey merges when the checks pass and the review signs
+                             off; else a person merges
                              --attach F: put a video or an image on the pull request, rendered
                              inline (mp4, mov, webm, png, jpg, jpeg, gif, webp, svg). Repeatable.
                              The URL goes where the body says {{attach:NAME}}, else at the end
+                             --reviews N: start N automated reviewers. One by default
+                             --no-review: start none, and require none
   covey pr comment [--body "…" | --body-file F] [--attach F]...
                              comment on this thread's pull request, with media the same way
+  covey pr review [N]        start N more automated reviewers (one by default) on this
+                             thread's pull request
   covey pr watch <n> [--auto] [--squash|--rebase] [--rounds N]
                              watch a pull request opened by hand
   covey pr watch --stop      stop the watch
   covey pr policy auto|manual [--squash|--rebase]
                              change who merges, on a watch that runs
-  covey pr status            the issue, the pull request and the watch of this thread
+  covey pr status            the issue, the pull request, the watch and the review of this thread
+
+Inside a review thread, which covey starts when a pull request is opened:
+
+  covey review changes --body "…" | --body-file F   [--attach F]...
+                             ask the author for changes, and hold the merge until you sign off
+  covey review approve [--body "…" | --body-file F] [--attach F]...
+                             sign off. Covey archives this thread
+  covey review status        the pull request this thread reviews, and where every reviewer is
+
+Covey adds the tagline that says a machine wrote the comment, to every comment a
+review thread leaves. Do not write it yourself.
 
 These run inside a covey thread, where COVEY_THREAD_ID is set; --thread <id> names one.`;
 
@@ -73,7 +93,7 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
     if (sub === "drop") return { request: { kind: "issue.take", issue: null } };
     return { error: "covey issue takes `take <n>` or `drop`" };
   }
-  if (cmd !== "pr") return { error: `covey does not know ${cmd ?? ""} ${sub ?? ""}`.trim() };
+  if (cmd !== "pr" && cmd !== "review") return { error: `covey does not know ${cmd ?? ""} ${sub ?? ""}`.trim() };
 
   // `--body-file` wins over `--body`; a long body needs no quoting that way.
   const body = (): string | { error: string } => {
@@ -94,6 +114,31 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
     return out;
   };
 
+  // How many reviewers the pull request asks for. One unless the caller says:
+  // the change nobody reads is the case the review exists to end, so
+  // `--no-review` is a thing to say rather than a default to leave alone.
+  const reviews = (): { reviews?: number } | { error: string } => {
+    const v = flag("--reviews");
+    if (has("--no-review")) {
+      if (v !== undefined) return { error: "--no-review and --reviews ask for opposite things; pass one of them" };
+      return { reviews: 0 };
+    }
+    if (v === undefined) return {};
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 0 ? { reviews: n } : { error: `--reviews needs a whole number, not ${v}; --no-review asks for none` };
+  };
+
+  if (cmd === "review") {
+    if (sub === "status") return { request: { kind: "review.status" } };
+    if (sub !== "approve" && sub !== "changes") return { error: "covey review takes `approve`, `changes` or `status`" };
+    const b = body();
+    if (typeof b !== "string") return b;
+    const a = attachments();
+    if (!Array.isArray(a)) return a;
+    if (sub === "changes" && !b.trim()) return { error: "covey review changes needs --body or --body-file: say what to change and where" };
+    return { request: { kind: "review.decide", verdict: sub === "approve" ? "approve" : "changes", body: b, attachments: a } };
+  }
+
   if (sub === "open") {
     const title = flag("--title")?.trim();
     if (!title) return { error: "covey pr open needs --title" };
@@ -103,7 +148,14 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
     if ("error" in r) return r;
     const a = attachments();
     if (!Array.isArray(a)) return a;
-    return { request: { kind: "pr.open", title, body: b, draft: has("--draft"), merge: has("--auto") ? "auto" : "manual", mergeMethod: method(), ...r, attachments: a } };
+    const v = reviews();
+    if ("error" in v) return v;
+    return { request: { kind: "pr.open", title, body: b, draft: has("--draft"), merge: has("--auto") ? "auto" : "manual", mergeMethod: method(), ...r, attachments: a, ...v } };
+  }
+  if (sub === "review") {
+    if (rest[0] === undefined) return { request: { kind: "pr.review" } };
+    const n = number(rest[0], "covey pr review");
+    return typeof n === "number" ? { request: { kind: "pr.review", count: n } } : n;
   }
   if (sub === "comment") {
     const b = body();
@@ -127,7 +179,7 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
     return { request: { kind: "pr.policy", merge, ...(has("--squash") || has("--rebase") ? { mergeMethod: method() } : {}) } };
   }
   if (sub === "status") return { request: { kind: "pr.status" } };
-  return { error: "covey pr takes `open`, `comment`, `watch`, `policy` or `status`" };
+  return { error: "covey pr takes `open`, `comment`, `review`, `watch`, `policy` or `status`" };
 }
 
 export interface LoopEnv {
@@ -178,8 +230,40 @@ export async function runLoop(request: LoopRequest, env: LoopEnv, connect: (url:
           threadId, title: request.title, body: request.body, draft: request.draft,
           merge: request.merge, mergeMethod: request.mergeMethod, maxRounds: request.maxRounds,
           ...(request.attachments.length ? { attachments: request.attachments } : {}),
-        })) as { number: number; url: string };
-        return { ok: true, lines: [`opened pull request #${r.number} ${r.url}`, ...attachedLine(request.attachments), ...policyLine(request.merge, request.mergeMethod)] };
+          ...(request.reviews === undefined ? {} : { reviews: request.reviews }),
+        })) as { number: number; url: string; reviewers?: string[] };
+        return { ok: true, lines: [
+          `opened pull request #${r.number} ${r.url}`,
+          ...attachedLine(request.attachments),
+          ...reviewersLine(r.reviewers, request.reviews),
+          ...policyLine(request.merge, request.mergeMethod, (r.reviewers ?? []).length),
+        ] };
+      }
+      case "pr.review": {
+        const r = (await rpc.call("thread.requestReview", {
+          threadId, ...(request.count === undefined ? {} : { count: request.count }),
+        })) as { number: number; reviewers: string[]; required: number };
+        return { ok: true, lines: [
+          `started ${r.reviewers.length} automated review${r.reviewers.length === 1 ? "" : "s"} of pull request #${r.number}`,
+          `pull request #${r.number} now needs ${r.required} sign-off${r.required === 1 ? "" : "s"} before covey calls it ready. Each reviewer comments on the pull request; covey sends you what it says. Do not read the review yourself and do not comment for it`,
+        ] };
+      }
+      case "review.decide": {
+        const r = (await rpc.call("thread.reviewDecide", {
+          threadId, verdict: request.verdict, body: request.body,
+          ...(request.attachments.length ? { attachments: request.attachments } : {}),
+        })) as { number: number; url: string; signedOff: number; required: number };
+        const tagged = `the comment carries the tagline that says a machine wrote it`;
+        return { ok: true, lines: request.verdict === "approve"
+          ? [`signed off on pull request #${r.number} ${r.url}`, ...attachedLine(request.attachments),
+             `${r.signedOff} of ${r.required} automated reviews have signed off; ${tagged}`,
+             "this review thread is archived. There is nothing more to do: stop the turn"]
+          : [`asked for changes on pull request #${r.number} ${r.url}`, ...attachedLine(request.attachments),
+             `${tagged}. Covey holds the merge until you sign off, and sends you a turn when the author pushes. Stop the turn now`] };
+      }
+      case "review.status": {
+        const snap = (await rpc.call("thread.snapshot", { threadId, limit: 1 })) as { thread: Thread };
+        return { ok: true, lines: describeReview(snap.thread) };
       }
       case "pr.comment": {
         const r = (await rpc.call("thread.commentPullRequest", {
@@ -208,9 +292,24 @@ function attachedLine(attachments: PullRequestAttachment[]): string[] {
   return attachments.length ? [`attached ${attachments.map((a) => a.name).join(", ")}; each renders inline on GitHub`] : [];
 }
 
-function policyLine(merge: MergePolicy, method: MergeMethod): string[] {
+/**
+ * What the agent is told about the reviewers that started, or did not.
+ *
+ * A daemon that answered with no `reviewers` at all is one older than the
+ * automated review, and it says nothing rather than "none started": the two
+ * are different facts, and only one of them asks the reader to go and look.
+ */
+function reviewersLine(reviewers: string[] | undefined, asked: number | undefined): string[] {
+  if (reviewers === undefined) return [];
+  if (asked === 0) return ["no automated review: --no-review was passed, so covey requires no sign-off"];
+  if (reviewers.length === 0) return ["no automated review started; see the notes in this thread for why. covey requires no sign-off"];
+  return [`started ${reviewers.length} automated review${reviewers.length === 1 ? "" : "s"}: each is a thread of its own that reads the change and comments on the pull request. covey sends you what it says, and will not call the pull request ready until it signs off. do not review your own change, and do not answer for the reviewer`];
+}
+
+function policyLine(merge: MergePolicy, method: MergeMethod, reviewers = 0): string[] {
+  const gate = reviewers > 0 ? " and the automated review signs off" : "";
   return [merge === "auto"
-    ? `merge policy: auto. covey merges (${method}) once the checks pass against the current base and no review asks for changes. covey sends each checks verdict, review and comment to this thread as a message; do not poll`
+    ? `merge policy: auto. covey merges (${method}) once the checks pass against the current base${gate} and no review asks for changes. covey sends each checks verdict, review and comment to this thread as a message; do not poll`
     : "merge policy: manual. a person merges, or runs `covey pr policy auto`. covey sends each checks verdict, review and comment to this thread as a message; do not poll"];
 }
 
@@ -225,8 +324,47 @@ export function describeThread(t: Thread): string[] {
   else {
     lines.push(`watch: ${w.state}${w.reason ? ` (${w.reason})` : ""}`);
     lines.push(`merge policy: ${w.merge} (${w.mergeMethod}); rounds used: ${w.rounds} of ${w.maxRounds}`);
+    if (w.readiness) lines.push(w.readiness.ready ? "ready to merge: yes" : `ready to merge: no (${w.readiness.why})`);
     if (w.error) lines.push(`last poll error: ${w.error}`);
   }
+  lines.push(...reviewLines(t));
+  return lines;
+}
+
+/**
+ * The automated review of this thread's pull request, in lines.
+ *
+ * The counting is `reviewStanding` in `@covey/protocol`, which the merge gate
+ * reads too: a status that disagreed with the gate would be worse than none.
+ */
+export function reviewLines(t: Thread): string[] {
+  const review = t.watch?.review;
+  if (!review || review.required <= 0) return ["review: none required"];
+  const s = reviewStanding(review);
+  const parts = [`${s.signedOff} of ${s.required} signed off`];
+  if (s.asking) parts.push(`${s.asking} asking for changes`);
+  if (s.waiting) parts.push(`${s.waiting} reviewing`);
+  if (s.dropped) parts.push(`${s.dropped} dropped`);
+  return [`review: ${parts.join(", ")}`, ...review.reviewers.map(reviewerLine)];
+}
+
+function reviewerLine(r: ReviewerRecord): string {
+  const word = r.state === "signedOff" ? "signed off" : r.state === "changesRequested" ? "asks for changes" : r.state === "dropped" ? "dropped" : "reviewing";
+  return `  reviewer ${r.index} (thread ${r.threadId.slice(0, 8)}): ${word}${r.note ? ` — ${r.note}` : ""}`;
+}
+
+/** What a review thread is for, and where every reviewer of the set stands. */
+export function describeReview(t: Thread): string[] {
+  const r = t.reviewOf;
+  if (!r) return ["this thread reviews no pull request: `covey review` runs inside a review thread, which covey starts when a pull request is opened"];
+  const lines = [
+    `reviewing: pull request #${r.number} ${r.url}`,
+    `branch: ${r.branch} into ${r.base}`,
+    `you are reviewer ${r.index} of ${r.of}; the change was written by thread ${r.authorThreadId}`,
+  ];
+  const w = t.watch;
+  lines.push(w ? `watch: ${w.state}${w.reason ? ` (${w.reason})` : ""}; pushes read: ${w.rounds} of ${w.maxRounds}` : "watch: none");
+  lines.push("say `covey review approve` or `covey review changes --body \"…\"` when you have read the change");
   return lines;
 }
 
