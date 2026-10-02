@@ -91,8 +91,16 @@ unless the user told you to merge on their behalf.
      it. Reply on the pull request with `covey pr comment --body "..."` so the
      reviewer sees the answer where they asked; add `--attach` when a
      screenshot or a video shows the fix. Push, then stop the turn.
-   - *The checks passed* and the policy is manual: nothing to do. Say the
-     pull request is ready for a person. Stop the turn.
+   - *The checks passed, and GitHub will not merge the pull request yet.*
+     A green check is not a merge. The message names what blocks it. The
+     branch is out of date with the base, or it conflicts:
+     `git fetch origin && git merge origin/<base>`, resolve, test, commit,
+     `git push`. A review the repository asks for, or a rule covey cannot
+     name: say so in your reply and stop, because only a person clears it.
+     Never tell the user a pull request is ready to merge when covey said
+     GitHub blocks it.
+   - *The checks passed*, nothing blocks the merge, and the policy is manual:
+     nothing to do. Say the pull request is ready for a person. Stop the turn.
    - *Covey merged the pull request*, or *the pull request was merged*: the
      loop is done. Give a two-line summary and stop.
    - *Blocked*: covey sent as many rounds as it may, or watched for too long.

@@ -469,7 +469,17 @@
   end — `watch.test.ts` and `news.test.ts` hold the rules. An engine test passes
   `EngineOptions.ghHost` so no test reaches GitHub. A watch's merge policy is `manual` unless
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
-  ready, and never under a running turn. An agent asks with `covey issue …` and `covey pr …`
+  ready, and never under a running turn. A green check is not a merge, and the other half
+  of the verdict is `mergeBlock`: a draft, a conflict, a base that has moved, a review the
+  repository asks for, or GitHub's own `BLOCKED` all leave the merge button grey with
+  every check passing, and a watch that said only "the checks passed" taught the agent to
+  answer "ready to merge" about a pull request GitHub refuses. That block *is* part of the
+  checks cursor's key, never a note beside it, because the base branch moves under a pass
+  the thread has already heard. `mergeStateStatus` is still never a checks verdict: GitHub
+  answers `BLOCKED` while the checks run, so every reader of it here waits for them first.
+  The base head is read on every poll under either policy — `isStale` refuses on doubt, so
+  an unknown base made `PullRequestWatch.readiness` (#172) call every `manual` watch not
+  ready, with a reason naming the base it could not read. An agent asks with `covey issue …` and `covey pr …`
   (`packages/cli/src/loop.ts`), and the `/covey` skill in `plugin/skills/covey/SKILL.md`
   tells it the loop. There are two (#191) and they differ in one step, whether the thread
   takes an issue: a number the user named takes the issue loop, and everything the user

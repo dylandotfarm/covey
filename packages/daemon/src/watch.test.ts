@@ -445,6 +445,50 @@ test("the policy is manual unless said otherwise: a green pull request waits for
   );
 });
 
+test("under manual, a green pull request GitHub will not merge says so, and says what to do", async (t) => {
+  // The run of 2026-10-02: six checks green, the merge button grey because
+  // the branch was out of date, and the thread told the reader it was ready.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  s.host.options.base = BASE;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = GREEN_ON_BASE;
+  facts.mergeStateStatus = "BEHIND";
+  await s.poll();
+  const turn = s.turns("t1")[0]!;
+  assert.match(turn, /The checks passed/);
+  assert.match(turn, /GitHub will not merge the pull request yet: the branch is out of date with main/);
+  assert.match(turn, /Merge main into covey\/t1 and push/);
+  assert.doesNotMatch(turn, /a person merges the pull request/);
+  assert.equal(s.thread("t1").watch?.rounds, 1, "this one is the agent's work, so it costs a round");
+  assert.equal(s.thread("t1").watch?.readiness?.ready, false);
+
+  // The agent merged main in and pushed. Nothing blocks the merge now.
+  facts.mergeStateStatus = "CLEAN";
+  facts.headRefOid = "pushed";
+  await s.poll();
+  const next = s.turns("t1").at(-1)!;
+  assert.match(next, /There is nothing to fix/);
+  assert.match(next, /merge policy is manual: a person merges/);
+  assert.deepEqual(s.thread("t1").watch?.readiness, { ready: true }, "the row the phone reads says ready, and means it");
+});
+
+test("under manual the base head is read too, so the row never calls a ready branch unready", async (t) => {
+  // #172 computed the readiness under either policy, but the base head was
+  // read only under auto. `isStale` refuses on doubt, so every manual watch
+  // read as "6 checks started before the base head is unknown".
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  s.host.options.base = BASE;
+  s.host.options.prs!["covey/t1"]!.checks = GREEN_ON_BASE;
+  await s.poll();
+  assert.deepEqual(s.thread("t1").watch?.readiness, { ready: true });
+});
+
 test("under auto, covey merges when the checks pass, but never under a running turn", async (t) => {
   const s = setup();
   t.after(s.cleanup);

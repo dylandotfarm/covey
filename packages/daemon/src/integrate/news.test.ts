@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  news, emptyCursor, asksForWork, endsWatch, describeNews, pollDelayMs, checksVerdict, mergeReadiness,
+  news, emptyCursor, asksForWork, endsWatch, describeNews, pollDelayMs, checksVerdict, mergeBlock, mergeReadiness,
   NO_CHECKS_GRACE_MS, POLL_MIN_MS, POLL_MAX_MS,
 } from "./news.js";
 import { pr } from "./testHost.js";
@@ -191,4 +191,113 @@ test("the daemon merges only what is green against the current base, mergeable, 
   assert.match(why({ number: 7, checks: STARTED, mergeStateStatus: "BEHIND" }), /BEHIND/);
   assert.match(why({ number: 7, checks: STARTED, state: "MERGED" }), /is merged/);
   assert.equal(asksForWork({ kind: "mergeFailed", error: "x" }), false, "a refused merge is a person's question, not a round");
+});
+
+// ---- what stands between a green check and the merge ---------------------------
+
+test("a pass behind a branch rule is not a pass to act on, and names the fix", () => {
+  // The case of 2026-10-02: six checks green, GitHub's merge button grey
+  // because the branch was out of date, and the thread told the reader the
+  // pull request was ready to merge.
+  const facts = pr({ number: 192, checks: GREEN, headRefOid: "fe1a5a2bbb", mergeStateStatus: "BEHIND" });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.deepEqual(r.events.map((e) => e.kind), ["checks"]);
+  const ev = r.events[0]!;
+  assert.equal(ev.kind === "checks" && ev.ci, "passing", "the checks did pass; it is the merge that is blocked");
+  assert.equal(ev.kind === "checks" && ev.block?.code, "behind");
+  assert.equal(asksForWork(ev), true, "the agent clears this one with a merge and a push");
+  const text = describeNews(facts, r.events, CTX);
+  assert.match(text, /The checks passed on fe1a5a2: 1 check succeeded\./);
+  assert.match(text, /GitHub will not merge the pull request yet: the branch is out of date with main/);
+  assert.match(text, /Merge main into covey\/abc and push/);
+  assert.doesNotMatch(text, /nothing to fix/, "the sentence the agent answered the reader with");
+  assert.doesNotMatch(text, /a person merges the pull request/);
+});
+
+test("a base that moves under a pass the thread has heard is news a second time", () => {
+  const green = pr({ number: 7, checks: GREEN, headRefOid: "aaa" });
+  const first = news(green, [], emptyCursor(), T0);
+  assert.equal(first.events[0]!.kind === "checks" && first.events[0]!.block, null);
+  assert.deepEqual(news(green, [], first.cursor, later(60_000)).events, [], "the same pass is delivered once");
+
+  // Somebody merged another pull request, and this branch is behind.
+  const behind = pr({ number: 7, checks: GREEN, headRefOid: "aaa", mergeStateStatus: "BEHIND" });
+  const second = news(behind, [], first.cursor, later(120_000));
+  assert.deepEqual(second.events.map((e) => e.kind), ["checks"], "the head did not move, but what blocks the merge did");
+  assert.equal(second.events[0]!.kind === "checks" && second.events[0]!.block?.code, "behind");
+  assert.deepEqual(news(behind, [], second.cursor, later(180_000)).events, [], "and that too is delivered once");
+
+  // The agent merged main in and pushed, and the checks passed again.
+  const fixed = pr({ number: 7, checks: GREEN, headRefOid: "bbb" });
+  const third = news(fixed, [], second.cursor, later(240_000));
+  assert.equal(third.events[0]!.kind === "checks" && third.events[0]!.block, null);
+});
+
+test("a block only a person can clear costs no round, and says who acts", () => {
+  const facts = pr({ number: 7, checks: GREEN, reviewDecision: "REVIEW_REQUIRED", mergeStateStatus: "BLOCKED" });
+  const r = news(facts, [], emptyCursor(), T0);
+  const ev = r.events[0]!;
+  assert.equal(ev.kind === "checks" && ev.block?.code, "review");
+  assert.equal(asksForWork(ev), false, "a round spent waiting is a round the next failure has lost");
+  const text = describeNews(facts, r.events, CTX);
+  assert.match(text, /requires a review before a merge/);
+  assert.match(text, /a person has to review the pull request/i);
+
+  const rule = pr({ number: 7, checks: GREEN, mergeStateStatus: "BLOCKED" });
+  const only = news(rule, [], emptyCursor(), T0);
+  assert.equal(only.events[0]!.kind === "checks" && only.events[0]!.block?.code, "blocked");
+  assert.match(describeNews(rule, only.events, CTX), /GitHub still blocks the merge, so a person can look at the rule/);
+});
+
+test("the block is read from settled facts, and never from one GitHub is still working out", () => {
+  const code = (over: Parameters<typeof pr>[0]) => mergeBlock(pr(over))?.code ?? null;
+  assert.equal(code({ number: 7 }), null, "a clean pull request blocks on nothing");
+  assert.equal(code({ number: 7, mergeable: "UNKNOWN", mergeStateStatus: "UNKNOWN" }), null, "GitHub has not worked it out yet; a block that flaps re-sends the verdict every poll");
+  assert.equal(code({ number: 7, isDraft: true }), "draft");
+  assert.equal(code({ number: 7, mergeable: "CONFLICTING" }), "conflict");
+  assert.equal(code({ number: 7, mergeStateStatus: "BEHIND" }), "behind");
+  assert.equal(code({ number: 7, reviewDecision: "CHANGES_REQUESTED" }), "changes");
+  assert.equal(code({ number: 7, reviewDecision: "REVIEW_REQUIRED" }), "review");
+  assert.equal(code({ number: 7, mergeStateStatus: "BLOCKED" }), "blocked");
+  assert.equal(code({ number: 7, mergeStateStatus: "UNSTABLE" }), null, "a check that is not required failed; GitHub merges it all the same");
+  assert.equal(code({ number: 7, state: "MERGED", mergeStateStatus: "BEHIND" }), null, "nothing blocks a pull request that is already merged");
+});
+
+test("a failing verdict carries no block: the failure is the thing to fix", () => {
+  const facts = pr({ number: 7, checks: FAILED, mergeStateStatus: "BEHIND" });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.equal(r.events[0]!.kind === "checks" && r.events[0]!.block, null);
+  assert.match(describeNews(facts, r.events, CTX), /The checks failed/);
+});
+
+test("no check at all still names what blocks the merge", () => {
+  const facts = pr({ number: 7, checks: [], mergeStateStatus: "BEHIND" });
+  const early = news(facts, [], emptyCursor(), T0);
+  const late = news(facts, [], early.cursor, later(NO_CHECKS_GRACE_MS));
+  assert.equal(late.events[0]!.kind === "checks" && late.events[0]!.block?.code, "behind");
+  assert.match(describeNews(facts, late.events, CTX), /No check ran on deadbee.*will not merge the pull request yet either: the branch is out of date/s);
+});
+
+test("a conflict reported an hour ago still shows in the next green verdict", () => {
+  const facts = pr({ number: 7, checks: GREEN, mergeable: "CONFLICTING", headRefOid: "aaa" });
+  const first = news(facts, [], emptyCursor(), T0);
+  assert.deepEqual(first.events.map((e) => e.kind), ["checks", "conflict"]);
+  // The conflict event fires once per head. A rerun that turns the checks
+  // green again at the same head must not read as ready.
+  const cursor = { ...first.cursor, checks: null };
+  const again = news(facts, [], cursor, later(3_600_000));
+  assert.deepEqual(again.events.map((e) => e.kind), ["checks"], "the conflict was delivered; the verdict is new");
+  assert.equal(again.events[0]!.kind === "checks" && again.events[0]!.block?.code, "conflict");
+  assert.equal(asksForWork(again.events[0]!), true);
+});
+
+test("covey never calls a pull request ready that GitHub reports as blocked", () => {
+  const base = { oid: "b", committedAt: "2026-09-21T09:00:00Z" };
+  const r = mergeReadiness(pr({ number: 7, checks: STARTED, mergeStateStatus: "BLOCKED" }), base);
+  assert.equal(r.ready, false);
+  assert.match(r.ready ? "" : r.why, /a rule of the repository is not met/);
+  // And the rule is read after the checks, because GitHub answers BLOCKED
+  // while they run: a pending check is named as a pending check.
+  const pending = mergeReadiness(pr({ number: 7, checks: PENDING, mergeStateStatus: "BLOCKED" }), base);
+  assert.match(pending.ready ? "" : pending.why, /has not finished/);
 });
