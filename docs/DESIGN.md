@@ -617,6 +617,24 @@ the second write on `GhHost`, beside `mergePullRequest`; a host has neither unle
 built with it, and `assertReadOnly` still refuses `pr create` on the read path. A pull request
 opened by hand is handed to covey with `thread.watch`.
 
+**A body goes up unwrapped** (#189). GitHub renders one newline inside a paragraph of a pull
+request, an issue or a comment as a line break. A model writes its prose wrapped at about
+eighty columns, so a body that reads as paragraphs where it was written arrives at the reader
+broken after every eightieth character. `integrate/reflow.ts` is pure and joins those lines
+back, one line per paragraph, on the way into `thread.openPullRequest` and
+`thread.commentPullRequest`. It runs *before* `attachMedia`, never after: the attachment URLs
+go in one per line, and a later unwrap would join them into the prose. It joins a run of lines
+only when the run carries the signature of a wrap — the widest line is between 60 and 120
+columns, and every line but the last is already too long to hold the first word of the line
+under it. A fence, an indented block, a table, a heading, a list marker, a blockquote marker,
+a rule and markdown's own hard break each end a run. A column of short lines fails the width
+test, and a column of paths or URLs fails the word test, because a line of one long word is
+never a wrapped sentence. One case stays ambiguous and the module joins it: several long lines
+of several words each, meant as a column, with no list marker and no fence. Nothing in the
+text tells that apart from wrapped prose, and the answer is a list or a fenced block. An issue
+the agent opens with `gh issue create` gets none of this, so the `/covey` skill asks for one
+line per paragraph as well.
+
 **Media on the pull request** is `attachments` on `thread.openPullRequest` and on
 `thread.commentPullRequest` (#105), which `covey pr open --attach F` and `covey pr comment
 --attach F` ask for. GitHub renders a video or an image inline only when the file is a *user
