@@ -27,6 +27,7 @@ function open(input: Record<string, unknown>) {
     getItemByToolUse: () => null,
     onStatus: () => {},
     onTurnComplete: () => {},
+    onUnpromptedTurn: () => null,
     onSessionInit: () => {},
     onModelUsed: () => {},
     onCommands: () => {},

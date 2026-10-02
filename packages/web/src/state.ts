@@ -373,7 +373,13 @@ export function relTime(iso: string | null, now = Date.now()): string {
 export function threadStatusLabel(t: Thread): string {
   if (t.pendingApprovals > 0) return "needs approval";
   if (t.status === "waiting") return "waiting for you";
-  if (t.latestTurn?.state === "running") return t.queuedTurns > 0 ? `working · ${t.queuedTurns} queued` : "working";
+  if (t.latestTurn?.state === "running") {
+    // A turn no message asked for: a background task woke the agent (#156).
+    // Say which it is, or a thread the reader never wrote to reads as one that
+    // answered somebody else.
+    const word = t.latestTurn.unprompted ? "background work" : "working";
+    return t.queuedTurns > 0 ? `${word} · ${t.queuedTurns} queued` : word;
+  }
   if (t.status === "starting") return "starting";
   if (t.status === "error" || t.latestTurn?.state === "error") return t.lastError ? `error: ${t.lastError}` : "error";
   if (t.latestTurn?.state === "interrupted") return "interrupted";

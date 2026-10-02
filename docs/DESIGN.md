@@ -1479,6 +1479,39 @@ and every later message (`task_updated` with `patch.is_backgrounded`, then
 waiting, so `background.state` is what tracks the work itself. A notification for a task
 with no row here becomes a plain note instead, unless the CLI marked it ambient.
 
+## A turn no message asked for (#156)
+
+A background task reports, the CLI hands the notification to the agent, and the agent
+works again: it reads files, runs commands and writes prose. covey asked for none of
+it. `ClaudeSession.currentTurnId` went to `null` at the result that ended the earlier
+turn, so without a rule for this the items land under no turn at all. Measured on a
+live thread: 52 items over 34 minutes, every one of them with `turnId: null`, the
+`turns` table empty for the whole stretch, and the thread reading idle while the agent
+wrote.
+
+So the CLI's output opens a turn. The first message that says this process is writing —
+model output, a tool result, or a command the CLI answered itself — asks the sink for
+one (`openUnpromptedTurn` → `SessionSink.onUnpromptedTurn`), and the engine mints a turn
+id, puts `latestTurn` in `running` and emits the thread. The next `result` ends it the
+way it ends any turn, so the tokens are differenced, the row is stored and the thread
+goes back to idle. `sessionBusy` then sees the work in the thread's own state, rather
+than leaning on `ClaudeSession.answering` alone.
+
+Two rules hold it up:
+
+- The turn is marked. `LatestTurn.unprompted` is what lets a client say why a thread
+  nobody wrote to is busy: the TUI's activity row says "a background task woke this"
+  and `threadStatusLabel` reads "background work" on the phone and on the page.
+- The tail of an interrupted turn opens nothing. `interrupt()` closes the turn before
+  the CLI answers, so the lines that still arrive would open a turn of their own and
+  leave the thread running after esc. `ClaudeSession.interrupted` stands in front of
+  that, and the next result and the next turn both clear it.
+
+Such a turn has no checkpoint and therefore no diff. A `before` tree captured at the
+moment covey noticed would be a snapshot of a working tree the agent had already
+changed, which reads as a diff and is not one; `turn.revert` refuses a turn with no
+checkpoint for the same reason.
+
 ## Folding a chain of tool calls away (#149)
 
 A *chain* is the run of tool calls and thoughts the agent made between two things it

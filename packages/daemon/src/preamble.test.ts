@@ -24,7 +24,7 @@ import { Engine } from "./engine.js";
 const SINK: SessionSink = {
   now: () => "2026-01-01T00:00:00Z",
   upsertItem: () => {}, getItemByToolUse: () => null,
-  onStatus: () => {}, onTurnComplete: () => {}, onSessionInit: () => {}, onModelUsed: () => {},
+  onStatus: () => {}, onTurnComplete: () => {}, onUnpromptedTurn: () => null, onSessionInit: () => {}, onModelUsed: () => {},
   onCommands: () => {},
 };
 

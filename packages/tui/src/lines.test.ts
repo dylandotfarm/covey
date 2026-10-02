@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { wrapSpans, markdownToLines, renderItem, elide, truncate, width, selectedText, highlightLine, colToIndex, isSystemMessage, lineText, lineWidth } from "./lines.js";
+import { wrapSpans, markdownToLines, renderItem, elide, truncate, width, selectedText, highlightLine, colToIndex, isSystemMessage, lineText, lineWidth, activityLine } from "./lines.js";
 import { T } from "./theme.js";
 
 const text = (l: { text: string }[]) => l.map((s) => s.text).join("");
@@ -310,4 +310,14 @@ test("a short note keeps its dash and grows no arrow", () => {
     kind: "note", tone: "info", text: "Context compacted (auto)", files: [],
   } as any, { width: 60, expanded: new Set(), links: { localFiles: true } });
   assert.equal(text(lines[0]!), "  \u2500 Context compacted (auto)");
+});
+
+// A thread at work on nothing the reader sent reads as one that lost its
+// place, so the activity row names the reason (#156).
+test("the activity row says when a background task woke the turn", () => {
+  const plain = activityLine({ tick: 0, elapsedMs: 1000, tools: 2, toolActive: true });
+  assert.ok(!lineText(plain).includes("background"));
+  const woken = activityLine({ tick: 0, elapsedMs: 1000, tools: 2, toolActive: true, unprompted: true });
+  assert.ok(lineText(woken).includes("a background task woke this"), lineText(woken));
+  assert.ok(lineText(woken).includes("running tool"), "it still says which kind of work is in flight");
 });

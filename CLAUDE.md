@@ -391,6 +391,18 @@
   covey never stops: `ClaudeSession.answering` is the second half of `busy`, because the CLI
   ends turns covey never started — a resumed session answers the background-task
   notifications it inherits, and covey reads that result as the end of its own turn.
+- The CLI also *starts* work covey never asked for, and that work gets a turn of its own
+  (#156). A background task reports, the agent reads files and writes prose, and
+  `currentTurnId` is already `null` from the earlier result — so the first line the CLI
+  writes opens a turn (`openUnpromptedTurn`, `SessionSink.onUnpromptedTurn`) and the next
+  result ends it like any other. Without it 52 items landed under no turn, the `turns`
+  table held no row for 34 minutes of real work, and the thread read idle while the agent
+  wrote. The turn is marked, because a reader has to be told why a thread nobody wrote to
+  is busy: `LatestTurn.unprompted` is the TUI's "a background task woke this" and the
+  page's "background work". It takes no checkpoint and so reports no diff — a `before`
+  tree read after the agent started would be a diff that is not one. And the tail of an
+  interrupted turn opens nothing (`ClaudeSession.interrupted`), or esc would leave the
+  thread running.
 - The model picker is read from the Claude Code covey runs, not from a list covey ships:
   the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
   no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The
