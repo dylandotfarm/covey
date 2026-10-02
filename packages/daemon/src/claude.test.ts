@@ -40,7 +40,7 @@ async function run(messages: unknown[], commands: unknown[] = []): Promise<Seen 
     now: () => "2026-01-01T00:00:00Z",
     upsertItem: (item) => { seen.items.push(item); },
     getItemByToolUse: () => null,
-    onStatus: () => {}, onTurnComplete: () => {}, onSessionInit: () => {}, onModelUsed: () => {},
+    onStatus: () => {}, onTurnComplete: () => {}, onUnpromptedTurn: () => null, onSessionInit: () => {}, onModelUsed: () => {},
     onCommands: (c) => { seen.commands.push(c); },
   };
   const store = { append: () => {}, load: () => null, listSessions: () => [] } as unknown as SessionStore;
@@ -70,7 +70,7 @@ test("the session tells the agent which thread and project it is working in", as
   const sink: SessionSink = {
     now: () => "2026-01-01T00:00:00Z",
     upsertItem: () => {}, getItemByToolUse: () => null,
-    onStatus: () => {}, onTurnComplete: () => {}, onSessionInit: () => {}, onModelUsed: () => {},
+    onStatus: () => {}, onTurnComplete: () => {}, onUnpromptedTurn: () => null, onSessionInit: () => {}, onModelUsed: () => {},
     onCommands: () => {},
   };
   const store = { append: () => {}, load: () => null, listSessions: () => [] } as unknown as SessionStore;
@@ -96,7 +96,7 @@ test("the session takes the covey plugin, and asks for none when there is none",
   const sink: SessionSink = {
     now: () => "2026-01-01T00:00:00Z",
     upsertItem: () => {}, getItemByToolUse: () => null,
-    onStatus: () => {}, onTurnComplete: () => {}, onSessionInit: () => {}, onModelUsed: () => {},
+    onStatus: () => {}, onTurnComplete: () => {}, onUnpromptedTurn: () => null, onSessionInit: () => {}, onModelUsed: () => {},
     onCommands: () => {},
   };
   const store = { append: () => {}, load: () => null, listSessions: () => [] } as unknown as SessionStore;

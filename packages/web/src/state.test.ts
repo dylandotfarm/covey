@@ -164,6 +164,15 @@ test("the tone and the label read the same facts the TUI reads", () => {
   assert.equal(threadStatusLabel(done), "idle");
 });
 
+// A background task woke the agent, so the thread works on nothing the reader
+// sent (#156). The label is the only thing that can say so.
+test("a turn no message asked for says it is background work", () => {
+  const woken = thread("t", "a", { status: "running", latestTurn: { turnId: "x", state: "running", startedAt: "", completedAt: null, unprompted: true } });
+  assert.equal(threadTone(woken), "busy");
+  assert.equal(threadStatusLabel(woken), "background work");
+  assert.equal(threadStatusLabel({ ...woken, queuedTurns: 2 }), "background work · 2 queued");
+});
+
 test("relTime says now, minutes, hours, days", () => {
   const now = Date.parse("2026-09-21T12:00:00Z");
   assert.equal(relTime("2026-09-21T11:59:30Z", now), "now");

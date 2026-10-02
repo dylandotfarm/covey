@@ -18,6 +18,12 @@ export interface SessionSink {
   getItemByToolUse(toolUseId: string): ToolCallItem | null;
   onStatus(status: "starting" | "running" | "waiting" | "idle" | "error" | "interrupted", error?: string): void;
   onTurnComplete(info: { usage: TurnUsage; isError: boolean; result: string; userMessageUuid: string | null }): void;
+  /**
+   * The CLI is writing and covey holds no turn: a background task reported and
+   * woke the agent (#156). Open a turn for the work and answer with its id, or
+   * `null` when there is no thread to open one on.
+   */
+  onUnpromptedTurn(): string | null;
   onSessionInit(info: { model: string; claudeCodeVersion: string; permissionMode: string }): void;
   onModelUsed(model: string): void;
   /** The whole `/` menu for this thread, replacing whatever it held before. */
@@ -113,8 +119,21 @@ export class ClaudeSession {
    * So the output itself is the second half of `busy`. It says nothing about
    * whose work it is, which is the point — a process that is writing is a
    * process covey must not stop.
+   *
+   * It stays the second half even though that output now opens a turn
+   * (`openUnpromptedTurn`, #156), because the two cover different moments: a
+   * turn opens at the first line the CLI writes, and this holds the session
+   * through an interrupt, whose turn covey closed before the CLI answered.
    */
   private answering = false;
+  /**
+   * An interrupt is in flight. The turn is over as far as covey is concerned,
+   * but the CLI may still write the tail of it, and that output must not open
+   * a turn of its own — esc would then leave the thread reading running. The
+   * flag is cleared at the next result and at the next turn, so it cannot
+   * stick and hide real work.
+   */
+  private interrupted = false;
   /**
    * Commands the session reported as bound to the terminal that runs the CLI.
    * The init message names them; `supportedCommands()` and the
@@ -248,6 +267,7 @@ export class ClaudeSession {
   sendTurn(turnId: string, text: string, attachments: Attachment[] = []) {
     this.currentTurnId = turnId;
     this.turnStartedAt = Date.now();
+    this.interrupted = false;
     this.enqueue(text, attachments);
     this.sink.onStatus("running");
     this.wake?.();
@@ -312,6 +332,7 @@ export class ClaudeSession {
     // idle sweep would never release it.
     this.currentTurnId = null;
     this.answering = false;
+    this.interrupted = true;
     this.sink.onStatus("interrupted");
   }
 
@@ -532,6 +553,29 @@ export class ClaudeSession {
     return this.ordinals.n++;
   }
 
+  /**
+   * Open a turn for work covey never asked for.
+   *
+   * The CLI starts work covey never asked for, as it ends turns covey never
+   * started. A background task completes, the CLI hands the notification to
+   * the agent, and the agent reads files, runs commands and writes prose —
+   * with no turn in flight, because `currentTurnId` went to null at the
+   * earlier result. Measured on 2026-09-25: 52 items over 34 minutes, every
+   * one of them filed under no turn, while the thread read idle and the
+   * `turns` table held no row for any of it (#156).
+   *
+   * So the output itself opens a turn, which the next result ends like any
+   * other. `answering` is then no longer the only thing holding the session:
+   * the thread says running, `sessionBusy` sees it, and `onTurnComplete`
+   * accounts for the work.
+   */
+  private openUnpromptedTurn() {
+    const turnId = this.sink.onUnpromptedTurn();
+    if (!turnId) return;
+    this.currentTurnId = turnId;
+    this.turnStartedAt = Date.now();
+  }
+
   /** A task has left the foreground: remember it, and say so on its row. */
   private goneToBackground(taskId: string) {
     this.backgrounded.add(taskId);
@@ -562,13 +606,18 @@ export class ClaudeSession {
   }
 
   private handle(msg: SDKMessage) {
-    const now = this.sink.now();
-    const base = { threadId: this.params.threadId, turnId: this.currentTurnId, seq: 0, createdAt: now, updatedAt: now };
     // Model output, a tool result and a command the CLI answered itself all
     // mean the same thing here: this process is in the middle of something.
     // The `result` case below is the only one that takes it back.
-    if (msg.type === "assistant" || msg.type === "stream_event" || msg.type === "user"
-      || (msg.type === "system" && msg.subtype === "local_command_output")) this.answering = true;
+    const writing = msg.type === "assistant" || msg.type === "stream_event" || msg.type === "user"
+      || (msg.type === "system" && msg.subtype === "local_command_output");
+    if (writing) {
+      this.answering = true;
+      // Ahead of `base`, so this message's own items carry the new turn.
+      if (this.currentTurnId === null && !this.interrupted) this.openUnpromptedTurn();
+    }
+    const now = this.sink.now();
+    const base = { threadId: this.params.threadId, turnId: this.currentTurnId, seq: 0, createdAt: now, updatedAt: now };
     switch (msg.type) {
       case "system": {
         if (msg.subtype === "init") {
@@ -742,6 +791,7 @@ export class ClaudeSession {
         }
         this.currentTurnId = null;
         this.answering = false;
+        this.interrupted = false;
         return;
       }
       default:
