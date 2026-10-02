@@ -41,17 +41,18 @@ import type { ExpoConfig } from "expo/config";
 /**
  * The version the runtime is keyed on. An update must match the app it lands in.
  *
- * `0.2.0` because `expo-speech-recognition` is native code, and a bundle that
- * calls it cannot run in an app built without it. Moving this moves the runtime
- * version, so a `0.1.0` install is offered nothing further — `updates.ts` in the
- * daemon answers it `noUpdateAvailable` rather than a manifest it could not use.
- * That is the protection working, and the cost is one sideload.
+ * `0.2.0` was `expo-speech-recognition`; `0.3.0` is `react-native-ble-plx`, for
+ * the device (#178). Both are native code, and a bundle that calls one cannot
+ * run in an app built without it. Moving this moves the runtime version, so a
+ * `0.2.0` install is offered nothing further — `updates.ts` in the daemon
+ * answers it `noUpdateAvailable` rather than a manifest it could not use. That
+ * is the protection working, and the cost is one sideload.
  *
  * **Move this whenever a native module is added or removed, and at no other
  * time.** A JavaScript change ships over the air and wants no bump; a bump
  * strands every installed app until somebody installs the new one by hand.
  */
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 const updatesUrl = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL?.trim();
 /** The certificate is committed; the private key that matches it is not. */
@@ -105,6 +106,11 @@ export default (): ExpoConfig => ({
     // `userInterfaceStyle: "dark"` above does nothing without this: the setting
     // is about the *system's* surfaces — the keyboard, the navigation bar — and
     // the app's own palette cannot reach them. Prebuild says so if it is missing.
+    // The device (#178). The plugin writes the Bluetooth permissions into the
+    // manifest: Android 12 split them into BLUETOOTH_SCAN and BLUETOOTH_CONNECT
+    // and wants `neverForLocation` on the scan, which is true here — covey
+    // looks for one service and reads no advertisement it did not come for.
+    ["react-native-ble-plx", { isBackgroundEnabled: false, neverForLocation: true }],
     "expo-system-ui",
     "expo-image",
     "expo-video",

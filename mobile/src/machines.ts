@@ -87,3 +87,14 @@ export async function readLod(): Promise<string | null> {
 export async function saveLod(lod: string): Promise<void> {
   await AsyncStorage.setItem(LOD_KEY, lod).catch(() => {});
 }
+
+/** Whether the reader asked covey to look for a device (#178). */
+const DEVICE_KEY = "covey.device";
+
+export async function readDeviceWanted(): Promise<boolean> {
+  try { return (await AsyncStorage.getItem(DEVICE_KEY)) === "1"; } catch { return false; }
+}
+
+export async function saveDeviceWanted(on: boolean): Promise<void> {
+  await AsyncStorage.setItem(DEVICE_KEY, on ? "1" : "0").catch(() => {});
+}
