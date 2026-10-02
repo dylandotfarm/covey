@@ -35,7 +35,7 @@ import { projectRows } from "@covey/web";
 import { threadIsBusy, type AssistantMessageItem, type TimelineItem } from "@covey/protocol";
 import { store } from "../store";
 import { DeviceLink, type LinkState } from "./ble";
-import { transcribe } from "./transcribe";
+import { transcribeUtterance } from "./transcribe";
 
 /** One row of the device's menu, and where it actually lives. */
 interface Row extends DeviceThread {
@@ -55,6 +55,15 @@ export interface DeviceInfo {
   pointedAt: string | null;
   /** What the bridge is doing, for a line under the switch. */
   doing: string | null;
+  /**
+   * What wrote the last words: the daemon's service, or this phone.
+   *
+   * Worth saying out loud. The two differ enough in quality that a reader who
+   * sees a bad transcript should be able to tell which one made it, and a
+   * daemon that quietly stopped answering would otherwise look like a
+   * recogniser that suddenly got worse.
+   */
+  transcriber: string | null;
 }
 
 /**
@@ -93,7 +102,7 @@ export class DeviceBridge {
 
   info: DeviceInfo = {
     state: "off", detail: null, name: null, firmware: null, battery: null,
-    pointedAt: null, doing: null,
+    pointedAt: null, doing: null, transcriber: null,
   };
 
   /** Called whenever `info` changed, so the settings screen repaints. */
@@ -275,9 +284,17 @@ export class DeviceBridge {
     await this.link.send(Down.state, writeState(Paint.hearing));
     this.say("writing out what was said");
 
+    /*
+     * The samples are decoded here even though the daemon is sent the blocks.
+     * They are what `loudness` reads, and loudness is what tells a microphone
+     * that heard nothing from a recogniser that understood nothing - the same
+     * blank screen and two different things to fix (#132).
+     */
     const pcm = pcmFromAdpcm(utterance.audio, utterance.blockBytes, utterance.samples);
     const loud = loudness(pcm);
-    const { text, error } = await transcribe(pcm);
+    const { text, error, backend } = await transcribeUtterance(
+      store.client(row.machine), utterance, pcm,
+    );
 
     if (!text) {
       /*
@@ -299,6 +316,7 @@ export class DeviceBridge {
 
     await this.link.send(Down.text, writeText(TextKind.heard, text));
     await this.link.send(Down.ack, writeAck(true, "Sent."));
+    this.info.transcriber = backend;
 
     const client = store.client(row.machine);
     if (!client) {

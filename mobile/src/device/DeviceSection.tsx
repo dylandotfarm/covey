@@ -87,6 +87,13 @@ export function DeviceSection() {
               <Text style={S.subtle}>
                 {info.doing ?? "Hold talk on the device to speak to this thread."}
               </Text>
+              {info.transcriber ? (
+                <Text style={S.subtle}>
+                  {info.transcriber === "phone"
+                    ? "Words written by this phone."
+                    : `Words written by the machine (${info.transcriber}).`}
+                </Text>
+              ) : null}
             </View>
           </Row>
         ) : null}

@@ -2038,6 +2038,49 @@ export interface RpcMethods {
     result: { secrets: SecretEntry[] };
   };
   /**
+   * Turn a recording into words (#180).
+   *
+   * The device records, the phone carries the bytes, and the *daemon* writes
+   * out the words. It is the daemon's job for three reasons. The key that
+   * reaches a transcription service is a secret, and covey keeps secrets on the
+   * machine that runs the work and never on a phone. The choice of service can
+   * then change without a new app, which matters because an app changes only by
+   * somebody installing one. And the TUI and the web client get dictation from
+   * the same call.
+   *
+   * `audio` is base64. `ima-adpcm` is what the device sends — four bits a
+   * sample, which is the only reason an utterance fits in the radio time
+   * Bluetooth Low Energy has — and `pcm16` is for a caller that already has
+   * samples. Either way the daemon decodes with `@covey/client`'s own decoder,
+   * so the device's format is read by the same code that wrote it.
+   *
+   * `samples` is what the recorder actually recorded. A block of ADPCM is a
+   * fixed 505 samples and a reader lets go of the button whenever they like, so
+   * the last block is padded; without this count the service is handed up to
+   * 31 ms of sound nobody made at the end of every sentence.
+   *
+   * The daemon answers `unavailable` when no service is set up, which is the
+   * client's signal to fall back to whatever it can do itself rather than to
+   * tell the reader covey is broken.
+   */
+  "transcribe": {
+    params: {
+      audio: string;
+      codec: "ima-adpcm" | "pcm16";
+      sampleRate: number;
+      samples: number;
+      /** `ima-adpcm` only. Bytes in one block; the decoder needs it. */
+      blockBytes?: number;
+    };
+    result: {
+      text: string;
+      /** How long the recording was, by its samples rather than by a clock. */
+      durationMs: number;
+      /** What wrote the words, for a line in the settings screen. */
+      backend: string;
+    };
+  };
+  /**
    * The environment of one thread, values and all, for `covey env exec`.
    *
    * Loopback only. A connection from anywhere else is refused with code

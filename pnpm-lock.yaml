@@ -209,6 +209,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: ^0.3.280
         version: 0.3.280(@anthropic-ai/sdk@0.124.0(zod@4.5.4))(@modelcontextprotocol/sdk@1.30.0(zod@4.5.4))(zod@4.5.4)
+      '@covey/client':
+        specifier: workspace:*
+        version: link:../client
       '@covey/protocol':
         specifier: workspace:*
         version: link:../protocol
