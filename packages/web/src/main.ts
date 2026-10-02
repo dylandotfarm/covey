@@ -451,6 +451,7 @@ function sheetCommand(target: SheetTarget, page: string, id: string): Command | 
     case "mode": return { type: "machine.settings", defaultPermissionMode: (id || null) as PermissionMode | null };
     case "streaming": return { type: "machine.settings", defaultStreaming: id === "on" };
     case "web": return { type: "machine.settings", webEnabled: id === "on" };
+    case "archive": return { type: "machine.settings", archiveOnMerge: id === "on" };
     case "live": return { type: "machine.settings", maxLiveSessions: budgetValue(id) };
     case "idle": return { type: "machine.settings", sessionIdleMinutes: budgetValue(id) };
     default: return null;

@@ -876,6 +876,8 @@ export function machineSheetRows(m: MachineSlot): SheetRow[] {
     { id: "streaming", label: "Default streaming", value: g.defaultStreaming ? "On" : "Off", choices: true },
   ];
   if (!m.primary) rows.push({ id: "web", label: "Web server", value: g.webEnabled ? "On" : "Off", choices: true });
+  // On unless the machine says otherwise, so an absent setting reads as on.
+  rows.push({ id: "archive", label: "Archive when merged", value: g.archiveOnMerge === false ? "Off" : "On", choices: true });
   // The memory this machine spends on live sessions. Not a default a new thread
   // inherits, which is why `sheetNote` says something else on these two pages.
   const budget = m.info?.sessionBudget;
@@ -920,6 +922,7 @@ export function sheetChoices(s: State, sheet: SheetState): SheetChoice[] {
     case "mode": return modeChoices(g.defaultPermissionMode, true);
     case "streaming": return onOffChoices(g.defaultStreaming === true, "new threads show text as it arrives", "new threads show each reply whole");
     case "web": return onOffChoices(g.webEnabled === true, "this machine serves the phone client", "this machine serves nothing");
+    case "archive": return onOffChoices(g.archiveOnMerge !== false, "a merged pull request archives its thread", "the merge arrives as a turn, and the thread stays");
     case "live": return budgetSheetChoices(liveChoices(g.maxLiveSessions, m?.info?.sessionBudget));
     case "idle": return budgetSheetChoices(idleChoices(g.sessionIdleMinutes, m?.info?.sessionBudget));
     default: return [];

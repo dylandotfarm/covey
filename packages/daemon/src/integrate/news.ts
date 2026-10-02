@@ -434,6 +434,32 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
   }
 }
 
+/**
+ * The last poll of a watch that merged, written for the reader instead of for
+ * the agent.
+ *
+ * Covey archives a thread whose pull request merged, and an archived thread
+ * runs no turn — so this note is the last thing in the transcript, and nobody
+ * acts on it. Two things follow. It says what became of the thread, which
+ * `describeEvent` never has to: there the agent is about to read it and the
+ * thread stays. And it carries the rest of the batch, because the poll that
+ * merges often reports the sign-off or the checks in the same breath, and a
+ * reader must not lose a reviewer's words to the archive.
+ */
+export function describeArchive(pr: PullRequestFacts, events: WatchEvent[], ctx: NewsContext): string {
+  const ev = events.find((e): e is Extract<WatchEvent, { kind: "merged" }> => e.kind === "merged");
+  const what = ctx.role === "reviewer"
+    ? "There is nothing left to review."
+    : ev?.by === "covey"
+      ? `Covey merged it (${ev.method ?? "merge"}) under the auto policy. The loop is done.`
+      : "The loop is done.";
+  // The URL ends its own line: a terminal that makes a link of it would take
+  // the full stop of a sentence with it.
+  const head = `Pull request #${pr.number} merged: ${pr.url}\n${what} Covey stopped the watch and archived this thread; write to it to bring it back.`;
+  const rest = events.filter((e) => e !== ev);
+  return rest.length ? [head, "", ...rest.map((e) => `- ${describeEvent(e, pr, ctx)}`)].join("\n") : head;
+}
+
 /** What to do about a block: one instruction, or the wait and why. */
 function describeBlock(block: MergeBlock, pr: PullRequestFacts, ctx: NewsContext): string {
   const round = `This is round ${ctx.rounds} of ${ctx.maxRounds}.`;

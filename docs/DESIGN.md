@@ -882,6 +882,20 @@ too, whichever command asked for it.
 thread drops it, as does `thread.watch` with `null`. The two hand-rolled loops still asking
 GitHub every fifteen seconds an hour after their timeout are the reason.
 
+**A merge puts the thread away.** The loop ends at the merge, so the only answer a turn
+could bring back is "it merged" — a session resumed, a model call spent, and a row the
+reader then archives by hand. The poll that sees the merge therefore writes the news as a
+note and archives the thread. The note is `describeArchive`, and it carries the rest of the
+batch as well as the merge, because the poll that merges often reports the sign-off or the
+checks in the same breath and a reader must not lose a reviewer's words to the archive.
+The setting is `MachineSettings.archiveOnMerge`, a row on the machine's control panel and
+on the web client's machine sheet. It is on unless the machine says otherwise, so `null`
+reads as on and `daemon.json` holds only the refusal; off, the merge arrives as a turn and
+the thread stays where it was. Archiving takes the worktree back and `thread.archive`
+refuses a thread with a turn running, so a merge seen while the thread works waits for the
+end of that turn — and somebody who writes to the thread in the meantime keeps it, because
+a reader with more to say has said the loop is not over.
+
 **Who accepts the work.** The watch carries a merge policy, `PullRequestWatch.merge`, set at
 `thread.openPullRequest` or `thread.watch` and changed with `thread.setMerge` (`M` on the
 thread row, or the palette). The default is `manual`: green is not the gate (#45), so a
@@ -1193,6 +1207,8 @@ daemon current does not mean finding an ssh session for it:
 - **Restart** — the same restart without the pull.
 - **Default model** and **default mode** (manual / auto / bypass) for new threads on that
   machine.
+- **Archive when merged** — whether a watch archives its thread when the pull request
+  merges, rather than sending the merge as a turn. On unless the machine says otherwise.
 - **Live sessions** and **Release when idle** — the two session limits, which is to say how
   much memory that machine spends on Claude sessions. Neither is a default a new thread
   inherits: both apply to the threads running now, and the daemon re-sweeps as soon as one

@@ -304,7 +304,7 @@ test("a moved thread keeps its branch when the remote has it, and starts fresh w
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {
   const settings = async () => (await a.rpc("hello", { protocolVersion: 1, client: "test" })).settings;
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, bind: "loopback" }, "no opinion until one is set");
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, archiveOnMerge: null, bind: "loopback" }, "no opinion until one is set");
 
   await a.rpc("shell.subscribe", {});
   a.pushes.length = 0;
@@ -314,7 +314,7 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
     a.pushes.some((p) => p.push === "shell" && p.event.kind === "machine.updated" && p.event.machine.settings.defaultModel === "claude-opus-5"),
     "the change is broadcast, so every client's panel follows",
   );
-  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, bind: "loopback" });
+  assert.deepEqual((await a.rpc("shell.snapshot", {})).machine.settings, { defaultModel: "claude-opus-5", defaultPermissionMode: "bypassPermissions", defaultStreaming: true, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, archiveOnMerge: null, bind: "loopback" });
   const onDisk = JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8"));
   assert.equal(onDisk.defaultModel, "claude-opus-5", "settings survive a daemon restart");
   assert.ok(onDisk.machineId, "writing settings does not clobber the rest of daemon.json");
@@ -357,7 +357,7 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.deepEqual(await budget(), { idleMinutes: 30, liveLimit: 1, sessionMemoryBytes: SESSION_MEMORY_BYTES }, "the resolved figures follow the settings");
 
   await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null });
-  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, bind: "loopback" }, "and can be cleared again");
+  assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, archiveOnMerge: null, bind: "loopback" }, "and can be cleared again");
   assert.deepEqual(await budget(), fresh, "and the resolved figures come back with them");
 });
 

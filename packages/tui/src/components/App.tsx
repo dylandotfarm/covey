@@ -790,6 +790,8 @@ export function App({ store }: { store: Store }) {
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
       { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
       { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
+      // On unless the machine says otherwise, so an absent setting reads as on.
+      { id: "archive", label: `Archive when merged: ${settings.archiveOnMerge === false ? "off" : "on"}`, hint: settings.archiveOnMerge === false ? "the merge arrives as a turn" : "no turn when a watch merges" },
       ...(settings.bind ? [{ id: "bind", label: `Reachable on: ${bindLabel(settings.bind)}`, hint: "where the daemon listens; changes at once" }] : []),
       // The memory dial of this machine. A session is a subprocess of about
       // 250 MB, so the ceiling is what the reader is really setting; the hint
@@ -838,6 +840,15 @@ export function App({ store }: { store: Store }) {
         case "web": {
           store.setOverlay(null);
           void store.setWebServer(machineKey!, !settings.webEnabled);
+          return;
+        }
+        case "archive": {
+          store.setOverlay(null);
+          const on = settings.archiveOnMerge === false;
+          void store.setMachineDefaults(machineKey!, { archiveOnMerge: on });
+          store.notify(`${info.name}: ${on
+            ? "a thread is archived when its pull request merges"
+            : "a thread hears the merge as a turn and stays on the screen"}`);
           return;
         }
         case "bind": return openPick(`Where ${info.name} listens`, BIND_MODES.map((o) => ({ ...o, hint: o.id === settings.bind ? "current" : o.hint })), (bid) => {

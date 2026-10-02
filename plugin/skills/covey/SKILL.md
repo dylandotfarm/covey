@@ -131,7 +131,11 @@ never run `covey review` from the thread that wrote the change.
    - *The checks passed*, nothing blocks the merge, and the policy is manual:
      nothing to do. Say the pull request is ready for a person. Stop the turn.
    - *Covey merged the pull request*, or *the pull request was merged*: the
-     loop is done. Give a two-line summary and stop.
+     loop is done. Give a two-line summary and stop. Most machines archive the
+     thread at the merge and send no turn for it at all, so the turn you are
+     stopping now is often your last one. Say there what is left open — a
+     follow-up, a thing you did not do — rather than keeping it for after the
+     merge.
    - *Blocked*: covey sent as many rounds as it may, or watched for too long.
      Stop. Tell the user what still fails and what you tried.
 7. **Check the state** at any time with `covey pr status`. It names the issue,
