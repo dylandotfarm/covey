@@ -43,6 +43,20 @@ export interface TranscribeParams {
   blockBytes?: number;
 }
 
+/**
+ * One line a reader can find afterwards.
+ *
+ * Which of the two wrote the words is otherwise invisible: a phone that falls
+ * back to its own recogniser and a daemon that wrote them look the same in the
+ * conversation, and the only tell was the microphone light coming on. So every
+ * recording that reaches here says so, with what it cost - and so does every
+ * one that does not, because `unavailable` is the quiet path and the quiet path
+ * is the one that needs saying out loud.
+ */
+type Log = (message: string) => void;
+
+const defaultLog: Log = (m) => process.stderr.write(`[coveyd] ${m}\n`);
+
 export interface TranscribeResult {
   text: string;
   durationMs: number;
@@ -118,10 +132,12 @@ async function readFailure(res: Response): Promise<TranscribeError> {
  */
 export async function transcribe(
   params: TranscribeParams,
-  opts: { url?: string | null; fetchImpl?: typeof fetch } = {},
+  opts: { url?: string | null; fetchImpl?: typeof fetch; log?: Log } = {},
 ): Promise<TranscribeResult> {
+  const log = opts.log ?? defaultLog;
   const url = opts.url === undefined ? transcribeUrl() : opts.url;
   if (!url) {
+    log("transcribe: nothing set up on this machine; the client will fall back to its own");
     throw new TranscribeError(
       "unavailable",
       "This machine has nothing set up to write out speech.",
@@ -139,6 +155,8 @@ export async function transcribe(
   const wav = wavFromPcm16(pcm, params.sampleRate || 16000);
 
   const call = opts.fetchImpl ?? fetch;
+  const started = Date.now();
+  const seconds = (durationMs / 1000).toFixed(1);
   const stop = AbortSignal.timeout(TIMEOUT_MS);
   let res: Response;
   try {
@@ -151,8 +169,10 @@ export async function transcribe(
   } catch (e) {
     const err = e as Error;
     if (err.name === "TimeoutError" || err.name === "AbortError") {
+      log(`transcribe: ${seconds}s of audio -> no answer in ${TIMEOUT_MS} ms`);
       throw new TranscribeError("timeout", "The service that writes out speech did not answer.");
     }
+    log(`transcribe: ${seconds}s of audio -> nothing answered at ${url}; the client will fall back`);
     // A service that is not running is the ordinary case on a machine nobody
     // set one up on, so it reads as "not set up" rather than as a fault.
     throw new TranscribeError(
@@ -161,16 +181,26 @@ export async function transcribe(
     );
   }
 
-  if (!res.ok) throw await readFailure(res);
+  if (!res.ok) {
+    const failure = await readFailure(res);
+    log(`transcribe: ${seconds}s of audio -> ${failure.code} after ${Date.now() - started} ms`);
+    throw failure;
+  }
 
   const body = (await res.json()) as { text?: unknown; backend?: unknown };
   const text = typeof body.text === "string" ? body.text.trim() : "";
+  const backend = typeof body.backend === "string" ? body.backend : "unknown";
   if (!text) {
+    log(`transcribe: ${seconds}s of audio -> ${backend} heard no words`);
     throw new TranscribeError("no-speech", "Nothing was heard.");
   }
+  log(
+    `transcribe: ${seconds}s of audio -> ${backend} in ${Date.now() - started} ms, ` +
+      `${text.split(/\s+/).length} words`,
+  );
   return {
     text,
     durationMs,
-    backend: typeof body.backend === "string" ? body.backend : "unknown",
+    backend,
   };
 }

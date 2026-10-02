@@ -6,6 +6,9 @@ import {
   type TranscribeParams,
 } from "./transcribe.js";
 
+/** The log goes to stderr in a daemon; a test has nothing to say to a reader. */
+const quiet = () => {};
+
 /** A tone, as something with a shape the codec has to carry. */
 function tone(samples: number, amp = 9000): Int16Array {
   const pcm = new Int16Array(samples);
@@ -77,7 +80,7 @@ describe("the recording", () => {
   it("goes to the service as a WAV, which is the one shape every recogniser takes", async () => {
     const pcm = tone(SAMPLE_RATE); // one second
     const { fetchImpl, seen } = service({ status: 200, body: { text: "hello", backend: "openai" } });
-    const out = await transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl });
+    const out = await transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl, log: quiet });
 
     assert.equal(out.text, "hello");
     assert.equal(out.backend, "openai");
@@ -99,7 +102,7 @@ describe("what a reader is told", () => {
       body: { error: "silent-audio", message: "The microphone recorded only silence; check that it works." },
     });
     await assert.rejects(
-      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl }),
+      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl, log: quiet }),
       (e: TranscribeError) => {
         assert.equal(e.code, "silent-audio");
         assert.match(e.message, /only silence/);
@@ -111,7 +114,7 @@ describe("what a reader is told", () => {
   it("writes its own sentence when the service answers with nothing useful", async () => {
     const { fetchImpl } = service({ status: 503, text: "<html>bad gateway</html>" });
     await assert.rejects(
-      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl }),
+      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl, log: quiet }),
       (e: TranscribeError) => {
         assert.equal(e.code, "http-503");
         assert.match(e.message, /had a fault/);
@@ -124,7 +127,7 @@ describe("what a reader is told", () => {
     // The client reads this one as "do it yourself". A machine nobody set a
     // service up on is not a broken machine.
     await assert.rejects(
-      transcribe(adpcmParams(pcm), { url: null }),
+      transcribe(adpcmParams(pcm), { url: null, log: quiet }),
       (e: TranscribeError) => e.code === "unavailable",
     );
 
@@ -132,7 +135,7 @@ describe("what a reader is told", () => {
       throw Object.assign(new Error("connect ECONNREFUSED"), { name: "TypeError" });
     }) as unknown as typeof fetch;
     await assert.rejects(
-      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl: refused }),
+      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl: refused, log: quiet }),
       (e: TranscribeError) => e.code === "unavailable",
     );
   });
@@ -142,7 +145,7 @@ describe("what a reader is told", () => {
       throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
     }) as unknown as typeof fetch;
     await assert.rejects(
-      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl: hangs }),
+      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl: hangs, log: quiet }),
       (e: TranscribeError) => e.code === "timeout",
     );
   });
@@ -151,17 +154,46 @@ describe("what a reader is told", () => {
     const { fetchImpl, seen } = service({ status: 200, body: { text: "x" } });
     await assert.rejects(
       transcribe({ audio: "", codec: "ima-adpcm", sampleRate: SAMPLE_RATE, samples: 0 },
-        { url: "http://box:8790", fetchImpl }),
+        { url: "http://box:8790", fetchImpl, log: quiet }),
       (e: TranscribeError) => e.code === "audio-empty",
     );
     assert.equal(seen.length, 0, "nothing should have gone over the wire");
+  });
+
+  it("says in the log which of the two wrote the words, and how long it took", async () => {
+    // Without this line the only tell that a phone fell back to its own
+    // recogniser was the microphone light coming on.
+    const lines: string[] = [];
+    const { fetchImpl } = service({ status: 200, body: { text: "one two three", backend: "openai" } });
+    await transcribe(adpcmParams(pcm), {
+      url: "http://box:8790", fetchImpl, log: (m) => lines.push(m),
+    });
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /transcribe: 0\.5s of audio -> openai in \d+ ms, 3 words/);
+  });
+
+  it("says so when there is nothing set up, because that is the quiet path", async () => {
+    const lines: string[] = [];
+    await assert.rejects(transcribe(adpcmParams(pcm), { url: null, log: (m) => lines.push(m) }));
+    assert.match(lines[0]!, /nothing set up on this machine/);
+  });
+
+  it("names the failure in the log as well as to the caller", async () => {
+    const lines: string[] = [];
+    const { fetchImpl } = service({
+      status: 422, body: { error: "silent-audio", message: "The microphone recorded only silence; check that it works." },
+    });
+    await assert.rejects(transcribe(adpcmParams(pcm), {
+      url: "http://box:8790", fetchImpl, log: (m) => lines.push(m),
+    }));
+    assert.match(lines[0]!, /-> silent-audio after \d+ ms/);
   });
 
   it("treats words the service did not find as `no-speech`, not as an empty message", async () => {
     // An empty string sent to an agent as a turn is a turn nobody meant.
     const { fetchImpl } = service({ status: 200, body: { text: "   ", backend: "openai" } });
     await assert.rejects(
-      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl }),
+      transcribe(adpcmParams(pcm), { url: "http://box:8790", fetchImpl, log: quiet }),
       (e: TranscribeError) => e.code === "no-speech",
     );
   });
