@@ -192,3 +192,152 @@ test("the daemon merges only what is green against the current base, mergeable, 
   assert.match(why({ number: 7, checks: STARTED, state: "MERGED" }), /is merged/);
   assert.equal(asksForWork({ kind: "mergeFailed", error: "x" }), false, "a refused merge is a person's question, not a round");
 });
+
+// ---- the two sides of the automated review ----
+//
+// One watch belongs to the thread that wrote the change and one to each thread
+// that reads it. These cases hold the line between what the two hear: the
+// author owns the build, the reviewer owns the code, and neither is woken by
+// its own words.
+
+const REVIEWER = { role: "reviewer" as const };
+const RCTX = { ...CTX, role: "reviewer" as const, base: "main" };
+const tagged = (verdict: "Approved" | "Changes requested") => `Line 20 is wrong.\n\n---\n*${verdict} — from an automated covey review.*`;
+
+test("a reviewer hears the push and the author never does", () => {
+  const first = pr({ number: 7, headRefOid: "aaaaaaa1", checks: GREEN });
+  const seen = news(first, [], emptyCursor(), T0, REVIEWER);
+  assert.deepEqual(seen.events.map((e) => e.kind), [], "the first poll is not a push: the brief named this head");
+
+  const pushed = pr({ number: 7, headRefOid: "bbbbbbb2", checks: GREEN });
+  const r = news(pushed, [], seen.cursor, later(60_000), REVIEWER);
+  assert.deepEqual(r.events.map((e) => e.kind), ["head"]);
+  assert.equal(asksForWork(r.events[0]!, "reviewer"), true, "reading the new diff is work, so it costs a round");
+  assert.equal(asksForWork(r.events[0]!, "author"), false, "an author pushed it: telling it so would cost a round for nothing");
+  const text = describeNews(pushed, r.events, RCTX);
+  assert.match(text, /the pull request you review #7/);
+  assert.match(text, /The author pushed bbbbbbb to branch; it was aaaaaaa/);
+  assert.match(text, /git pull/);
+  assert.match(text, /git diff origin\/main\.\.\.HEAD/);
+  assert.match(text, /covey review approve/);
+});
+
+test("a reviewer hears no checks verdict and no conflict", () => {
+  // Both are the author's work, already in hand. A reviewer woken by a red
+  // build spends a round of its budget on somebody else's job.
+  const facts = pr({ number: 7, checks: FAILED, mergeable: "CONFLICTING" });
+  assert.deepEqual(news(facts, [], emptyCursor(), T0, REVIEWER).events.map((e) => e.kind), []);
+  assert.deepEqual(news(facts, [], emptyCursor(), T0).events.map((e) => e.kind), ["checks", "conflict"], "the author hears both");
+});
+
+test("a reviewer still hears a merge and a close: there is nothing left to review", () => {
+  const merged = news(pr({ number: 7, state: "MERGED" }), [], emptyCursor(), T0, REVIEWER);
+  assert.deepEqual(merged.events.map((e) => e.kind), ["merged"]);
+  assert.match(describeNews(pr({ number: 7, state: "MERGED" }), merged.events, RCTX), /nothing left to review/);
+  assert.match(describeNews(pr({ number: 7, state: "MERGED" }), merged.events, RCTX), /do not comment/);
+});
+
+test("a thread never hears a comment it wrote itself", () => {
+  // Every thread of one pull request writes from one GitHub account, so no
+  // author login can tell a reviewer's comment from the author's. Without this
+  // a reviewer is woken by its own review and asked to answer itself.
+  const mine = { id: "c1", author: "agent", body: tagged("Changes requested"), createdAt: T0, url: "https://github.com/o/r/pull/7#issuecomment-1", path: null, line: null };
+  const theirs = { id: "c2", author: "agent", body: "I pushed the fix.", createdAt: T0, url: "https://github.com/o/r/pull/7#issuecomment-2", path: null, line: null };
+  const cursor = { ...emptyCursor(), posted: [mine.url] };
+  const r = news(pr({ number: 7, comments: [mine, theirs] }), [], cursor, T0, REVIEWER);
+  assert.deepEqual(r.events.map((e) => (e.kind === "comment" ? e.comment.id : e.kind)), ["c2"]);
+  assert.deepEqual(r.cursor.comments, ["c1", "c2"], "the one it wrote is still recorded, so the match runs once");
+});
+
+test("a tagged comment reads as a machine's, and asks the author for the change", () => {
+  const comment = { id: "c1", author: "agent", body: tagged("Changes requested"), createdAt: T0, url: "u", path: null, line: null };
+  const facts = pr({ number: 7, comments: [comment] });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.deepEqual(r.events.map((e) => e.kind), ["comment"]);
+  assert.equal(asksForWork(r.events[0]!, "author"), true, "a machine that asks for changes is work for the author");
+  assert.equal(asksForWork(r.events[0]!, "reviewer"), false, "and discussion for a second reviewer");
+  const text = describeNews(facts, r.events, CTX);
+  assert.match(text, /Comment by an automated covey review, which asks for changes/);
+  assert.match(text, /Make the change, commit, push to covey\/abc/);
+  assert.match(text, /round 1 of 3/);
+  assert.doesNotMatch(describeNews(facts, r.events, RCTX), /Make the change/, "a reviewer is told nothing to do about it");
+});
+
+test("a sign-off comment is labelled and costs no round", () => {
+  const comment = { id: "c1", author: "agent", body: tagged("Approved"), createdAt: T0, url: "u", path: null, line: null };
+  const facts = pr({ number: 7, comments: [comment] });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.equal(asksForWork(r.events[0]!, "author"), false);
+  assert.match(describeNews(facts, r.events, CTX), /which signed off/);
+});
+
+const needing = (signedOff: number, required: number) => ({
+  required,
+  reviewers: Array.from({ length: required }, (_, i) => ({
+    threadId: `r${i}`, index: i + 1, state: i < signedOff ? ("signedOff" as const) : ("reviewing" as const),
+    note: null, startedAt: T0, decidedAt: null,
+  })),
+});
+
+test("the sign-off that completes the review is news, once", () => {
+  const facts = pr({ number: 7, checks: GREEN });
+  const pending = news(facts, [], emptyCursor(), T0, { review: needing(0, 1) });
+  assert.deepEqual(pending.events.map((e) => e.kind), ["checks"], "nothing to say while the review is out");
+
+  const done = news(facts, [], pending.cursor, later(60_000), { review: needing(1, 1) });
+  assert.deepEqual(done.events.map((e) => e.kind), ["reviewed"]);
+  assert.equal(asksForWork(done.events[0]!), false, "a sign-off asks the author for nothing");
+  assert.match(describeNews(facts, done.events, CTX), /Every automated review has signed off \(1 of 1\)/);
+  assert.match(describeNews(facts, done.events, CTX), /ready for a person to merge/);
+
+  const again = news(facts, [], done.cursor, later(120_000), { review: needing(1, 1) });
+  assert.deepEqual(again.events.map((e) => e.kind), [], "and never a second time");
+});
+
+test("asking for another reviewer makes the next sign-off news again", () => {
+  const facts = pr({ number: 7, checks: GREEN });
+  const done = news(facts, [], { ...emptyCursor(), checks: { head: facts.headRefOid, ci: "passing" } }, T0, { review: needing(1, 1) });
+  assert.deepEqual(done.events.map((e) => e.kind), ["reviewed"]);
+  // A second reviewer joins: the review is out again, and the cursor says so.
+  const reopened = news(facts, [], done.cursor, later(60_000), { review: needing(1, 2) });
+  assert.deepEqual(reopened.events.map((e) => e.kind), []);
+  assert.equal(reopened.cursor.reviewed, false);
+  const closed = news(facts, [], reopened.cursor, later(120_000), { review: needing(2, 2) });
+  assert.deepEqual(closed.events.map((e) => e.kind), ["reviewed"]);
+});
+
+test("a watch with no review requirement says nothing about one", () => {
+  // Every pull request opened before this existed, and every `--no-review` one.
+  const facts = pr({ number: 7, checks: GREEN });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.deepEqual(r.events.map((e) => e.kind), ["checks"]);
+  assert.equal(r.cursor.reviewed, false, "nothing to remember");
+  assert.doesNotMatch(describeNews(facts, r.events, CTX), /automated review/);
+});
+
+test("a green check with the review still out says what it is waiting for", () => {
+  const facts = pr({ number: 7, checks: GREEN });
+  const r = news(facts, [], emptyCursor(), T0, { review: needing(0, 2) });
+  const text = describeNews(facts, r.events, { ...CTX, review: needing(0, 2) });
+  assert.match(text, /The checks passed/);
+  assert.match(text, /The automated review has not signed off yet — 0 of 2/);
+  assert.doesNotMatch(text, /merge policy is manual/, "the review is the nearer answer to 'what now'");
+});
+
+test("mergeReadiness holds a green pull request until the review signs off", () => {
+  const base = { oid: "b", committedAt: "2026-09-21T09:00:00Z" };
+  const facts = pr({ number: 7, checks: STARTED, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" });
+  assert.deepEqual(mergeReadiness(facts, base), { ready: true }, "no review asked for, so nothing to wait on");
+  assert.deepEqual(mergeReadiness(facts, base, needing(0, 1)), { ready: false, why: "0 of 1 automated reviews have signed off" });
+  assert.deepEqual(mergeReadiness(facts, base, needing(1, 1)), { ready: true });
+  assert.deepEqual(mergeReadiness(facts, base, needing(0, 0)), { ready: true }, "`--no-review` waits on nobody");
+});
+
+test("a red check is the reason a reader is given, not the review", () => {
+  // A reader told "the review has not signed off" about a branch with a red
+  // check has been told the wrong thing: the review is checked last.
+  const base = { oid: "b", committedAt: "2026-09-21T09:00:00Z" };
+  const r = mergeReadiness(pr({ number: 7, checks: FAILED, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }), base, needing(0, 1));
+  assert.equal(r.ready, false);
+  assert.doesNotMatch(r.ready === false ? r.why : "", /automated review/);
+});

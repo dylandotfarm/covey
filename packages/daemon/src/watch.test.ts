@@ -15,13 +15,12 @@ import { mkdtempSync, rmSync, writeFileSync, truncateSync, readdirSync, existsSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { Query, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { MachineInfo, Project, Thread } from "@covey/protocol";
 import { Db } from "./db.js";
 import { Engine, EngineError } from "./engine.js";
-import type { QueryFactory } from "./claude.js";
 import { fakeHost, pr } from "./integrate/testHost.js";
 import { POLL_MAX_MS, WATCH_MAX_MS, pollDelayMs } from "./integrate/news.js";
+import { autoReply, fakeCli, settle } from "./claudeFake.js";
 
 const MACHINE: MachineInfo = {
   machineId: "m1", name: "test", os: "linux", arch: "arm64", homeDir: "/tmp", daemonVersion: "0",
@@ -41,46 +40,6 @@ function thread(id: string): Thread {
   };
 }
 
-/**
- * A CLI that answers every message with "ok", so a turn the watch sends
- * completes. While `held`, it answers nothing, so a turn stays running.
- */
-interface Cli { held: boolean; release(): void }
-
-function autoReply(cli: Cli): QueryFactory {
-  return ({ prompt, options }) => {
-  const out: unknown[] = [];
-  let wake: (() => void) | null = null;
-  let done = false;
-  const push = (m: unknown) => { out.push(m); wake?.(); wake = null; };
-  options.abortController?.signal.addEventListener("abort", () => { done = true; wake?.(); });
-  void (async () => {
-    for await (const _ of prompt as AsyncIterable<SDKUserMessage>) {
-      while (cli.held) await new Promise<void>((r) => { const prior = cli.release; cli.release = () => { prior(); r(); }; });
-      push({ type: "assistant", parent_tool_use_id: null, message: { id: `msg-${randomUUID()}`, model: "opus", content: [{ type: "text", text: "ok" }] } });
-      push({ type: "result", subtype: "success", is_error: false, result: "ok", modelUsage: {}, user_message_uuid: null });
-    }
-  })();
-  return {
-    async *[Symbol.asyncIterator]() {
-      for (;;) {
-        if (done) return;
-        if (out.length === 0) { await new Promise<void>((r) => (wake = r)); continue; }
-        yield out.shift() as never;
-      }
-    },
-    supportedCommands: async () => [],
-    interrupt: async () => {},
-    setPermissionMode: async () => {},
-    setModel: async () => {},
-    backgroundTasks: async () => true,
-  } as unknown as Query;
-  };
-}
-
-/** Let the engine's queued microtasks and the session's pump run. */
-const settle = async () => { for (let i = 0; i < 12; i++) await new Promise((r) => setTimeout(r, 0)); };
-
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "covey-watch-"));
   const db = new Db(dir);
@@ -89,7 +48,7 @@ function setup() {
     defaultModel: null, createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
   } as Project);
   let clock = Date.parse("2026-09-21T10:00:00Z");
-  const cli: Cli = { held: false, release: () => {} };
+  const cli = fakeCli();
   const host = fakeHost({
     canCreate: true,
     canMerge: true,
