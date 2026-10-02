@@ -697,6 +697,23 @@ they need nothing installed in the agent's shell. The `/covey` skill
 open through covey, stop the turn, and act on each `covey watch:` message; `--auto` only when
 the user said to merge on their behalf.
 
+**Work the user only described takes the same loop without the issue (#191).** The skill began
+at an issue number, so a bug a person described in conversation fell outside it, and the first
+answer to that was to have the agent file the issue itself. That was the wrong default: most of
+what a user asks for in conversation is not issue-shaped — a fix they watched happen, a rename,
+a change named in one sentence — and an issue filed for each one is opened and closed inside the
+minute by the same agent, with no reader in between. So the skill holds two loops that differ in
+one step, and one rule that picks between them: a number the user named, or an issue the user
+asked for, is the issue loop; anything else is the no-issue loop and files nothing. The pull
+request is the record either way, which is why the body of one opened with no issue says what
+the user asked for as well as what changed. Everything after `covey pr open` is the same text
+for both. The daemon needs none of it: `Closes #N` is added only `if (t.issue && …)`, so a
+thread that holds no issue already opens a pull request with no `Closes` line, and
+`watch.test.ts` holds that. What the daemon does carry is the reach of the skill — the
+frontmatter `description` is the whole of what a plugin puts in a session's context, so it names
+the second loop as well, or the model never loads the skill for the work that has no number
+(`plugin.test.ts`).
+
 The skill reaches a session as a **plugin**, not as a personal skill. The daemon hands
 `plugin/` from its own checkout to every session it starts (`plugin.ts`, the SDK's `plugins`
 option, one `--plugin-dir` on the process), so a pull updates it and the internal update

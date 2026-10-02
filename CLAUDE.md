@@ -471,7 +471,14 @@
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
   ready, and never under a running turn. An agent asks with `covey issue …` and `covey pr …`
   (`packages/cli/src/loop.ts`), and the `/covey` skill in `plugin/skills/covey/SKILL.md`
-  tells it the loop. `--attach F` on `covey pr open` and `covey pr comment` puts a video or
+  tells it the loop. There are two (#191) and they differ in one step, whether the thread
+  takes an issue: a number the user named takes the issue loop, and everything the user
+  only described takes the no-issue loop, which files *nothing* — an issue opened and
+  closed inside the minute by the same agent is a row no reader saw. The skill's
+  frontmatter `description` is the whole of what a plugin puts in a session's context, so
+  it names both loops or the model never loads the skill for work that has no number
+  (`plugin.test.ts`). The daemon carries none of this: `Closes #N` goes on only
+  `if (t.issue && …)`. `--attach F` on `covey pr open` and `covey pr comment` puts a video or
   an image on the pull request as a GitHub *user attachment*, the only kind that renders
   inline (`integrate/attach.ts` holds the rules; the route is undocumented and
   `uploadAttachment` fails closed on anything but 201, before the push). A video over 10 MB
