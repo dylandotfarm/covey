@@ -225,12 +225,28 @@ test("a reviewer's comment carries the tagline, and the reviewer never hears its
   assert.equal(left.number, 101);
   assert.match(left.body, /^`lines\.ts` line 20 drops the last row\./);
   assert.match(left.body, new RegExp(REVIEW_TAGLINE, "i"), "covey adds the tagline; the reviewer never writes it");
-  // The URL goes on the reviewer's own cursor, so its own comment is not news.
+  // Two guards, and the signature is the one that holds: covey signs the
+  // comment with the thread that wrote it, and the URL goes on that thread's
+  // own cursor as well.
+  assert.match(left.body, new RegExp(`<!-- covey-thread: ${reviewerId} -->$`), "covey signs it; the reviewer never writes the marker");
   assert.deepEqual(s.thread(reviewerId).watch!.cursor.posted, [`https://github.com/o/r/pull/101#issuecomment-1`]);
+
+  // The poll that follows is the whole point. GitHub lists this comment with no
+  // URL — which is what the cursor could never cover — so without the
+  // signature the reviewer is woken by its own review and asked to answer
+  // itself, and under `auto` it never signs off.
+  await s.poll();
+  const watched = s.turns(reviewerId).filter((x) => x.startsWith("covey watch:"));
+  assert.deepEqual(watched, [], "the reviewer hears nothing: it wrote the only comment there is");
+  const heard = s.turns("t1").filter((x) => x.startsWith("covey watch:")).join("\n");
+  assert.match(heard, /Comment by an automated covey review/, "the author hears it");
+  assert.match(heard, /lines\.ts` line 20 drops the last row/);
+  assert.doesNotMatch(heard, /covey-thread/, "and never sees the marker");
 
   // The author's comment carries no tagline: it is a person's thread's words.
   await s.engine.commentPullRequest({ threadId: "t1", body: "Fixed, thanks." });
   assert.doesNotMatch(s.host.comments.at(-1)!.body, new RegExp(REVIEW_TAGLINE, "i"));
+  assert.match(s.host.comments.at(-1)!.body, /<!-- covey-thread: t1 -->$/, "every comment covey posts is signed, review or not");
 });
 
 test("asking for changes holds the merge, and the reviewer keeps reviewing", async (t) => {
