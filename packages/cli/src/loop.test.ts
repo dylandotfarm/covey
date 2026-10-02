@@ -182,3 +182,73 @@ test("status reads as lines an agent can act on", () => {
   ]);
   assert.deepEqual(describeThread({ id: "t", branch: null } as unknown as Thread), ["issue: none taken", "branch: none", "pull request: none opened through covey", "watch: none", "review: none required"]);
 });
+
+// ---- the automated review ---------------------------------------------------
+
+test("a pull request asks for one reviewer unless the flags say otherwise", () => {
+  // Nothing in the request: the daemon's own default, which is one reviewer.
+  // The CLI must not restate that number, or the two would drift.
+  const plain = requestOf(["pr", "open", "--title", "x"]);
+  assert.equal("reviews" in plain ? plain.reviews : undefined, undefined);
+  assert.equal((requestOf(["pr", "open", "--title", "x", "--no-review"]) as { reviews: number }).reviews, 0);
+  assert.equal((requestOf(["pr", "open", "--title", "x", "--reviews", "2"]) as { reviews: number }).reviews, 2);
+  assert.match(error("pr open --title x --reviews two"), /--reviews needs a whole number/);
+  assert.match(error("pr open --title x --no-review --reviews 2"), /opposite things/);
+});
+
+test("covey pr review takes a count, and one by default", () => {
+  assert.deepEqual(request("pr review"), { kind: "pr.review" });
+  assert.deepEqual(request("pr review 2"), { kind: "pr.review", count: 2 });
+  assert.match(error("pr review 0"), /needs a number/);
+});
+
+test("covey review says one of two things, and changes needs words", () => {
+  assert.deepEqual(requestOf(["review", "approve"]), { kind: "review.decide", verdict: "approve", body: "", attachments: [] });
+  assert.deepEqual(requestOf(["review", "approve", "--body", "Reads right."]),
+    { kind: "review.decide", verdict: "approve", body: "Reads right.", attachments: [] });
+  assert.deepEqual(requestOf(["review", "changes", "--body", "Line 20."]),
+    { kind: "review.decide", verdict: "changes", body: "Line 20.", attachments: [] });
+  assert.deepEqual(request("review status"), { kind: "review.status" });
+  // A reviewer that blocks a change has to say what to change.
+  assert.match(error("review changes"), /needs --body/);
+  assert.match(error("review merge"), /takes `approve`, `changes` or `status`/);
+});
+
+test("a review's words can carry media, by the same rules as a comment", () => {
+  const r = requestOf(["review", "changes", "--body", "The row is cut:", "--attach", "shot.png"]);
+  assert.deepEqual((r as { attachments: { name: string }[] }).attachments.map((a) => a.name), ["shot.png"]);
+});
+
+test("the review of a pull request reads as lines an agent can act on", async () => {
+  const { reviewLines, describeReview } = await import("./loop.js");
+  const t = (watch: unknown) => ({ id: "t-1", branch: "covey/abc", watch } as unknown as Thread);
+  assert.deepEqual(reviewLines(t(undefined)), ["review: none required"]);
+  assert.deepEqual(reviewLines(t({ review: { required: 0, reviewers: [] } })), ["review: none required"]);
+  assert.deepEqual(reviewLines(t({
+    review: {
+      required: 2,
+      reviewers: [
+        { threadId: "aaaaaaaa-1111", index: 1, state: "signedOff", note: "Reads right.", startedAt: "", decidedAt: "" },
+        { threadId: "bbbbbbbb-2222", index: 2, state: "changesRequested", note: "Line 20 is wrong.", startedAt: "", decidedAt: "" },
+      ],
+    },
+  })), [
+    "review: 1 of 2 signed off, 1 asking for changes",
+    "  reviewer 1 (thread aaaaaaaa): signed off — Reads right.",
+    "  reviewer 2 (thread bbbbbbbb): asks for changes — Line 20 is wrong.",
+  ]);
+
+  const reviewer = {
+    id: "r-1", branch: "covey/rev",
+    reviewOf: { authorThreadId: "t-1", number: 101, url: "https://github.com/o/r/pull/101", branch: "covey/abc", base: "main", index: 1, of: 2, startedAt: "" },
+    watch: { number: 101, state: "watching", reason: null, rounds: 1, maxRounds: 3 },
+  } as unknown as Thread;
+  assert.deepEqual(describeReview(reviewer), [
+    "reviewing: pull request #101 https://github.com/o/r/pull/101",
+    "branch: covey/abc into main",
+    "you are reviewer 1 of 2; the change was written by thread t-1",
+    "watch: watching; pushes read: 1 of 3",
+    'say `covey review approve` or `covey review changes --body "…"` when you have read the change',
+  ]);
+  assert.match(describeReview(t(undefined))[0]!, /this thread reviews no pull request/);
+});
