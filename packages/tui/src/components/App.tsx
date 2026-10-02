@@ -35,6 +35,7 @@ import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken }
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
 import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, type DropResult, type FailedDrop } from "../attachments.js";
+import { applyPaste, chipsPaste, keepTagged, pasteLines, pastedAlready, revealPaste } from "@covey/client";
 import { T, THEMES, themeFor, themeGeneration } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -174,7 +175,15 @@ export function App({ store }: { store: Store }) {
   // Where the last pasted chunk left the draft, and when. A terminal can write
   // one drop in two goes, and `pasteText` joins the halves back up while the
   // seam is open — see `readSplitDrop`.
-  const pasteSeam = useRef<{ at: number; value: string; caret: number } | null>(null);
+  //
+  // `chip` is the other half of that, and it is there only when the chunk went
+  // aside as a `[pasted n lines]` chip: the draft before it, and the raw text
+  // it holds. A block cut in two is then pasted again whole, from `from`, so
+  // the reader gets one chip holding every line instead of two holding some
+  // each. Only a chunk that was itself a chip joins, because a chunk that was
+  // not is the reader's own writing — prose joined onto the next paste would
+  // disappear into its chip.
+  const pasteSeam = useRef<{ at: number; value: string; caret: number; chip?: { from: Ed.EditState; raw: string } } | null>(null);
   // Answering a question uses its own buffer and cursor so the composer draft
   // is preserved across the interruption.
   const [answerDraft, setAnswerDraft] = useState("");
@@ -2190,8 +2199,19 @@ export function App({ store }: { store: Store }) {
       if (span) return applyEdit(cutTag(draft, span));
       return applyEdit(fwd ? Ed.deleteForward(st) : Ed.deleteBack(st));
     }
-    if (key.leftArrow) return setCaret(key.meta ? Ed.wordStart(draft, caret) : key.super ? Ed.lineStart(draft, caret) : Math.max(0, caret - 1));
-    if (key.rightArrow) return setCaret(key.meta ? Ed.wordEnd(draft, caret) : key.super ? Ed.lineEnd(draft, caret) : Math.min(draft.length, caret + 1));
+    // A chip is one thing on the screen, so it is one step to walk over: the
+    // caret goes to the far side of it rather than through forty characters of
+    // a name the reader cannot edit anyway. The word and line keys keep their
+    // own meaning — they are how the caret gets past a chip to its middle.
+    if (key.leftArrow || key.rightArrow) {
+      const fwd = !!key.rightArrow;
+      if (!key.meta && !key.super) {
+        const span = tagSpanAt(draft, caret, chipTags(), !fwd);
+        if (span) return setCaret(fwd ? span.end : span.start);
+      }
+      if (fwd) return setCaret(key.meta ? Ed.wordEnd(draft, caret) : key.super ? Ed.lineEnd(draft, caret) : Math.min(draft.length, caret + 1));
+      return setCaret(key.meta ? Ed.wordStart(draft, caret) : key.super ? Ed.lineStart(draft, caret) : Math.max(0, caret - 1));
+    }
     // Move by *visual* row so a wrapped paragraph steps line by line. Only
     // from the first row up, or the last row down, do the keys leave the draft
     // and walk the messages this thread has sent. That walk fills the draft
@@ -2247,9 +2267,16 @@ export function App({ store }: { store: Store }) {
    *
    * @returns false when the drop held nothing at all.
    */
-  /** The tags standing in the draft for a drop, attached or not. */
+  /**
+   * The tags standing in the draft for a chip: a drop, attached or not, and a
+   * block of text held aside. One list, because a chip is one chip to the
+   * reader — one key takes it out, one step walks over it — whatever stands
+   * behind it.
+   */
   function chipTags(): string[] {
-    return state.view ? [...new Set(store.attachments(state.view.threadId).map((a) => a.tag))] : [];
+    if (!state.view) return [];
+    const id = state.view.threadId;
+    return [...new Set([...store.attachments(id).map((a) => a.tag), ...store.pastes(id).map((p) => p.tag)])];
   }
   function attach(attachments: Attachment[], failed: FailedDrop[] = [], base: Ed.EditState = { value: draft, caret }): boolean {
     if ((attachments.length === 0 && failed.length === 0) || !state.view) return false;
@@ -2273,9 +2300,9 @@ export function App({ store }: { store: Store }) {
    * the next paste.
    */
   function pasteText(raw: string) {
+    const seam = openSeam();
     if (state.view) {
       const whole = readDroppedFiles(raw);
-      const seam = openSeam();
       const split = seam ? readSplitDrop(seam.value.slice(0, seam.caret), raw) : null;
       // A directory that exists is also what the front half of a cut path
       // leaves behind, so a join that names a file beats it (#130). Anything
@@ -2290,8 +2317,41 @@ export function App({ store }: { store: Store }) {
         if (attach(split.drop.attachments, split.drop.failed, cut)) return;
       }
     }
-    // Normalise line endings and tabs, then insert.
-    const next = Ed.insert({ value: draft, caret }, Ed.normalisePaste(raw));
+    // Ordinary text. Normalise line endings and tabs first: what the draft
+    // holds and what a chip holds are the one string, so what the reader sees
+    // revealed is what the turn carries.
+    const text = Ed.normalisePaste(raw);
+    const held = state.view ? store.pastes(state.view.threadId) : [];
+    // The same block pasted a second time shows the text the chip stands for.
+    // Before the seam, because this is the one pair of pastes a person really
+    // does make inside a second, and a join would make them one chip of twice
+    // the lines instead.
+    const again = state.view ? pastedAlready(draft, text, held) : null;
+    if (again && state.view) {
+      const shown = revealPaste(draft, again)!;
+      store.setPastes(state.view.threadId, keepTagged(shown.value, held));
+      applyEdit(shown);
+      pasteSeam.current = null;
+      return;
+    }
+    // A chunk that continues a chip is pasted again whole, from the draft that
+    // pair started at, so a terminal that writes a block in two goes still
+    // leaves one chip.
+    const more = seam?.chip;
+    const base = more ? more.from : { value: draft, caret };
+    const all = more ? Ed.normalisePaste(more.raw + raw) : text;
+    if (state.view && chipsPaste(all)) {
+      const put = applyPaste(base.value, base.caret, all, held);
+      store.setPastes(state.view.threadId, put.pastes);
+      applyEdit(put);
+      // Short: the bar shares its one row with the title, and a notice that
+      // does not fit is cut from the middle (`barNotice`). The chip itself is
+      // on the screen, so what the line is for is the way back from it.
+      store.notify(`held ${pasteLines(all)} lines — paste again to show the text`);
+      pasteSeam.current = { at: Date.now(), value: put.value, caret: put.caret, chip: { from: base, raw: more ? more.raw + raw : raw } };
+      return;
+    }
+    const next = Ed.insert(base, all);
     applyEdit(next);
     pasteSeam.current = { at: Date.now(), ...next };
   }
@@ -2309,7 +2369,7 @@ export function App({ store }: { store: Store }) {
    * wait closes the seam, so the join can only ever finish a paste that is still
    * arriving.
    */
-  function openSeam(): { value: string; caret: number } | null {
+  function openSeam(): NonNullable<typeof pasteSeam.current> | null {
     const seam = pasteSeam.current;
     if (!seam || Date.now() - seam.at > PASTE_SEAM_MS) return null;
     return seam.value === draft && seam.caret === caret ? seam : null;

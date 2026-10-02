@@ -1343,6 +1343,30 @@ deleted is a file dropped with nothing said. Every file of one directory shares 
 not its files, and no client can ask for a file back. #85 has the shape of the content-addressed
 store that would fix both.
 
+### A pasted block is a chip too
+
+A stack trace, a log, a whole file: a person pastes one so the agent will *read* it, not so
+they can look at it. Two hundred lines in the draft push the transcript off the screen and
+scroll the composer's own window, so the sentence being written goes with them. So a paste of
+**more than two lines** goes aside and the draft gets `[pasted 200 lines]` in its place
+(`packages/client/src/paste.ts`, `AppState.pendingPastes`). `sendTurn` puts the lines back
+where the chip stood (`expandPastes`), so the agent reads what was pasted and never the chip.
+
+Three lines, because one line and two read as part of the sentence: a path, a branch name or a
+two-line error is something the reader is writing *with*, and a chip there hides text they
+want to edit.
+
+It is the same chip as a drop's, by the same rules and in the same code — one tag, ordinary
+text, and the tag the only record of what stands behind it. One key deletes it, and one arrow
+key walks over it, because a chip is one thing on the screen. A chunk the terminal wrote in
+two goes joins onto the seam the last paste left, as a cut path does, so one block makes one
+chip and not two.
+
+**Paste the same block again and the chip becomes the text**, where it stands. That is the one
+way back to what a chip holds, and the reason a second paste never holds the same lines twice.
+The reveal is decided before the seam, because two pastes inside a second is exactly what a
+person does when they want to see one.
+
 ## Showing a file: the other direction through the same store (#160)
 
 A drop carries a file *to* the agent. `covey show` carries one *from* it — a screenshot of the

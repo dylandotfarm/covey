@@ -7,6 +7,7 @@ import { MachineClient, projectPool, type ClientOptions, type ConnState } from "
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
+import { expandPastes, type PastedText } from "@covey/client";
 import { ViewCache } from "./viewCache.js";
 import { Frames, type FrameOptions } from "./frames.js";
 import type { ScrollAnchor } from "./scroll.js";
@@ -266,6 +267,15 @@ export interface AppState {
   drafts: Map<string, string>;
   /** Files dropped into the composer, per thread, pending the next send. */
   pendingAttachments: Map<string, TaggedAttachment[]>;
+  /**
+   * Text pasted into the composer and held aside as a chip, per thread.
+   *
+   * The draft holds `[pasted 40 lines]` and this holds the forty lines;
+   * `sendTurn` puts them back. Beside the attachments and not inside them,
+   * because nothing of a paste is a file: it carries no bytes to the wire, it
+   * has no size cap, and it goes into the text itself.
+   */
+  pendingPastes: Map<string, PastedText[]>;
   tick: number;
   /** Diff panel replacing the transcript. */
   diffView: { threadId: string; loading: boolean; diff: TurnDiff | null; scroll: number } | null;
@@ -437,7 +447,7 @@ export class Store {
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
       expanded: this.config.prefs.expanded ?? {}, toggledRows: new Set(),
       lod: startingLod(this.config.prefs), overlay: null, notice: null,
-      scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
+      scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(),
       selection: null, relaunch: null,
       clientBuild: opts.build ?? null, clientStale: false,
     };
@@ -892,6 +902,30 @@ export class Store {
     if (this.state.pendingAttachments.delete(threadId)) this.touch();
   }
 
+  pastes(threadId: string) { return this.state.pendingPastes.get(threadId) ?? []; }
+  setPastes(threadId: string, held: PastedText[]) {
+    if (held.length === 0) this.state.pendingPastes.delete(threadId);
+    else this.state.pendingPastes.set(threadId, held);
+    this.touch();
+  }
+  /**
+   * Drop the text whose chip the reader deleted from the draft. The chip is the
+   * only record of a paste, as a tag is the only record of a file.
+   */
+  syncPastes(threadId: string, text: string) {
+    const cur = this.pastes(threadId);
+    if (cur.length === 0) return cur;
+    const kept = keepTagged(text, cur);
+    if (kept.length === cur.length) return cur;
+    if (kept.length === 0) this.state.pendingPastes.delete(threadId);
+    else this.state.pendingPastes.set(threadId, kept);
+    this.touch();
+    return kept;
+  }
+  clearPastes(threadId: string) {
+    if (this.state.pendingPastes.delete(threadId)) this.touch();
+  }
+
   // ---- selection -----------------------------------------------------------
 
   beginSelection(pane: Selection["pane"], line: number, col: number) {
@@ -1300,9 +1334,14 @@ export class Store {
     // A chip for a file that did not attach is text in the draft and nothing
     // else: it has no bytes, so nothing of it goes over the wire.
     const attachments = kept.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, ...a }) => a);
+    // A held paste is text, so it goes into the text — the chip reads as the
+    // lines it stood for. Measured against the draft the reader sees, before
+    // the lines go in, so a chip inside a pasted block is never read as one.
+    const full = expandPastes(text, this.syncPastes(v.threadId, text));
     try {
-      await client.command({ type: "turn.send", threadId: v.threadId, turnId: randomUUID(), text, ...(attachments.length ? { attachments } : {}) });
+      await client.command({ type: "turn.send", threadId: v.threadId, turnId: randomUUID(), text: full, ...(attachments.length ? { attachments } : {}) });
       this.clearAttachments(v.threadId);
+      this.clearPastes(v.threadId);
       this.set({ scrollFromBottom: 0, scrollAnchor: null });
     } catch (e: any) { this.notify(e.message, "error"); }
   }

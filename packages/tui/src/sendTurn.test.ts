@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Attachment } from "@covey/protocol";
 import type { TaggedAttachment } from "./attachments.js";
+import type { PastedText } from "@covey/client";
 
 // A Store reads the config on construction. Point it at an empty directory so
 // the test never sees the machine list of whoever runs it.
@@ -14,13 +15,14 @@ const { Store } = await import("./store.js");
 interface Sent { type: string; text: string; attachments?: Attachment[] }
 
 /** A store with one thread open and a client that records what it is asked to send. */
-function harness(pending: TaggedAttachment[]) {
+function harness(pending: TaggedAttachment[], held: PastedText[] = []) {
   const sent: Sent[] = [];
   const store = new Store([]);
   const s = store as any;
   s.state.view = { machine: "m", threadId: "t", thread: null, items: new Map(), loading: false, error: null, hasMore: false, loadingOlder: false, seq: 0 };
   s.clients.set("m", { command: async (c: Sent) => { sent.push(c); return {}; } });
   store.setAttachments("t", pending);
+  store.setPastes("t", held);
   return { store, sent };
 }
 
@@ -46,4 +48,26 @@ test("the tag stays in the client and never reaches the wire", async () => {
   const a = sent[0]!.attachments![0]!;
   assert.ok(!("tag" in a), `the wire attachment must carry no tag, got ${JSON.stringify(a)}`);
   assert.equal(a.path, "/a/shot.png", "the real path still goes, so the daemon can copy the file");
+});
+
+const LOG = "Traceback:\n  line one\n  line two";
+
+test("a held paste goes to the wire as its lines, where the chip stood", async () => {
+  const { store, sent } = harness([], [{ tag: "[pasted 3 lines]", text: LOG }]);
+  await store.sendTurn("what is this [pasted 3 lines] about");
+  assert.equal(sent[0]!.text, `what is this ${LOG} about`, "the agent reads the lines, never the chip");
+  assert.equal(store.pastes("t").length, 0, "the send clears the held text");
+});
+
+test("text whose chip the reader deleted does not go with the turn", async () => {
+  const { store, sent } = harness([], [{ tag: "[pasted 3 lines]", text: LOG }]);
+  await store.sendTurn("never mind");
+  assert.equal(sent[0]!.text, "never mind");
+  assert.equal(store.pastes("t").length, 0);
+});
+
+test("a chip is a whole turn on its own", async () => {
+  const { store, sent } = harness([], [{ tag: "[pasted 3 lines]", text: LOG }]);
+  await store.sendTurn("[pasted 3 lines]");
+  assert.equal(sent[0]!.text, LOG);
 });

@@ -17,6 +17,7 @@ import { render } from "ink";
 import { App } from "./App.js";
 import type { AppState, MachineState, Store, ThreadView } from "../store.js";
 import type { TaggedAttachment } from "../attachments.js";
+import type { PastedText } from "@covey/client";
 import { FakeStdin, FakeStdout, settle, until } from "./testTerminal.js";
 
 const BACKSPACE = "\x7f";
@@ -37,7 +38,7 @@ function appState(): AppState {
     machines: new Map([["pi", m]]), order: ["pi"], selected: { machine: "pi", threadId: "t" }, view, focus: "composer",
     sidebarCollapsed: true, expanded: {}, toggledRows: new Set(), lod: "compact",
     overlay: null, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(),
-    pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
+    pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(),
     selection: null, relaunch: null, clientBuild: null, clientStale: false,
   };
 }
@@ -59,6 +60,8 @@ async function composer(draft: string, atts: TaggedAttachment[]) {
     pendingRequest: () => null,
     attachments: (id: string) => state.pendingAttachments.get(id) ?? [],
     setAttachments: (id: string, a: TaggedAttachment[]) => { state.pendingAttachments.set(id, a); },
+    pastes: (id: string) => state.pendingPastes.get(id) ?? [],
+    setPastes: (id: string, held: PastedText[]) => { state.pendingPastes.set(id, held); },
     draft: (id: string) => state.drafts.get(id) ?? "",
     setDraft: (id: string, v: string) => { state.drafts.set(id, v); },
     setFocus: () => {}, select: async () => {}, loadOlder: async () => {},
