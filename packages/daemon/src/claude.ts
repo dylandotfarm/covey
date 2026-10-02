@@ -183,7 +183,7 @@ export class ClaudeSession {
    * session is to kill the work and leave the tool row reading "running" for
    * ever (measured: a `sleep 100` in the background died with the session and
    * its output file was never written). A task that never reports therefore
-   * holds its session — which is the right trade: 300 MB costs less than the
+   * holds its session — which is the right trade: 250 MB costs less than the
    * build the user waits for.
    */
   get busy(): boolean {

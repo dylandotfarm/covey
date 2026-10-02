@@ -44,7 +44,7 @@ export const REVIEW_TAGLINE = "from an automated covey review";
  * How many reviewers a pull request gets when the caller says nothing.
  *
  * One. A reviewer is a thread, which is a worktree and a session of about
- * 300 MB, so the number that is safe to spend on every pull request is the
+ * 250 MB, so the number that is safe to spend on every pull request is the
  * smallest one that still reads the change. A caller that wants two says two.
  */
 export const DEFAULT_REVIEWS = 1;

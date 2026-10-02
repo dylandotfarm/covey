@@ -78,7 +78,7 @@ export interface DaemonConfig {
 /**
  * The default idle limit, in minutes.
  *
- * A session costs about 300 MB, and `defaultLiveSessionLimit` is what bounds
+ * A session costs about 250 MB, and `defaultLiveSessionLimit` is what bounds
  * that cost: the budget releases the least recently used session as soon as
  * the machine holds more than it allows. So the idle limit never guards the
  * memory ceiling. It only gives memory back *under* the ceiling, and it asks
@@ -101,20 +101,55 @@ export interface DaemonConfig {
  */
 export const DEFAULT_SESSION_IDLE_MINUTES = 120;
 
-/** What one live session costs in resident memory. Measured: 271-363 MB. */
-export const SESSION_MEMORY_BYTES = 300 * 1024 * 1024;
+/**
+ * What one more live session costs the machine.
+ *
+ * Measured on 2026-10-02 against SDK 0.3.280, on a 32-core Ubuntu machine with
+ * 31 GiB of memory: eight sessions started through the Agent SDK with covey's
+ * own options — streaming input, the user, project and local settings files,
+ * the covey plugin — and each process read from `/proc/<pid>/smaps_rollup`.
+ * MB per session:
+ *
+ *     point in the test                      Rss   Pss   private
+ *     started, no turn                       239   145   133
+ *     after one trivial turn                 255   159   147
+ *     after a turn with tools (200 KB read)  271   174   162
+ *
+ * The figure to build a ceiling on is `Pss` and never `Rss`. About 100 MB of
+ * each process is the binary's own code pages, and every session on the
+ * machine shares one copy of them; `Rss` counts that 100 MB again in every
+ * process, so it reads eight sessions as most of a gigabyte more than they
+ * cost. The old figure of 300 MB was the `Rss` of a session with no sibling,
+ * which is the one case where the two readings agree.
+ *
+ * 250 MB and not 174, because a session grows with the work it does and then
+ * stops. One session that read 48 files over 8 turns went from 133 MB of
+ * private memory to about 190 MB and grew no further, and a session on the
+ * live daemon held 249 MB after an hour of real work. So 250 MB is what a
+ * session that has done a day's work costs, and the ceiling is for those.
+ */
+export const SESSION_MEMORY_BYTES = 250 * 1024 * 1024;
 
 /**
  * How many sessions this machine keeps live when nobody said otherwise.
  *
- * The daemon spends at most 15% of the machine's memory on warm sessions, and
- * never fewer than two (a thread and the one beside it) nor more than eight.
- * A small machine therefore holds fewer sessions than a large one, which is
- * what a memory limit has to mean.
+ * A quarter of the machine's memory at `SESSION_MEMORY_BYTES` a session, and
+ * never fewer than two — a thread and the one beside it, which is the least a
+ * person can work with. Nothing bounds it from above, because the memory is
+ * the bound: the old cap of eight meant every machine with more than 16 GiB of
+ * memory held the same eight sessions, so the figure this function reads
+ * decided nothing on exactly the machines that have memory to spend. A 31 GiB
+ * workstation now holds 31 sessions, and the floor catches a board under 2 GiB,
+ * which cannot afford even two.
+ *
+ * A quarter and not the old 15%, because the ceiling is a ceiling and not a
+ * reservation. A machine seldom holds the whole count, every session over the
+ * floor is one a reader opened, and the three quarters left over is what the
+ * agents' own work — a build, a test run, a browser — spends.
  */
 export function defaultLiveSessionLimit(mem = totalmem()): number {
-  const affordable = Math.floor((mem * 0.15) / SESSION_MEMORY_BYTES);
-  return Math.min(8, Math.max(2, affordable));
+  const affordable = Math.floor((mem * 0.25) / SESSION_MEMORY_BYTES);
+  return Math.max(2, affordable);
 }
 
 const configFile = () => join(dataDir(), "daemon.json");

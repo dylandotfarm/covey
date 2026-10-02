@@ -1508,7 +1508,7 @@ export class Engine {
   /**
    * Archive every reviewer of a thread that is itself being put away.
    *
-   * A reviewer outlives nothing: its session is 300 MB and its worktree is a
+   * A reviewer outlives nothing: its session is 250 MB and its worktree is a
    * checkout, and the change it was reading is no longer anybody's work. With
    * `record` the verdict is marked `dropped` first, which also keeps the
    * reviewer's own archive from raising a turn on a thread the reader just

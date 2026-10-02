@@ -13,8 +13,8 @@ import { defaultLiveSessionLimit } from "./config.js";
 /**
  * Releasing the session of an idle thread, and resuming it with its history.
  *
- * A session costs about 300 MB of resident memory, so a daemon that has run a
- * dozen threads holds gigabytes for conversations nobody reads. These tests
+ * A session costs about 250 MB, so a daemon that has run a dozen threads
+ * holds gigabytes for conversations nobody reads. These tests
  * drive a whole engine against a stand-in for the CLI: no Claude subprocess
  * starts, and the clock is a variable, so a thread can be idle for an hour in
  * a millisecond.
@@ -360,11 +360,24 @@ test("a lower limit applies to the sessions already live", async (t) => {
   assert.equal(s.clis[0]!.aborted, true);
 });
 
-test("the default budget follows the size of the machine", () => {
+test("the default budget follows the size of the machine, with no ceiling of its own", () => {
   const gb = 1024 ** 3;
-  assert.equal(defaultLiveSessionLimit(2 * gb), 2, "a small board still keeps two");
-  assert.equal(defaultLiveSessionLimit(8 * gb), 4);
-  assert.equal(defaultLiveSessionLimit(24 * gb), 8, "and a large machine is still capped");
+  // A quarter of the memory at 250 MB a session, which is 2 sessions on a
+  // 2 GiB board and 8 on an 8 GiB one.
+  assert.equal(defaultLiveSessionLimit(2 * gb), 2);
+  assert.equal(defaultLiveSessionLimit(8 * gb), 8);
+  // Under 2 GiB the arithmetic affords fewer than two, and the floor answers
+  // instead: a thread and the one beside it is the least a person can work
+  // with.
+  assert.equal(defaultLiveSessionLimit(gb), 2, "a small board still keeps two");
+  assert.equal(defaultLiveSessionLimit(gb / 4), 2, "and so does one that affords none");
+  // The machine these figures were measured on, in bytes as `totalmem` reports
+  // them.
+  assert.equal(defaultLiveSessionLimit(33_367_314_432), 31, "a 31 GiB workstation");
+  // Nothing caps it from above: the old cap of eight meant every machine over
+  // 16 GiB held the same eight sessions, so the memory decided nothing on the
+  // machines that have memory to spend.
+  assert.equal(defaultLiveSessionLimit(256 * gb), 262, "a large machine is not capped");
 });
 
 test("the timeline keeps the note about the released session", async (t) => {
