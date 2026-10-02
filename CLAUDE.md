@@ -64,7 +64,20 @@
   (`readSplitDrop`, #130), because a terminal can write one path in two goes — and a path that
   ends at a separator is never a directory drop, because that is exactly what the front half
   of a cut path looks like. Both routes end at the same `attach`, so a change to one wants the
-  other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`).
+  other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`),
+  and one arrow key to walk over.
+- A paste of more than two lines is a chip as well: the draft gets `[pasted 200 lines]`
+  and `AppState.pendingPastes` holds the lines, which `sendTurn` puts back where the chip
+  stood (`expandPastes`). The rules are `packages/client/src/paste.ts`, beside the drop's
+  own, because a chip is a chip whatever stands behind it — one tag, ordinary text, one key
+  to delete. Three lines is the floor because one line and two are something the reader
+  writes *with*: a path, a branch, a two-line error. Nothing of a paste is a file — no
+  bytes on the wire, no cap, no file store — so it is held beside the attachments and
+  never inside them. Two rules a reader cannot undo: **paste the same block again and the
+  chip becomes the text**, in place, which is the only way back to what it holds; and that
+  reveal is decided *before* the seam, because two pastes inside `PASTE_SEAM_MS` is exactly
+  what a person does when they want to see one, and the seam would have joined them into
+  one chip of twice the lines.
 - The agent shows its own work the same way the reader drops one (#160): `covey show
   shot.png --text "…"` copies the file into that one store and writes a `note` carrying
   `SystemNoteItem.files`, which the web client paints inline and the TUI names with an

@@ -31,7 +31,7 @@ function appState(overlay: Overlay | null): AppState {
     machines: new Map([["pi", m]]), order: ["pi"], selected: null, view: null, focus: "sidebar",
     sidebarCollapsed: false, expanded: {}, toggledRows: new Set(), lod: "compact",
     overlay, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(),
-    pendingAttachments: new Map(), tick: 0, diffView: null, attention: new Map(),
+    pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(),
     selection: null, relaunch: null, clientBuild: null, clientStale: false,
   };
 }
@@ -48,7 +48,7 @@ function prompt(opts: { mask?: boolean }) {
     subscribe: () => () => {},
     getState: () => state,
     pendingRequest: () => null,
-    attachments: () => [], draft: () => "", setDraft: () => {}, setFocus: () => {},
+    attachments: () => [], pastes: () => [], draft: () => "", setDraft: () => {}, setFocus: () => {},
     select: async () => {}, loadOlder: async () => {}, clearSelection: () => {},
     notify: () => {}, setOverlay: () => {}, isExpanded: () => true,
     toggleExpanded: () => {}, shutdown: () => {},
