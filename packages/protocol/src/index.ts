@@ -34,6 +34,18 @@ export interface MachineInfo {
   /** Short commit of the build the daemon runs, e.g. `b9a8b01` or `b9a8b01-dirty`. */
   daemonVersion: string;
   /**
+   * The Android app this machine has built and will hand over (#185).
+   *
+   * Absent on every machine that has never run `pnpm run apk`, which is most of
+   * them. A native change moves the app's runtime version and so cannot ship
+   * over the air — somebody has to install a binary — and this is how the app
+   * offers a link to one instead of making a reader type an address from
+   * memory. It is not the update channel: `/updates` carries JavaScript into an
+   * app already installed, and this carries a whole app to somebody who chose
+   * to install it.
+   */
+  appBuild?: { version: string; builtAt: string; bytes: number };
+  /**
    * The build in full, so a client can tell whether this machine runs older
    * code than it does. Optional: a daemon built before this field omits it,
    * and the client says "unknown" rather than guessing.

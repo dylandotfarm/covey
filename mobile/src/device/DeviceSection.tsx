@@ -14,6 +14,7 @@ import { SIZE, T } from "../theme";
 import { Dot, Row, S, SectionTitle } from "../ui";
 import { readDeviceWanted, saveDeviceWanted } from "../machines";
 import { bridge } from "./bridge";
+import { linkServiceAvailable } from "../../modules/covey-link";
 import type { LinkState } from "./ble";
 
 /** What each state of the link reads as, and the colour of its dot. */
@@ -65,6 +66,12 @@ export function DeviceSection() {
               {info.name ? ` · ${info.name}` : ""}
               {detail.length ? ` · ${detail.join(" · ")}` : ""}
             </Text>
+            {on && !linkServiceAvailable ? (
+              <Text style={{ color: T.warning, fontSize: SIZE.small }}>
+                This build cannot hold the link while the screen is off. Install
+                the newer app to fix that.
+              </Text>
+            ) : null}
             {info.detail && info.state !== "ready" ? (
               <Text style={{ color: info.state === "denied" ? T.danger : T.subtle, fontSize: SIZE.small }}>
                 {info.detail}

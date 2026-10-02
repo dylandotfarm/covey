@@ -35,6 +35,7 @@ import { projectRows } from "@covey/web";
 import { threadIsBusy, type AssistantMessageItem, type TimelineItem } from "@covey/protocol";
 import { store } from "../store";
 import { DeviceLink, type LinkState } from "./ble";
+import { startLinkService, stopLinkService } from "../../modules/covey-link";
 import { transcribeUtterance } from "./transcribe";
 
 /** One row of the device's menu, and where it actually lives. */
@@ -64,6 +65,14 @@ export interface DeviceInfo {
    * recogniser that suddenly got worse.
    */
   transcriber: string | null;
+  /**
+   * Whether anything is keeping the link alive with the screen off.
+   *
+   * False on a build made before the service existed, which a bundle delivered
+   * over the air can land in. Worth saying out loud rather than leaving a
+   * reader to find out by locking their phone.
+   */
+  held: boolean;
 }
 
 /**
@@ -102,7 +111,7 @@ export class DeviceBridge {
 
   info: DeviceInfo = {
     state: "off", detail: null, name: null, firmware: null, battery: null,
-    pointedAt: null, doing: null, transcriber: null,
+    pointedAt: null, doing: null, transcriber: null, held: false,
   };
 
   /** Called whenever `info` changed, so the settings screen repaints. */
@@ -137,6 +146,15 @@ export class DeviceBridge {
   async start(): Promise<void> {
     if (this.unsubscribe) return;
     this.unsubscribe = store.subscribe(() => this.push());
+    /*
+     * The service goes up first and comes down last.
+     *
+     * It is what lets the scan find the device with the screen off, so starting
+     * it after the scan would mean the first scan runs under the restriction
+     * the service exists to lift.
+     */
+    this.info.held = startLinkService();
+    this.changed();
     await this.link.start();
   }
 
@@ -144,6 +162,9 @@ export class DeviceBridge {
     this.unsubscribe?.();
     this.unsubscribe = null;
     await this.link.stop();
+    stopLinkService();
+    this.info.held = false;
+    this.changed();
   }
 
   running(): boolean {

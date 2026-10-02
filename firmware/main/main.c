@@ -55,6 +55,19 @@ typedef struct {
 } ev_t;
 
 static QueueHandle_t s_events;
+
+/*
+ * The utterance that had nowhere to go (#184).
+ *
+ * A phone whose screen is locked is a phone the device cannot reach for a
+ * second or two, and a reader does not know that when they press the button.
+ * Losing what they said is the worst thing this device can do, so it is encoded
+ * and kept here until the link is back. One, not a queue: a reader who speaks
+ * twice into a device that is plainly not answering has said the same thing
+ * twice, and the second is the one they would want.
+ */
+static uint8_t *s_held;
+static size_t s_held_len;
 static char s_name[24];
 static uint8_t s_battery = 0xff;
 static bool s_frame_dump = false;
@@ -148,8 +161,30 @@ static void send_select(void)
  * them. Copying a hundred kilobytes to glue on a header would be the largest
  * allocation this firmware makes, twice.
  */
-static bool send_recording(void)
+/** Send what is held, if anything. Keeps it when it still cannot go. */
+static bool send_held(void)
 {
+    if (!s_held || !ble_ready()) return false;
+    ESP_LOGI(TAG, "sending the utterance that was waiting, %u bytes", (unsigned)s_held_len);
+    bool ok = ble_send(UP_AUDIO, s_held, s_held_len);
+    if (ok) {
+        free(s_held);
+        s_held = NULL;
+        s_held_len = 0;
+    }
+    return ok;
+}
+
+/**
+ * Encode what was recorded and send it, or keep it until the link is back.
+ *
+ * Answers whether it went. The caller says which of the two happened on the
+ * screen, because "held" and "sent" are different things to a reader waiting
+ * for an answer.
+ */
+static bool send_recording(bool *held)
+{
+    *held = false;
     size_t count = 0;
     const int16_t *pcm = audio_samples(&count);
     if (count == 0) return false;
@@ -167,11 +202,21 @@ static bool send_recording(void)
     adpcm_encode(&st, pcm, count, body + 16);
     proto_write_audio_header(body, audio_duration_ms(), (uint32_t)count);
 
-    ESP_LOGI(TAG, "sending %u ms, %u samples, %u bytes, peak %.2f", (unsigned)audio_duration_ms(),
+    ESP_LOGI(TAG, "%u ms, %u samples, %u bytes, peak %.2f", (unsigned)audio_duration_ms(),
              (unsigned)count, (unsigned)total, audio_peak());
-    bool ok = ble_send(UP_AUDIO, body, total);
-    free(body);
-    return ok;
+
+    if (ble_ready() && ble_send(UP_AUDIO, body, total)) {
+        free(body);
+        return true;
+    }
+
+    /* Nowhere to send it. Keep it rather than lose what somebody said. */
+    free(s_held);
+    s_held = body;
+    s_held_len = total;
+    *held = true;
+    ESP_LOGW(TAG, "no phone; holding %u bytes until the link is back", (unsigned)total);
+    return false;
 }
 
 /* ------------------------------------------------------------ the console */
@@ -433,11 +478,13 @@ static void handle_button(const button_event_t *b)
         break;
 
     case BTN_TALK_DOWN:
-        if (!ble_ready()) {
-            ui_set_text(TEXT_NOTICE, "No phone. Open covey on your phone and connect.");
-            paint(true);
-            break;
-        }
+        /*
+         * Record whether or not the phone is there.
+         *
+         * It may be a locked screen that is one second from waking, and the
+         * reader has already started talking. What cannot be recovered is the
+         * sentence; the link usually can.
+         */
         /*
          * Recording starts here and not when the press turns out to be long.
          * A reader begins talking as they press, and the first syllable is what
@@ -471,9 +518,12 @@ static void handle_button(const button_event_t *b)
 
         ui_set_state(STATE_HEARING);
         paint(true);
-        if (!send_recording()) {
-            ui_set_text(TEXT_NOTICE, "The recording did not reach the phone.");
-            ui_set_state(STATE_IDLE);
+        bool held = false;
+        if (!send_recording(&held)) {
+            ui_set_text(TEXT_NOTICE, held
+                ? "Saved. It goes to covey when your phone is back."
+                : "The recording did not reach the phone.");
+            ui_set_state(held ? STATE_AWAY : STATE_IDLE);
             paint(true);
         }
         break;
@@ -500,7 +550,9 @@ static void ui_task(void *arg)
             case EV_LINK:
                 ui_set_link(ev.connected);
                 if (ev.connected) {
-                    ui_set_text(TEXT_NOTICE, "Connected. Pick a thread and hold talk.");
+                    ui_set_text(TEXT_NOTICE, s_held
+                        ? "Connected. Sending what you said."
+                        : "Connected. Pick a thread and hold talk.");
                 } else {
                     ui_set_state(STATE_IDLE);
                 }
@@ -514,6 +566,17 @@ static void ui_task(void *arg)
 
         /* Say how the device is every half minute, and only while anybody listens. */
         uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+        /*
+         * The link is up and something is waiting. This is the sweep rather
+         * than the connect event because a phone is connected a moment before
+         * it subscribes, and a send before that goes nowhere.
+         */
+        if (s_held && ble_ready() && send_held()) {
+            ui_set_state(STATE_BUSY);
+            ui_set_text(TEXT_HEARD, "Sent what you said while the phone was away.");
+            paint(true);
+        }
+
         if (ble_ready() && now - last_status > 30000) {
             last_status = now;
             s_battery = battery_percent();

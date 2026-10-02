@@ -1,0 +1,24 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'maven-publish'
+
+group = 'farm.dylan.covey.link'
+version = '0.1.0'
+
+android {
+  namespace "farm.dylan.covey.link"
+  compileSdk rootProject.ext.has('compileSdkVersion') ? rootProject.ext.get('compileSdkVersion') : 36
+  defaultConfig {
+    minSdk rootProject.ext.has('minSdkVersion') ? rootProject.ext.get('minSdkVersion') : 24
+  }
+  compileOptions {
+    sourceCompatibility JavaVersion.VERSION_17
+    targetCompatibility JavaVersion.VERSION_17
+  }
+  kotlinOptions { jvmTarget = "17" }
+}
+
+dependencies {
+  implementation project(':expo-modules-core')
+  implementation "org.jetbrains.kotlin:kotlin-stdlib:${kotlinVersion}"
+}

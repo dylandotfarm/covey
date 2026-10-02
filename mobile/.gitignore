@@ -8,8 +8,18 @@ dist/
 
 # `expo prebuild` writes the native project. Generated from app.config.ts, so
 # the config is the source and this is not.
-android/
-ios/
+#
+# Anchored to this directory. Unanchored, `android/` matches a directory of that
+# name at *any* depth — which silently swallowed `modules/covey-link/android`,
+# the hand-written Kotlin of a local native module (#184). Generated code lives
+# at the root here; source lives under `modules/`.
+/android/
+/ios/
+
+# Gradle's own output inside a local native module. The Kotlin beside it is
+# source and is tracked; this is what the build wrote from it.
+modules/*/android/build/
+modules/*/android/.gradle/
 
 # The machine that serves this app's updates, per checkout. `.env.example` is
 # the committed template.

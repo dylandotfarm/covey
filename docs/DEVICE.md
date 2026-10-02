@@ -281,6 +281,62 @@ own framebuffer, not a photograph of it.
 gives a codec that opens, reads that succeed, and every sample zero; `zeros=0%`
 with a mean over about 100 is a microphone that works.
 
+## Reaching it with the screen locked
+
+Android stops a **background** app from receiving Bluetooth scan results while
+the screen is off, and kills the process when the app is swiped away. Either one
+makes the device unreachable, and the reader just sees a button that does
+nothing.
+
+`mobile/modules/covey-link` is the answer: a foreground service that does
+nothing at all. It holds no connection and reads no characteristic — `ble.ts`
+still owns the scan, the connection and the fragments. All it does is run in the
+foreground, which lifts the scan restriction and stops the process being
+reclaimed. Anything else in it would be a second implementation of something
+that already works.
+
+It costs a notification Android will not let covey hide, and that is right: a
+reader should be able to see what is holding their radio open, and to stop it.
+The channel is `IMPORTANCE_LOW`, so it sits in the shade without making a sound.
+
+From Android 14 the service type must be declared **twice** — in the manifest
+and again in the `startForeground` call — and a mismatch throws rather than
+degrades. `connectedDevice` is the type, with
+`FOREGROUND_SERVICE_CONNECTED_DEVICE` beside it.
+
+The module is loaded with `requireOptionalNativeModule`, not
+`requireNativeModule`. A bundle delivered over the air can land in an app built
+before the module existed, and the strict call would throw at import time and
+take the whole app down. Answering false is what an older app honestly is.
+
+### The device keeps what it could not send
+
+The firmware used to refuse to record at all when the link was down, so a
+moment's disconnection threw away a sentence before the reader had finished
+speaking it. Now it records regardless, encodes, and holds the utterance in
+PSRAM until the link returns — then sends it from the status sweep rather than
+from the connect event, because a phone is connected for a moment before it
+subscribes and a send before that goes nowhere.
+
+One held utterance, not a queue: somebody who speaks twice into a device that is
+plainly not answering has said the same thing twice, and the second is the one
+they meant.
+
+## Installing a new app
+
+A native change moves the runtime version, so it cannot come over the air. The
+machine that built the app serves it instead, at `/apk`, gated exactly as
+`/updates` is — and the settings screen offers it as a row to tap, so nobody has
+to type an address into a phone's browser from memory.
+
+`MachineInfo.appBuild` carries the version, the size and when gradle wrote it. A
+machine that has never run `pnpm run apk` reports nothing and offers nothing,
+which is most of them.
+
+This is **not** the update channel. `/updates` carries JavaScript into an app
+already installed, silently and often; `/apk` hands a whole binary to somebody
+who chose to install it, for the one case the other refuses to handle.
+
 ## The cost of a native module
 
 `react-native-ble-plx` is native code, so `mobile/app.config.ts` moves to

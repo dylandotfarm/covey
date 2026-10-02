@@ -25,6 +25,7 @@ import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } fro
 import { applyUpdate, fetchUpdate, updateInconsistency, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
 import type { Routes } from "../nav";
 import { DeviceSection } from "../device/DeviceSection";
+import { AppBuildRow } from "../device/AppBuildRow";
 
 type Props = NativeStackScreenProps<Routes, "Settings">;
 
@@ -120,6 +121,8 @@ export function SettingsScreen({ navigation }: Props) {
         </View>
 
         <DeviceSection />
+
+        <AppBuildRow />
 
         <SectionTitle text="Machines" />
         {[...s.machines.values()].map((m) => {
