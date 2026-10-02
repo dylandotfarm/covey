@@ -156,7 +156,8 @@ export function news(
     if (next.comments.includes(c.id)) continue;
     next.comments.push(c.id);
     // A comment this thread wrote itself is not news to it. The id is recorded
-    // all the same, so the match runs once however long the watch lives.
+    // above whether the URL matches or not, so this is safe to get wrong: a URL
+    // that failed to match would cost one turn, once, and never a loop.
     if (c.url && next.posted!.includes(c.url)) continue;
     events.push({ kind: "comment", comment: c });
   }
