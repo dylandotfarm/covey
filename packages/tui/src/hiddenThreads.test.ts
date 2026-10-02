@@ -14,7 +14,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { threadIsHidden, threadNeedsPerson, threadReviewing, type ReviewerState, type Thread } from "@covey/protocol";
+import { threadIsFinished, threadIsHidden, threadNeedsPerson, threadReviewing, type ReviewerState, type Thread } from "@covey/protocol";
 
 function thread(over: Partial<Thread> = {}): Thread {
   return {
@@ -88,4 +88,24 @@ test("a review that is over leaves no mark", () => {
   // Nothing is reading, so nothing is marked as reading. That the pull request
   // is now short of a sign-off is the readiness on the row, not this.
   assert.equal(threadReviewing(reviewed("dropped")), 0);
+});
+
+test("a thread under review has not finished", () => {
+  // The `✓` in the sidebar and the green dot on the phone say the same thing:
+  // this thread is yours again. A turn that ended is not enough, because the
+  // reviewers read the change after the author stops and the next turn comes
+  // from them — both marks at once sent the reader to a thread with nothing to
+  // do in it.
+  const ended = { turnId: "x", state: "completed" as const, startedAt: "", completedAt: "" };
+  assert.equal(threadIsFinished(thread({ latestTurn: ended })), true);
+  assert.equal(threadIsFinished({ ...reviewed("reviewing"), latestTurn: ended }), false);
+  assert.equal(threadIsFinished({ ...reviewed("changesRequested"), latestTurn: ended }), false);
+  assert.equal(threadIsFinished({ ...reviewed("signedOff"), latestTurn: ended }), true, "the review is over");
+  assert.equal(threadIsFinished({ ...reviewed("dropped"), latestTurn: ended }), true);
+});
+
+test("only a turn that ended finishes a thread", () => {
+  assert.equal(threadIsFinished(thread()), false, "a thread that has never run");
+  assert.equal(threadIsFinished(thread({ latestTurn: { turnId: "x", state: "running", startedAt: "", completedAt: null } })), false);
+  assert.equal(threadIsFinished(thread({ latestTurn: { turnId: "x", state: "error", startedAt: "", completedAt: "" } })), false);
 });
