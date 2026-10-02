@@ -116,18 +116,19 @@ test("parseCellSize reads the answer to the query, and nothing else", () => {
 });
 
 test("takeWindowReports takes every report out of a chunk, and nothing else", () => {
-  // One answer, as `useInput` hands it over: the leading escape is gone.
+  // One answer, which is how ink delivers one: its leading escape is gone,
+  // because ink cuts a read at every escape and drops the first of the event.
   assert.deepEqual(takeWindowReports("[6;34;16t"), { cell: { w: 16, h: 34 }, rest: "" });
-  // A resize drags for a second, so the answers arrive many to a chunk. The
-  // reader saw every one of them in the composer before they went this way.
+  // A whole drag of a corner, were the answers ever to share one chunk.
   const many = "[6;34;16t" + (ESC + "[6;34;16t").repeat(37);
   assert.deepEqual(takeWindowReports(many), { cell: { w: 16, h: 34 }, rest: "" });
   // The window reports a terminal sends unasked go too, and size nothing.
   assert.deepEqual(takeWindowReports(ESC + "[4;1080;1920t" + ESC + "[8;45;120t"), { cell: undefined, rest: "" });
   // The last answer is the one that describes the window now.
   assert.deepEqual(takeWindowReports("[6;34;16t" + ESC + "[6;40;20t").cell, { w: 20, h: 40 });
-  // A key typed while the window moved is still the reader's.
-  assert.deepEqual(takeWindowReports("[6;34;16t" + ESC + "[6;34;16tq").rest, "q");
+  // Text around a report is the reader's: this is a bracketed paste, which ink
+  // hands over whole, and the one chunk that really does carry both.
+  assert.deepEqual(takeWindowReports("before " + ESC + "[6;34;16t after").rest, "before  after");
   // Everything else is the reader's, whole.
   assert.deepEqual(takeWindowReports("hello"), { cell: undefined, rest: "hello" });
   assert.deepEqual(takeWindowReports("the cost is 16t"), { cell: undefined, rest: "the cost is 16t" });

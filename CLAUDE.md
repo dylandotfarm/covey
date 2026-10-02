@@ -107,9 +107,12 @@
   `App.tsx` (`takeWindowReports`) before the mouse parse. Match one whole and you match
   nothing: ink splits a chunk into one event per escape sequence and then drops that
   event's *leading* escape, so the answer arrives as `[6;34;16t`, and the guard that
-  wanted the escape put thirty-eight of them in a reader's composer. The question is
-  asked once the resize stops (`CELL_SIZE_DELAY_MS`), because a window dragged by its
-  corner resizes tens of times and every question is answered.
+  wanted the escape put thirty-eight of them in a reader's composer. It is read from
+  anywhere in the chunk all the same, because a bracketed paste is the one chunk that
+  carries text around a report — covey registers no `usePaste`, so ink hands the whole
+  of a paste to `useInput` — and a report inside pasted text goes with nothing said.
+  The question is asked once the resize stops (`CELL_SIZE_DELAY_MS`), because a window
+  dragged by its corner resizes tens of times and every question is answered.
   Inline in the transcript is the next step and it waits on #24:
   `width()` counts a combining mark as a column, so `wrapSpans` would misjudge a row. The
   overlay builds its own rows and never calls it. kitty takes PNG and raw RGB alone, so

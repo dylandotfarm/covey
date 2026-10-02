@@ -1793,9 +1793,9 @@ export function App({ store }: { store: Store }) {
     const reports = takeWindowReports(rawInput);
     if (reports.cell) cellSize.current = reports.cell;
     const input = reports.rest;
-    // Nothing of the chunk but the terminal's own words. A chunk that carried
-    // a keystroke as well goes on with it, so a key typed while the window
-    // moved is still the reader's. A chunk that was empty to begin with is a
+    // Nothing of the chunk but the terminal's own words, so there is nothing
+    // left to do with it. What is left over is a paste that carried a report,
+    // which goes on as the reader's. A chunk that was empty to begin with is a
     // key ink named instead, an arrow or a page, and it goes on too.
     if (input === "" && rawInput !== "") return;
     // Mouse reports arrive through the same channel as keys; Ink leaves them

@@ -211,9 +211,10 @@ export function parseCellSize(reply: string): CellSize | undefined {
  * The answer to `CELL_SIZE_QUERY` is one of these, and so are the window size
  * reports a terminal sends unasked when the reader drags a corner.
  *
- * The leading escape is optional for the reason `parseCellSize` gives, and the
- * match is not anchored at the end: a terminal writes a report and the next
- * keystroke into the same read, and `useInput` hands covey the pair.
+ * The leading escape is optional for the reason `parseCellSize` gives. Hold
+ * the `/g` flag in mind: `String.replace` resets `lastIndex` and
+ * `takeWindowReports` is safe, but a `WINDOW_REPORT.test(…)` added later would
+ * carry the index of the last match into the next call.
  */
 const WINDOW_REPORT = /(?:\u001b|^)\[\d+(?:;\d+)*t/g;
 
@@ -232,9 +233,17 @@ export interface WindowReports {
  *
  * Ink leaves an unrecognised CSI in the string it gives `useInput`, so a
  * report covey does not pick off is a report the reader finds in the composer.
- * Drag a window by its corner and covey asks for the cell size again, so the
- * answers arrive many to a chunk and glued to whatever was typed with them —
- * which is why this reads every report of a chunk rather than the whole of it.
+ * One report is one chunk, and that chunk has lost its leading escape: ink
+ * cuts a read at every escape and emits each sequence on its own
+ * (`input-parser.js`), then drops the first escape of the event
+ * (`use-input.js`). So a drag of a corner delivers one answer per call, each
+ * of them `[6;34;16t`.
+ *
+ * The match still reads anywhere in the chunk rather than the whole of it,
+ * because one chunk does carry text around a report: covey registers no
+ * `usePaste`, so ink hands a whole bracketed paste to `useInput` as one
+ * string. A report inside pasted text goes out of the draft with nothing
+ * said, which is the price, and the reader keeps every word they pasted.
  *
  * `CSI <numbers> t` is the terminal's answer about its window and is never a
  * key: a kitty key report ends in `u`, a legacy one in `~` or a letter after
@@ -243,6 +252,7 @@ export interface WindowReports {
 export function takeWindowReports(input: string): WindowReports {
   let cell: CellSize | undefined;
   // Nearly every chunk is one keystroke, and every report ends in a `t`.
+  // The `/g` regex is used here and only here; see the note on it.
   const rest = input.includes("t")
     ? input.replace(WINDOW_REPORT, (report) => { cell = parseCellSize(report) ?? cell; return ""; })
     : input;
