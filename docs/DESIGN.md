@@ -155,9 +155,10 @@ The engine therefore releases a session that nobody needs. Two rules, in this or
    the agent.
 2. **The budget.** While more sessions are live than `MachineSettings.maxLiveSessions`
    allows, the least recently used ones go. The default comes from the machine's own memory:
-   15% of it at 300 MB a session, and never fewer than two nor more than eight. The budget is
-   a target, not a promise — a machine with more turns in flight than memory keeps every
-   running turn.
+   a quarter of it at 250 MB a session, and never fewer than two. Nothing bounds it from
+   above, because the memory is the bound — a cap of eight made every machine over 16 GiB
+   hold the same eight sessions. The budget is a target, not a promise: a machine with more
+   turns in flight than memory keeps every running turn.
 
 A session is never released while it owes somebody an answer: a turn in flight, a tool
 approval on screen, a question in front of the user, or a background task that still runs. A
@@ -171,7 +172,7 @@ The work is a child of the session subprocess and only that subprocess reads the
 `task_notification` that ends it. Measured against a live daemon: a `sleep 100` handed to the
 background died with the released session, its output file was never written, and the tool row
 still read "running in the background" five minutes later. So a live background task holds its
-session, and a task that never reports holds it for ever — 300 MB costs less than the build.
+session, and a task that never reports holds it for ever — 250 MB costs less than the build.
 
 Nothing is lost. The transcript lives in the session store, keyed by thread id, so the next
 message starts a new process with `resume` and the model reads the whole conversation back.
@@ -853,7 +854,7 @@ through `threadStatusLabel`, which answered `idle` for the whole review before t
 after every state that needs the reader, because being reviewed is not something to act on.
 
 **A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
-archives its reviewers: a session is 300 MB and a worktree is a checkout, and the change
+archives its reviewers: a session is 250 MB and a worktree is a checkout, and the change
 they were reading is nobody's work any more. The record is marked `dropped` first, so the
 reviewer's own archive raises no "the review did not finish" turn on a thread the reader
 has just put away.
@@ -1199,11 +1200,13 @@ daemon current does not mean finding an ssh session for it:
 
   A `null` in either setting means "the daemon's own default", and no client can work out
   what that resolves to — the ceiling's default is read from the machine's memory, so it is 4
-  on a Pi and 8 on a workstation. So the daemon says: `MachineInfo.sessionBudget` carries the
-  two resolved figures and what one session costs, and it is re-sent with every
+  on a Pi and 31 on a 31 GiB workstation. So the daemon says: `MachineInfo.sessionBudget`
+  carries the two resolved figures and what one session costs, and it is re-sent with every
   `machine.updated`. The panel therefore reads `from memory (4)` and `default (2 hours)`
   rather than the bare word, and every row of the ceiling's picker is priced
-  (`4 sessions · about 1.3 GB`) — the count of sessions is not what the reader is choosing.
+  (`4 sessions · about 1 GB`) — the count of sessions is not what the reader is choosing.
+  The rows run to 32, because the default does: a list that stopped at 12 offered a reader on
+  a workstation nothing near the number their own machine had picked.
   A daemon built before that field says "default" with no number, rather than a guess made
   from the memory of the machine the *client* runs on.
 
