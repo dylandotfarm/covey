@@ -1,0 +1,43 @@
+# The board: an ESP32-S3-PICO-1 with 8 MB of flash and 8 MB of octal PSRAM.
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# PSRAM holds the recording. A minute of 16 kHz samples is 1.9 MB, which is not
+# a thing internal memory could ever hold.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+
+# Bluetooth Low Energy, and no Classic: this chip has no Classic radio. NimBLE
+# rather than Bluedroid because it is about 100 kB smaller and covey needs one
+# peripheral with one service.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+# The phone bonds, so a reconnection needs no pairing. The link is encrypted
+# once it has; the characteristics do not demand it, because a phone that will
+# not bond must still be able to speak rather than fail without saying why.
+CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
+CONFIG_BT_NIMBLE_SM_LEGACY=y
+CONFIG_BT_NIMBLE_SM_SC=y
+CONFIG_BT_NIMBLE_MAX_BONDS=4
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+# A whole utterance goes out in fragments as fast as the radio takes them, so
+# the host needs somewhere to queue them.
+CONFIG_BT_NIMBLE_MSYS1_BLOCK_COUNT=60
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=517
+
+# The USB port is the console, because this board has no separate UART bridge.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

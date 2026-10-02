@@ -24,6 +24,7 @@ import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
 import { applyUpdate, fetchUpdate, updateInconsistency, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
 import type { Routes } from "../nav";
+import { DeviceSection } from "../device/DeviceSection";
 
 type Props = NativeStackScreenProps<Routes, "Settings">;
 
@@ -117,6 +118,8 @@ export function SettingsScreen({ navigation }: Props) {
             </Row>
           ))}
         </View>
+
+        <DeviceSection />
 
         <SectionTitle text="Machines" />
         {[...s.machines.values()].map((m) => {

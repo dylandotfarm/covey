@@ -1,0 +1,5 @@
+# What the build writes. `idf.py build` makes all of it from what is committed.
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
