@@ -785,6 +785,11 @@ export class Engine {
           // One that signed off is already recorded, and `dropReviewer` leaves
           // it alone: covey archives a reviewer itself the moment it signs off.
           if (fresh?.reviewOf) void this.dropReviewer(fresh, "somebody archived the review thread before it decided");
+          // A reviewer of a thread that is done is done too: its session and
+          // its worktree would otherwise outlive the work they were for. The
+          // record is marked first, so the reviewer's own archive raises no
+          // "ended with no verdict" turn on a thread the reader just put away.
+          await this.windUpReviewers(fresh, "the thread that wrote the change was archived", true);
         }
         return this.mutateThread(cmd.threadId, (x) => { x.archivedAt = cmd.archived ? now : null; });
       }
@@ -798,6 +803,9 @@ export class Engine {
         // Told before the row goes: `dropReviewer` reads this thread to find the
         // author, and a thread already deleted names nobody.
         if (t.reviewOf) await this.dropReviewer(t, "somebody deleted the review thread before it decided");
+        // The record goes with the row, so there is nothing to mark: the
+        // reviewers are archived, which hands back their worktrees.
+        await this.windUpReviewers(t, "the thread that wrote the change was deleted", false);
         const proj = this.db.getProject(t.projectId);
         if (proj) void deleteCheckpointRefs(this.gitCwd(t, proj), t.id);
         // The worktree goes with the thread; the branch stays, as it does on
@@ -1492,6 +1500,26 @@ export class Engine {
   private markReviewerOver(reviewThread: Thread, why: string): void {
     const mine = this.reviewerRecord(reviewThread);
     if (mine && mine.state === "reviewing") this.recordVerdict(reviewThread, "dropped", why);
+  }
+
+  /**
+   * Archive every reviewer of a thread that is itself being put away.
+   *
+   * A reviewer outlives nothing: its session is 300 MB and its worktree is a
+   * checkout, and the change it was reading is no longer anybody's work. With
+   * `record` the verdict is marked `dropped` first, which also keeps the
+   * reviewer's own archive from raising a turn on a thread the reader just
+   * archived; on a delete there is no record left to mark.
+   */
+  private async windUpReviewers(t: Thread | null | undefined, why: string, record: boolean): Promise<void> {
+    for (const r of t?.watch?.review?.reviewers ?? []) {
+      if (r.state !== "reviewing") continue;
+      const rt = this.db.getThread(r.threadId);
+      if (!rt || rt.archivedAt) continue;
+      if (record) this.recordVerdict(rt, "dropped", why);
+      await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId: rt.id, archived: true })
+        .catch((e: any) => this.opts.log?.(`could not archive reviewer ${rt.id.slice(0, 8)}: ${e?.message ?? e}`));
+    }
   }
 
   /** This review thread's row on the author's watch, when both still exist. */

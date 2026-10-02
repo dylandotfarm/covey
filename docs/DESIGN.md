@@ -804,6 +804,12 @@ again and the next sign-off is news again. `mergeReadiness` checks the review **
 every fact GitHub reported, because a reader told "the review has not signed off" about a
 branch with a red check has been told the wrong thing.
 
+**A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
+archives its reviewers: a session is 300 MB and a worktree is a checkout, and the change
+they were reading is nobody's work any more. The record is marked `dropped` first, so the
+reviewer's own archive raises no "the review did not finish" turn on a thread the reader
+has just put away.
+
 **A review that ends with no verdict is reported.** A dropped reviewer can never sign off, so
 the merge would wait for ever in silence. Archiving the thread, deleting it, or its own watch
 running out of rounds marks the record `dropped` and sends the author a turn saying so and

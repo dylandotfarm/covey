@@ -451,3 +451,48 @@ test("a review worktree sits on the branch under review and follows it", async (
   await git(reviewer.worktreePath!, "pull", "-q");
   assert.equal(await head(reviewer.worktreePath!), fix);
 });
+
+test("archiving the author winds up its reviewers: no session outlives the work", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1", { reviews: 2 });
+  await settle();
+  assert.equal(s.reviewThreads().filter((x) => !x.archivedAt).length, 2);
+
+  await s.command({ type: "thread.archive", threadId: "t1", archived: true });
+  await settle();
+  assert.deepEqual(s.reviewThreads().map((x) => !!x.archivedAt), [true, true]);
+  assert.deepEqual(s.reviewers("t1").map((r) => r.state), ["dropped", "dropped"]);
+  assert.deepEqual(s.reviewers("t1").map((r) => r.note), ["the thread that wrote the change was archived", "the thread that wrote the change was archived"]);
+  // The reader has just archived this thread; it must not be woken to be told
+  // that the review it no longer cares about did not finish.
+  assert.equal(s.turns("t1").filter((x) => /ended with no verdict/.test(x)).length, 0, s.turns("t1").join("\n---\n"));
+  assert.ok(opened.reviewers.every((id) => s.thread(id).watch!.state === "dropped"));
+});
+
+test("a reviewer that signed off is left alone when the author is archived", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  await s.engine.reviewDecide({ threadId: opened.reviewers[0]!, verdict: "approve", body: "Good." });
+  await settle();
+  await s.command({ type: "thread.archive", threadId: "t1", archived: true });
+  await settle();
+  assert.equal(s.reviewers("t1")[0]!.state, "signedOff", "a verdict is not undone by archiving the author");
+  assert.equal(s.reviewers("t1")[0]!.note, "Good.");
+});
+
+test("deleting the author archives its reviewers, and leaves no turn behind", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  await s.command({ type: "thread.delete", threadId: "t1" });
+  await settle();
+  assert.equal(s.db.getThread("t1"), null, "the author's row is gone");
+  assert.ok(s.thread(opened.reviewers[0]!).archivedAt);
+});
