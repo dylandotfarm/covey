@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
+import type { TerminalEvent } from "@covey/protocol";
 import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
 import { MachineClient, projectPool, type ClientOptions, type ConnState } from "@covey/client";
@@ -12,6 +13,8 @@ import { ViewCache } from "./viewCache.js";
 import { Frames, type FrameOptions } from "./frames.js";
 import type { ScrollAnchor } from "./scroll.js";
 import { DEFAULT_THEME, THEMES, asThemeId, setTheme, themeFor, themeId } from "./theme.js";
+import { AnsiLog } from "./ansi.js";
+import { TERMINAL_HISTORY, TERMINAL_ROWS, echoLine } from "./shell.js";
 
 /**
  * How many timeline items a thread opens with when the reader means it. Big
@@ -288,6 +291,41 @@ export interface AppState {
   tick: number;
   /** Diff panel replacing the transcript. */
   diffView: { threadId: string; loading: boolean; diff: TurnDiff | null; scroll: number } | null;
+  /**
+   * The thread's shell, replacing the transcript (#10).
+   *
+   * Held open across a close: shutting the panel sets `open` to false and
+   * keeps everything else, because the shell on the daemon is still running
+   * and the reader who comes back wants the screen they left. Only `endShell`
+   * clears it.
+   *
+   * `log` is an `AnsiLog` and is *mutated*, never replaced — a build writes
+   * hundreds of chunks and a copy per chunk is a copy too many. `logGen` is
+   * what React watches instead, the rule `ItemLines` follows for the
+   * transcript.
+   */
+  terminal: {
+    machine: string;
+    threadId: string;
+    terminalId: string;
+    open: boolean;
+    cwd: string;
+    shell: string;
+    busy: boolean;
+    exitCode: number | null;
+    log: AnsiLog;
+    logGen: number;
+    /** The line being typed, and where the caret sits in it. */
+    draft: string;
+    caret: number;
+    /** Lines scrolled up from the bottom; 0 follows the output. */
+    scroll: number;
+    /** What the reader has run here, newest last, and where ↑ has walked to. */
+    history: string[];
+    historyAt: number | null;
+    /** The shell ended, so the panel says so instead of taking a command. */
+    ended: boolean;
+  } | null;
   /** Threads that changed state while not on screen: `${machine}:${threadId}` → reason. */
   attention: Map<string, "approval" | "done" | "error">;
   /** Mouse text selection, scoped to one pane. */
@@ -364,7 +402,7 @@ export interface StoreOptions {
  * the sidebar.
  */
 export interface Selection {
-  pane: "transcript" | "diff";
+  pane: "transcript" | "diff" | "terminal";
   anchor: { line: number; col: number };
   head: { line: number; col: number };
   dragging: boolean;
@@ -420,6 +458,13 @@ export class Store {
   private clients = new Map<string, MachineClient>();
   /** Threads the reader has already opened, ready to paint again. */
   private viewCache = new ViewCache();
+  /**
+   * The size the shell panel last had, which is the `COLUMNS` and `LINES` a
+   * shell is started with. Kept here and not in `AppState` because the shell
+   * is told it rather than painted from it, and App already owns `size`.
+   */
+  private termCols = 80;
+  private termRows = 24;
   private config: TuiConfig;
   private noticeTimer: NodeJS.Timeout | null = null;
 
@@ -457,7 +502,7 @@ export class Store {
       showHidden: this.config.prefs.showHidden ?? false,
       expanded: this.config.prefs.expanded ?? {}, toggledRows: new Set(),
       lod: startingLod(this.config.prefs), overlay: null, notice: null,
-      scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(),
+      scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, terminal: null, attention: new Map(),
       selection: null, relaunch: null,
       clientBuild: opts.build ?? null, clientStale: false,
     };
@@ -606,6 +651,7 @@ export class Store {
       shellSynchronized: () => this.touchFromMachine(),
       threadEvent: (threadId, ev) => this.applyThread(saved.url, threadId, ev),
       threadSynchronized: () => this.touchFromMachine(),
+      terminalEvent: (terminalId, ev) => this.applyTerminal(terminalId, ev),
       machineUpdate: (update) => {
         const prev = ms.update;
         ms.update = update;
@@ -754,10 +800,16 @@ export class Store {
     const gen = ++this.selectGen;
     const prev = this.state.selected;
     this.cacheCurrentView();
+    // The panel belongs to the thread it was opened on, so a move to another
+    // one lets go of it. The *shell* keeps running on the daemon with its
+    // directory and its output, and ctrl+` on that thread again attaches to it
+    // and paints what it wrote — so the only thing lost here is the list the
+    // ↑ key walks, which is a client's note and not the shell's.
+    const dropTerminal = this.state.terminal && this.state.terminal.threadId !== sel?.threadId ? { terminal: null } : {};
     // Not awaited: releasing the old machine's subscription is bookkeeping, and
     // the new thread's snapshot does not wait on it.
     if (prev && prev.machine !== sel?.machine) void this.clients.get(prev.machine)?.unwatchThread();
-    if (!sel) { this.set({ selected: null, view: null }); return; }
+    if (!sel) { this.set({ selected: null, view: null, ...dropTerminal }); return; }
     const client = this.clients.get(sel.machine);
     const ms = this.state.machines.get(sel.machine);
     this.state.attention.delete(`${sel.machine}:${sel.threadId}`);
@@ -777,13 +829,13 @@ export class Store {
         // because a file may have appeared since the reader was last here.
         commands: cached.commands, dirs: new Map(),
       };
-      this.set({ selected: sel, view, scrollFromBottom: 0, scrollAnchor: null, diffView: null });
+      this.set({ selected: sel, view, scrollFromBottom: 0, scrollAnchor: null, diffView: null, ...dropTerminal });
       client?.resumeThread(sel.threadId, cached.seq);
       return;
     }
 
     const view: ThreadView = { machine: sel.machine, threadId: sel.threadId, thread: ms?.threads.get(sel.threadId) ?? null, items: new Map(), loading: true, error: null, hasMore: false, loadingOlder: false, seq: 0, commands: null, dirs: new Map() };
-    this.set({ selected: sel, view, scrollFromBottom: 0, scrollAnchor: null, diffView: null });
+    this.set({ selected: sel, view, scrollFromBottom: 0, scrollAnchor: null, diffView: null, ...dropTerminal });
     try {
       const snap: ThreadSnapshot | undefined = await client?.watchThread(sel.threadId, limit);
       if (gen !== this.selectGen || this.state.selected?.threadId !== sel.threadId) return;
@@ -1416,6 +1468,167 @@ export class Store {
     } catch (e: any) { this.notify(e.message, "error"); this.set({ diffView: null }); }
   }
   setDiffScroll(n: number) { if (this.state.diffView) this.set({ diffView: { ...this.state.diffView, scroll: Math.max(0, n) } }); }
+
+  // ---- the thread's shell (#10) ---------------------------------------------
+
+  /**
+   * ctrl+` : show the thread's shell, or hide it again.
+   *
+   * Hiding does not end the shell. The shell runs on the daemon, in the
+   * thread's directory, and a reader who glances at the transcript and comes
+   * back wants the directory they had walked to and the build they left
+   * running — so the panel is shut and the state is kept, and `endTerminal` is
+   * the only thing that lets go.
+   */
+  async toggleTerminal() {
+    const term = this.state.terminal;
+    if (term && term.open) { this.set({ terminal: { ...term, open: false } }); return; }
+    const v = this.state.view;
+    const client = v && this.clients.get(v.machine);
+    if (!v || !client) { this.notify("open a thread first", "error"); return; }
+    // The same shell, still running: show it again and do not ask the daemon.
+    if (term && !term.ended && term.machine === v.machine && term.threadId === v.threadId) {
+      this.set({ terminal: { ...term, open: true } });
+      void this.resizeTerminal();
+      return;
+    }
+    try {
+      const info = await client.rpc("terminal.open", { threadId: v.threadId, cols: this.termCols, rows: this.termRows });
+      const log = new AnsiLog(TERMINAL_ROWS);
+      if (info.scrollback) log.write(info.scrollback);
+      this.set({
+        terminal: {
+          machine: v.machine, threadId: v.threadId, terminalId: info.terminalId, open: true,
+          cwd: info.cwd, shell: info.shell, busy: info.busy, exitCode: info.exitCode,
+          log, logGen: log.generation, draft: "", caret: 0, scroll: 0, history: [], historyAt: null, ended: false,
+        },
+      });
+    } catch (e: any) { this.notify(`shell: ${e.message}`, "error"); }
+  }
+
+  /** Run what the reader typed, or hand it to whatever is already running. */
+  async sendTerminal() {
+    const term = this.state.terminal;
+    const client = term && this.clients.get(term.machine);
+    if (!term || !client || term.ended) return;
+    const line = term.draft;
+    // The echo is covey's, because there is no pty to echo for us. It goes in
+    // before the command runs, so the output lands under the line that caused
+    // it rather than above it.
+    if (!term.busy) term.log.write(echoLine(term.cwd, line));
+    const history = !term.busy && line.trim() !== "" && term.history[term.history.length - 1] !== line
+      ? [...term.history, line].slice(-TERMINAL_HISTORY)
+      : term.history;
+    this.set({
+      terminal: {
+        ...term, draft: "", caret: 0, history, historyAt: null, scroll: 0,
+        busy: term.busy || line.trim() !== "", logGen: term.log.generation,
+      },
+    });
+    try { await client.rpc("terminal.input", { terminalId: term.terminalId, data: line + "\n" }); }
+    catch (e: any) { this.notify(`shell: ${e.message}`, "error"); }
+  }
+
+  /** ctrl+c in the panel: interrupt what is running. */
+  async interruptTerminal() {
+    const term = this.state.terminal;
+    const client = term && this.clients.get(term.machine);
+    if (!term || !client || !term.busy) return;
+    // Covey writes the `^C` a terminal would have echoed, so the reader can see
+    // where in the output they pressed it.
+    term.log.write("^C\n");
+    this.set({ terminal: { ...term, logGen: term.log.generation, scroll: 0 } });
+    try { await client.rpc("terminal.signal", { terminalId: term.terminalId, signal: "int" }); }
+    catch (e: any) { this.notify(`shell: ${e.message}`, "error"); }
+  }
+
+  /** ctrl+d on an empty line: end the shell, as it does in any shell. */
+  async endTerminal() {
+    const term = this.state.terminal;
+    const client = term && this.clients.get(term.machine);
+    this.set({ terminal: null });
+    if (!term || !client) return;
+    try { await client.rpc("terminal.close", { terminalId: term.terminalId }); } catch { /* it was already gone */ }
+  }
+
+  setTerminalDraft(draft: string, caret: number) {
+    const term = this.state.terminal;
+    if (!term) return;
+    this.set({ terminal: { ...term, draft, caret: Math.max(0, Math.min(draft.length, caret)) } });
+  }
+
+  setTerminalScroll(n: number) {
+    const term = this.state.terminal;
+    if (!term) return;
+    this.set({ terminal: { ...term, scroll: Math.max(0, n) } });
+  }
+
+  /**
+   * Walk the commands run here. `dir` is -1 for older and 1 for newer.
+   *
+   * The panel keeps its own list rather than reading the composer's
+   * (`history.ts`): what a reader typed at a shell and what they said to an
+   * agent are two vocabularies, and one list would offer each in the other's
+   * place.
+   */
+  recallTerminal(dir: -1 | 1) {
+    const term = this.state.terminal;
+    if (!term || term.history.length === 0) return;
+    const at = term.historyAt ?? term.history.length;
+    const next = Math.max(0, Math.min(term.history.length, at + dir));
+    const draft = next === term.history.length ? "" : term.history[next]!;
+    this.set({ terminal: { ...term, historyAt: next, draft, caret: draft.length } });
+  }
+
+  clearTerminal() {
+    const term = this.state.terminal;
+    if (!term) return;
+    term.log.clear();
+    this.set({ terminal: { ...term, logGen: term.log.generation, scroll: 0 } });
+  }
+
+  /**
+   * Tell the shell how wide the panel is.
+   *
+   * There is no pty, so this reaches the next command and not the one running
+   * — which is the whole of what a resize can mean through a pipe. Sent on
+   * open and on a resize, and never per keystroke.
+   */
+  async resizeTerminal(cols?: number, rows?: number) {
+    if (cols !== undefined) this.termCols = cols;
+    if (rows !== undefined) this.termRows = rows;
+    const term = this.state.terminal;
+    const client = term && this.clients.get(term.machine);
+    if (!term || !client || term.ended) return;
+    try { await client.rpc("terminal.resize", { terminalId: term.terminalId, cols: this.termCols, rows: this.termRows }); }
+    catch { /* a shell that went away says so through its own exit event */ }
+  }
+
+  /**
+   * One thing the shell said.
+   *
+   * `setFromMachine`, like every other callback a daemon drives: a `pnpm test`
+   * writes faster than a screen can paint, and a paint per chunk is the
+   * reader's keyboard spent on output they cannot read that fast anyway.
+   */
+  private applyTerminal(terminalId: string, ev: TerminalEvent) {
+    const term = this.state.terminal;
+    if (!term || term.terminalId !== terminalId) return;
+    switch (ev.kind) {
+      case "output":
+        term.log.write(ev.data);
+        this.setFromMachine({ terminal: { ...term, logGen: term.log.generation } });
+        return;
+      case "ran":
+        this.setFromMachine({ terminal: { ...term, busy: false, exitCode: ev.exitCode, cwd: ev.cwd, logGen: term.log.generation } });
+        return;
+      case "exit": {
+        term.log.write(`\n[the shell ended${ev.signal ? ` on ${ev.signal}` : ev.code === null ? "" : ` with status ${ev.code}`}]\n`);
+        this.setFromMachine({ terminal: { ...term, ended: true, busy: false, logGen: term.log.generation } });
+        return;
+      }
+    }
+  }
 
   async cancelQueued(turnId: string) {
     const v = this.state.view;

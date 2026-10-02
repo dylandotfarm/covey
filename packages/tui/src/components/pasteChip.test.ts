@@ -41,7 +41,7 @@ function appState(): AppState {
     machines: new Map([["pi", m]]), order: ["pi"], selected: { machine: "pi", threadId: "t" }, view, focus: "composer",
     sidebarCollapsed: true, showHidden: false, expanded: {}, toggledRows: new Set(), lod: "compact",
     overlay: null, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(),
-    pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(),
+    pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, terminal: null, attention: new Map(),
     selection: null, relaunch: null, clientBuild: null, clientStale: false,
   };
 }

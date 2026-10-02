@@ -157,6 +157,14 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
   const { engine } = o;
   const send = (m: WireFromDaemon) => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m)); };
   const subs = new Map<string, () => void>();
+  /**
+   * The subscription this connection holds on each shell, by terminal id.
+   *
+   * `terminal.open` both opens and subscribes, and a reader opens the same
+   * shell again whenever they come back to it — so without this the second
+   * open left the first listener in place and every byte arrived twice.
+   */
+  const termSubs = new Map<string, string>();
   let subCounter = 0;
   /**
    * The name this connection gave at `hello`. It says whether a person or a
@@ -230,6 +238,38 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         });
         return { subscriptionId: id };
       }
+      case "terminal.open": {
+        // The socket is the whole gate, as it is for `turn.send`: a client that
+        // may tell an agent to run a command may run one itself. Not loopback
+        // only, unlike `secrets.env` — the point of this is that the client is
+        // usually on another machine from the directory it opens.
+        const info = engine.terminalOpen({ threadId: String(p.threadId), cols: p.cols, rows: p.rows });
+        // One subscription per shell per connection. Opening again replaces it.
+        const held = termSubs.get(info.terminalId);
+        if (held) { subs.get(held)?.(); subs.delete(held); }
+        const id = `x${++subCounter}`;
+        const un = engine.onTerminal((terminalId, ev) => {
+          if (terminalId === info.terminalId) send({ push: "terminal", subscriptionId: id, terminalId, event: ev });
+        });
+        subs.set(id, un);
+        termSubs.set(info.terminalId, id);
+        // No replay and no seq: a stream is not a timeline. What a reader who
+        // reconnects needs is the screen, and `scrollback` is already in this
+        // answer — so there is nothing to synchronize after it.
+        return { ...info, subscriptionId: id };
+      }
+      case "terminal.input":
+        engine.terminalInput(String(p.terminalId), String(p.data ?? ""));
+        return null;
+      case "terminal.signal":
+        engine.terminalSignal(String(p.terminalId), p.signal === "quit" ? "quit" : p.signal === "term" ? "term" : "int");
+        return null;
+      case "terminal.resize":
+        engine.terminalResize(String(p.terminalId), Number(p.cols), Number(p.rows));
+        return null;
+      case "terminal.close":
+        engine.terminalClose(String(p.terminalId));
+        return null;
       case "unsubscribe":
         subs.get(p.subscriptionId)?.();
         subs.delete(p.subscriptionId);
