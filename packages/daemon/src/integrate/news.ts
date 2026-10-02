@@ -21,13 +21,28 @@
  * `mergeReadiness` is the fourth rule, for the `auto` policy: the daemon
  * merges only what the gate of #45 would call green against the current
  * base, and never on a review that asks for changes.
+ *
+ * `mergeBlock` is the fifth, and it is the checks verdict's other half. A
+ * green check is not a merge: a branch rule, a draft or a base that has moved
+ * all leave the merge button grey with every check passing. A watch that said
+ * only "the checks passed" taught the agent to answer "ready for you to
+ * merge" about a pull request GitHub refuses, so every verdict now carries
+ * what stands between it and the merge.
  */
-import type { BaseHead, CheckSummary, MergeMethod, MergePolicy, WatchCursor } from "@covey/protocol";
+import type { BaseHead, CheckSummary, MergeBlockCode, MergeMethod, MergePolicy, WatchCursor } from "@covey/protocol";
 import type { CommentEntry, PullRequestFacts, ReviewEntry, RollupEntry } from "./gh.js";
 import { summariseCheck, summariseChecks } from "./checks.js";
 
 export type WatchEvent =
-  | { kind: "checks"; ci: "passing" | "failing" | "absent" | "stale"; head: string; checks: CheckSummary[]; failed: CheckSummary[] }
+  | {
+      kind: "checks";
+      ci: "passing" | "failing" | "absent" | "stale";
+      head: string;
+      checks: CheckSummary[];
+      failed: CheckSummary[];
+      /** What stands between the green check and the merge button, or null. */
+      block: MergeBlock | null;
+    }
   | { kind: "conflict"; head: string }
   | { kind: "review"; review: ReviewEntry }
   | { kind: "comment"; comment: CommentEntry }
@@ -36,6 +51,48 @@ export type WatchEvent =
   | { kind: "closed" }
   /** The daemon tried to merge under `auto`, and `gh` refused. */
   | { kind: "mergeFailed"; error: string };
+
+/**
+ * Why GitHub will not merge the pull request, apart from its checks. The
+ * watch reads the checks from the check runs and the rest from here, and the
+ * two together are the whole of "can this merge now".
+ */
+export interface MergeBlock {
+  code: MergeBlockCode;
+  /** The fact, as one clause: the sentence reads "GitHub will not merge ... yet: <why>." */
+  why: string;
+}
+
+/**
+ * What stands between this pull request and its merge, or null when nothing
+ * but the checks does.
+ *
+ * Only a settled fact belongs here. GitHub works `mergeable` and
+ * `mergeStateStatus` out after the fact, and answers `UNKNOWN` until it has,
+ * so neither unknown is a block — a block that flaps would re-send the
+ * checks verdict on every poll. `BLOCKED` is read last for the same reason it
+ * is never read as a checks verdict: GitHub answers it while the checks run,
+ * so it means "a rule you cannot see" only once they have passed.
+ */
+export function mergeBlock(pr: PullRequestFacts): MergeBlock | null {
+  if (pr.state !== "OPEN") return null;
+  const status = pr.mergeStateStatus.toUpperCase();
+  const decision = pr.reviewDecision.toUpperCase();
+  if (pr.isDraft) return { code: "draft", why: "the pull request is a draft" };
+  // The conflict is an event of its own, with its own cursor. It is named
+  // here as well because that event fires once per head: a conflict reported
+  // an hour ago must not leave the next green verdict reading as ready.
+  if (pr.mergeable === "CONFLICTING" || status === "DIRTY") {
+    return { code: "conflict", why: `the branch conflicts with ${pr.baseRefName}` };
+  }
+  if (status === "BEHIND") {
+    return { code: "behind", why: `the branch is out of date with ${pr.baseRefName}, and this repository merges no branch that is behind` };
+  }
+  if (decision === "CHANGES_REQUESTED") return { code: "changes", why: "a review asks for changes" };
+  if (decision === "REVIEW_REQUIRED") return { code: "review", why: "this repository requires a review before a merge" };
+  if (status === "BLOCKED") return { code: "blocked", why: "GitHub reports the merge as blocked, so a rule of this repository is not met" };
+  return null;
+}
 
 export function emptyCursor(): WatchCursor {
   return { head: null, checks: null, conflict: null, mergeTried: null, reviews: [], comments: [] };
@@ -148,10 +205,19 @@ export function news(
     const stale = verdict.ci === "passing" && options.merge === "auto"
       && summariseChecks(pr.checks, options.base ?? null, pr.mergeStateStatus).ci === "stale";
     const ci = stale ? "stale" : verdict.ci;
-    const delivered = next.checks !== null && next.checks.head === sha && next.checks.ci === ci;
+    // A failure and a stale pass are already work to do, and the block would
+    // only crowd out the thing to fix. A pass and an absent check are where
+    // the agent needs it: both read as "nothing to do" without it.
+    const block = ci === "passing" || ci === "absent" ? mergeBlock(pr) : null;
+    const code = block?.code ?? null;
+    // The block is part of the key, not a decoration on it. The base branch
+    // moves under a pass the thread has already heard, and that is exactly
+    // the case the thread must be told about a second time.
+    const delivered = next.checks !== null && next.checks.head === sha && next.checks.ci === ci
+      && (next.checks.block ?? null) === code;
     if (!delivered) {
-      next.checks = { head: sha, ci };
-      events.push({ kind: "checks", ci, head: sha, checks: verdict.checks, failed: verdict.failed });
+      next.checks = { head: sha, ci, block: code };
+      events.push({ kind: "checks", ci, head: sha, checks: verdict.checks, failed: verdict.failed, block });
     }
   }
   if (pr.mergeable === "CONFLICTING" && next.conflict !== sha) {
@@ -163,7 +229,14 @@ export function news(
 
 /** True for an event the agent has to act on. Such an event costs a round. */
 export function asksForWork(ev: WatchEvent): boolean {
-  if (ev.kind === "checks") return ev.ci === "failing" || ev.ci === "stale";
+  if (ev.kind === "checks") {
+    // A block the agent clears with a push costs a round, like the stale pass
+    // it is a sibling of. A draft, a review and a rule of the repository all
+    // wait for a person, so they cost none: a round spent on a wait is a round
+    // the next real failure has lost.
+    if (ev.block) return ev.block.code === "behind" || ev.block.code === "conflict";
+    return ev.ci === "failing" || ev.ci === "stale";
+  }
   if (ev.kind === "conflict") return true;
   if (ev.kind === "review") return ev.review.state.toUpperCase() === "CHANGES_REQUESTED";
   return false;
@@ -190,6 +263,13 @@ export function mergeReadiness(pr: PullRequestFacts, base: BaseHead | null): { r
   if (pr.mergeable !== "MERGEABLE") return { ready: false, why: "GitHub has not said yet whether the branch is mergeable" };
   const checks = summariseChecks(pr.checks, base, pr.mergeStateStatus);
   if (checks.ci !== "passing") return { ready: false, why: checks.reason };
+  // GitHub's own refusal, read after the checks and not before: it answers
+  // `BLOCKED` while they run as well, and "a rule is not met" is the wrong
+  // sentence for a check that has not finished. A rule covey cannot name is
+  // still a rule, so this is never read as ready.
+  if (pr.mergeStateStatus.toUpperCase() === "BLOCKED") {
+    return { ready: false, why: "GitHub blocks the merge: a rule of the repository is not met" };
+  }
   return { ready: true };
 }
 
@@ -224,12 +304,17 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
       }
       if (ev.ci === "passing") {
         const n = ev.checks.filter((c) => c.state === "success").length;
+        const passed = `The checks passed on ${short(ev.head)}: ${n} check${n === 1 ? "" : "s"} succeeded.`;
+        // A green check is not a merge. Never say "nothing to fix" over a
+        // block: that sentence is what the agent answers the reader with.
+        if (ev.block) return `${passed} GitHub will not merge the pull request yet: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}`;
         const then = ctx.merge === "auto"
           ? "Covey merges the pull request on its next poll, unless a review asks for changes or the base has moved."
           : "The merge policy is manual: a person merges the pull request, or switches this thread to auto. Wait; covey sends the next review, comment or merge as a turn.";
-        return `The checks passed on ${short(ev.head)}: ${n} check${n === 1 ? "" : "s"} succeeded. There is nothing to fix. ${then}`;
+        return `${passed} There is nothing to fix. ${then}`;
       }
-      return `No check ran on ${short(ev.head)} in ${Math.round(NO_CHECKS_GRACE_MS / 60_000)} minutes. The repository may have no checks for this branch. Nothing has tested the change; say so in the pull request if a check was expected.`;
+      const none = `No check ran on ${short(ev.head)} in ${Math.round(NO_CHECKS_GRACE_MS / 60_000)} minutes. The repository may have no checks for this branch. Nothing has tested the change; say so in the pull request if a check was expected.`;
+      return ev.block ? `${none} GitHub will not merge the pull request yet either: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}` : none;
     }
     case "conflict":
       return `The branch conflicts with ${pr.baseRefName} at ${short(ev.head)}. Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
@@ -253,6 +338,25 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
       return "The pull request was closed without a merge. The loop is done, and covey stops the watch.";
     case "mergeFailed":
       return `Covey tried to merge the pull request under the auto policy, and GitHub refused: ${ev.error}. Covey does not try again on this head. A person has to look, or a push starts the loop again.`;
+  }
+}
+
+/** What to do about a block: one instruction, or the wait and why. */
+function describeBlock(block: MergeBlock, pr: PullRequestFacts, ctx: NewsContext): string {
+  const round = `This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
+  switch (block.code) {
+    case "behind":
+      return `Merge ${pr.baseRefName} into ${ctx.branch} and push. The checks run again against the new base. ${round}`;
+    case "conflict":
+      return `Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
+    case "draft":
+      return "Mark the pull request ready for review when the work is done. Covey does not merge a draft.";
+    case "changes":
+      return "Answer the review and push the change it asks for. Covey sends the next review as a turn.";
+    case "review":
+      return "Wait; a person has to review the pull request. Covey sends the review as a turn. Say in your reply that the merge waits for a review.";
+    case "blocked":
+      return "You cannot clear this one. Say in your reply that the checks passed and GitHub still blocks the merge, so a person can look at the rule.";
   }
 }
 

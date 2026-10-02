@@ -1464,10 +1464,14 @@ export class Engine {
       const fresh = this.db.getThread(t.id);
       const live = fresh?.watch;
       if (!fresh || !live || live.state !== "watching" || live.number !== w.number) return;
-      // The base head is read only under `auto`, where staleness stands
-      // between the thread and its merge. Under `manual` it is the person's
-      // question, and one `gh` call fewer per poll.
-      const base = live.merge === "auto" && facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
+      // The base head, under either policy. Under `auto` staleness stands
+      // between the thread and its merge. Under `manual` the readiness on the
+      // row (#172) is nonsense without it: `isStale` refuses on doubt, so an
+      // unknown base made every passing check read as stale, and the phone
+      // said "6 checks started before the base head is unknown" about a branch
+      // that was ready. One `gh` call per poll, and polls are 30 seconds apart
+      // at their fastest.
+      const base = facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
       const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base });
       live.cursor = cursor;
       live.polledAt = nowIso;

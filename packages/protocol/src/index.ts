@@ -755,16 +755,32 @@ export interface PullRequestWatch {
 }
 
 /**
+ * Why GitHub will not merge a pull request, apart from its checks. The daemon
+ * works it out (`mergeBlock`); the protocol names it because the watch cursor
+ * stores it. `conflict` and `behind` are the agent's own work; `draft`,
+ * `changes`, `review` and `blocked` wait for a person.
+ */
+export type MergeBlockCode = "draft" | "conflict" | "behind" | "changes" | "review" | "blocked";
+
+/**
  * What a watch has already delivered, so that nothing arrives twice. A retry,
  * a reconnect or a restart reads the cursor and goes on from it.
  */
 export interface WatchCursor {
   /** The head commit the watch last saw, and when it first saw it. */
   head: { sha: string; seenAt: string } | null;
-  /** The checks verdict last delivered, and the head it was for. `stale` is
-   *  only read under the `auto` policy, where it stands between the thread
-   *  and its merge. */
-  checks: { head: string; ci: "passing" | "failing" | "absent" | "stale" } | null;
+  /**
+   * The checks verdict last delivered, and the head it was for. `stale` is
+   * only read under the `auto` policy, where it stands between the thread
+   * and its merge.
+   *
+   * `block` is why GitHub would still refuse the merge, and it is part of the
+   * key rather than a note beside it: the base branch moves under a pass the
+   * thread has already heard, and a pull request that turns green and then
+   * out of date has to be told twice. Absent on a daemon older than the
+   * field, which reads as no block.
+   */
+  checks: { head: string; ci: "passing" | "failing" | "absent" | "stale"; block?: MergeBlockCode | null } | null;
   /** The head a merge conflict was last reported for. */
   conflict: string | null;
   /** The head the daemon last tried, and failed, to merge. One try per head. */
