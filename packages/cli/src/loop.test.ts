@@ -200,6 +200,10 @@ test("covey pr review takes a count, and one by default", () => {
   assert.deepEqual(request("pr review"), { kind: "pr.review" });
   assert.deepEqual(request("pr review 2"), { kind: "pr.review", count: 2 });
   assert.match(error("pr review 0"), /needs a number/);
+  // Every flag lands in `rest` beside the count, so a `--thread` where the
+  // count would stand is no count at all, and not a word that is not a number.
+  assert.deepEqual(request("pr review --thread t-1 --port 3799"), { kind: "pr.review" });
+  assert.deepEqual(request("pr review 2 --port 3799"), { kind: "pr.review", count: 2 });
 });
 
 test("covey review says one of two things, and changes needs words", () => {

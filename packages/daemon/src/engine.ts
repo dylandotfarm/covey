@@ -1359,6 +1359,17 @@ export class Engine {
       started.push(id);
     }
     if (started.length === 0) return [];
+    // Every reviewer now says how many there are. A reviewer that started
+    // earlier was told a smaller number, and its brief has been read, but the
+    // tagline on each later comment is computed from this row — so a reader
+    // never sees "reviewer 2 of 2" beside a comment that names no seat at all.
+    const required = this.db.getThread(threadId)?.watch?.review?.required ?? 0;
+    for (const r of this.db.getThread(threadId)?.watch?.review?.reviewers ?? []) {
+      const rt = this.db.getThread(r.threadId);
+      if (!rt?.reviewOf || rt.reviewOf.of === required) continue;
+      rt.reviewOf = { ...rt.reviewOf, of: required };
+      this.putThreadAndEmit(rt);
+    }
     const fresh = this.db.getThread(threadId);
     if (fresh) {
       const standing = reviewStanding(fresh.watch?.review);

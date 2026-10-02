@@ -153,8 +153,12 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
     return { request: { kind: "pr.open", title, body: b, draft: has("--draft"), merge: has("--auto") ? "auto" : "manual", mergeMethod: method(), ...r, attachments: a, ...v } };
   }
   if (sub === "review") {
-    if (rest[0] === undefined) return { request: { kind: "pr.review" } };
-    const n = number(rest[0], "covey pr review");
+    // The count is optional, and `--thread` or `--port` may stand where it
+    // would: every flag lands in `rest` too, so "no count" is "no word here
+    // that is not a flag" and never "nothing here at all".
+    const count = rest[0]?.startsWith("--") ? undefined : rest[0];
+    if (count === undefined) return { request: { kind: "pr.review" } };
+    const n = number(count, "covey pr review");
     return typeof n === "number" ? { request: { kind: "pr.review", count: n } } : n;
   }
   if (sub === "comment") {

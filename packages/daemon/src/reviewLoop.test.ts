@@ -173,6 +173,11 @@ test("covey pr review adds a reviewer to a pull request that has one, and raises
   assert.equal(added.required, 2);
   assert.equal(s.reviewThreads().length, 2);
   assert.deepEqual(s.reviewers("t1").map((r) => r.index), [1, 2]);
+  // The first reviewer was told it was the only one. Its tagline is computed
+  // from this row at comment time, so it must now say how many there are.
+  assert.deepEqual(s.reviewThreads().map((t) => [t.reviewOf!.index, t.reviewOf!.of]), [[1, 2], [2, 2]]);
+  await s.engine.commentPullRequest({ threadId: s.reviewThreads()[0]!.id, body: "A note." });
+  assert.match(s.host.comments.at(-1)!.body, /\(reviewer 1 of 2\)/);
 });
 
 test("a reviewer does not ask for a reviewer, and a thread with no pull request cannot", async (t) => {
