@@ -42,7 +42,8 @@ import type { ExpoConfig } from "expo/config";
  * The version the runtime is keyed on. An update must match the app it lands in.
  *
  * `0.2.0` was `expo-speech-recognition`; `0.3.0` is `react-native-ble-plx`, for
- * the device (#178). Both are native code, and a bundle that calls one cannot
+ * the device (#178); `0.4.0` is `modules/covey-link`, the foreground service
+ * that keeps that radio alive while the screen is off (#184). Both are native code, and a bundle that calls one cannot
  * run in an app built without it. Moving this moves the runtime version, so a
  * `0.2.0` install is offered nothing further — `updates.ts` in the daemon
  * answers it `noUpdateAvailable` rather than a manifest it could not use. That
@@ -52,7 +53,7 @@ import type { ExpoConfig } from "expo/config";
  * time.** A JavaScript change ships over the air and wants no bump; a bump
  * strands every installed app until somebody installs the new one by hand.
  */
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 const updatesUrl = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL?.trim();
 /** The certificate is committed; the private key that matches it is not. */

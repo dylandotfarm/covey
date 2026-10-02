@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { appBuild } from "./apk.js";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
 import { readModels } from "./models.js";
 import { dataDir, loadDaemonConfig, machineSettings, platformInfo, projectsDir, type DaemonConfig } from "./config.js";
@@ -51,6 +52,10 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   // The build, not the package version: "0.0.1" never moves, so it could not
   // tell a client that this machine runs older code than the client does.
   const build = await buildInfo();
+  // What `pnpm run apk` left behind, if anything (#185). Read once at start: a
+  // build that lands later is picked up by the next restart, and a daemon that
+  // restarts is what a new build usually comes with.
+  const app = await appBuild();
   const machine: MachineInfo = {
     machineId: config.machineId, name: config.name, ...platformInfo(),
     daemonVersion: buildLabel(build), build, protocolVersion: PROTOCOL_VERSION,
@@ -59,6 +64,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
     settings: machineSettings(config),
     projectsDir: projectsDir(),
+    ...(app ? { appBuild: app } : {}),
     webAddresses: webAddresses({ port: config.port, bind: config.bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips }),
   };
   const db = new Db(join(dataDir()));

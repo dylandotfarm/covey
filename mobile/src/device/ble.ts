@@ -88,7 +88,20 @@ async function permitted(): Promise<boolean> {
     ? [PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN, PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT]
     : [PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION];
   const got = await PermissionsAndroid.requestMultiple(wanted);
-  return wanted.every((p) => got[p] === PermissionsAndroid.RESULTS.GRANTED);
+  if (!wanted.every((p) => got[p] === PermissionsAndroid.RESULTS.GRANTED)) return false;
+
+  /*
+   * The notification, asked for separately and not required.
+   *
+   * From Android 13 a notification needs permission, and the foreground service
+   * that keeps the link alive while the screen is off carries one. Refusing it
+   * does not stop the service - it only makes it invisible - so a refusal must
+   * not stop the radio with it.
+   */
+  if (api >= 33) {
+    await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => {});
+  }
+  return true;
 }
 
 export class DeviceLink {

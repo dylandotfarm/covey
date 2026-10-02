@@ -203,7 +203,25 @@
   because a service can then change with no new app. `unavailable` is the one
   code that makes a client fall back to its own recogniser; every other failure
   carries the service's own sentence to the screen, because those sentences were
-  written for it. `docs/DEVICE.md` holds the reasoning and the rules.
+  written for it.
+  Android stops a *background* app from receiving Bluetooth scan results while
+  the screen is off and kills a swiped-away process, so the device is
+  unreachable with a locked phone (#184): `mobile/modules/covey-link` is a
+  foreground service that **does nothing** — `ble.ts` still owns the scan and the
+  connection, and the service only keeps the process alive. From Android 14 the
+  service type is declared twice, in the manifest and again at `startForeground`,
+  and a mismatch throws. Load it with `requireOptionalNativeModule`, never the
+  strict one: a bundle sent over the air can land in an app built before the
+  module existed, and the throw would be at import time. The firmware records
+  even with no link and **holds** the utterance until one returns, sent from the
+  status sweep rather than the connect event, because a phone is connected a
+  moment before it subscribes. A native module moved the app to `0.4.0`, so the
+  daemon serves the binary it built at `/apk` and the settings screen links to
+  it (#185, `MachineInfo.appBuild`) — gated like `/updates`, with the token on
+  the URL because a download carries no header. That is *not* the update channel
+  and never becomes it: `/updates` ships JavaScript into an installed app,
+  `/apk` hands a whole binary to somebody who chose to install it.
+  `docs/DEVICE.md` holds the reasoning and the rules.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
   and not a replacement — never change the TUI to suit it. The idea is one `Grid` of styled

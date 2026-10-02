@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { PROTOCOL_VERSION, type RpcRequest, type RpcResponse, type PushMessage, type WireFromDaemon, type PullRequestAttachment } from "@covey/protocol";
 import { Engine, EngineError } from "./engine.js";
 import { transcribe, TranscribeError } from "./transcribe.js";
+import { serveApk } from "./apk.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
 import { readFleet, type DaemonConfig } from "./config.js";
@@ -77,6 +78,16 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
       void authenticate(req, o.config, selfUserId).then((auth) => {
         if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`file: ${auth.reason}\n`); return; }
         serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id));
+      }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+      return;
+    }
+    // The Android app itself (#185), for the sideload a native change forces.
+    // Gated exactly as `/updates` is, and a browser carries the token on the
+    // URL because a download has no header to put it in (#135).
+    if (req.url === "/apk" || req.url?.startsWith("/apk?")) {
+      void authenticate(req, o.config, selfUserId).then((auth) => {
+        if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`apk: ${auth.reason}\n`); return; }
+        void serveApk(req, res);
       }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
       return;
     }

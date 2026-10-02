@@ -1,0 +1,28 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    What a foreground service costs, declared.
+
+    Android stops a background app from receiving Bluetooth scan results while
+    the screen is off. That is the restriction that makes the device unreachable
+    with a locked phone, and a foreground service is the mechanism Android
+    offers for lifting it: the app keeps running, scanning works, and the link
+    is held.
+
+    `connectedDevice` is the type, and from Android 14 both the type and its own
+    permission must be declared or `startForeground` throws. POST_NOTIFICATIONS
+    is asked for at run time on Android 13 and later; without it the service
+    still runs, but its notification is invisible, and a reader should be able
+    to see what is holding their radio open.
+  -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <application>
+    <service
+      android:name="farm.dylan.covey.link.CoveyLinkService"
+      android:enabled="true"
+      android:exported="false"
+      android:foregroundServiceType="connectedDevice" />
+  </application>
+</manifest>
