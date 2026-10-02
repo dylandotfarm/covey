@@ -1632,11 +1632,15 @@ One `thread.cleared` event says it, not an `item.removed` per item, because a lo
 would be a thousand events for one act. A client that reconnects reads it after the upserts it
 replays, so it ends with an empty map either way.
 
-The title goes back to `New thread` with `titleAuto` true, and the next message names the
-thread again through the path a first message takes. That needs no change in `startTurn`:
-it asks `titleIsAuto(t) && (firstMessage || t.title === "New thread")`, and the title alone
-answers both halves. So `lastMessageAt` is left alone, which is what keeps the thread where
-the reader left it — the sidebar orders a project's threads by that field.
+An automatic title goes back to `New thread` with `titleAuto` true, and the next message
+names the thread again through the path a first message takes. That needs no change in
+`startTurn`: it asks `titleIsAuto(t) && (firstMessage || t.title === "New thread")`, and the
+title alone answers both halves. So `lastMessageAt` is left alone, which is what keeps the
+thread where the reader left it — the sidebar orders a project's threads by that field.
+
+A title the reader typed is never taken back. `titleAuto` records whose title it is, a rename
+clears it, and every other writer of a title asks first; a name the clear took would be a name
+nothing could give back, because it is in no row and there is no undo.
 
 Refused, with `busy`, while a turn is running or a message is queued, for the reason
 `turn.revert` is: the rows it removes are the ones a running turn is still writing.

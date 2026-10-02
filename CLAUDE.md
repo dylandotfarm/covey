@@ -373,8 +373,9 @@
   clear touches no file. **`lastMessageAt` is never reset**, or the thread falls to the
   bottom of its project; `startTurn` names a thread again from the title alone, because
   `titleIsAuto(t) && (firstMessage || t.title === "New thread")` is already satisfied by
-  putting the title back. One `thread.cleared` event says it all, never an
-  `item.removed` per item.
+  putting the title back — and only an *automatic* title goes back, because a name the
+  reader typed is in no row and no undo gives it back. One `thread.cleared` event says it
+  all, never an `item.removed` per item.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
 - A thread's session is a subprocess of about 250 MB. That figure is `Pss` and never `Rss`:

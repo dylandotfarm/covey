@@ -63,7 +63,7 @@ test("the next message names the thread again", async () => {
   } finally { h.cleanup(); }
 });
 
-test("a thread the reader renamed by hand is named again too", async () => {
+test("a thread the reader named by hand keeps that name", async () => {
   const h = setup();
   try {
     await h.turn("t3", "fix the reconnect loop");
@@ -71,8 +71,14 @@ test("a thread the reader renamed by hand is named again too", async () => {
     assert.equal(h.db.getThread("t3")!.titleAuto, false);
 
     await h.clear("t3");
+    // `titleAuto` says whose title it is, and a rename clears it. A name covey
+    // took here would be a name nothing could give back: it is in no row, there
+    // is no undo, and the next message would write its own first line over it.
+    assert.equal(h.db.getThread("t3")!.title, "websockets");
+    assert.equal(h.db.getThread("t3")!.titleAuto, false);
+
     await h.turn("t3", "now the backoff timer");
-    assert.equal(h.db.getThread("t3")!.title, "now the backoff timer");
+    assert.equal(h.db.getThread("t3")!.title, "websockets", "and the next message does not take it either");
   } finally { h.cleanup(); }
 });
 

@@ -1387,7 +1387,10 @@ export class Store {
           // chip for a file nothing will send is a chip the reader cannot use.
           this.clearAttachments(v.threadId);
           this.clearPastes(v.threadId);
-          this.notify("cleared — the next message names this thread again", "success");
+          // Only "cleared": whether the next message renames the thread
+          // depends on whose title it is, and this side cannot say without a
+          // second copy of the daemon's rule.
+          this.notify("cleared", "success");
         } catch (e: any) { this.notify(e.message, "error"); }
         return;
       default:

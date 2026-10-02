@@ -385,9 +385,9 @@ export class Db {
   deleteCheckpoint(threadId: string, turnId: string) {
     this.sql.prepare("DELETE FROM turn_checkpoints WHERE thread_id=? AND turn_id=?").run(threadId, turnId);
   }
-  /** Delete every item of a thread (`thread.clear`, #16); returns how many went. */
-  clearItems(threadId: string): number {
-    return Number(this.sql.prepare("DELETE FROM items WHERE thread_id=?").run(threadId).changes);
+  /** Delete every item of a thread (`thread.clear`, #16). */
+  clearItems(threadId: string) {
+    this.sql.prepare("DELETE FROM items WHERE thread_id=?").run(threadId);
   }
   /** Delete items with seq >= fromSeq; returns their ids. */
   deleteItemsFrom(threadId: string, fromSeq: number): string[] {

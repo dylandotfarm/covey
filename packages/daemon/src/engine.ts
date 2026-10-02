@@ -2165,6 +2165,17 @@ export class Engine {
    * stands, which is what keeps the thread where the reader left it — the
    * sidebar orders by that field, and a cleared thread must not fall to the
    * bottom of its project.
+   *
+   * A title the reader typed is never taken back, which is what `titleAuto`
+   * promises everywhere else: a rename clears the flag, `autoTitle` asks the
+   * same question before it writes, and a name covey takes here is a name
+   * nothing can give back.
+   *
+   * The guard above reads the turn and the queue, not `sessionBusy`, so a
+   * clear does end a session that is answering a background task of its own
+   * (#156) under no turn. That is meant: the reader asked for the process to
+   * go, and a refusal on a thread the sidebar paints as idle would read as a
+   * bug.
    */
   private clearThread(t: Thread): number {
     // The live process holds the conversation in its own memory, so it goes
@@ -2176,14 +2187,13 @@ export class Engine {
     this.db.deleteTranscript(t.sessionId);
     this.chains.forget(t.id);
     this.forgetAuthFailure(t.id);
-    // A title query in flight was written for the conversation that has gone,
-    // and `titleIsAuto` is true again, so it would land on the empty thread.
+    // A title query in flight reads the message of a conversation that has
+    // gone, and on an auto-titled thread it would land on the empty one.
     this.titling.get(t.id)?.abort();
     this.emitThread(t.id, { kind: "thread.cleared" });
     return this.mutateThread(t.id, (x) => {
       x.sessionId = randomUUID();
-      x.title = "New thread";
-      x.titleAuto = true;
+      if (titleIsAuto(x)) { x.title = "New thread"; x.titleAuto = true; }
       x.latestTurn = null;
       x.status = "idle";
       x.lastError = null;

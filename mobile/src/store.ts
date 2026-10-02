@@ -330,11 +330,15 @@ class Store {
     // There is no `/` menu on this screen yet, so the command is typed whole.
     const own = coveyCommand(text);
     if (own) {
-      this.state.drafts.delete(composerKey(machine, threadId));
-      setPendingAttachments(this.state, machine, threadId, []);
-      this.schedule();
-      if (own.name === "clear") this.clients.get(machine)?.command({ type: "thread.clear", threadId }).catch(this.fail);
-      else this.fail(new Error(`/${own.name} is not a command covey answers`));
+      if (own.name !== "clear") { this.fail(new Error(`/${own.name} is not a command covey answers`)); return; }
+      // The draft and its chips go only once the daemon has taken the command,
+      // as they do in the TUI: `thread.clear` is refused under a running turn,
+      // and a reader must not lose the files they picked to a refusal.
+      this.clients.get(machine)?.command({ type: "thread.clear", threadId }).then(() => {
+        this.state.drafts.delete(composerKey(machine, threadId));
+        setPendingAttachments(this.state, machine, threadId, []);
+        this.schedule();
+      }).catch(this.fail);
       return;
     }
     // The tag in the text is the file. Whatever lost its tag does not go.

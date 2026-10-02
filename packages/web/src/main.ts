@@ -261,13 +261,16 @@ const actions: Actions = {
     // A covey command is the page's own work and never reaches the agent (#16).
     const own = coveyCommand(text);
     if (own) {
-      state.drafts.delete(composerKey(machine, threadId));
-      // The draft went with the command, so its chips go too: a chip for a
-      // file nothing will send is a chip the reader cannot use.
-      setPendingAttachments(state, machine, threadId, []);
-      schedule();
-      if (own.name === "clear") clients.get(machine)?.command({ type: "thread.clear", threadId }).catch(fail);
-      else fail(new Error(`/${own.name} is not a command covey answers`));
+      if (own.name !== "clear") { fail(new Error(`/${own.name} is not a command covey answers`)); return; }
+      // The draft and its chips go only once the daemon has taken the command.
+      // `thread.clear` is the one command here that is refused — `busy`, under
+      // a running turn — and a reader who loses the files they picked to a
+      // refusal has lost them for nothing.
+      clients.get(machine)?.command({ type: "thread.clear", threadId }).then(() => {
+        state.drafts.delete(composerKey(machine, threadId));
+        setPendingAttachments(state, machine, threadId, []);
+        schedule();
+      }).catch(fail);
       return;
     }
     // The tag in the text is the file. Whatever lost its tag does not go.
