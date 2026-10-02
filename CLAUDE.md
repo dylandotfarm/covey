@@ -553,7 +553,15 @@
   is what `blockLead` is for, and it costs no round because no push makes a reviewer finish
   sooner. `mergeReadiness` and `mergeBlock` both read the review last, after every fact
   GitHub reported. A reviewer that ends with no verdict is reported to the author by the
-  daemon and not by a poll, because there is no artefact to read it from; one that signed off is archived by covey itself and
+  daemon and not by a poll, because there is no artefact to read it from. A reviewer is **not
+  painted**: `Thread.hidden`, read only through `threadIsHidden`, whose third term is the
+  whole safety of it — a hidden thread that needs a person is never hidden, or a reviewer
+  blocked on an approval would hang the pull request for ever off the screen. The switch is
+  the device's (`prefs.showHidden`, `localStorage`), and the hiding goes where the lists are
+  built (`liveThreads`, `projectRows`) so the counts hide what the rows hide. Because the
+  reviewers are invisible the thread under review must say so, or it reads as stalled:
+  `threadReviewing` counts them and the TUI paints `⊙` (a glyph, like `AGENT_MARK`), while the
+  web says it in `threadStatusLabel`, which answered `idle` for the whole review before; one that signed off is archived by covey itself and
   is never a drop. Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
   with the loop and `covey env`.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon

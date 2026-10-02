@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
+import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ReviewerState, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
 import type { TaggedAttachment } from "@covey/client";
 import {
   addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
@@ -720,4 +720,52 @@ test("threadMedia ignores a link that is not media", () => {
     mediaItem({ kind: "assistant", text: "See https://example.com/page and https://x/notes.txt", streaming: false, model: null }),
   ]);
   assert.equal(found.length, 0);
+});
+
+// ---- the threads covey hides, on the phone ----------------------------------
+
+test("a hidden thread is off the list until the reader asks, and never when it needs them", () => {
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  const ids = () => projectRows(s).flatMap((r) => r.threads.map((x) => x.thread.id)).sort();
+  const withReviewer = (over: Partial<Thread>) => applyShellSnapshot(box, snap("box", [project("p1", "covey")], [
+    thread("author", "p1"),
+    thread("rev", "p1", { hidden: true, origin: { by: "agent", parentThreadId: "author" }, ...over }),
+  ]));
+
+  withReviewer({});
+  assert.deepEqual(ids(), ["author"], "the reviewer is not a row");
+  assert.equal(projectRows(s)[0]!.threads.length, 1, "and the row's own count agrees with what it shows");
+
+  s.showHidden = true;
+  assert.deepEqual(ids(), ["author", "rev"]);
+
+  // The rule that makes hiding safe: a reviewer blocked on an approval is
+  // painted whatever the switch says, because nobody else is watching it.
+  s.showHidden = false;
+  withReviewer({ pendingApprovals: 1 });
+  assert.deepEqual(ids(), ["author", "rev"]);
+  withReviewer({ status: "error" });
+  assert.deepEqual(ids(), ["author", "rev"]);
+});
+
+test("a thread sitting still under review does not read as idle", () => {
+  // The reviewers are hidden, so this line is the one place the reader sees the
+  // loop running. Without it the thread said "idle" for the whole review.
+  const reviewing = (...states: ReviewerState[]) => thread("t", "p1", {
+    watch: {
+      number: 7, state: "watching", reason: null, merge: "manual", mergeMethod: "merge", rounds: 0, maxRounds: 3,
+      quiet: 0, startedAt: "", polledAt: null, endedAt: null, error: null,
+      cursor: { head: null, checks: null, conflict: null, mergeTried: null, reviews: [], comments: [] },
+      review: { required: states.length, reviewers: states.map((state, i) => ({ threadId: `r${i}`, index: i + 1, state, note: null, startedAt: "", decidedAt: null })) },
+    },
+  } as Partial<Thread>);
+  assert.equal(threadStatusLabel(reviewing("reviewing")), "under review");
+  assert.equal(threadStatusLabel(reviewing("reviewing", "reviewing")), "under review · 2 reviewers");
+  assert.equal(threadStatusLabel(reviewing("changesRequested")), "under review", "it is waiting on the author: the loop is live");
+  assert.equal(threadStatusLabel(reviewing("signedOff")), "idle", "the review is over");
+  assert.equal(threadStatusLabel(thread("t", "p1")), "idle");
+  // Anything the reader has to act on is the nearer answer.
+  assert.equal(threadStatusLabel({ ...reviewing("reviewing"), pendingApprovals: 1 }), "needs approval");
+  assert.equal(threadStatusLabel({ ...reviewing("reviewing"), status: "error", lastError: null }), "error");
 });

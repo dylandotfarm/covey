@@ -829,6 +829,29 @@ costs no round: there is nothing the author can push that makes a reviewer finis
 told "the review has not signed off" about a branch with a red check has been told the wrong
 thing.
 
+**A reviewer is not on the screen.** A reader did not ask for it, and a sidebar that grew a
+second row per pull request would make covey's own machinery look like their work.
+`Thread.hidden` says so and `threadIsHidden` is the one place that reads it, because hiding
+has an escape hatch a plain `if (t.hidden)` would miss: **a hidden thread that needs a person
+is never hidden.** That is the fold rule of #69 one step further out — a reviewer in a strict
+permission mode asks for an approval, nobody else is watching it, and off the screen the whole
+pull request waits for ever on a prompt the reader cannot see. The switch is the reader's own
+(`prefs.showHidden` and the settings overlay in the TUI, `localStorage` and the Detail rows in
+the web client), a device preference like the theme and the level of detail, carried in no
+command. Hiding is applied where the lists are built — `liveThreads` in the TUI, `projectRows`
+in the shared client — so the counts and the tallies hide exactly what the rows hide; a number
+the reader cannot reconcile with what is above it is worse than no number.
+
+**So the thread being reviewed says so.** Its reviewers are invisible, and a thread with a
+pull request open sits still for minutes: without a mark it reads as stalled, which is the one
+thing hiding must not cause. `threadReviewing` counts the reviewers still working — one that
+asked for changes counts too, because it waits on the author and the loop is as live as when
+it was reading — and the TUI paints `⊙` beside the title, with the count when there is more
+than one. A glyph and not a colour, for the reason the agent mark is one: covey runs over ssh,
+in tmux, and on terminals with a narrow palette. The web client says it in words instead,
+through `threadStatusLabel`, which answered `idle` for the whole review before this; it comes
+after every state that needs the reader, because being reviewed is not something to act on.
+
 **A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
 archives its reviewers: a session is 300 MB and a worktree is a checkout, and the change
 they were reading is nobody's work any more. The record is marked `dropped` first, so the

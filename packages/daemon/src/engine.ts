@@ -1408,6 +1408,9 @@ export class Engine {
       pendingApprovals: 0, queuedTurns: 0, latestTurn: null, lastMessageAt: null, archivedAt: null,
       pinnedAt: null, movedTo: null,
       reviewOf: { authorThreadId: author.id, number: r.number, url: r.url, branch: r.branch, base: r.base, index: r.index, of: r.of, startedAt: now },
+      // Machinery the reader did not ask for. A client paints it only when the
+      // reader asks to see what is hidden, and always when it needs a person.
+      hidden: true,
       createdAt: now, updatedAt: now,
     };
     this.db.putThread(t);

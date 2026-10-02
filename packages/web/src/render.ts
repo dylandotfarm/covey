@@ -9,7 +9,7 @@
  * item id and rebuilt only when the daemon re-sent that item.
  */
 import { acceptCommand, commandLabel, cutTag, noteFold, spliceTags, tagSpanAt } from "@covey/client";
-import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Attachment, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
+import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, threadIsHidden, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Attachment, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
@@ -80,6 +80,7 @@ export interface Actions {
   toggleRow(key: string): void;
   /** Read transcripts at this level of detail from now on (#149). */
   setLod(lod: Lod): void;
+  setShowHidden(on: boolean): void;
 }
 
 /** How far a row slides to show the button under it, in CSS pixels. Matches `.swipe .archive` in app.css. */
@@ -542,7 +543,7 @@ export class Renderer {
    */
   private settingsPanel(s: State): HTMLElement {
     const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"));
-    panel.append(h("h3", {}, "Detail"), this.lodPanel(s));
+    panel.append(h("h3", {}, "Detail"), this.lodPanel(s), this.hiddenPanel(s));
     panel.append(h("h3", {}, "Machines"));
     for (const m of s.machines.values()) panel.append(this.machineCard(m));
     if (s.machines.size === 1) panel.append(h("p", { class: "hint" }, "Other machines appear here once the TUI starts the web server on this one; it hands over the list."));
@@ -561,6 +562,30 @@ export class Renderer {
     }
     if (s.access.addresses.length === 0) panel.append(h("p", { class: "empty" }, "This machine has no tailnet and no LAN address."));
     return panel;
+  }
+
+  /**
+   * Whether this device paints the threads covey hides: its own automated
+   * reviewers.
+   *
+   * A preference of the device, beside `lod` and for the same reason. The hint
+   * counts what is hidden right now, because a switch over nothing reads as a
+   * bug, and it names the one case the switch does not cover: a hidden thread
+   * that needs the reader is never hidden.
+   */
+  private hiddenPanel(s: State): HTMLElement {
+    let n = 0;
+    for (const m of s.machines.values()) for (const t of m.threads.values()) if (threadIsHidden(t, false) && !t.archivedAt && !t.movedTo) n++;
+    const hint = s.showHidden
+      ? "painted under the threads they review"
+      : n === 0 ? "covey's automated reviewers, when it has any" : `${n} hidden now; one that needs you is never hidden`;
+    return h("div", { class: "lod" },
+      h("button", {
+        type: "button",
+        class: s.showHidden ? "chosen" : "",
+        onclick: () => this.a.setShowHidden(!s.showHidden),
+      }, s.showHidden ? "Hidden threads: shown" : "Hidden threads: hidden", h("small", {}, hint)),
+    );
   }
 
   /**

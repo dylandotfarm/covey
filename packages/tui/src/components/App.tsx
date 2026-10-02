@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, threadIsHidden, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
@@ -117,6 +117,22 @@ const MEMBER_STATE_HINT: Record<RunMemberState, string> = {
 
 /** What `g` cycles through in the usage overlay. */
 const USAGE_GROUPINGS: UsageGroupBy[] = ["thread", "project", "model", "machine"];
+
+/**
+ * What the hidden-threads switch says it is holding back.
+ *
+ * Covey hides its own automated reviewers, and a switch labelled "hidden" over
+ * nothing reads as a bug. The count is of threads really hidden right now, so it
+ * answers "hidden from what?" rather than naming the feature.
+ */
+function hiddenHint(state: AppState): string {
+  if (state.showHidden) return "covey's automated reviewers are painted under the threads they review";
+  let n = 0;
+  for (const m of state.machines.values()) for (const t of m.threads.values()) if (threadIsHidden(t, false) && !t.archivedAt && !t.movedTo) n++;
+  return n === 0
+    ? "covey's automated reviewers, when it has any"
+    : `${n} automated review${n === 1 ? "" : "s"} hidden; one that needs you is never hidden`;
+}
 
 export function App({ store }: { store: Store }) {
   const state = useSyncExternalStore(store.subscribe, store.getState);
@@ -725,11 +741,15 @@ export function App({ store }: { store: Store }) {
       { id: "theme", label: `Theme: ${theme.label}`, hint: theme.hint, swatch: [theme.palette.accent, theme.palette.success, theme.palette.warning, theme.palette.danger, theme.palette.claude] },
       { id: "lod", label: `Detail: ${LOD_LABEL[state.lod].label}`, hint: "ctrl+o" },
       { id: "bell", label: `Bell: ${store.bell ? "on" : "off"}`, hint: store.bell ? "rings when a thread needs approval, finishes or fails" : "silent" },
+      // The hidden threads are covey's automated reviewers. The hint counts
+      // them, because a switch that says "off" over nothing reads as broken.
+      { id: "hidden", label: `Hidden threads: ${state.showHidden ? "shown" : "hidden"}`, hint: hiddenHint(state) },
     ], (id) => {
       switch (id) {
         case "theme": return themePick();
         case "lod": return lodPick();
         case "bell": { store.setOverlay(null); store.setBell(!store.bell); return; }
+        case "hidden": { store.setOverlay(null); store.toggleHidden(); return; }
       }
     });
   };

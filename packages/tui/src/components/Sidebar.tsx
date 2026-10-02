@@ -5,7 +5,7 @@ import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { hyperlinksEnabled, osc8 } from "../links.js";
-import { runMemberStateLabel, runState, tallyRun } from "@covey/protocol";
+import { runMemberStateLabel, runState, tallyRun, threadReviewing } from "@covey/protocol";
 import { buildSkew } from "../build.js";
 
 const HYPERLINKS = hyperlinksEnabled();
@@ -56,6 +56,16 @@ function headerCount(rows: SidebarRow[], state: AppState): string {
  * terminal with a narrow font as the rest of the sidebar does.
  */
 export const AGENT_MARK = "◇";
+
+/**
+ * A thread whose change is under automated review.
+ *
+ * The reviewers are hidden, so without this a thread with a pull request open
+ * sits still for minutes with nothing on screen to say why, and reads as
+ * stalled. A glyph and not a colour, for the reason `AGENT_MARK` is one: covey
+ * runs over ssh, in tmux, and on terminals with a narrow palette.
+ */
+export const REVIEW_MARK = "⊙";
 
 /**
  * How far from the left a row of each kind starts, in columns.
@@ -278,9 +288,16 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // Which machine, when the project is on more than one. Short, because
       // the title is what the row is for.
       const tag = row.tag ? ` ${truncate(row.tag, 6)}` : "";
+      // How many automated reviewers are still on this thread's change. The
+      // count only when there is more than one, so the usual row spends two
+      // columns and not three.
+      const reviewing = threadReviewing(t);
+      const review = reviewing > 0 ? ` ${REVIEW_MARK}${reviewing > 1 ? reviewing : ""}` : "";
       // The same sum for a thread row: the gutter, the status dot and its
-      // space, the space before the time, and the padding on the right.
-      const titleW = Math.max(4, width - indent - 6 - time.length - held.length - tag.length);
+      // space, the space before the time, and the padding on the right. Every
+      // piece painted to the right of the title is subtracted here, or the row
+      // grows a second line and the mouse hit test silently breaks.
+      const titleW = Math.max(4, width - indent - 6 - time.length - held.length - tag.length - review.length);
       // The issue the thread took goes before the title, the way a run member
       // row leads with its task key: the number is the link a reader follows,
       // and on a terminal that knows OSC 8 it is one (#108). The link wraps
@@ -295,6 +312,7 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
           <Text color={attention === "done" ? T.success : attention === "error" ? T.danger : statusColor(st, pulse)}>{showDot ? (attention === "done" ? "✓" : attention === "error" ? "✗" : "●") : t.pinnedAt ? "⋆" : " "} </Text>
           <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{linked}</Text>
           <Text color={T.subtle}>{held}</Text>
+          <Text color={T.awaiting}>{review}</Text>
           <Text color={T.faint}>{tag}</Text>
           <Text color={T.faint}> {time}</Text>
         </Box>

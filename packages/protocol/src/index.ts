@@ -640,6 +640,16 @@ export interface Thread {
    */
   reviewOf?: ThreadReview | null;
   /**
+   * True when no client paints this thread unless the reader asks to see what
+   * is hidden. The daemon sets it on a review thread: a reviewer is machinery
+   * the reader did not ask for, and a sidebar that grew a second row per pull
+   * request would make covey's own work look like the reader's.
+   *
+   * `threadIsHidden` is the one place that reads it, because hiding has an
+   * escape hatch that a plain `if (t.hidden)` would miss.
+   */
+  hidden?: boolean;
+  /**
    * The names of the secrets this thread sets for itself, sorted, and never a
    * value (#126). A name here hides the project's name of the same spelling.
    * Absent on a thread written before secrets existed.
@@ -659,6 +669,47 @@ export function threadIsBusy(t: Thread): boolean {
   if (t.pendingApprovals > 0) return true;
   if (t.latestTurn?.state === "running") return true;
   return t.status === "running" || t.status === "starting" || t.status === "waiting";
+}
+
+/**
+ * True when a thread has stopped needing to work and started needing a person:
+ * it failed, or it is blocked on an approval or an answer.
+ *
+ * The attention rule of #49, and the one copy of it. A fold may hide a row, and
+ * `hidden` may take one off the screen altogether, but neither may hide this:
+ * nobody else is watching a thread that failed, and a thread asking for an
+ * approval deadlocks in silence when the reader cannot see it.
+ */
+export function threadNeedsPerson(t: Thread): boolean {
+  return t.status === "error" || t.status === "waiting" || t.pendingApprovals > 0;
+}
+
+/**
+ * True when a client should leave this thread off the screen.
+ *
+ * `showHidden` is the reader's own switch — a device preference like the theme,
+ * carried in no command and heard by no daemon. The third term is the whole
+ * safety of the feature: a hidden thread that needs a person is never hidden.
+ * A review thread in a strict permission mode asks for an approval, and an
+ * approval nobody can see is a thread that waits for ever.
+ */
+export function threadIsHidden(t: Thread, showHidden = false): boolean {
+  return !!t.hidden && !showHidden && !threadNeedsPerson(t);
+}
+
+/**
+ * How many automated reviewers are still working on this thread's change.
+ *
+ * A reviewer that asked for changes counts: it is waiting on the author, and
+ * the loop is as live as when it was reading. A reviewer that signed off or was
+ * dropped does not. The sidebar paints this so a thread sitting still with a
+ * pull request open does not read as stalled — it is being reviewed, which is
+ * the one thing the reader cannot otherwise see once the reviewers are hidden.
+ */
+export function threadReviewing(t: Thread): number {
+  const review = t.watch?.review;
+  if (!review || review.required <= 0) return 0;
+  return review.reviewers.filter((x) => x.state === "reviewing" || x.state === "changesRequested").length;
 }
 
 /** The issue a thread took. The number is the link; the rest is for the reader. */

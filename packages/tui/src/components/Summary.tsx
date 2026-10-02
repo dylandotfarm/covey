@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import { modelLabel, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
 import type { AppState, MachineState, PoolMember, SidebarRow, ThreadTally } from "../store.js";
 import { liveThreads, byRecency, tallyThreads, permissionModeLabel, projectGroups, machineLabel } from "../store.js";
+import { threadIsHidden } from "@covey/protocol";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { buildLine, buildSkew } from "../build.js";
@@ -41,14 +42,22 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
   // archived and moved ones counted, and a tally per machine for its line.
   const threads: Thread[] = [];
   const perMachine = new Map<string, Thread[]>();
-  let hidden = 0;
+  // `past` is a thread that is over, not one covey hides: the two are counted
+  // differently, and the footer names only the first. The word `hidden` means
+  // `Thread.hidden` everywhere else in covey, so it is not reused here.
+  let past = 0;
   for (const x of pool) {
     const m = state.machines.get(x.machine);
     if (!m) continue;
     const mine: Thread[] = [];
     for (const t of m.threads.values()) {
       if (t.projectId !== x.projectId) continue;
-      if (t.archivedAt || t.movedTo) hidden++; else mine.push(t);
+      if (t.archivedAt || t.movedTo) { past++; continue; }
+      // Covey's own reviewers, left out exactly as the sidebar leaves them out.
+      // A count the reader cannot reconcile with the rows beside it is worse
+      // than no count.
+      if (threadIsHidden(t, state.showHidden)) continue;
+      mine.push(t);
     }
     perMachine.set(x.machine, mine);
     threads.push(...mine);
@@ -66,7 +75,7 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
       <Box height={1} />
       <Text wrap="truncate">
         <Counts t={tally} where={` on ${pool.length} machine${pool.length === 1 ? "" : "s"}`} />
-        {hidden > 0 && <Text color={T.faint}>  ·  {hidden} archived or moved</Text>}
+        {past > 0 && <Text color={T.faint}>  ·  {past} archived or moved</Text>}
         {p.baseBranch && <Text color={T.subtle}>  ·  from {p.baseBranch}</Text>}
         {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel, state.machines.get(pool[0]!.machine)?.info?.models)}</Text>}
       </Text>
@@ -139,7 +148,7 @@ function MachinesSummary({ state, height }: { state: AppState; height: number })
 function MachineSummary({ m, state, width, height, tick }: { m: MachineState; state: AppState; width: number; height: number; tick: number }) {
   const info = m.info;
   const projects = [...m.projects.values()].sort((a, b) => a.title.localeCompare(b.title));
-  const tally = tallyThreads(liveThreads(m));
+  const tally = tallyThreads(liveThreads(m, undefined, state.showHidden));
   const settings = info?.settings;
   const skew = buildSkew(state.clientBuild, info?.build);
   const room = Math.max(1, height - (m.update ? 10 : 9) - (m.error ? 1 : 0) - (skew === "same" || skew === "unknown" ? 0 : 1));
@@ -192,7 +201,7 @@ function MachineSummary({ m, state, width, height, tick }: { m: MachineState; st
         </Text>
       )}
       <Box height={1} />
-      {shown.map((p) => <ProjectLine key={p.id} m={m} p={p} width={width} />)}
+      {shown.map((p) => <ProjectLine key={p.id} m={m} p={p} width={width} showHidden={state.showHidden} />)}
       {projects.length === 0 && <Text color={T.subtle} italic>{m.conn === "connected" ? "no projects yet — press a to add one" : "nothing to show until it connects"}</Text>}
       {projects.length > shown.length && <Text color={T.faint}>  … {projects.length - shown.length} more</Text>}
       <Box flexGrow={1} />
@@ -246,8 +255,8 @@ function ThreadLine({ t, width, tick }: { t: Thread; width: number; tick: number
   );
 }
 
-function ProjectLine({ m, p, width }: { m: MachineState; p: Project; width: number }) {
-  const tally = tallyThreads(liveThreads(m, p.id));
+function ProjectLine({ m, p, width, showHidden }: { m: MachineState; p: Project; width: number; showHidden: boolean }) {
+  const tally = tallyThreads(liveThreads(m, p.id, showHidden));
   const titleW = Math.max(12, Math.min(34, Math.floor(width * 0.4)));
   const count = (tally.total ? `${tally.total} thread${tally.total === 1 ? "" : "s"}` : "no threads").padEnd(12);
   const busy = (tally.running ? `${tally.running} running  ` : "") + (tally.waiting ? `${tally.waiting} waiting` : "");

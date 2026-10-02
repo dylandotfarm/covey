@@ -15,6 +15,8 @@ import { picked, shrinkInBrowser } from "./shrink.js";
 const TOKEN_KEY = "covey.token";
 /** Where this device keeps its level of detail (#149). */
 const LOD_KEY = "covey.lod";
+/** Where this device keeps whether it paints covey's own hidden threads. */
+const SHOW_HIDDEN_KEY = "covey.showHidden";
 
 /**
  * The level this device reads transcripts at, from the last time it was set.
@@ -43,6 +45,7 @@ function readToken(): string | undefined {
 
 const state = emptyState();
 state.lod = readLod();
+state.showHidden = localStorage.getItem(SHOW_HIDDEN_KEY) === "1";
 const clients = new Map<string, MachineClient>();
 /** Read once: the page's token, if this address needs one. The media route takes it too (#110). */
 const token = readToken();
@@ -197,6 +200,11 @@ const actions: Actions = {
     state.toggledRows = next;
     // No `schedule()`: the browser has already opened or shut the `<details>`,
     // and a paint here would rebuild the row under the finger that did it.
+  },
+  setShowHidden(on) {
+    state.showHidden = on;
+    localStorage.setItem(SHOW_HIDDEN_KEY, on ? "1" : "0");
+    schedule();
   },
   setLod(lod) {
     state.lod = lod;

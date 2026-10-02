@@ -13,7 +13,7 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, type Lod,
+  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsHidden, threadReviewing, type Lod,
   type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
@@ -121,6 +121,12 @@ export interface State {
    */
   lod: Lod;
   /**
+   * Paint the threads covey hides from the reader (`Thread.hidden`): its
+   * automated reviewers. A preference of the device, like `lod`, kept in
+   * `localStorage` and carried in no command.
+   */
+  showHidden: boolean;
+  /**
    * Transcript rows the reader changed from what `lod` gives them.
    *
    * A *toggle*, not a list of open rows: at `full` every call starts open, so
@@ -131,7 +137,7 @@ export interface State {
 }
 
 export function emptyState(): State {
-  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), attachments: new Map(), attaching: null, access: null, showAddresses: false, choosing: null, sheet: null, media: null, lod: DEFAULT_LOD, toggledRows: new Set() };
+  return { machines: new Map(), folded: new Set(), view: null, item: null, drafts: new Map(), attachments: new Map(), attaching: null, access: null, showAddresses: false, choosing: null, sheet: null, media: null, lod: DEFAULT_LOD, showHidden: false, toggledRows: new Set() };
 }
 
 export function addMachine(s: State, key: string, name: string, primary = false, token?: string): MachineSlot {
@@ -281,7 +287,11 @@ export function projectRows(s: State): ProjectRow[] {
       r.homes.push({ machine: m.key, machineName: m.name, conn: m.conn, project: p });
     }
     for (const t of m.threads.values()) {
-      if (t.archivedAt || t.movedTo) continue;
+      // Hidden is hiding from the whole row, counts included: a number that
+      // included a thread nobody can see is the confusion the hiding removes.
+      // `threadIsHidden` lets one through when it needs a person, so a reviewer
+      // waiting on an approval is never invisible.
+      if (t.archivedAt || t.movedTo || threadIsHidden(t, s.showHidden)) continue;
       const p = m.projects.get(t.projectId);
       const r = p ? row(projectKey(m.key, p), p.title, p.baseBranch ?? null) : row(`orphan:${m.key}:${t.projectId}`, "(project not listed)");
       r.threads.push({ machine: m.key, machineName: m.name, thread: t });
@@ -383,6 +393,13 @@ export function threadStatusLabel(t: Thread): string {
   if (t.status === "starting") return "starting";
   if (t.status === "error" || t.latestTurn?.state === "error") return t.lastError ? `error: ${t.lastError}` : "error";
   if (t.latestTurn?.state === "interrupted") return "interrupted";
+  // A thread with a pull request open sits still while covey's own reviewers
+  // read the change, and "idle" is what made that read as stalled. The
+  // reviewers are hidden, so this line is the one place the reader sees the
+  // loop running. It comes after every state that needs a person: being
+  // reviewed is not something the reader has to act on.
+  const reviewing = threadReviewing(t);
+  if (reviewing > 0) return reviewing === 1 ? "under review" : `under review · ${reviewing} reviewers`;
   return "idle";
 }
 
