@@ -24,7 +24,7 @@ import { render } from "ink";
 import type { MachineInfo, Project, Thread } from "@covey/protocol";
 import { App, SIDEBAR_W } from "./App.js";
 import { FakeStdin, FakeStdout, until } from "./testTerminal.js";
-import { layoutTitleBar, type BarPart } from "../titleBar.js";
+import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
 import { width } from "../lines.js";
 
 process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-bar-"));
@@ -95,12 +95,20 @@ async function bar(store: unknown, cols: number): Promise<string> {
   }
 }
 
-/** What `layoutTitleBar` says the row should read as, for the same inputs. */
-function want(parts: BarPart[], forms: string[], cols: number): string {
+/**
+ * The two sides `layoutTitleBar` describes, for the same inputs.
+ *
+ * Two sides and not one string: `space-between` holds them apart by whatever
+ * the row had over, so the run of spaces between them is no part of the
+ * layout and nothing here should claim to know it. `RIGHT_GAP` is its floor
+ * and the cases below measure the whole row against the pane, which is what
+ * bounds it from the other end.
+ */
+function want(parts: BarPart[], forms: string[], cols: number): { left: string; right: string } {
   const out = layoutTitleBar(parts, { kind: "hint", forms }, cols - SIDEBAR_W - 4);
-  let s = "";
-  for (const p of out.parts) if (p) s += (p.gap ? "  " : "") + p.text;
-  return out.right ? `${s}  ${out.right}` : s;
+  let left = "";
+  for (const p of out.parts) if (p) left += (p.gap ? " ".repeat(PART_GAP) : "") + p.text;
+  return { left, right: out.right };
 }
 
 test("the bar names the project and steps the hint down a form, rather than cutting either", async () => {
@@ -112,13 +120,14 @@ test("the bar names the project and steps the hint down a form, rather than cutt
   // whole terminal and the bar names the open thread instead.
   for (const cols of [120, 100, 94, 90, 80, 70]) {
     const painted = await bar(store, cols);
-    // The two sides are held apart by `space-between`, so the run of spaces
-    // between them is whatever the row had over. Everything this case is
-    // about — which parts are painted, which hint form, where each gap is —
-    // survives collapsing it.
-    assert.equal(painted.trim().replace(/ {3,}/g, "  "), want(parts, BROWSE, cols),
-      `the bar at ${cols} columns is not the row the layout described`);
-    assert.ok(width(painted) <= cols - SIDEBAR_W, `the bar overran its pane at ${cols} columns`);
+    const { left, right } = want(parts, BROWSE, cols);
+    const row = painted.trimStart();
+    assert.ok(row.startsWith(left),
+      `the bar at ${cols} columns does not open with the parts the layout described: ${JSON.stringify(row)}`);
+    assert.equal(row.slice(left.length).trimStart(), right,
+      `the hint at ${cols} columns is not the form the layout chose`);
+    assert.ok(width(painted) + RIGHT_GAP <= cols - SIDEBAR_W,
+      `the bar overran its pane at ${cols} columns`);
   }
 });
 

@@ -10,7 +10,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart, type BarRight } from "./titleBar.js";
+import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarLayout, type BarPart, type BarRight } from "./titleBar.js";
 import { width } from "./lines.js";
 
 const HINTS = ["↑↓ browse · enter open · click works too", "↑↓ browse · enter open", "enter open"];
@@ -26,14 +26,27 @@ const openThread: BarPart[] = [
   { text: "" },
 ];
 
-/** The columns the layout would paint, gaps and all. */
-function painted(parts: BarPart[], right: BarRight, room: number): number {
-  const out = layoutTitleBar(parts, right, room);
+/** The columns a laid-out row's parts take, gaps and all. */
+function partsPainted(out: BarLayout): number {
   let w = 0;
   for (const p of out.parts) if (p) w += (p.gap ? PART_GAP : 0) + width(p.text);
-  if (out.right) w += RIGHT_GAP + width(out.right);
   return w;
 }
+
+/** The columns the layout would paint, the right-hand side with them. */
+function painted(parts: BarPart[], right: BarRight, room: number): number {
+  const out = layoutTitleBar(parts, right, room);
+  return partsPainted(out) + (out.right ? RIGHT_GAP + width(out.right) : 0);
+}
+
+/**
+ * A short name beside a list too long to paint — a project whose pool names
+ * three machines, on the pane an 80-column terminal leaves beside the sidebar.
+ */
+const bigPool: BarPart[] = [
+  { text: "ui", keep: true },
+  { text: "raspberrypi-four · macbook-pro-16 · thinkpad" },
+];
 
 /** What the row reads as, for an assertion a person can check by eye. */
 function row(parts: BarPart[], right: BarRight, room: number): string {
@@ -89,6 +102,30 @@ test("a part beside the title is dropped, never shortened to an ellipsis", () =>
       if (i === 0 || !p) continue;
       assert.equal(p.text, openThread[i]!.text,
         `at ${room} columns part ${i} was painted cut: ${JSON.stringify(p.text)}`);
+    }
+  }
+});
+
+test("the columns a dropped part gives back are the hint's to use", () => {
+  // Measured against what the parts take and not against what they want: the
+  // pool is dropped here, so the row is two columns of name and the hint has
+  // the rest. Measuring the want left forty-four columns blank with a hint
+  // that fits four times over refused.
+  assert.equal(row(bigPool, hint(), 46), "ui  ↑↓ browse · enter open · click works too");
+  assert.equal(layoutTitleBar(bigPool, hint(), 46).parts[1], null, "the pool is the part that went");
+  assert.equal(row(bigPool, hint(), 42), "ui  ↑↓ browse · enter open");
+  // Wide enough for the pool, and the hint then takes what is over.
+  assert.equal(row(bigPool, hint(), 60), "ui  raspberrypi-four · macbook-pro-16 · thinkpad  enter open");
+});
+
+test("a hint is painted whenever one fits beside the parts that are", () => {
+  const shortest = HINTS.at(-1)!;
+  for (const parts of [summary, openThread, bigPool]) {
+    for (let room = 0; room <= 160; room++) {
+      const out = layoutTitleBar(parts, hint(), room);
+      if (out.right) continue;
+      assert.ok(partsPainted(out) + RIGHT_GAP + width(shortest) > room,
+        `at ${room} columns ${JSON.stringify(shortest)} fitted beside the parts and no hint was painted`);
     }
   }
 });

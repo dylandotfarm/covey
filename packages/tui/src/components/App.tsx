@@ -7,7 +7,7 @@ import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, 
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth } from "../lines.js";
-import { layoutTitleBar, type BarPart } from "../titleBar.js";
+import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
 import { ASSUMED_CELL, CELL_SIZE_QUERY, graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, parseCellSize, type CellSize } from "../media.js";
@@ -2434,7 +2434,10 @@ export function App({ store }: { store: Store }) {
   // The hint the bar shows when nothing was raised, longest form first. The
   // bar takes the longest one that fits whole beside the title and shows
   // nothing when none does, so a hint is never cut (`layoutTitleBar`, #87).
-  // Each ladder keeps the one key a reader cannot guess at its foot.
+  // At its foot each ladder keeps the one thing the screen does not already
+  // say: the key a reader could not guess, or — while the transcript is
+  // scrolled — that it is, which is the news there and is nowhere else on the
+  // screen. The key back follows on the rung above it.
   const barHints = state.diffView ? ["diff: j/k scroll · d close", "d close"]
     : scrollFromBottom > 0 ? ["scrolled · cmd+shift+g follows", "scrolled"]
     : state.focus === "sidebar" ? ["↑↓ browse · enter open · click works too", "↑↓ browse · enter open", "enter open"]
@@ -2524,7 +2527,7 @@ export function App({ store }: { store: Store }) {
           <Box>
             {bar.parts.map((part, i) => part && (
               <Text key={i} color={barTones[i]?.color} bold={barTones[i]?.bold} wrap="truncate">
-                {part.gap ? "  " : ""}{barTones[i]?.link && HYPERLINKS ? osc8(barTones[i]!.link!, part.text) : part.text}
+                {part.gap ? " ".repeat(PART_GAP) : ""}{barTones[i]?.link && HYPERLINKS ? osc8(barTones[i]!.link!, part.text) : part.text}
               </Text>
             ))}
           </Box>
@@ -2534,7 +2537,7 @@ export function App({ store }: { store: Store }) {
               The title gives way instead, because the reader can see the
               row the title names and cannot see the reason. */}
           {bar.right && (
-            <Box flexShrink={0} marginLeft={2}>
+            <Box flexShrink={0} marginLeft={RIGHT_GAP}>
               <Text color={notice ? (notice.tone === "error" ? T.danger : notice.tone === "warning" ? T.warning : notice.tone === "success" ? T.success : T.muted) : T.faint} wrap="truncate">{bar.right}</Text>
             </Box>
           )}

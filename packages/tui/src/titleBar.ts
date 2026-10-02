@@ -60,13 +60,10 @@ export type BarLayout = {
   right: string;
 };
 
-/** The columns `parts` wants, with the gap between each. */
-function partsWidth(parts: BarPart[]): number {
+/** The columns a fitted list of parts takes, gaps and all. */
+function paintedWidth(parts: (BarPainted | null)[]): number {
   let w = 0;
-  for (const p of parts) {
-    if (!p.text) continue;
-    w += (w ? PART_GAP : 0) + width(p.text);
-  }
+  for (const p of parts) if (p) w += (p.gap ? PART_GAP : 0) + width(p.text);
   return w;
 }
 
@@ -114,9 +111,21 @@ export function layoutTitleBar(parts: BarPart[], right: BarRight, room: number):
     const text = elide(right.text, Math.max(0, room - RIGHT_GAP));
     return { parts: fitParts(parts, text ? room - RIGHT_GAP - width(text) : room), right: text };
   }
-  const want = partsWidth(parts);
+  // Measured against what the parts *take*, never against what they want. A
+  // part that does not fit is dropped, and the columns it gives back are the
+  // hint's to use: measure the want and a name of two columns beside a pool of
+  // machines too long to paint leaves the rest of the row blank, with a hint
+  // that fits four times over refused. That is the width an 80-column terminal
+  // gives the pane beside the sidebar, which is the width #87 was filed at.
+  //
+  // Fitting first cannot change the answer the other way round. `fitParts` is
+  // given the whole room, so no part is dropped and the pane's own name is
+  // never truncated to make room for a hint — the ranking holds, and the sum
+  // fits by construction.
+  const fitted = fitParts(parts, room);
+  const took = paintedWidth(fitted);
   for (const form of right.forms) {
-    if (want + RIGHT_GAP + width(form) <= room) return { parts: fitParts(parts, room), right: form };
+    if (took + RIGHT_GAP + width(form) <= room) return { parts: fitted, right: form };
   }
-  return { parts: fitParts(parts, room), right: "" };
+  return { parts: fitted, right: "" };
 }
