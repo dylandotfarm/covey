@@ -992,12 +992,17 @@ export interface WatchCursor {
   comments: string[];
   /**
    * The URLs of the comments this thread wrote itself, which are never news to
-   * it. Without this a reviewer's own comment comes back to the reviewer on the
-   * next poll, as a turn that asks it to answer itself; the author and its
-   * reviewers all write from one GitHub account, so no author login can tell
-   * the two apart. The URL is the key and not the id because `gh pr comment`
-   * answers with a URL and `gh pr view` lists a node id, and only the URL is
-   * on both sides.
+   * it. A thread that hears its own comment answers itself, and the author and
+   * its reviewers all write from one GitHub account, so no author login can
+   * tell them apart.
+   *
+   * This is the second half of that guard and not the first. The signature
+   * covey writes into every comment it posts is the first
+   * (`daemon/src/integrate/sign.ts`): it travels on the comment, so it holds
+   * for a watch stopped and started again, for a comment written before the
+   * watch, and for a comment GitHub lists with no URL at all — which is what
+   * this list cannot cover, since the URL is its only key. It stays because a
+   * comment covey posted before it signed them carries no signature.
    *
    * Absent on a cursor written before this existed, which reads as empty.
    */
