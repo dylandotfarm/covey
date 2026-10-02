@@ -690,6 +690,27 @@ covey's store by building a temporary config directory (`claude-resume-<id>`) an
 session read the link; none after it did. A brief is then one line:
 `/covey take issue 94 to completion, automerge when done`.
 
+**And the thread prefers the loop without being asked.** A plugin *offers* a skill: its
+name and its one-line description go into the session's context, and the model then
+decides, turn by turn, whether to read it. The description asks for the words of an issue,
+so a thread that opened with "fix this bug" never reached for it — it committed, ran
+`git push`, opened with `gh pr create`, and the daemon watched nothing, because no pull
+request had come through `covey pr open`. A reader had to type `/covey` to get the loop.
+`COVEY_PREAMBLE` (`plugin.ts`) closes that: the engine appends it to Claude Code's own
+system prompt (`systemPrompt.append`) for every session that gets the plugin. It names the
+thread, names the skill and the `covey` command, says which first acts call for the skill,
+and holds the two rules a person cannot take back — never push to the base branch, never
+merge. The note goes with the plugin or not at all: a daemon that runs from no checkout has
+no `plugin/`, and a note naming a skill the session cannot load is worse than no note. It
+stays a pointer rather than a copy, because every word of it rides on every turn of every
+thread while the skill costs nothing until the model loads it. The SDK records the rendered
+prompt at a conversation's first request and replays the record on each later request and
+resume, so an edit to the note reaches a running thread only at its next compaction, and a
+new thread at once — which is the behaviour to want, since a prompt that changed
+mid-conversation would invalidate the cached prefix and discard the model's earlier
+reasoning. `preamble.test.ts` holds the three halves: the SDK option, the pairing with the
+plugin, and what the text says.
+
 **Acting from a client (#108).** A person at the web client reads an item with
 `github.item` and acts with `github.act`: a review (`approve`, `request_changes`,
 `comment`), a comment, a merge with a method, a close or a reopen. The daemon of the

@@ -11,6 +11,7 @@ import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
+import { COVEY_PREAMBLE } from "./plugin.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
 import { redactDeep, redactor } from "./redact.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
@@ -101,7 +102,9 @@ export interface EngineOptions {
    *  request. */
   ghHost?: (options: RealHostOptions) => GhHost;
   /** Plugin directories every session gets: the covey plugin with the `/covey`
-   *  skill. `main.ts` finds it in the checkout; a test passes none. */
+   *  skill. `main.ts` finds it in the checkout; a test passes none. A session
+   *  that gets the plugin also gets `COVEY_PREAMBLE`, the note that tells it to
+   *  follow the skill. */
   plugins?: string[];
   /** The clock the idle sweep reads, in milliseconds. A test moves it by hand. */
   now?: () => number;
@@ -1968,7 +1971,9 @@ export class Engine {
         streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
         ...(Object.keys(secrets).length ? { secrets } : {}),
-        ...(this.opts.plugins?.length ? { plugins: this.opts.plugins } : {}),
+        // The skill and the note that points at it, together or not at all: a
+        // note that names a skill the session cannot load is worse than none.
+        ...(this.opts.plugins?.length ? { plugins: this.opts.plugins, systemPromptAppend: COVEY_PREAMBLE } : {}),
       },
       this.sinkFor(t.id),
       // `undefined` selects the SDK's own `query`, which is what a daemon uses.

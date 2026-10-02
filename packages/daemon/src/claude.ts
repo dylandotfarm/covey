@@ -44,6 +44,10 @@ export interface SessionParams {
    *  `/covey` skill. A plugin reaches a resumed session; a personal skill does
    *  not (see `plugin.ts`). */
   plugins?: string[];
+  /** Text to append to Claude Code's own system prompt: `COVEY_PREAMBLE`, which
+   *  tells the session it is a covey thread and to follow the skill. The engine
+   *  sends it with the plugin and never without it. */
+  systemPromptAppend?: string;
   /** The project the thread works in. It goes into the session's environment
    *  as `COVEY_PROJECT_ID`, for an agent that creates a thread to put it in
    *  the project it is working in. Nothing in covey reads it back. */
@@ -190,7 +194,18 @@ export class ClaudeSession {
       sessionStoreFlush: "eager",
       canUseTool: (name, input, o) => this.canUseTool(name, input, o),
       settingSources: ["user", "project", "local"],
-      systemPrompt: { type: "preset", preset: "claude_code" },
+      // Claude Code's own prompt, with covey's note after it. The SDK records
+      // the rendered prompt on the conversation's first request and sends the
+      // record on every later request and resume, so a thread already running
+      // keeps the note it started with until it compacts; a new thread takes
+      // the new text at once. That is the behaviour to want — a prompt that
+      // changed mid-conversation would invalidate the cached prefix and throw
+      // away the model's earlier reasoning — so the recording stays on.
+      systemPrompt: {
+        type: "preset" as const,
+        preset: "claude_code" as const,
+        ...(this.params.systemPromptAppend ? { append: this.params.systemPromptAppend } : {}),
+      },
       // What the agent inside this session is allowed to know about itself.
       // Nothing else on the wire can tell it: the daemon sees a websocket, not
       // the process behind it, so an agent that creates a thread can only say
