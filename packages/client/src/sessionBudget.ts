@@ -4,14 +4,15 @@ import type { SessionBudget } from "@covey/protocol";
  * What a machine spends on live Claude sessions, said in a way a reader can act
  * on.
  *
- * A thread's session is a subprocess of about 300 MB, so `maxLiveSessions` and
- * `sessionIdleMinutes` are the memory dial of a covey machine. The ceiling is
- * the one that bounds the memory: the daemon releases the least recently used
- * session that is not busy as soon as the machine holds more than the ceiling
- * allows. The idle limit gives memory back *under* that ceiling, and it charges
- * for it — a session covey resumes cannot refresh its own token, so it has a
- * deadline a fresh one does not. The hints below say so, because that is the
- * one thing a reader who shortens the idle limit does not already know.
+ * A thread's session is a subprocess that costs about 250 MB, so
+ * `maxLiveSessions` and `sessionIdleMinutes` are the memory dial of a covey
+ * machine. The ceiling is the one that bounds the memory: the daemon releases
+ * the least recently used session that is not busy as soon as the machine
+ * holds more than the ceiling allows. The idle limit gives memory back *under*
+ * that ceiling, and it charges for it — a session covey resumes cannot refresh
+ * its own token, so it has a deadline a fresh one does not. The hints below
+ * say so, because that is the one thing a reader who shortens the idle limit
+ * does not already know.
  *
  * `null` in either setting means "the daemon's own default", and no client can
  * work out what that is: the ceiling's default is read from the machine's
@@ -41,8 +42,15 @@ export interface BudgetChoice {
 /** The idle limits covey offers, in minutes. `0` keeps every session. */
 export const IDLE_CHOICES = [15, 30, 60, 120, 240, 480] as const;
 
-/** The live-session ceilings covey offers. */
-export const LIVE_CHOICES = [1, 2, 3, 4, 6, 8, 12] as const;
+/**
+ * The live-session ceilings covey offers.
+ *
+ * The list runs past 12 because the default does: a quarter of the memory at
+ * 250 MB a session is 31 sessions on a 31 GiB workstation, so a reader who
+ * wants to set a number of their own needs rows near that one. The steps widen
+ * as they climb, because 24 and 26 are not a choice anybody makes.
+ */
+export const LIVE_CHOICES = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32] as const;
 
 /** Bytes as one decimal of a gigabyte: `1.2 GB`. */
 function gigabytes(bytes: number): string {
@@ -119,7 +127,7 @@ export function liveChoices(setting: number | null | undefined, budget?: Session
     {
       id: "",
       label: budget ? `From memory (${budget.liveLimit})` : "From memory",
-      hint: "15% of this machine's memory",
+      hint: "a quarter of this machine's memory",
       current: current === null,
     },
     ...LIVE_CHOICES.map((n) => ({

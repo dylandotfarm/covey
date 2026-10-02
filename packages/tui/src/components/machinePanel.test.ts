@@ -1,7 +1,7 @@
 /**
  * The session limits on the machine control panel.
  *
- * A thread's session is a subprocess of about 300 MB, and `maxLiveSessions` and
+ * A thread's session is a subprocess of about 250 MB, and `maxLiveSessions` and
  * `sessionIdleMinutes` are what a reader turns to hold that down. Until now the
  * only way to change either was to edit `daemon.json` on the machine and
  * restart the daemon, or to set an environment variable — which is to say, an
@@ -32,9 +32,10 @@ const INFO = (settings: Partial<MachineInfo["settings"]> = {}): MachineInfo => (
   daemonVersion: "abc1234", protocolVersion: 1,
   capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
   settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, ...settings },
-  // 4 sessions is what 8 GB of memory affords, so the panel says 4 where a
-  // workstation would say 8. That is the figure no client could work out.
-  sessionBudget: { idleMinutes: 120, liveLimit: 4, sessionMemoryBytes: 300 * 1024 * 1024 },
+  // 4 sessions is what 4 GiB of memory affords, so the panel says 4 where a
+  // 31 GiB workstation would say 31. That is the figure no client could work
+  // out for itself.
+  sessionBudget: { idleMinutes: 120, liveLimit: 4, sessionMemoryBytes: 250 * 1024 * 1024 },
 });
 
 /** A store with one connected machine, and every command it was sent. */
@@ -101,8 +102,11 @@ test("picking a live-session ceiling sends it, and the panel prices every choice
     await until(() => stdout.lastFrame.includes("Live sessions on pi"));
     // What a ceiling costs, beside the ceiling. The count is not the thing
     // being chosen; the memory is.
-    assert.match(stdout.lastFrame, /about 1\.3 GB/, stdout.lastFrame);
+    assert.match(stdout.lastFrame, /about 1 GB/, stdout.lastFrame);
 
+    // "24 sessions" holds this filter too, and the cursor is on the first row
+    // that matches, so what the daemon is sent is what proves the right one was
+    // picked.
     stdin.type("4 session");
     await settle(60);
     stdin.type("\r");

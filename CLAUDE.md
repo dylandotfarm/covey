@@ -369,7 +369,13 @@
   key: a chain's is `chain:<id>`, never its head item's own id, or one tap opens both.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
-- A thread's session is a subprocess of about 300 MB. The engine releases one after
+- A thread's session is a subprocess of about 250 MB. That figure is `Pss` and never `Rss`:
+  about 100 MB of every process is the binary's own code pages, which every session on the
+  machine shares, so `Rss` counts them once per process and reads eight sessions as most of a
+  gigabyte more than they cost. The 300 MB covey assumed before was the `Rss` of a session
+  with no sibling. The default ceiling is a quarter of the machine's memory at that figure,
+  with a floor of two and nothing above — 31 sessions on a 31 GiB workstation, where the old
+  cap of eight made the memory this rule reads decide nothing. The engine releases one after
   `sessionIdleMinutes` (default 120) and holds at most `maxLiveSessions`; the next message
   resumes it from the transcript. `maxLiveSessions` is what bounds the memory, so the idle
   timer only gives memory back under that ceiling — and it charges for it, because the

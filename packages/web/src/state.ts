@@ -946,7 +946,7 @@ export function sheetNote(s: State, sheet: SheetState): string {
   if (sheet.page === "web") return `Whether ${name} serves the phone client.`;
   // Neither session limit is a default a new thread inherits: both apply to
   // every thread on the machine, and to the ones running now.
-  if (sheet.page === "live") return `How much memory ${name} may hold in live sessions. A session is about 300 MB.`;
+  if (sheet.page === "live") return `How much memory ${name} may hold in live sessions. A session is about 250 MB.`;
   if (sheet.page === "idle") return `When ${name} stops the session of a thread nobody is using. The next message resumes it from the transcript.`;
   return `Every new thread on ${name} starts with this. A thread that runs keeps what it has.`;
 }

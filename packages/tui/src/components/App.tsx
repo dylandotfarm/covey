@@ -802,7 +802,7 @@ export function App({ store }: { store: Store }) {
       { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
       ...(settings.bind ? [{ id: "bind", label: `Reachable on: ${bindLabel(settings.bind)}`, hint: "where the daemon listens; changes at once" }] : []),
       // The memory dial of this machine. A session is a subprocess of about
-      // 300 MB, so the ceiling is what the reader is really setting; the hint
+      // 250 MB, so the ceiling is what the reader is really setting; the hint
       // prices it rather than repeating the number in the label.
       //
       // Both hints are short on purpose. `Overlay` gives the label what the
