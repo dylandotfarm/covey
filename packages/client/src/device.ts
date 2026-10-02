@@ -51,9 +51,9 @@ export const DEVICE_PROTOCOL = 1;
  * writes to `DOWNLINK`, so neither direction waits on the other and a reply can
  * go out while an utterance is still arriving.
  */
-export const DEVICE_SERVICE_UUID = "c0ve1000-7b2d-4f1a-9c3e-1d5a8f0b6e21";
-export const DEVICE_UPLINK_UUID = "c0ve1001-7b2d-4f1a-9c3e-1d5a8f0b6e21";
-export const DEVICE_DOWNLINK_UUID = "c0ve1002-7b2d-4f1a-9c3e-1d5a8f0b6e21";
+export const DEVICE_SERVICE_UUID = "c0be1000-7b2d-4f1a-9c3e-1d5a8f0b6e21";
+export const DEVICE_UPLINK_UUID = "c0be1001-7b2d-4f1a-9c3e-1d5a8f0b6e21";
+export const DEVICE_DOWNLINK_UUID = "c0be1002-7b2d-4f1a-9c3e-1d5a8f0b6e21";
 
 /** What the device advertises itself as. The app scans for the service, not this. */
 export const DEVICE_NAME_PREFIX = "covey";

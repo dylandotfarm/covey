@@ -1,0 +1,6 @@
+# The device holds one application and no update slot: a bundle reaches it over
+# USB, not over the air. The phone's app is the thing that updates often.
+# Name,   Type, SubType, Offset,  Size,     Flags
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xf000,  0x1000,
+factory,  app,  factory, 0x10000, 0x300000,

@@ -1,0 +1,7 @@
+dependencies:
+  idf:
+    version: ">=5.5"
+  # Espressif's own codec driver. The board's microphone and speaker are both
+  # an ES8311, which needs about sixty register writes to come up; this is the
+  # maintained version of that sequence and it is why covey does not carry one.
+  espressif/esp_codec_dev: "~1.3.4"

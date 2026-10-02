@@ -22,6 +22,50 @@ function roundTrip(type: number, body: Uint8Array, payload: number, id = 7): Uin
   return out;
 }
 
+
+/*
+ * What the device's own encoder produced, captured over the serial port.
+ *
+ * The firmware's `selftest_adpcm` encodes a triangle wave that both sides can
+ * build without floating point, and prints the bytes. This is that output,
+ * verbatim. The test below encodes the same samples in TypeScript and demands
+ * the same bytes — which is the only check there is that the C in
+ * `firmware/main/adpcm.c` and the TypeScript in `device.ts` agree, because the
+ * two can never run together. Capture it again with:
+ *
+ *   cd firmware && sg dialout -c "python3 tools/console.py key t"
+ */
+const DEVICE_ADPCM_BASE64 =
+  "INEAAHd3d3cGAQERISGqq7u8y7usrMu6QzNDJDM0QzM0M7zbusu7vMu727pDM0MkQzJDMzRDy7rL" +
+  "u7zLu8usu0NDMzRDM0MkMzTLu7y7rbu8y7u8JDM0QzM0MyVDMsu7vLvMusu7vMszNEMzNDMlMzRD" +
+  "u7zLu8usu7zLuzQzRDJDMzRDM0O7rbu8y7u8u627Q0MzNEMzQyQzNMu7vLutu7zLu7wkMzRDMzQz" +
+  "JTM0y7u8u8y6y7u8yzM0QzM0M0QyQzPLrLu8y7u8u8y6QzNDJDM0QzM0M9u7vMu7y6y7vMszNEMz" +
+  "UzJDMzRDu7zLu7y7rbu8yzM0QzNTMkMzNEO7vHAXNgDLu7y7rbu8O0QyQzM0QzNTMrO8vMu7vLvM" +
+  "uss7NEMzQyRDMkMztMu7vMu7y6y7vDtEMkMzNEMzUzK0u7zLu8usu7zLOzRDMzQzJTM0Q7O8y7u8" +
+  "u8y6rLs8QzM0M0QyQzM0w7vLrLu8y7u8uz0zNDNEMiQzNEPDusu7vMu7y6y7PEMzQyQzNEMzNMO7" +
+  "vLvMusu7vMtLMiQzNEMzNDNEsrvMusu7vMu72zozRDJDMzRDM1Oyu8y6y7u8y7vbOjNEMkMzNEMz" +
+  "U7K7zLrLu7zLu9s6M0QyQzM0QzNTsrvMusu7vMu72zozRDJDMzRDM1Oyu8y6y7u8y7vbOjNEMkMA" +
+  "ADcAMzRDM0PLu8usu7zLu7y7NDQzRDJDMzRDM7zLu8usy7rLu7wkMzRDMzQzRDJDu7y7zLrLu7zL" +
+  "uzRDM0MkMzRDMzSsy7rLu7zLu8usM0MkMzRDMzQzJbvLrLu8y7u8u60zQyQzNEMzNDMlu8usu7zL" +
+  "u7y7rTNDJDM0QzM0MyW7y6y7vMu7vLutM0MkMzRDMzQzJbvLrLu8y7u8u60zQyQzNEMzNDMlu8us" +
+  "u7zLu7y7rTNDJDM0QzM0MyW7y6y7vMu7vLutM0MkMzRDMzQzJbvLrLu8y7u8u60zQyQzNEMzNDMl" +
+  "u8usu7zLu7y7rTNDJDM0QzM0MyW7y6y7vMu7kOg1ALy7PFMyQzM0QzNTMrO8vMu7vLvMuss7NEMz" +
+  "UzJDMzRDw7rLu7zLu9u6ywAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+  "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==";
+
+/* The samples `selftest_adpcm` encodes: a triangle of period 40, peak 12000. */
+function selftestTone(): Int16Array {
+  const pcm = new Int16Array(1600);
+  for (let i = 0; i < pcm.length; i++) {
+    const phase = i % 40;
+    const v = phase < 20 ? phase : 40 - phase;
+    pcm[i] = (v - 10) * 1200;
+  }
+  return pcm;
+}
+
 /** A tone, as something with a shape the codec has to follow. */
 function tone(samples: number, hz = 440, amp = 12000): Int16Array {
   const pcm = new Int16Array(samples);
@@ -196,6 +240,42 @@ describe("audio", () => {
     assert.equal(pcmFromAdpcm(blocks).length, ADPCM_BLOCK_SAMPLES * 2);
     // Told what the device recorded, it stops there.
     assert.equal(pcmFromAdpcm(blocks, ADPCM_BLOCK_BYTES, pcm.length).length, pcm.length);
+  });
+
+  it("agrees with the encoder on the device, byte for byte", () => {
+    const fromDevice = Uint8Array.from(Buffer.from(DEVICE_ADPCM_BASE64, "base64"));
+    const here = adpcmFromPcm(selftestTone());
+    assert.equal(here.length, 1024, "four blocks of 256");
+    assert.deepEqual(here, fromDevice, "firmware/main/adpcm.c and device.ts have drifted apart");
+  });
+
+  it("decodes what the device sent back to the samples it encoded", () => {
+    const pcm = selftestTone();
+    const back = pcmFromAdpcm(
+      Uint8Array.from(Buffer.from(DEVICE_ADPCM_BASE64, "base64")),
+      ADPCM_BLOCK_BYTES,
+      pcm.length,
+    );
+    assert.equal(back.length, pcm.length);
+
+    let signal = 0;
+    let noise = 0;
+    let settled = 0;
+    for (let i = 0; i < pcm.length; i++) {
+      const off = Math.abs(pcm[i]! - back[i]!);
+      signal += pcm[i]! * pcm[i]!;
+      noise += off * off;
+      // ADPCM opens every block at the smallest step there is and doubles its
+      // way up to whatever the sound is doing, so the first few samples of a
+      // block lag a loud attack badly - measured, 6036 off at sample 6 and
+      // within 174 by sample 30. That is the codec working, not a fault, and a
+      // bound over the whole recording would have to be so loose it proved
+      // nothing. So the attack is skipped and the rest is held tightly.
+      if (i % ADPCM_BLOCK_SAMPLES >= 30) settled = Math.max(settled, off);
+    }
+    const snr = 10 * Math.log10(signal / noise);
+    assert.ok(snr > 20, `the device's audio came back at ${snr.toFixed(1)} dB`);
+    assert.ok(settled < 400, `once the step had caught up it was still ${settled} off`);
   });
 
   it("writes the one WAV header Android's recogniser accepts", () => {
