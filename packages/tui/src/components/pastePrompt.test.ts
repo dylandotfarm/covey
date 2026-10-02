@@ -29,7 +29,7 @@ function appState(overlay: Overlay | null): AppState {
   } as unknown as MachineState;
   return {
     machines: new Map([["pi", m]]), order: ["pi"], selected: null, view: null, focus: "sidebar",
-    sidebarCollapsed: false, expanded: {}, toggledRows: new Set(), lod: "compact",
+    sidebarCollapsed: false, showHidden: false, expanded: {}, toggledRows: new Set(), lod: "compact",
     overlay, notice: null, scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(),
     pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(),
     selection: null, relaunch: null, clientBuild: null, clientStale: false,

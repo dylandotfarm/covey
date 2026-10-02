@@ -584,6 +584,27 @@ export async function createWorktree(
 }
 
 /**
+ * Point a review worktree's own branch at the branch under review, and make
+ * that branch its upstream.
+ *
+ * The upstream is the point. `git pull` is what the reviewer is told to run
+ * when the author pushes, and a branch with no tracking information answers
+ * that with an error. It also closes the other half for free: under
+ * `push.default=simple` git itself refuses to push a branch whose upstream has
+ * another name, so a reviewer told never to push cannot push by accident.
+ *
+ * The worktree is a checkout covey made moments ago and nobody has written in,
+ * so the reset throws nothing away.
+ */
+export async function trackBranch(worktree: string, remoteBranch: string): Promise<{ ok: true } | { error: string }> {
+  const at = await gitTry(worktree, ["reset", "--hard", `origin/${remoteBranch}`]);
+  if (!at.ok) return { error: at.err };
+  const up = await gitTry(worktree, ["branch", `--set-upstream-to=origin/${remoteBranch}`]);
+  if (!up.ok) return { error: up.err };
+  return { ok: true };
+}
+
+/**
  * Give a thread's worktree back: the checkout goes, the branch (and every
  * commit on it) stays. Never forced — git refuses while the tree holds
  * modified or untracked files, and a tree we cannot remove safely is one we

@@ -149,3 +149,13 @@ test("the note holds the two rules that a reader cannot undo", () => {
   assert.match(COVEY_PREAMBLE, /Never push to the base branch/);
   assert.match(COVEY_PREAMBLE, /Never merge a pull request yourself/);
 });
+
+/**
+ * A review thread reads the note before it reads its own brief. Were the note
+ * silent, a reviewer could push a fix to the branch it was asked to read, and
+ * the change nobody reviewed would be its own.
+ */
+test("the note tells a review thread what it is, and what it must not do", () => {
+  assert.match(COVEY_PREAMBLE, /covey review:/);
+  assert.match(COVEY_PREAMBLE, /never commit, push or merge on that branch/);
+});

@@ -329,10 +329,23 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
           merge: p.merge === "auto" ? "auto" : p.merge === "manual" ? "manual" : undefined,
           mergeMethod: p.mergeMethod,
           attachments: readAttachmentParams(p.attachments),
+          reviews: typeof p.reviews === "number" ? p.reviews : undefined,
         });
       case "thread.commentPullRequest":
         return engine.commentPullRequest({
           threadId: String(p.threadId),
+          body: p.body === undefined ? undefined : String(p.body),
+          attachments: readAttachmentParams(p.attachments),
+        });
+      case "thread.requestReview":
+        return engine.requestReview({
+          threadId: String(p.threadId),
+          count: typeof p.count === "number" ? p.count : undefined,
+        });
+      case "thread.reviewDecide":
+        return engine.reviewDecide({
+          threadId: String(p.threadId),
+          verdict: p.verdict === "approve" ? "approve" : "changes",
           body: p.body === undefined ? undefined : String(p.body),
           attachments: readAttachmentParams(p.attachments),
         });

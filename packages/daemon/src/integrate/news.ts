@@ -28,10 +28,20 @@
  * only "the checks passed" taught the agent to answer "ready for you to
  * merge" about a pull request GitHub refuses, so every verdict now carries
  * what stands between it and the merge.
+ *
+ * The sixth is the automated review, and it is a `mergeBlock` too — covey's own
+ * rather than GitHub's, and the only one of them covey refuses on its own
+ * behalf. One watch belongs to the thread that wrote the change and one to each
+ * thread that reviews it, and the two hear different things: the author owns the
+ * build, so a checks verdict and a conflict are its news; the reviewer owns the
+ * code, so a push to the branch is its news and the checks are none of its
+ * business. `integrate/review.ts` holds the words and the gate; this file holds
+ * what each side hears.
  */
-import type { BaseHead, CheckSummary, MergeBlockCode, MergeMethod, MergePolicy, WatchCursor } from "@covey/protocol";
+import type { BaseHead, CheckSummary, MergeBlockCode, MergeMethod, MergePolicy, ReviewRequirement, WatchCursor, WatchRole } from "@covey/protocol";
 import type { CommentEntry, PullRequestFacts, ReviewEntry, RollupEntry } from "./gh.js";
 import { summariseCheck, summariseChecks } from "./checks.js";
+import { reviewGate, reviewVerdictOf } from "./review.js";
 
 export type WatchEvent =
   | {
@@ -44,6 +54,9 @@ export type WatchEvent =
       block: MergeBlock | null;
     }
   | { kind: "conflict"; head: string }
+  /** The branch moved. A reviewer's news, and never an author's: an author's
+   *  own push is not something to tell it about. */
+  | { kind: "head"; head: string; was: string }
   | { kind: "review"; review: ReviewEntry }
   | { kind: "comment"; comment: CommentEntry }
   /** `by` is set when the daemon merged under the `auto` policy. */
@@ -74,7 +87,7 @@ export interface MergeBlock {
  * is never read as a checks verdict: GitHub answers it while the checks run,
  * so it means "a rule you cannot see" only once they have passed.
  */
-export function mergeBlock(pr: PullRequestFacts): MergeBlock | null {
+export function mergeBlock(pr: PullRequestFacts, review?: ReviewRequirement | null): MergeBlock | null {
   if (pr.state !== "OPEN") return null;
   const status = pr.mergeStateStatus.toUpperCase();
   const decision = pr.reviewDecision.toUpperCase();
@@ -91,11 +104,26 @@ export function mergeBlock(pr: PullRequestFacts): MergeBlock | null {
   if (decision === "CHANGES_REQUESTED") return { code: "changes", why: "a review asks for changes" };
   if (decision === "REVIEW_REQUIRED") return { code: "review", why: "this repository requires a review before a merge" };
   if (status === "BLOCKED") return { code: "blocked", why: "GitHub reports the merge as blocked, so a rule of this repository is not met" };
+  // Covey's own block, and the only one here that is not GitHub's, so it is
+  // read last: every fact GitHub reported is a nearer answer to "why not".
+  const gate = reviewGate(review);
+  if (!gate.ready) return { code: "unreviewed", why: gate.why };
   return null;
 }
 
+/**
+ * Who is refusing. Every block but one is GitHub's, and saying "GitHub will not
+ * merge this" about covey's own automated review would send the agent looking
+ * for a branch rule that is not there.
+ */
+export function blockLead(block: MergeBlock): string {
+  return block.code === "unreviewed"
+    ? "Covey will not call the pull request ready yet"
+    : "GitHub will not merge the pull request yet";
+}
+
 export function emptyCursor(): WatchCursor {
-  return { head: null, checks: null, conflict: null, mergeTried: null, reviews: [], comments: [] };
+  return { head: null, checks: null, conflict: null, mergeTried: null, reviews: [], comments: [], posted: [] };
 }
 
 /**
@@ -150,6 +178,14 @@ export interface NewsOptions {
   merge?: MergePolicy;
   /** The tip of the base branch, for the staleness test. Read only under `auto`. */
   base?: BaseHead | null;
+  /** Which side of the review this watch is. Omitted reads as `author`. */
+  role?: WatchRole;
+  /**
+   * The automated review the pull request needs, on an `author` watch. The
+   * record is the daemon's own and changes between polls, so it is handed in
+   * rather than read from the facts: `gh` knows nothing about it.
+   */
+  review?: ReviewRequirement | null;
 }
 
 /**
@@ -165,10 +201,17 @@ export function news(
   now: string,
   options: NewsOptions = {},
 ): { events: WatchEvent[]; cursor: WatchCursor } {
-  const next: WatchCursor = { ...emptyCursor(), ...cursor, reviews: [...cursor.reviews], comments: [...cursor.comments] };
+  const next: WatchCursor = { ...emptyCursor(), ...cursor, reviews: [...cursor.reviews], comments: [...cursor.comments], posted: [...(cursor.posted ?? [])] };
   const events: WatchEvent[] = [];
+  const role = options.role ?? "author";
   const sha = pr.headRefOid;
+  const was = next.head?.sha ?? null;
   if (!next.head || next.head.sha !== sha) next.head = { sha, seenAt: now };
+  // A reviewer is woken by the push, not by the build. The first poll is not a
+  // push: the brief already told the reviewer to read the change, and a `head`
+  // event on the head it was briefed about would ask it to read the same diff
+  // twice.
+  if (role === "reviewer" && was !== null && was !== sha) events.push({ kind: "head", head: sha, was });
 
   for (const r of pr.reviews) {
     // A pending review is one its author has not submitted. Nobody else can
@@ -184,6 +227,10 @@ export function news(
   for (const c of [...pr.comments, ...lineComments]) {
     if (next.comments.includes(c.id)) continue;
     next.comments.push(c.id);
+    // A comment this thread wrote itself is not news to it. The id is recorded
+    // above whether the URL matches or not, so this is safe to get wrong: a URL
+    // that failed to match would cost one turn, once, and never a loop.
+    if (c.url && next.posted!.includes(c.url)) continue;
     events.push({ kind: "comment", comment: c });
   }
 
@@ -195,6 +242,11 @@ export function news(
     events.push({ kind: "closed" });
     return { events, cursor: next };
   }
+
+  // The author owns the build. A reviewer hears no checks verdict and no
+  // conflict: both are work the author is already doing, and a round of a
+  // reviewer's budget spent on them is a round it cannot spend on the code.
+  if (role === "reviewer") return { events, cursor: next };
 
   const verdict = checksVerdict(pr.checks);
   const old = Date.parse(now) - Date.parse(next.head.seenAt) >= NO_CHECKS_GRACE_MS;
@@ -208,7 +260,7 @@ export function news(
     // A failure and a stale pass are already work to do, and the block would
     // only crowd out the thing to fix. A pass and an absent check are where
     // the agent needs it: both read as "nothing to do" without it.
-    const block = ci === "passing" || ci === "absent" ? mergeBlock(pr) : null;
+    const block = ci === "passing" || ci === "absent" ? mergeBlock(pr, options.review) : null;
     const code = block?.code ?? null;
     // The block is part of the key, not a decoration on it. The base branch
     // moves under a pass the thread has already heard, and that is exactly
@@ -227,18 +279,30 @@ export function news(
   return { events, cursor: next };
 }
 
-/** True for an event the agent has to act on. Such an event costs a round. */
-export function asksForWork(ev: WatchEvent): boolean {
+/**
+ * True for an event the agent has to act on. Such an event costs a round.
+ *
+ * The role decides two of these. A push is work for a reviewer — read the new
+ * diff — and never for an author, who made it. And a comment from an automated
+ * review that asks for changes is work for the author and for nobody else: a
+ * second reviewer reads its colleague's comment as discussion, not as a task,
+ * and a reviewer that acted on one would try to fix the change itself.
+ */
+export function asksForWork(ev: WatchEvent, role: WatchRole = "author"): boolean {
   if (ev.kind === "checks") {
     // A block the agent clears with a push costs a round, like the stale pass
     // it is a sibling of. A draft, a review and a rule of the repository all
     // wait for a person, so they cost none: a round spent on a wait is a round
-    // the next real failure has lost.
+    // the next real failure has lost. An automated review that has not signed
+    // off is a wait of that kind: the reviewer is reading, and there is nothing
+    // the author can push that makes it finish sooner.
     if (ev.block) return ev.block.code === "behind" || ev.block.code === "conflict";
     return ev.ci === "failing" || ev.ci === "stale";
   }
   if (ev.kind === "conflict") return true;
+  if (ev.kind === "head") return role === "reviewer";
   if (ev.kind === "review") return ev.review.state.toUpperCase() === "CHANGES_REQUESTED";
+  if (ev.kind === "comment") return role === "author" && reviewVerdictOf(ev.comment.body) === "changes";
   return false;
 }
 
@@ -252,8 +316,15 @@ export function endsWatch(ev: WatchEvent): ev is Extract<WatchEvent, { kind: "me
  * a fact GitHub reported, in one sentence, so the note that records a wait
  * says what it waits for. A running turn is the engine's question, not this
  * one's: it reads the thread, and this reads the pull request.
+ *
+ * The automated review is the one refusal that is not GitHub's. It is covey's
+ * own record, because GitHub refuses an approval on your own pull request and
+ * every review thread writes from the author's login. The review is checked
+ * last: a reader told "the review has not signed off" about a branch with a red
+ * check has been told the wrong thing, and the facts GitHub reports are the
+ * ones a person can act on.
  */
-export function mergeReadiness(pr: PullRequestFacts, base: BaseHead | null): { ready: true } | { ready: false; why: string } {
+export function mergeReadiness(pr: PullRequestFacts, base: BaseHead | null, review?: ReviewRequirement | null): { ready: true } | { ready: false; why: string } {
   if (pr.state !== "OPEN") return { ready: false, why: `the pull request is ${pr.state.toLowerCase()}` };
   if (pr.isDraft) return { ready: false, why: "the pull request is a draft" };
   const decision = pr.reviewDecision.toUpperCase();
@@ -270,7 +341,10 @@ export function mergeReadiness(pr: PullRequestFacts, base: BaseHead | null): { r
   if (pr.mergeStateStatus.toUpperCase() === "BLOCKED") {
     return { ready: false, why: "GitHub blocks the merge: a rule of the repository is not met" };
   }
-  return { ready: true };
+  // Covey's own refusal, last of all, because every fact GitHub reported is a
+  // nearer answer to "why not": a reader told "the review has not signed off"
+  // about a branch with a red check has been told the wrong thing.
+  return reviewGate(review);
 }
 
 export interface NewsContext {
@@ -281,11 +355,18 @@ export interface NewsContext {
   maxRounds: number;
   /** Who merges, so the text after a pass says what happens next. */
   merge: MergePolicy;
+  /** Which side of the review reads this. Omitted reads as `author`. */
+  role?: WatchRole;
+  /** The automated review, so the text after a pass says what it still waits for. */
+  review?: ReviewRequirement | null;
+  /** The base branch the reviewer compares against, on a `reviewer` watch. */
+  base?: string;
 }
 
 /** The whole turn: one heading, one line per event. */
 export function describeNews(pr: PullRequestFacts, events: WatchEvent[], ctx: NewsContext): string {
-  const lines = [`covey watch: news on pull request #${pr.number} (${pr.url}).`, ""];
+  const what = ctx.role === "reviewer" ? "the pull request you review" : "pull request";
+  const lines = [`covey watch: news on ${what} #${pr.number} (${pr.url}).`, ""];
   for (const ev of events) lines.push(`- ${describeEvent(ev, pr, ctx)}`);
   return lines.join("\n");
 }
@@ -307,17 +388,21 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
         const passed = `The checks passed on ${short(ev.head)}: ${n} check${n === 1 ? "" : "s"} succeeded.`;
         // A green check is not a merge. Never say "nothing to fix" over a
         // block: that sentence is what the agent answers the reader with.
-        if (ev.block) return `${passed} GitHub will not merge the pull request yet: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}`;
+        if (ev.block) return `${passed} ${blockLead(ev.block)}: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}`;
         const then = ctx.merge === "auto"
           ? "Covey merges the pull request on its next poll, unless a review asks for changes or the base has moved."
           : "The merge policy is manual: a person merges the pull request, or switches this thread to auto. Wait; covey sends the next review, comment or merge as a turn.";
         return `${passed} There is nothing to fix. ${then}`;
       }
       const none = `No check ran on ${short(ev.head)} in ${Math.round(NO_CHECKS_GRACE_MS / 60_000)} minutes. The repository may have no checks for this branch. Nothing has tested the change; say so in the pull request if a check was expected.`;
-      return ev.block ? `${none} GitHub will not merge the pull request yet either: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}` : none;
+      return ev.block ? `${none} ${blockLead(ev.block)} either: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}` : none;
     }
     case "conflict":
       return `The branch conflicts with ${pr.baseRefName} at ${short(ev.head)}. Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
+    case "head": {
+      const base = ctx.base ?? pr.baseRefName;
+      return `The author pushed ${short(ev.head)} to ${pr.headRefName}; it was ${short(ev.was)}. Run \`git pull\` and read the change again: \`git diff ${short(ev.was)}..HEAD\` is what is new, and \`git diff origin/${base}...HEAD\` is the whole change. Then say \`covey review approve\` or \`covey review changes\`. ${round}`;
+    }
     case "review": {
       const who = author(ev.review.author, pr);
       const verdict = reviewWord(ev.review.state);
@@ -326,15 +411,23 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
       return `Review by ${who}: ${verdict}.${body ? `\n${body}` : ""}${ask}`;
     }
     case "comment": {
-      const who = author(ev.comment.author, pr);
+      const verdict = reviewVerdictOf(ev.comment.body);
+      const who = verdict ? reviewerWord(verdict) : author(ev.comment.author, pr);
       const where = ev.comment.path ? ` on ${ev.comment.path}${ev.comment.line !== null ? ` line ${ev.comment.line}` : ""}` : "";
-      return `Comment by ${who}${where}:\n${quote(ev.comment.body)}`;
+      // A machine asked the author for changes. The author acts; a second
+      // reviewer reading the same comment is reading a colleague, not a task.
+      const ask = verdict === "changes" && ctx.role !== "reviewer"
+        ? `\nMake the change, commit, push to ${ctx.branch}, and answer it with \`covey pr comment\`. Covey tells the reviewer about the push. ${round}`
+        : "";
+      return `Comment by ${who}${where}:\n${quote(ev.comment.body)}${ask}`;
     }
     case "merged":
+      if (ctx.role === "reviewer") return `The pull request was merged, so there is nothing left to review. Covey stops the watch. Say so in one line and stop the turn; do not comment.`;
       return ev.by === "covey"
         ? `Covey merged the pull request (${ev.method ?? "merge"}): the checks passed against the current ${pr.baseRefName}, and the merge policy is auto. The loop is done, and covey stops the watch.`
         : "The pull request was merged. The loop is done, and covey stops the watch.";
     case "closed":
+      if (ctx.role === "reviewer") return "The pull request was closed without a merge, so there is nothing left to review. Covey stops the watch. Say so in one line and stop the turn; do not comment.";
       return "The pull request was closed without a merge. The loop is done, and covey stops the watch.";
     case "mergeFailed":
       return `Covey tried to merge the pull request under the auto policy, and GitHub refused: ${ev.error}. Covey does not try again on this head. A person has to look, or a push starts the loop again.`;
@@ -357,6 +450,8 @@ function describeBlock(block: MergeBlock, pr: PullRequestFacts, ctx: NewsContext
       return "Wait; a person has to review the pull request. Covey sends the review as a turn. Say in your reply that the merge waits for a review.";
     case "blocked":
       return "You cannot clear this one. Say in your reply that the checks passed and GitHub still blocks the merge, so a person can look at the rule.";
+    case "unreviewed":
+      return "Wait; the automated review is reading the change. Covey sends each of its comments as a turn, and tells you when it signs off. Do not review your own change and do not start a reviewer yourself.";
   }
 }
 
@@ -372,6 +467,15 @@ function short(sha: string): string {
 function author(login: string, pr: PullRequestFacts): string {
   const name = login || "somebody";
   return pr.author && login === pr.author ? `${name} (the account that opened the pull request)` : name;
+}
+
+/** Who a comment carrying covey's own tagline is from, and what it decided. */
+function reviewerWord(verdict: "approved" | "changes" | "comment"): string {
+  switch (verdict) {
+    case "approved": return "an automated covey review, which signed off";
+    case "changes": return "an automated covey review, which asks for changes";
+    case "comment": return "an automated covey review";
+  }
 }
 
 function reviewWord(state: string): string {

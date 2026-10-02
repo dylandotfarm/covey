@@ -49,11 +49,17 @@ export function coveyPlugin(root: string | null): string | null {
  * no checkout hands over neither, because a note that names a skill the session
  * does not have is worse than no note.
  *
+ * The review line is here for the same reason as the two rules. A review thread
+ * reads the note before it reads its own brief, and a reviewer that pushed a fix
+ * to the branch it was asked to read would have made the change nobody reviewed.
+ *
  * Change this and the skill together, as with `covey show` and the loop.
  */
 export const COVEY_PREAMBLE = `This session runs inside a covey thread. The covey daemon on this machine gave the thread a git worktree on its own branch, and it can push that branch, open a pull request for it, watch the pull request, and merge it. You ask with the \`covey\` command.
 
 Load the \`covey\` skill (\`covey:covey\`) and follow it for that work. Load it in the first turn that takes an issue, pushes a branch, opens or comments on a pull request, shows the reader a file, or reads this thread's secrets. Prefer it over \`gh\` and over a plain \`git push\`; the skill says where \`gh\` still fits.
+
+A message that starts \`covey review:\` means this thread reviews another thread's change. Read that message and the skill's reviewer section; never commit, push or merge on that branch.
 
 Two rules hold before you read the skill, because a person cannot take either act back:
 

@@ -27,6 +27,9 @@ issue. Both end at a pull request covey watches. Pick by what the user said:
   the user says so.
 - **Anything else** — a bug the user describes, a fix they watched you make, a
   rename, a change named in one sentence. The no-issue loop.
+- **The first message of the thread starts `covey review:`.** Neither loop:
+  this thread reviews somebody else's change. Read *If you are the reviewer*
+  below and nothing else here.
 
 Never file an issue to hold work you are about to do. Most of what a user
 asks for in conversation is not issue-shaped, and an issue opened and closed
@@ -44,14 +47,40 @@ gh issue create --title "<one line, what is wrong>" --body-file /tmp/issue.md
 ## The user's words decide who merges
 
 - "merge when you're done", "automerge", "land it": open with `--auto`.
-  Covey merges once the checks pass against the current base and no review
-  asks for changes.
+  Covey merges once the checks pass against the current base, the automated
+  review has signed off, and no review asks for changes.
 - Anything else, and every case where the user wants to look first: open
   without `--auto`. A person merges. This is the default, because a merge is
   the one act in the loop a person cannot take back.
 
 Never merge a pull request yourself, and never run `covey pr policy auto`
 unless the user told you to merge on their behalf.
+
+## Every pull request is reviewed
+
+Covey starts an **automated reviewer** when you open a pull request: a second
+covey thread that reads your change, comments on the pull request, and signs
+off or asks for changes. Covey does not call the pull request ready, and does
+not merge it under `--auto`, until the review signs off.
+
+You do not start it and you do not answer for it. What you do:
+
+- **Nothing, by default.** One reviewer starts with the pull request.
+- `--no-review` on `covey pr open` when the user says no review is needed, for
+  example "this is a one-line typo fix, skip the review".
+- `--reviews N` when the user asks for more than one, for example "this is a
+  big feature, get two reviewers on it".
+- `covey pr review` later, when a reviewer was dropped and covey says a person
+  has to decide.
+
+Its comments arrive as `covey watch:` messages like any other, and each ends
+with the line *from an automated covey review*. Treat one that asks for changes
+as you treat a person's review: make the change, push, and answer it with
+`covey pr comment`. Covey tells the reviewer about your push, and it reads the
+change again.
+
+Never review your own pull request, never write that tagline yourself, and
+never run `covey review` from the thread that wrote the change.
 
 ## The issue loop
 
@@ -105,7 +134,8 @@ unless the user told you to merge on their behalf.
      loop is done. Give a two-line summary and stop.
    - *Blocked*: covey sent as many rounds as it may, or watched for too long.
      Stop. Tell the user what still fails and what you tried.
-7. **Check the state** at any time with `covey pr status`.
+7. **Check the state** at any time with `covey pr status`. It names the issue,
+   the pull request, the watch, and where each reviewer stands.
 
 ## The no-issue loop
 
@@ -125,6 +155,52 @@ there is no issue to read and none to file.
 
 Say in your reply that you opened the pull request against no issue, so the
 user can ask for one if they want the work tracked.
+
+## If you *are* the reviewer
+
+Covey opens a review thread with a message that starts `covey review:`. That
+thread is not the one that wrote the change. Its job is to read the change and
+to say one of two things.
+
+1. **Read the change.** Your worktree is a checkout of the branch under review,
+   so the code in front of you is the code on the pull request.
+
+   ```
+   gh pr view <n>
+   git diff origin/<base>...HEAD      the whole change
+   git log --oneline origin/<base>..HEAD
+   ```
+
+   Read the project's own notes for agents, and hold the change to them.
+
+2. **Say one of two things.**
+
+   ```
+   covey review changes --body "…"     ask the author for changes
+   covey review approve [--body "…"]   sign off, and end the review
+   ```
+
+   Covey puts the comment on the pull request and adds the tagline that says a
+   machine wrote it. Do not write that tagline yourself, and do not use
+   `gh pr comment` or `gh pr review`.
+
+3. **Stop the turn.** Covey wakes you when the author pushes. Run `git pull`
+   and read the change again from there.
+
+The rules of a review thread:
+
+- Never commit to the branch, never push it, and never merge. The author makes
+  every change; you read and you say.
+- Name the file and the line for each thing you want changed, and say why it
+  matters. One comment that covers the change beats ten that each cover a line.
+- Ask for changes only for something that should hold the change up: a bug, a
+  missing case, a rule of the project the change breaks. A matter of taste is a
+  remark inside your comment, not a reason to block.
+- The checks are the author's work, so covey sends you none of them. A red
+  build is already in hand.
+- `covey review approve` ends the review and covey archives the thread. There
+  is nothing after it.
+- `covey review status` says what you review and where the other reviewers are.
 
 ## Write a body as paragraphs, not as wrapped lines
 
@@ -262,6 +338,8 @@ covey env exec -- <cmd>    run one command with those secrets in its environment
 - Do not open a second pull request for the same thread.
 - Do not file an issue for work the user did not ask you to file.
 - Do not push to the base branch, and do not merge.
+- Do not review your own change, and do not answer a review for the reviewer.
+  Covey has a thread for that, and it is not this one.
 - Do not stop covey's watch (`covey pr watch --stop`) unless the user asks.
 
 ## Reference
@@ -269,17 +347,29 @@ covey env exec -- <cmd>    run one command with those secrets in its environment
 ```
 covey issue take <n>          record the issue this thread owns
 covey issue drop              clear it
-covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N] [--attach F]...
+covey pr open --title "…" [--body "…" | --body-file F] [--draft] [--auto] [--squash|--rebase] [--rounds N] [--attach F]... [--reviews N | --no-review]
+covey pr review [N]           start N more automated reviewers (one by default)
 covey pr comment [--body "…" | --body-file F] [--attach F]...
                               comment on this thread's pull request, with media
 covey pr watch <n> [--auto]   watch a pull request opened by hand
 covey pr watch --stop         stop the watch
 covey pr policy auto|manual   change who merges
-covey pr status               the issue, the pull request and the watch of this thread
+covey pr status               the issue, the pull request, the watch and the review
+                              of this thread
 covey show <file>... [--text "…"]
                               put a picture or a video in this conversation
 covey env                     the secrets this thread can use, by name
 covey env exec -- <cmd>       run one command with those secrets in its environment
+```
+
+From a review thread only:
+
+```
+covey review changes --body "…" [--attach F]...
+                              ask the author for changes, and hold the merge
+covey review approve [--body "…"] [--attach F]...
+                              sign off, and end the review
+covey review status           the pull request this thread reviews
 ```
 
 `--rounds N` bounds how many messages that ask for more work covey sends

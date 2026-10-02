@@ -634,6 +634,22 @@ export interface Thread {
   pullRequest?: ThreadPullRequest | null;
   watch?: PullRequestWatch | null;
   /**
+   * Set on a review thread: the pull request it reviews, and the thread that
+   * asked. Absent on every other thread, and on every thread written before
+   * the automated review existed.
+   */
+  reviewOf?: ThreadReview | null;
+  /**
+   * True when no client paints this thread unless the reader asks to see what
+   * is hidden. The daemon sets it on a review thread: a reviewer is machinery
+   * the reader did not ask for, and a sidebar that grew a second row per pull
+   * request would make covey's own work look like the reader's.
+   *
+   * `threadIsHidden` is the one place that reads it, because hiding has an
+   * escape hatch that a plain `if (t.hidden)` would miss.
+   */
+  hidden?: boolean;
+  /**
    * The names of the secrets this thread sets for itself, sorted, and never a
    * value (#126). A name here hides the project's name of the same spelling.
    * Absent on a thread written before secrets existed.
@@ -653,6 +669,47 @@ export function threadIsBusy(t: Thread): boolean {
   if (t.pendingApprovals > 0) return true;
   if (t.latestTurn?.state === "running") return true;
   return t.status === "running" || t.status === "starting" || t.status === "waiting";
+}
+
+/**
+ * True when a thread has stopped needing to work and started needing a person:
+ * it failed, or it is blocked on an approval or an answer.
+ *
+ * The attention rule of #49, and the one copy of it. A fold may hide a row, and
+ * `hidden` may take one off the screen altogether, but neither may hide this:
+ * nobody else is watching a thread that failed, and a thread asking for an
+ * approval deadlocks in silence when the reader cannot see it.
+ */
+export function threadNeedsPerson(t: Thread): boolean {
+  return t.status === "error" || t.status === "waiting" || t.pendingApprovals > 0;
+}
+
+/**
+ * True when a client should leave this thread off the screen.
+ *
+ * `showHidden` is the reader's own switch — a device preference like the theme,
+ * carried in no command and heard by no daemon. The third term is the whole
+ * safety of the feature: a hidden thread that needs a person is never hidden.
+ * A review thread in a strict permission mode asks for an approval, and an
+ * approval nobody can see is a thread that waits for ever.
+ */
+export function threadIsHidden(t: Thread, showHidden = false): boolean {
+  return !!t.hidden && !showHidden && !threadNeedsPerson(t);
+}
+
+/**
+ * How many automated reviewers are still working on this thread's change.
+ *
+ * A reviewer that asked for changes counts: it is waiting on the author, and
+ * the loop is as live as when it was reading. A reviewer that signed off or was
+ * dropped does not. The sidebar paints this so a thread sitting still with a
+ * pull request open does not read as stalled — it is being reviewed, which is
+ * the one thing the reader cannot otherwise see once the reviewers are hidden.
+ */
+export function threadReviewing(t: Thread): number {
+  const review = t.watch?.review;
+  if (!review || review.required <= 0) return 0;
+  return review.reviewers.filter((x) => x.state === "reviewing" || x.state === "changesRequested").length;
 }
 
 /** The issue a thread took. The number is the link; the rest is for the reader. */
@@ -686,6 +743,116 @@ export interface ThreadPullRequest {
   base: string;
   openedAt: string;
 }
+
+/**
+ * Where one automated reviewer stands.
+ *  - `reviewing` — the review thread is at work, or waiting for a push.
+ *  - `signedOff` — it is satisfied. Covey archives the thread with the verdict.
+ *  - `changesRequested` — it asked the author for changes, and waits for them.
+ *  - `dropped` — the review ended with no verdict: somebody archived or
+ *    deleted the thread, or its own watch ran out of rounds. A dropped
+ *    reviewer can never sign off, so the author hears about it and a person
+ *    decides whether to ask for another one.
+ */
+export type ReviewerState = "reviewing" | "signedOff" | "changesRequested" | "dropped";
+
+/** One review thread, as the author's watch records it. */
+export interface ReviewerRecord {
+  /** The review thread. The sidebar paints it under the author's thread. */
+  threadId: ThreadId;
+  /** Which reviewer of the set this is, from 1, so a brief can name itself. */
+  index: number;
+  state: ReviewerState;
+  /** The reviewer's last word, one line, for a reader. Null until it speaks. */
+  note: string | null;
+  startedAt: string;
+  /** When it signed off, asked for changes, or was dropped. Null while it reviews. */
+  decidedAt: string | null;
+}
+
+/**
+ * The automated review a pull request needs before covey calls it done.
+ *
+ * This is covey's own record and never GitHub's. A review thread runs under
+ * the same `gh` login as the thread that opened the pull request, and GitHub
+ * refuses an approval on your own pull request. So the reviewer's *words* go
+ * on the pull request as a comment, where a person reads them beside the
+ * change, and the *verdict* lives here, where `mergeReadiness` reads it.
+ */
+export interface ReviewRequirement {
+  /** How many sign-offs the pull request needs. One unless the caller asked for more. */
+  required: number;
+  /** One per review thread the daemon started, in the order it started them. */
+  reviewers: ReviewerRecord[];
+}
+
+/**
+ * The review requirement in five numbers.
+ *
+ * Pure, and the one place that counts them: the merge gate, the agent's
+ * `covey pr status` and every client read this, so no two of them can
+ * disagree about whether a pull request has been reviewed.
+ */
+export function reviewStanding(review: ReviewRequirement | null | undefined): {
+  required: number; signedOff: number; asking: number; dropped: number; waiting: number;
+} {
+  const rs = review?.reviewers ?? [];
+  const count = (s: ReviewerState) => rs.filter((r) => r.state === s).length;
+  return {
+    required: review?.required ?? 0,
+    signedOff: count("signedOff"),
+    asking: count("changesRequested"),
+    dropped: count("dropped"),
+    waiting: count("reviewing"),
+  };
+}
+
+/**
+ * True when the review is done with: enough reviewers have signed off, and
+ * none of them is still asking for changes. A requirement of zero — the
+ * `--no-review` case, and every pull request opened before this existed — is
+ * satisfied by definition.
+ */
+export function reviewSatisfied(review: ReviewRequirement | null | undefined): boolean {
+  if (!review || review.required <= 0) return true;
+  const s = reviewStanding(review);
+  return s.asking === 0 && s.signedOff >= s.required;
+}
+
+/**
+ * The pull request a thread reviews on another thread's behalf.
+ *
+ * It sits on the review thread's row, so a restart reads it back and the
+ * reviewer knows what it is for without asking. The author's own record of
+ * the same edge is `PullRequestWatch.review`; this is the back-pointer, and
+ * `ThreadOrigin.parentThreadId` is what makes the sidebar paint the nesting.
+ */
+export interface ThreadReview {
+  /** The thread that opened the pull request and asked for the review. */
+  authorThreadId: ThreadId;
+  number: number;
+  url: string;
+  /** The branch under review, and the branch it merges into. */
+  branch: string;
+  base: string;
+  /** Which reviewer of the set this is, from 1, and how many there are. */
+  index: number;
+  of: number;
+  startedAt: string;
+}
+
+/**
+ * Which side of the review one watch sits on.
+ *  - `author` — the thread that opened the pull request. It owns the build, so
+ *    a checks verdict, a conflict and the merge are its news.
+ *  - `reviewer` — a review thread. It owns the code, so a push to the branch
+ *    is its news and it never merges. The checks are not its business: the
+ *    author is already fixing them, and a reviewer woken by a red build would
+ *    spend a round on somebody else's work.
+ *
+ * Absent reads as `author`, which is every watch written before this existed.
+ */
+export type WatchRole = "author" | "reviewer";
 
 /**
  * Where a watch stands.
@@ -722,6 +889,16 @@ export interface PullRequestWatch {
   reason: string | null;
   merge: MergePolicy;
   mergeMethod: MergeMethod;
+  /** Which side of the review this watch is. Absent reads as `author`. */
+  role?: WatchRole;
+  /**
+   * The automated review this pull request needs, on an `author` watch. Absent
+   * or a `required` of zero means no review is asked for, and the pull request
+   * is ready as soon as GitHub says so. A `reviewer` watch carries none: the
+   * review it belongs to is on the author's row, and `Thread.reviewOf` is the
+   * link back.
+   */
+  review?: ReviewRequirement | null;
   /**
    * Turns this watch sent that asked for more work: a failing check, a merge
    * conflict, or a review that asked for changes. A turn that only reports
@@ -755,12 +932,17 @@ export interface PullRequestWatch {
 }
 
 /**
- * Why GitHub will not merge a pull request, apart from its checks. The daemon
- * works it out (`mergeBlock`); the protocol names it because the watch cursor
- * stores it. `conflict` and `behind` are the agent's own work; `draft`,
- * `changes`, `review` and `blocked` wait for a person.
+ * Why a pull request will not merge, apart from its checks. The daemon works it
+ * out (`mergeBlock`); the protocol names it because the watch cursor stores it.
+ * `conflict` and `behind` are the agent's own work; `draft`, `changes`, `review`
+ * and `blocked` wait for a person.
+ *
+ * `unreviewed` is the one refusal that is covey's own and not GitHub's: the
+ * automated review has not signed off. It waits for a machine rather than for a
+ * person, and `blockLead` is why the sentence says so — "GitHub will not merge
+ * this" would send the agent looking for a branch rule that is not there.
  */
-export type MergeBlockCode = "draft" | "conflict" | "behind" | "changes" | "review" | "blocked";
+export type MergeBlockCode = "draft" | "conflict" | "behind" | "changes" | "review" | "blocked" | "unreviewed";
 
 /**
  * What a watch has already delivered, so that nothing arrives twice. A retry,
@@ -789,6 +971,18 @@ export interface WatchCursor {
   reviews: string[];
   /** Comment ids already delivered, conversation and line comments alike. */
   comments: string[];
+  /**
+   * The URLs of the comments this thread wrote itself, which are never news to
+   * it. Without this a reviewer's own comment comes back to the reviewer on the
+   * next poll, as a turn that asks it to answer itself; the author and its
+   * reviewers all write from one GitHub account, so no author login can tell
+   * the two apart. The URL is the key and not the id because `gh pr comment`
+   * answers with a URL and `gh pr view` lists a node id, and only the URL is
+   * on both sides.
+   *
+   * Absent on a cursor written before this existed, which reads as empty.
+   */
+  posted?: string[];
 }
 
 export interface LatestTurn {
@@ -2227,8 +2421,42 @@ export interface RpcMethods {
       /** How the daemon merges under `auto`. Omitted = `merge`. */
       mergeMethod?: MergeMethod;
       attachments?: PullRequestAttachment[];
+      /**
+       * How many automated reviewers to start on the pull request. Omitted = one;
+       * `0` = none. Each is a thread of its own, so a caller that wants no
+       * review has to say so, and a caller that wants two says two.
+       */
+      reviews?: number;
     };
-    result: { number: number; url: string };
+    result: { number: number; url: string; reviewers: ThreadId[] };
+  };
+  /**
+   * Start automated reviewers on the pull request a thread already opened or
+   * watches, on the daemon that holds the branch. Each reviewer is a thread of
+   * its own: a worktree at the pull request's head, a `reviewer` watch on the
+   * same number, and a brief that tells it what it is for. The count adds to
+   * the reviewers the pull request already has, and raises what it requires.
+   *
+   * `thread.openPullRequest` does this itself, so this is for a pull request
+   * that has run out of reviewers or was opened with none.
+   */
+  "thread.requestReview": {
+    params: { threadId: ThreadId; count?: number };
+    result: { number: number; reviewers: ThreadId[]; required: number };
+  };
+  /**
+   * One reviewer's verdict, from the review thread itself. The daemon puts the
+   * words on the pull request as a comment, with the tagline that says a
+   * machine wrote them, and records the verdict on the author's watch.
+   *
+   * `approve` ends the review: the thread is archived, and the author hears
+   * that the pull request is one sign-off closer to ready. `changes` keeps the
+   * thread alive to read the author's answer, and holds the merge until the
+   * reviewer is satisfied. Refused on a thread that reviews nothing.
+   */
+  "thread.reviewDecide": {
+    params: { threadId: ThreadId; verdict: "approve" | "changes"; body?: string; attachments?: PullRequestAttachment[] };
+    result: { number: number; url: string; state: ReviewerState; signedOff: number; required: number };
   };
   /**
    * Leave a comment on the thread's pull request, with the same attachment

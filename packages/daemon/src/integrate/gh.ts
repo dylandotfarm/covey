@@ -48,6 +48,8 @@ export interface RollupEntry {
 export interface PullRequestFacts {
   number: number;
   url: string;
+  /** The one line the pull request is called, for a brief to name it. */
+  title: string;
   /** The login that opened it, or null when `gh` did not say. */
   author: string | null;
   headRefName: string;
@@ -266,7 +268,7 @@ async function gh(cwd: string, args: string[]): Promise<string> {
 }
 
 const PR_FIELDS = [
-  "number", "url", "author", "headRefName", "baseRefName", "headRefOid", "state", "isDraft",
+  "number", "url", "title", "author", "headRefName", "baseRefName", "headRefOid", "state", "isDraft",
   "mergeable", "mergeStateStatus", "reviewDecision", "additions", "deletions", "files", "statusCheckRollup",
   "reviews", "comments",
 ].join(",");
@@ -279,6 +281,7 @@ export function parsePullRequest(j: any): PullRequestFacts {
   return {
     number: j.number,
     url: String(j.url ?? ""),
+    title: String(j.title ?? ""),
     author: j.author?.login ? String(j.author.login) : null,
     headRefName: j.headRefName,
     baseRefName: j.baseRefName,

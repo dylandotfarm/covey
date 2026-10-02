@@ -193,6 +193,170 @@ test("the daemon merges only what is green against the current base, mergeable, 
   assert.equal(asksForWork({ kind: "mergeFailed", error: "x" }), false, "a refused merge is a person's question, not a round");
 });
 
+// ---- the two sides of the automated review ----
+//
+// One watch belongs to the thread that wrote the change and one to each thread
+// that reads it. These cases hold the line between what the two hear: the
+// author owns the build, the reviewer owns the code, and neither is woken by
+// its own words.
+
+const REVIEWER = { role: "reviewer" as const };
+const RCTX = { ...CTX, role: "reviewer" as const, base: "main" };
+const tagged = (verdict: "Approved" | "Changes requested") => `Line 20 is wrong.\n\n---\n*${verdict} — from an automated covey review.*`;
+
+test("a reviewer hears the push and the author never does", () => {
+  const first = pr({ number: 7, headRefOid: "aaaaaaa1", checks: GREEN });
+  const seen = news(first, [], emptyCursor(), T0, REVIEWER);
+  assert.deepEqual(seen.events.map((e) => e.kind), [], "the first poll is not a push: the brief named this head");
+
+  const pushed = pr({ number: 7, headRefOid: "bbbbbbb2", checks: GREEN });
+  const r = news(pushed, [], seen.cursor, later(60_000), REVIEWER);
+  assert.deepEqual(r.events.map((e) => e.kind), ["head"]);
+  assert.equal(asksForWork(r.events[0]!, "reviewer"), true, "reading the new diff is work, so it costs a round");
+  assert.equal(asksForWork(r.events[0]!, "author"), false, "an author pushed it: telling it so would cost a round for nothing");
+  const text = describeNews(pushed, r.events, RCTX);
+  assert.match(text, /the pull request you review #7/);
+  assert.match(text, /The author pushed bbbbbbb to branch; it was aaaaaaa/);
+  assert.match(text, /git pull/);
+  assert.match(text, /git diff origin\/main\.\.\.HEAD/);
+  assert.match(text, /covey review approve/);
+});
+
+test("a reviewer hears no checks verdict and no conflict", () => {
+  // Both are the author's work, already in hand. A reviewer woken by a red
+  // build spends a round of its budget on somebody else's job.
+  const facts = pr({ number: 7, checks: FAILED, mergeable: "CONFLICTING" });
+  assert.deepEqual(news(facts, [], emptyCursor(), T0, REVIEWER).events.map((e) => e.kind), []);
+  assert.deepEqual(news(facts, [], emptyCursor(), T0).events.map((e) => e.kind), ["checks", "conflict"], "the author hears both");
+});
+
+test("a reviewer still hears a merge and a close: there is nothing left to review", () => {
+  const merged = news(pr({ number: 7, state: "MERGED" }), [], emptyCursor(), T0, REVIEWER);
+  assert.deepEqual(merged.events.map((e) => e.kind), ["merged"]);
+  assert.match(describeNews(pr({ number: 7, state: "MERGED" }), merged.events, RCTX), /nothing left to review/);
+  assert.match(describeNews(pr({ number: 7, state: "MERGED" }), merged.events, RCTX), /do not comment/);
+});
+
+test("a thread never hears a comment it wrote itself", () => {
+  // Every thread of one pull request writes from one GitHub account, so no
+  // author login can tell a reviewer's comment from the author's. Without this
+  // a reviewer is woken by its own review and asked to answer itself.
+  const mine = { id: "c1", author: "agent", body: tagged("Changes requested"), createdAt: T0, url: "https://github.com/o/r/pull/7#issuecomment-1", path: null, line: null };
+  const theirs = { id: "c2", author: "agent", body: "I pushed the fix.", createdAt: T0, url: "https://github.com/o/r/pull/7#issuecomment-2", path: null, line: null };
+  const cursor = { ...emptyCursor(), posted: [mine.url] };
+  const r = news(pr({ number: 7, comments: [mine, theirs] }), [], cursor, T0, REVIEWER);
+  assert.deepEqual(r.events.map((e) => (e.kind === "comment" ? e.comment.id : e.kind)), ["c2"]);
+  assert.deepEqual(r.cursor.comments, ["c1", "c2"], "the one it wrote is still recorded, so the match runs once");
+});
+
+test("a tagged comment reads as a machine's, and asks the author for the change", () => {
+  const comment = { id: "c1", author: "agent", body: tagged("Changes requested"), createdAt: T0, url: "u", path: null, line: null };
+  const facts = pr({ number: 7, comments: [comment] });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.deepEqual(r.events.map((e) => e.kind), ["comment"]);
+  assert.equal(asksForWork(r.events[0]!, "author"), true, "a machine that asks for changes is work for the author");
+  assert.equal(asksForWork(r.events[0]!, "reviewer"), false, "and discussion for a second reviewer");
+  const text = describeNews(facts, r.events, CTX);
+  assert.match(text, /Comment by an automated covey review, which asks for changes/);
+  assert.match(text, /Make the change, commit, push to covey\/abc/);
+  assert.match(text, /round 1 of 3/);
+  assert.doesNotMatch(describeNews(facts, r.events, RCTX), /Make the change/, "a reviewer is told nothing to do about it");
+});
+
+test("a sign-off comment is labelled and costs no round", () => {
+  const comment = { id: "c1", author: "agent", body: tagged("Approved"), createdAt: T0, url: "u", path: null, line: null };
+  const facts = pr({ number: 7, comments: [comment] });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.equal(asksForWork(r.events[0]!, "author"), false);
+  assert.match(describeNews(facts, r.events, CTX), /which signed off/);
+});
+
+const needing = (signedOff: number, required: number) => ({
+  required,
+  reviewers: Array.from({ length: required }, (_, i) => ({
+    threadId: `r${i}`, index: i + 1, state: i < signedOff ? ("signedOff" as const) : ("reviewing" as const),
+    note: null, startedAt: T0, decidedAt: null,
+  })),
+});
+
+test("a green pass with the review out carries it as a block, and the sign-off clears it", () => {
+  // The review is a `mergeBlock` like a draft or a branch rule, so it needs no
+  // event of its own: the verdict is keyed on the block, and the pass is
+  // re-delivered the moment the block goes.
+  const facts = pr({ number: 7, checks: GREEN });
+  const out = news(facts, [], emptyCursor(), T0, { review: needing(0, 1) });
+  assert.deepEqual(out.events.map((e) => e.kind), ["checks"]);
+  const block = out.events[0]!.kind === "checks" ? out.events[0]!.block : null;
+  assert.equal(block?.code, "unreviewed");
+  assert.equal(block?.why, "0 of 1 automated reviews have signed off");
+  assert.equal(asksForWork(out.events[0]!), false, "the reviewer is reading; no push makes it finish sooner");
+  const waiting = describeNews(facts, out.events, CTX);
+  assert.match(waiting, /The checks passed/);
+  // Never "GitHub will not merge": this refusal is covey's own, and the agent
+  // sent looking for a branch rule would find none.
+  assert.match(waiting, /Covey will not call the pull request ready yet: 0 of 1/);
+  assert.match(waiting, /the automated review is reading the change/);
+  assert.doesNotMatch(waiting, /nothing to fix/);
+
+  const quiet = news(facts, [], out.cursor, later(60_000), { review: needing(0, 1) });
+  assert.deepEqual(quiet.events, [], "the same block is not news twice");
+
+  const done = news(facts, [], out.cursor, later(120_000), { review: needing(1, 1) });
+  assert.deepEqual(done.events.map((e) => e.kind), ["checks"], "the block went, so the pass is news again");
+  assert.equal(done.events[0]!.kind === "checks" ? done.events[0]!.block : "x", null);
+  const ready = describeNews(facts, done.events, CTX);
+  assert.match(ready, /There is nothing to fix/);
+  assert.match(ready, /a person merges the pull request/);
+});
+
+test("asking for another reviewer blocks the pass again", () => {
+  const facts = pr({ number: 7, checks: GREEN });
+  const done = news(facts, [], emptyCursor(), T0, { review: needing(1, 1) });
+  assert.equal(done.events[0]!.kind === "checks" ? done.events[0]!.block : "x", null);
+  const reopened = news(facts, [], done.cursor, later(60_000), { review: needing(1, 2) });
+  assert.deepEqual(reopened.events.map((e) => e.kind), ["checks"]);
+  assert.equal(reopened.events[0]!.kind === "checks" ? reopened.events[0]!.block?.code : null, "unreviewed");
+});
+
+test("a reviewer that asks for changes blocks the pass with its own words", () => {
+  const facts = pr({ number: 7, checks: GREEN });
+  const asking = { required: 1, reviewers: [{ threadId: "r0", index: 1, state: "changesRequested" as const, note: null, startedAt: T0, decidedAt: T0 }] };
+  const r = news(facts, [], emptyCursor(), T0, { review: asking });
+  assert.equal(r.events[0]!.kind === "checks" ? r.events[0]!.block?.why : "", "an automated covey review asks for changes");
+});
+
+test("a watch with no review requirement says nothing about one", () => {
+  // Every pull request opened before this existed, and every `--no-review` one.
+  const facts = pr({ number: 7, checks: GREEN });
+  const r = news(facts, [], emptyCursor(), T0);
+  assert.deepEqual(r.events.map((e) => e.kind), ["checks"]);
+  assert.equal(r.events[0]!.kind === "checks" ? r.events[0]!.block : "x", null, "nothing to wait on");
+  assert.doesNotMatch(describeNews(facts, r.events, CTX), /automated review/);
+});
+
+test("a reviewer's watch hears no block: the merge is not its question", () => {
+  const facts = pr({ number: 7, checks: GREEN, isDraft: true });
+  assert.deepEqual(news(facts, [], emptyCursor(), T0, REVIEWER).events.map((e) => e.kind), []);
+});
+
+test("mergeReadiness holds a green pull request until the review signs off", () => {
+  const base = { oid: "b", committedAt: "2026-09-21T09:00:00Z" };
+  const facts = pr({ number: 7, checks: STARTED, mergeable: "MERGEABLE", mergeStateStatus: "CLEAN" });
+  assert.deepEqual(mergeReadiness(facts, base), { ready: true }, "no review asked for, so nothing to wait on");
+  assert.deepEqual(mergeReadiness(facts, base, needing(0, 1)), { ready: false, why: "0 of 1 automated reviews have signed off" });
+  assert.deepEqual(mergeReadiness(facts, base, needing(1, 1)), { ready: true });
+  assert.deepEqual(mergeReadiness(facts, base, needing(0, 0)), { ready: true }, "`--no-review` waits on nobody");
+});
+
+test("a red check is the reason a reader is given, not the review", () => {
+  // A reader told "the review has not signed off" about a branch with a red
+  // check has been told the wrong thing: the review is checked last.
+  const base = { oid: "b", committedAt: "2026-09-21T09:00:00Z" };
+  const r = mergeReadiness(pr({ number: 7, checks: FAILED, mergeable: "MERGEABLE", mergeStateStatus: "BLOCKED" }), base, needing(0, 1));
+  assert.equal(r.ready, false);
+  assert.doesNotMatch(r.ready === false ? r.why : "", /automated review/);
+});
+
 // ---- what stands between a green check and the merge ---------------------------
 
 test("a pass behind a branch rule is not a pass to act on, and names the fix", () => {

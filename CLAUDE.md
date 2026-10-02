@@ -529,6 +529,41 @@
   the session reads the note before it decides to read the skill. The SDK records the
   rendered prompt at a conversation's first request, so an edit reaches a running thread
   only at its next compaction; a new thread takes it at once.
+- Opening a pull request starts a **reviewer**: a second covey thread that reads the
+  change, comments on the pull request, and signs off or asks for changes. Covey does
+  not call the pull request ready and an `auto` watch does not merge until it signs off.
+  A reviewer is a *thread*, not a mode — `origin.parentThreadId` nests it under its
+  author, `Thread.reviewOf` is the link back, and the author's record is
+  `PullRequestWatch.review` — so the sidebar, the watch, the archive and the transcript
+  all come free. Its worktree is the branch *under review*: `newWorktree` takes a ref,
+  and `trackBranch` sets the upstream to that branch, which makes `git pull` work and
+  makes git itself refuse a push. The words go on the pull request and the verdict goes
+  in the database, because a review thread writes from the author's own `gh` login and
+  GitHub refuses an approval on your own pull request — so the sign-off can never be a
+  GitHub review. `integrate/review.ts` is pure and owns the tagline (`from an automated
+  covey review`), which covey writes and the reviewer never does, anchored to the start
+  of a line so a comment that *quotes* a review is not read as one. `PullRequestWatch.role`
+  splits what the two sides hear: the author owns the build and hears every checks verdict,
+  the reviewer owns the code and hears the *push* and no checks at all. `WatchCursor.posted`
+  is why no thread hears a comment it wrote itself — every thread of one pull request writes
+  from one account, and without it a reviewer was woken by its own review for ever.
+  The review needs no watch event of its own: it is a `mergeBlock` under the code
+  `unreviewed`, so the checks verdict is keyed on it and the pass is re-delivered the moment
+  the review signs off. It is the one block that is covey's refusal and not GitHub's, which
+  is what `blockLead` is for, and it costs no round because no push makes a reviewer finish
+  sooner. `mergeReadiness` and `mergeBlock` both read the review last, after every fact
+  GitHub reported. A reviewer that ends with no verdict is reported to the author by the
+  daemon and not by a poll, because there is no artefact to read it from. A reviewer is **not
+  painted**: `Thread.hidden`, read only through `threadIsHidden`, whose third term is the
+  whole safety of it — a hidden thread that needs a person is never hidden, or a reviewer
+  blocked on an approval would hang the pull request for ever off the screen. The switch is
+  the device's (`prefs.showHidden`, `localStorage`), and the hiding goes where the lists are
+  built (`liveThreads`, `projectRows`) so the counts hide what the rows hide. Because the
+  reviewers are invisible the thread under review must say so, or it reads as stalled:
+  `threadReviewing` counts them and the TUI paints `⊙` (a glyph, like `AGENT_MARK`), while the
+  web says it in `threadStatusLabel`, which answered `idle` for the whole review before; one that signed off is archived by covey itself and
+  is never a drop. Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
+  with the loop and `covey env`.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon
   merges the two into `options.env` of the Claude session, so a tool call reads `$STRIPE_KEY`
   like `$PATH`. `e` on a sidebar row is the editor, and a project's panel writes to every

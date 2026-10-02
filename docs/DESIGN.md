@@ -690,7 +690,8 @@ thread and moves the member to `blocked` with that reason, which is the run's ow
 "a person has to look".
 
 **An agent asks from its shell.** `covey issue take <n>`, `covey pr open`, `covey pr comment`,
-`covey pr watch`, `covey pr policy` and `covey pr status` (`packages/cli/src/loop.ts`) speak to the local
+`covey pr review`, `covey pr watch`, `covey pr policy`, `covey pr status` and, from a review
+thread, `covey review approve|changes|status` (`packages/cli/src/loop.ts`) speak to the local
 daemon over loopback for the thread in `COVEY_THREAD_ID`, with Node's own `WebSocket`, so
 they need nothing installed in the agent's shell. The `/covey` skill
 (`plugin/skills/covey/SKILL.md`) tells the agent the loop: take the issue, work, prove it,
@@ -759,6 +760,122 @@ a note that names the act and the client, and the watch delivers the review, the
 or the merge as a turn on its next poll, the same as one made on GitHub. A merge from the
 client is the person's decision, so it is not held under a running turn; the client warns
 when the thread is still working, because the daemon's own `auto` merge would wait.
+
+### The automated review
+
+A change nobody reads was the hole in the loop. A reader who wanted one had to open a
+thread by hand, ask it to review, ask it to comment, and then tell the first thread what
+the second had said. So covey starts the reviewer itself: **opening a pull request starts a
+review thread**, and until that thread signs off covey does not call the pull request ready
+and an `auto` watch does not merge it.
+
+**A reviewer is a thread, not a mode.** It is an ordinary covey thread — a worktree, a
+session, a row in the sidebar — created by the daemon with `origin.by = "agent"` and
+`origin.parentThreadId` set to the thread that wrote the change, so the sidebar paints it
+under its author where a reader looks for it. Nothing new had to be built for the nesting,
+the watch, the archive or the transcript: a reviewer gets all of it by being a thread. The
+link back is `Thread.reviewOf`, on the reviewer's row, and the author's own record is
+`PullRequestWatch.review`, so a restart reads both back.
+
+**The reviewer's worktree is the branch under review.** `newWorktree` takes a ref for this:
+it fetches the pull request's branch and makes a worktree at `origin/<branch>`, under a
+branch name of its own, because git refuses to check out a branch a second worktree already
+holds and the author's worktree holds that one. `trackBranch` then sets the upstream to the
+branch under review, which does two things: `git pull` works, which is what the reviewer is
+told to run when the author pushes, and `git push` is refused by git itself under
+`push.default=simple`, which enforces "never push to this branch" without covey having to.
+
+**The words go on the pull request; the verdict goes in the database.** A review thread runs
+under the same `gh` login as the author, and GitHub refuses an approval on your own pull
+request — so the sign-off cannot be a GitHub review. It is covey's own record,
+`ReviewRequirement`, read by `mergeReadiness`. The comment is still the artefact a person
+reads beside the change, so the verdict is written into it as well, in a tagline that
+`integrate/review.ts` adds and reads back: **from an automated covey review**, with
+`Approved` or `Changes requested` in front of it. Covey writes that tagline and the reviewer
+cannot, because a reviewer asked to write its own marker would one day write a different
+one, and the marker is what tells a reader a machine wrote the words. The marker is anchored
+to the start of a line, so a comment that *quotes* a review — which every answer to one
+does, since `describeEvent` quotes with `> ` — is not read as a review itself.
+
+**The author owns the build; the reviewer owns the code.** `PullRequestWatch.role` says which
+side a watch is, and the two hear different things. An author hears every checks verdict,
+every conflict and the merge. A reviewer hears a *push* — a new head is its signal to read
+the diff again — and hears no checks verdict and no conflict at all: a red build is work the
+author already has in hand, and a round of a reviewer's budget spent on it is a round it
+cannot spend on the code. Both hear every comment and the merge, because a reviewer with
+nothing left to review has to stop.
+
+**No thread hears a comment it wrote itself.** Every thread of one pull request writes from
+one GitHub account, so no author login can tell a reviewer's comment from the author's.
+Without this the reviewer's own review came back to it on the next poll as a turn asking it
+to answer itself, and a comment costs no round, so nothing bounded it. `WatchCursor.posted`
+holds the URLs the thread wrote; the URL is the key rather than the id because `gh pr
+comment` answers with a URL and `gh pr view` lists a node id, and only the URL is on both
+sides.
+
+**The review is a `mergeBlock`, and needs no event of its own.** A green check is not a
+merge, and the watch already carries what stands between the two — a draft, a conflict, a
+base that has moved, a branch rule. The automated review is one more of those, under the code
+`unreviewed`, and it is the only one that is covey's own refusal rather than GitHub's; that is
+what `blockLead` is for, because "GitHub will not merge this" would send the agent looking for
+a branch rule that is not there. Everything else follows from the mechanism that was already
+built: the checks verdict is keyed on the block, so the pass is re-delivered the moment the
+review signs off, in the same turn as the sign-off comment — the reviewer's words and what
+they add up to, together, and the "ready for a person" sentence comes from the same place it
+always did. Asking for another reviewer blocks the pass again, and the next sign-off clears
+it again, with no state to keep. The block waits for a machine rather than for a person, so it
+costs no round: there is nothing the author can push that makes a reviewer finish sooner.
+`mergeReadiness` reads the review **last** for the same reason `mergeBlock` does — a reader
+told "the review has not signed off" about a branch with a red check has been told the wrong
+thing.
+
+**A reviewer is not on the screen.** A reader did not ask for it, and a sidebar that grew a
+second row per pull request would make covey's own machinery look like their work.
+`Thread.hidden` says so and `threadIsHidden` is the one place that reads it, because hiding
+has an escape hatch a plain `if (t.hidden)` would miss: **a hidden thread that needs a person
+is never hidden.** That is the fold rule of #69 one step further out — a reviewer in a strict
+permission mode asks for an approval, nobody else is watching it, and off the screen the whole
+pull request waits for ever on a prompt the reader cannot see. The switch is the reader's own
+(`prefs.showHidden` and the settings overlay in the TUI, `localStorage` and the Detail rows in
+the web client), a device preference like the theme and the level of detail, carried in no
+command. Hiding is applied where the lists are built — `liveThreads` in the TUI, `projectRows`
+in the shared client — so the counts and the tallies hide exactly what the rows hide; a number
+the reader cannot reconcile with what is above it is worse than no number.
+
+**So the thread being reviewed says so.** Its reviewers are invisible, and a thread with a
+pull request open sits still for minutes: without a mark it reads as stalled, which is the one
+thing hiding must not cause. `threadReviewing` counts the reviewers still working — one that
+asked for changes counts too, because it waits on the author and the loop is as live as when
+it was reading — and the TUI paints `⊙` beside the title, with the count when there is more
+than one. A glyph and not a colour, for the reason the agent mark is one: covey runs over ssh,
+in tmux, and on terminals with a narrow palette. The web client says it in words instead,
+through `threadStatusLabel`, which answered `idle` for the whole review before this; it comes
+after every state that needs the reader, because being reviewed is not something to act on.
+
+**A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
+archives its reviewers: a session is 300 MB and a worktree is a checkout, and the change
+they were reading is nobody's work any more. The record is marked `dropped` first, so the
+reviewer's own archive raises no "the review did not finish" turn on a thread the reader
+has just put away.
+
+**A review that ends with no verdict is reported.** A dropped reviewer can never sign off, so
+the merge would wait for ever in silence. Archiving the thread, deleting it, or its own watch
+running out of rounds marks the record `dropped` and sends the author a turn saying so and
+what it means; that turn comes from the daemon and not from a poll, because there is no
+artefact on GitHub to read it from. A reviewer that already decided is left alone — covey
+archives a reviewer itself the moment it signs off, and that is not a drop. A pull request
+that merges or closes under a reviewer ends its seat quietly, because the author is reading
+the same merge on its own watch.
+
+**How many.** One, unless the caller says. `covey pr open --no-review` asks for none and
+`--reviews N` for N, up to five, because each reviewer is a session under the machine's own
+`maxLiveSessions` ceiling. `covey pr review [N]` adds reviewers to a pull request that is
+already open, which is the answer when one was dropped. A reviewer that fails to start is a
+note on the author's thread and never a throw: the pull request is already open on GitHub,
+and the requirement counts the reviewers that really started, so the gate can never wait for
+a thread that does not exist. `covey review approve` and `covey review changes --body "…"`
+are the reviewer's two commands, and a `covey pr comment` from a review thread is tagged
+too, whichever command asked for it.
 
 **Every watch has an end.** A merge or a close ends it. Archiving, deleting or moving the
 thread drops it, as does `thread.watch` with `null`. The two hand-rolled loops still asking

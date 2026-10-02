@@ -29,11 +29,11 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-group-"));
 
 import React from "react";
 import { render } from "ink";
-import type { MachineInfo, Project, Run, RunMember, RunMemberState, Thread, ThreadOrigin } from "@covey/protocol";
+import type { MachineInfo, Project, ReviewerState, Run, RunMember, RunMemberState, Thread, ThreadOrigin } from "@covey/protocol";
 import { Store, archiveKey, pendingTasks, projectRuns, runIsBusy, sidebarRows, runKey, threadGroupKey, needsPerson, type AppState, type MachineState } from "./store.js";
 import { sidebarCells, rowAtScreenRow } from "./sidebar.js";
 import { App } from "./components/App.js";
-import { AGENT_MARK } from "./components/Sidebar.js";
+import { AGENT_MARK, REVIEW_MARK } from "./components/Sidebar.js";
 
 const PI = "ws://pi:3790";
 
@@ -867,5 +867,110 @@ test("a marked row is still one line, so the hit test and the renderer agree", a
       "the hit test and the painted frame disagree about which row sits on that line");
     await click(line);
     assert.equal(opened.at(-1), "mine");
+  } finally { unmount(); }
+});
+
+// ---- the threads covey hides, and the mark on what they review ---------------
+//
+// A reviewer is machinery the reader did not ask for, so `Thread.hidden` keeps
+// it off the screen. Hiding is a stronger claim than furling — a furled row is
+// one keystroke away, a hidden one is not there at all — so each rule below is
+// a case, and the second is the one that makes the first safe.
+
+/** A thread covey hid, under the thread whose change it reviews. */
+const reviewer = (id: string, at: string, parent: string, over: Partial<Thread> = {}) =>
+  started(id, at, parent, { hidden: true, ...over });
+
+/** An author whose pull request has `states.length` reviewers on it. */
+function underReview(id: string, at: string, ...states: ReviewerState[]): Thread {
+  return thread(id, at, {
+    watch: {
+      number: 7, state: "watching", reason: null, merge: "manual", mergeMethod: "merge", role: "author",
+      rounds: 0, maxRounds: 3, quiet: 0, startedAt: "", polledAt: null, endedAt: null, error: null,
+      cursor: { head: null, checks: null, conflict: null, mergeTried: null, reviews: [], comments: [] },
+      review: { required: states.length, reviewers: states.map((state, i) => ({ threadId: `rev-${i}`, index: i + 1, state, note: null, startedAt: "", decidedAt: null })) },
+    },
+  } as Partial<Thread>);
+}
+
+test("a reviewer is not a row, and the thread it reviews keeps no caret", () => {
+  const store = storeWith([
+    underReview("author", "2026-01-09T00:00:00Z", "reviewing"),
+    reviewer("rev", "2026-01-08T00:00:00Z", "author"),
+    thread("mine", "2026-01-07T00:00:00Z"),
+  ]);
+  assert.deepEqual(painted(store.state as AppState), ["author@1", "mine@1"]);
+  const rows = sidebarRows(store.state as AppState).filter((r) => r.kind === "thread");
+  // Not a furled group: there is nothing behind the caret, so there is no
+  // caret. A row that said "1" over a thread the reader cannot reach would be
+  // worse than no row.
+  assert.equal(rows.find((r) => r.thread!.id === "author")!.group, undefined);
+});
+
+test("the switch is the way in, and the reviewer comes back where it belongs", () => {
+  const store = storeWith([
+    underReview("author", "2026-01-09T00:00:00Z", "reviewing"),
+    reviewer("rev", "2026-01-08T00:00:00Z", "author"),
+  ]);
+  store.state.showHidden = true;
+  store.state.expanded[threadGroupKey(PI, "author")] = true;
+  assert.deepEqual(painted(store.state as AppState), ["author@1", "rev@2"], "under the thread it reviews, as its child");
+});
+
+test("a hidden reviewer that needs a person is painted whatever the switch says", () => {
+  // The deadlock this rule exists to refuse: a reviewer in a strict permission
+  // mode asks for an approval, and nobody else is watching it. Hidden, the
+  // whole pull request waits for ever on a prompt nobody can see.
+  for (const over of [{ pendingApprovals: 1 }, { status: "error" as const }, { status: "waiting" as const }]) {
+    const store = storeWith([
+      underReview("author", "2026-01-09T00:00:00Z", "reviewing"),
+      reviewer("rev", "2026-01-08T00:00:00Z", "author", over),
+    ]);
+    assert.deepEqual(painted(store.state as AppState), ["author@1", "rev@2"], JSON.stringify(over));
+    // And through its parent's fold as well, which is the furl rule of #69:
+    // letting the thread through has to let the path to it through too.
+    assert.equal(store.state.expanded[threadGroupKey(PI, "author")] ?? false, false, "the group is furled");
+  }
+});
+
+test("the project row counts what it paints and nothing else", () => {
+  const store = storeWith([
+    underReview("author", "2026-01-09T00:00:00Z", "reviewing"),
+    reviewer("rev-a", "2026-01-08T00:00:00Z", "author"),
+    reviewer("rev-b", "2026-01-07T00:00:00Z", "author"),
+  ]);
+  const count = () => sidebarRows(store.state as AppState).find((r) => r.kind === "project")!.count;
+  assert.equal(count(), 1, "one thread the reader can see");
+  store.state.showHidden = true;
+  assert.equal(count(), 3);
+});
+
+test("a thread under review carries the mark, painted on the screen", async () => {
+  // The reviewers are invisible, so without this a thread with a pull request
+  // open sits still for minutes with nothing to say why, and reads as stalled.
+  const store = storeWith([
+    underReview("author", "2026-01-09T00:00:00Z", "reviewing"),
+    reviewer("rev", "2026-01-08T00:00:00Z", "author"),
+    underReview("signed", "2026-01-07T00:00:00Z", "signedOff"),
+    thread("plain", "2026-01-06T00:00:00Z"),
+  ]);
+  const { frame, unmount } = await paint(store);
+  try {
+    const lineOf = (text: string) => frame().find((l) => l.slice(0, 33).includes(text)) ?? "";
+    assert.ok(lineOf("author").includes(REVIEW_MARK), `no mark on the thread being reviewed: "${lineOf("author")}"`);
+    assert.ok(!lineOf("signed").includes(REVIEW_MARK), "a review that is over still marked the row");
+    assert.ok(!lineOf("plain").includes(REVIEW_MARK), "a thread with no review was marked");
+  } finally { unmount(); }
+});
+
+test("two reviewers put the count beside the mark, and the row stays one line", async () => {
+  const store = storeWith([underReview("author", "2026-01-09T00:00:00Z", "reviewing", "reviewing")]);
+  const { frame, unmount } = await paint(store);
+  try {
+    const line = frame().find((l) => l.slice(0, 33).includes("author")) ?? "";
+    assert.ok(line.includes(`${REVIEW_MARK}2`), `the count is not beside the mark: "${line}"`);
+    // One row, one line, always: a second line silently breaks the mouse hit
+    // test, because `sidebarCells` gives every row exactly one.
+    assert.equal(frame().filter((l) => l.slice(0, 33).includes("author")).length, 1);
   } finally { unmount(); }
 });

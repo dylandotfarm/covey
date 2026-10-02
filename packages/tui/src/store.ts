@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, type Lod } from "@covey/protocol";
+import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
 import { MachineClient, projectPool, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
@@ -242,6 +242,15 @@ export interface AppState {
   view: ThreadView | null;
   focus: Focus;
   sidebarCollapsed: boolean;
+  /**
+   * Paint the threads covey hides from the reader (`Thread.hidden`): its
+   * automated reviewers. Off by default, and a device preference like the
+   * theme — `prefs.showHidden`, carried in no command.
+   *
+   * It never hides a thread that needs a person; that is `threadIsHidden`, and
+   * the reason the switch is safe to leave off.
+   */
+  showHidden: boolean;
   /** Fold keys → open. A project folds by its group key (`ProjectGroup.key`),
    *  a run by `runKey`, a thread group by `threadGroupKey`, the machines
    *  section by `MACHINES_KEY`. */
@@ -445,6 +454,7 @@ export class Store {
     this.state = {
       machines: new Map(), order: [], selected: null, view: null, focus: "sidebar",
       sidebarCollapsed: this.config.prefs.sidebarCollapsed ?? false,
+      showHidden: this.config.prefs.showHidden ?? false,
       expanded: this.config.prefs.expanded ?? {}, toggledRows: new Set(),
       lod: startingLod(this.config.prefs), overlay: null, notice: null,
       scrollFromBottom: 0, scrollAnchor: null, drafts: new Map(), pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null, attention: new Map(),
@@ -803,6 +813,7 @@ export class Store {
 
   setFocus(f: Focus) { this.set({ focus: f }); }
   toggleSidebar() { this.set({ sidebarCollapsed: !this.state.sidebarCollapsed }); this.config.prefs.sidebarCollapsed = this.state.sidebarCollapsed; this.persist(); }
+  toggleHidden() { this.set({ showHidden: !this.state.showHidden }); this.config.prefs.showHidden = this.state.showHidden; this.persist(); }
   setOverlay(o: Overlay | null) { this.set({ overlay: o }); }
   // `defaultOpen` is what the row shows before the user has ever touched it:
   // projects start open, the archived folder starts furled.
@@ -2144,8 +2155,17 @@ function append<K, V>(map: Map<K, V[]>, key: K, value: V): void {
   if (list) list.push(value); else map.set(key, [value]);
 }
 
-export function liveThreads(m: MachineState, projectId?: string): Thread[] {
-  return [...m.threads.values()].filter((t) => !t.archivedAt && !t.movedTo && (projectId === undefined || t.projectId === projectId));
+/**
+ * The threads of a machine a reader may see: not archived, not a tombstone, and
+ * not hidden unless they asked.
+ *
+ * The hiding is here rather than in `sidebarRows` because everything flows from
+ * this one list — the project row's count, the tree under it, and the tally in
+ * the summary pane. A count that included a row nobody can see would be the
+ * same confusion the hiding exists to remove.
+ */
+export function liveThreads(m: MachineState, projectId?: string, showHidden = false): Thread[] {
+  return [...m.threads.values()].filter((t) => !t.archivedAt && !t.movedTo && !threadIsHidden(t, showHidden) && (projectId === undefined || t.projectId === projectId));
 }
 
 /** Pinned first, then most recently spoken to — the sidebar's order. */
@@ -2259,7 +2279,7 @@ export function threadGroupKey(machine: string, threadId: string): string { retu
  * silence if the thread asking for the approval is the one that is hidden.
  */
 export function needsPerson(t: Thread): boolean {
-  return t.status === "error" || t.status === "waiting" || t.pendingApprovals > 0;
+  return threadNeedsPerson(t);
 }
 
 /**
@@ -2452,7 +2472,7 @@ export function sidebarRows(s: AppState): SidebarRow[] {
       busy ||= runs.some(runIsBusy);
       waiting ||= runs.some((r) => runNeedsPerson(s, r));
       for (const run of runs) for (const mem of run.members) if (!mem.threadId && !isFinalMemberState(mem.state)) count++;
-      for (const t of liveThreads(m, x.projectId)) {
+      for (const t of liveThreads(m, x.projectId, s.showHidden)) {
         count++;
         busy ||= t.status === "running" || t.status === "starting";
         waiting ||= t.status === "waiting" || t.pendingApprovals > 0;

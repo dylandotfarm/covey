@@ -205,7 +205,7 @@ export function fakeHost(options: FakeHostOptions = {}): FakeHost {
       // it — exactly as GitHub would answer once `gh pr create` returns.
       const number = 100 + opened.length;
       options.prs ??= {};
-      options.prs[draft.branch] = pr({ number, headRefName: draft.branch, baseRefName: draft.base, isDraft: draft.draft, checks: [] });
+      options.prs[draft.branch] = pr({ number, title: draft.title, headRefName: draft.branch, baseRefName: draft.base, isDraft: draft.draft, checks: [] });
       return { number, url: options.prs[draft.branch]!.url };
     };
   }
@@ -229,6 +229,7 @@ export function pr(over: Partial<PullRequestFacts> & { number: number }): PullRe
   return {
     number: over.number,
     url: over.url ?? `https://github.com/o/r/pull/${over.number}`,
+    title: over.title ?? `change ${over.number}`,
     author: over.author ?? "agent",
     headRefName: over.headRefName ?? "branch",
     baseRefName: over.baseRefName ?? "main",

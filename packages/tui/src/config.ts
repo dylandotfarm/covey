@@ -48,6 +48,10 @@ export interface TuiConfig {
     defaultPermissionMode?: "default" | "acceptEdits" | "plan" | "bypassPermissions";
     /** Disable the terminal bell for background thread events. */
     quiet?: boolean;
+    /** Paint the threads covey hides from the reader — its automated reviewers.
+     *  A device preference like the theme: no command carries it, no daemon
+     *  hears it. */
+    showHidden?: boolean;
     /**
      * Clones asked of machines that were not connected at the time. The
      * store sends each one when its machine next answers, and takes it off
