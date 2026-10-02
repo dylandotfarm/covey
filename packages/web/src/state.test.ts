@@ -487,7 +487,7 @@ test("the session limits name the number the daemon resolved them to, and price 
   const box = addMachine(s, "ws://box:3790", "box", true);
   const m = info("box");
   m.settings = { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null };
-  m.sessionBudget = { idleMinutes: 120, liveLimit: 4, sessionMemoryBytes: 300 * 1024 * 1024 };
+  m.sessionBudget = { idleMinutes: 120, liveLimit: 4, sessionMemoryBytes: 250 * 1024 * 1024 };
   applyShellSnapshot(box, { seq: 1, machine: m, projects: [], threads: [] });
   s.sheet = { target: { kind: "machine", machine: box.key }, page: "" };
 
@@ -501,8 +501,10 @@ test("the session limits name the number the daemon resolved them to, and price 
   assert.deepEqual(live.filter((c) => c.current).map((c) => c.id), [""]);
   assert.equal(live[0]!.label, "From memory (4)");
   // The count of sessions is not what the reader is choosing — the memory is.
-  assert.equal(live.find((c) => c.id === "4")!.hint, "about 1.3 GB");
-  assert.match(sheetNote(s, s.sheet), /about 300 MB/);
+  assert.equal(live.find((c) => c.id === "4")!.hint, "about 1 GB");
+  // The list reaches 32, because a quarter of a workstation's memory does.
+  assert.equal(live.at(-1)!.label, "32 sessions");
+  assert.match(sheetNote(s, s.sheet), /about 250 MB/);
 
   s.sheet.page = "idle";
   const idle = sheetChoices(s, s.sheet);

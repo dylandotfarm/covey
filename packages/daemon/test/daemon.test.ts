@@ -15,6 +15,7 @@ import type { RpcMethodName, RpcMethods } from "@covey/protocol";
 import { startDaemon, stopAll, tempDir, waitForExit, type TestDaemon } from "./daemons.js";
 import { scratchRemote, git, head, type ScratchRemote } from "../src/scratch.js";
 import { normaliseRemote, isBareRepo, projectSlug } from "../src/git.js";
+import { SESSION_MEMORY_BYTES, defaultLiveSessionLimit } from "../src/config.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -340,8 +341,12 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   const budget = async () => (await a.rpc("shell.snapshot", {})).machine.sessionBudget;
   const fresh = await budget();
   assert.equal(fresh!.idleMinutes, 120, "the default idle limit, said out loud");
-  assert.ok(fresh!.liveLimit >= 2 && fresh!.liveLimit <= 8, `a ceiling from this machine's memory, got ${fresh!.liveLimit}`);
-  assert.equal(fresh!.sessionMemoryBytes, 300 * 1024 * 1024, "what one session costs, so a panel can price a ceiling before it is set");
+  // A quarter of this machine's memory at `SESSION_MEMORY_BYTES` a session.
+  // Nothing bounds it from above, so the test bounds it by the machine it runs
+  // on rather than by a figure of its own.
+  assert.equal(fresh!.liveLimit, defaultLiveSessionLimit(), `a ceiling from this machine's memory, got ${fresh!.liveLimit}`);
+  assert.ok(fresh!.liveLimit >= 2, "never fewer than a thread and the one beside it");
+  assert.equal(fresh!.sessionMemoryBytes, SESSION_MEMORY_BYTES, "what one session costs, so a panel can price a ceiling before it is set");
 
   // The session limits live beside the rest, and a nonsense value reads as "no
   // opinion" rather than as a limit that would release every session at once.
@@ -349,7 +354,7 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   assert.equal((await settings()).sessionIdleMinutes, 30);
   assert.equal((await settings()).maxLiveSessions, 1, "one live session is the smallest budget there is");
   assert.equal(JSON.parse(readFileSync(join(A.home, "daemon.json"), "utf8")).sessionIdleMinutes, 30, "and survives a restart");
-  assert.deepEqual(await budget(), { idleMinutes: 30, liveLimit: 1, sessionMemoryBytes: 300 * 1024 * 1024 }, "the resolved figures follow the settings");
+  assert.deepEqual(await budget(), { idleMinutes: 30, liveLimit: 1, sessionMemoryBytes: SESSION_MEMORY_BYTES }, "the resolved figures follow the settings");
 
   await a.command({ type: "machine.settings", defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null });
   assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, bind: "loopback" }, "and can be cleared again");
