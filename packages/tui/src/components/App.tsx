@@ -846,9 +846,11 @@ export function App({ store }: { store: Store }) {
           store.setOverlay(null);
           const on = settings.archiveOnMerge === false;
           void store.setMachineDefaults(machineKey!, { archiveOnMerge: on });
+          // Short on purpose: the notice has one row, and what will not fit
+          // goes from the middle of the sentence.
           store.notify(`${info.name}: ${on
-            ? "a thread is archived when its pull request merges"
-            : "a thread hears the merge as a turn and stays on the screen"}`);
+            ? "a merged pull request archives its thread"
+            : "the merge arrives as a turn"}`);
           return;
         }
         case "bind": return openPick(`Where ${info.name} listens`, BIND_MODES.map((o) => ({ ...o, hint: o.id === settings.bind ? "current" : o.hint })), (bid) => {
