@@ -1980,13 +1980,25 @@ export class Store {
       if (!client) continue;
       try {
         const pr = await client.rpc("run.pullRequest", { threadId: m.threadId });
-        // The member's thread holds the watch of #94. A watch that ended in
-        // `blocked` is the loop handing the work to a person, and the member
-        // says so in the run panel with the reason the watch gave.
+        // The member's thread holds the watch of #94. Two things on that watch
+        // say the loop has handed the work to a person, and the member says so
+        // in the run panel with the watch's own words.
+        //
+        // A watch that ended in `blocked` is one. A watch whose round budget is
+        // spent is the other (#199): covey goes on reading the pull request but
+        // has stopped waking the thread, so nobody is working on it. That used
+        // to arrive here as `blocked`, and reading `state` alone now buries the
+        // one member covey has stopped asking — which is #199's own shape a
+        // level up, covey no longer telling somebody. `spentAt` is the only
+        // route the case has to a reader outside that one transcript.
         const watch = threadOnMachineId(this.state, m.machineId, m.threadId)?.watch;
-        const blocked = watch?.state === "blocked" && !isFinalMemberState(m.state) && m.state !== "withdrawn";
+        const why = watch?.state === "blocked" ? watch.reason
+          : watch?.spentAt
+            ? `Covey sent ${watch.maxRounds} turn${watch.maxRounds === 1 ? "" : "s"} that asked for more work on #${watch.number} and stopped waking the thread. Covey still watches the pull request.`
+            : null;
+        const blocked = why !== null && !isFinalMemberState(m.state) && m.state !== "withdrawn";
         const state = blocked ? "blocked" : nextStateForPr(m.state, pr);
-        const note = blocked && m.state !== "blocked" ? watch!.reason : undefined;
+        const note = blocked && m.state !== "blocked" ? why : undefined;
         if (pr?.url !== m.pullRequest?.url || pr?.state !== m.pullRequest?.state || state !== m.state)
           await this.patchMember(machine, runId, m.id, { pullRequest: pr, state, ...(note !== undefined ? { note } : {}) });
       } catch (e: any) { errors.push(`${m.task.key}: ${e.message}`); }

@@ -505,3 +505,17 @@ test("a thread out of rounds still hears everything that does not ask it for wor
   // And the held events are still words a person can read in the transcript.
   assert.match(describeNews(facts, hold, CTX), /The checks failed on aaa/);
 });
+
+test("a batch held back by a spent budget names no round", () => {
+  // It is a note for a person, under a sentence that says the rounds are gone.
+  // "This is round 3 of 3." there reads as a countdown that never moves.
+  const facts = pr({ number: 199, checks: FAILED, headRefOid: "aaa" });
+  const r = news(facts, [], emptyCursor(), T0);
+  const spent = { ...CTX, rounds: 3, maxRounds: 3, spent: true };
+  const held = describeNews(facts, r.events, spent);
+  assert.match(held, /Covey watches the checks again after the push\.$/m);
+  assert.doesNotMatch(held, /round 3 of 3/);
+  assert.doesNotMatch(held, / \n|  $/, "and it ends at its full stop, not at a space");
+  // The same batch as a turn still counts the round out loud.
+  assert.match(describeNews(facts, r.events, { ...CTX, rounds: 2 }), /This is round 2 of 3\./);
+});

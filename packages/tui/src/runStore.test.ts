@@ -27,7 +27,7 @@ process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-run-"));
 import React from "react";
 import { render } from "ink";
 import type { Command, MachineInfo, Project, Run, RunMember, Thread } from "@covey/protocol";
-import { Store, nextStateForPr, sidebarRows, runKey, type AppState, type MachineState } from "./store.js";
+import { Store, nextStateForPr, memberNeedsPerson, sidebarRows, runKey, type AppState, type MachineState } from "./store.js";
 import { sidebarCells } from "./sidebar.js";
 import { parseTaskList } from "./run.js";
 import { App } from "./components/App.js";
@@ -44,6 +44,8 @@ class FakeClient {
   failSnapshot = false;
   /** The run this fake keeps, so `run.member.patch` behaves as a daemon would. */
   run: Run | null = null;
+  /** What `run.pullRequest` answers, for the cases that read one. */
+  pullRequest: { url: string; state: string; number: number } | null = null;
   constructor(private store: Store, private key: string) {}
   async command(cmd: Command) {
     this.commands.push(cmd);
@@ -57,7 +59,7 @@ class FakeClient {
       return { seq: 1, thread: { id: params.threadId, branch: this.branch, worktreePath: "/w" } as Thread, items: [], hasMore: false, commands: null };
     }
     if (method === "run.issues") return { issues: [], error: null };
-    if (method === "run.pullRequest") return null;
+    if (method === "run.pullRequest") return this.pullRequest;
     throw new Error(`unexpected rpc ${method}`);
   }
   /** The daemon's own behaviour, as far as these cases need it. */
@@ -583,4 +585,62 @@ test("a click lands on the row that was painted there, run rows and all", async 
     assert.equal(ov?.kind === "run" ? ov.runId : null, id);
     assert.deepEqual(opened, ["th1"], "and opened no thread on the way");
   } finally { unmount(); }
+});
+
+/** A member of a dispatched run, with its thread on the Mac. */
+async function dispatched(): Promise<{ store: Store; mac: FakeClient; runId: string; member: RunMember }> {
+  const { store, mac } = twoMachines();
+  const runId = await runOf(store, "44");
+  await store.dispatchRun(MAC, runId);
+  const member = store.run(MAC, runId)!.members[0]!;
+  mac.pullRequest = { url: "https://github.com/o/r/pull/101", state: "OPEN", number: 101 };
+  return { store, mac, runId, member };
+}
+
+/** A thread row, as a machine's subscription would hold it. */
+function memberThread(id: string, watch: Thread["watch"]): Thread {
+  return {
+    id, projectId: "p-mac", title: id, provider: "claude", sessionId: `s-${id}`, model: null,
+    permissionMode: "default", branch: "covey/aaaaaaaa", worktreePath: "/w", status: "idle",
+    lastError: null, pendingApprovals: 0, queuedTurns: 0, latestTurn: null, lastMessageAt: null,
+    archivedAt: null, pinnedAt: null, movedTo: null, watch,
+    createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-01-01T00:00:00Z",
+  };
+}
+
+/** The watch a member's thread carries, with whatever the case changes. */
+function watched(over: Partial<NonNullable<Thread["watch"]>> = {}): NonNullable<Thread["watch"]> {
+  return {
+    number: 101, state: "watching", reason: null, merge: "manual", mergeMethod: "merge",
+    rounds: 3, maxRounds: 3, quiet: 0, startedAt: "2026-10-02T10:00:00Z", polledAt: null,
+    endedAt: null, error: null,
+    cursor: { head: null, checks: null, conflict: null, mergeTried: null, reviews: [], comments: [] },
+    ...over,
+  };
+}
+
+test("a member whose watch spent its rounds reads as blocked, with what covey stopped doing", async () => {
+  // #199 one level up. The budget now mutes the work instead of ending the
+  // watch, so `watch.state` stays `watching` — and a run panel that reads that
+  // field alone buries the one member covey has stopped asking for work. A
+  // furled run would hide it, and `memberNeedsPerson` would say no.
+  const { store, mac, runId, member } = await dispatched();
+  const ms = store.state.machines.get(MAC)!;
+  ms.threads.set(member.threadId!, memberThread(member.threadId!, watched({ spentAt: "2026-10-02T11:00:00Z" })));
+  await store.refreshPullRequests(MAC, runId);
+  const m = store.run(MAC, runId)!.members[0]!;
+  assert.equal(m.state, "blocked", "the run's own word for \"a person has to look\"");
+  assert.match(m.note!, /sent 3 turns that asked for more work on #101 and stopped waking the thread/);
+  assert.match(m.note!, /still watches/, "and says the pull request is not abandoned");
+  assert.ok(memberNeedsPerson(store.state, m), "so a furled run paints it anyway");
+});
+
+test("a member whose watch still holds its rounds is left where the pull request puts it", async () => {
+  const { store, mac, runId, member } = await dispatched();
+  const ms = store.state.machines.get(MAC)!;
+  ms.threads.set(member.threadId!, memberThread(member.threadId!, watched({ rounds: 1 })));
+  await store.refreshPullRequests(MAC, runId);
+  const m = store.run(MAC, runId)!.members[0]!;
+  assert.equal(m.state, "review", "nothing is wrong, so the pull request decides");
+  assert.equal(m.note, member.note);
 });

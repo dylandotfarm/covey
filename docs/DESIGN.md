@@ -682,13 +682,36 @@ and the agent reads the failure, fixes it, and pushes. The turn names the checks
 with their URLs, the review with its words, the comment with its file and line, and which
 round this is.
 
-**The loop is bounded.** An event that asks for work — a failing check, a conflict, a review
-that asks for changes — costs a round; a pass, a comment or an approval costs none. A watch
-sends at most `maxRounds` (default three) such turns; the next one ends the watch in
-`blocked`, with the news in the transcript as a note and the reason on the row. A watch that
-runs 72 hours without a merge or a close ends in `blocked` too. The TUI reads a run member's
-thread and moves the member to `blocked` with that reason, which is the run's own word for
-"a person has to look".
+**The loop is bounded, and the bound is on the work.** An event that asks for work — a
+failing check, a conflict, a review that asks for changes — costs a round; a pass, a comment
+or an approval costs none, and neither does a base branch that moved. `behind`, and the
+stale pass it is a sibling of under `auto`, are the base's news and not the change's:
+nothing the thread pushes stops the base moving again, and on a repository several covey
+threads land on they fire every few minutes. #199 is what charging for them cost — every
+open pull request of 2026-10-02 spent two of its three rounds merging `main`, and the first
+real failure met a budget that was already gone.
+
+A watch sends at most `maxRounds` (default three) turns that ask for work. The next one does
+not end the watch. `splitForBudget` holds the work-asking events back, they go in the
+transcript as a note a person reads, covey says once that it has stopped waking the thread,
+and `PullRequestWatch.spentAt` records when. The poll goes on, so a review that signs off, a
+checks verdict with nothing left to fix and the merge itself still arrive as turns, and an
+`auto` watch still merges. Ending the watch instead is the whole of #199: the rounds ran out
+on a base that moved, the watch stopped, and the pull request then sat approved with six
+green checks and nobody left to merge it. A `reviewer` watch is the one exception and still
+ends in `blocked` — a review that may not read another push can never sign off, and the
+author would wait for a verdict that is not coming. A batch that ends the watch skips the
+budget under either role: the pull request is over, so there is no work to hold back.
+
+A watch that runs 72 hours without a merge or a close ends in `blocked`. That is now the
+only bound on a base that churns for ever; the round budget no longer catches that case, and
+it caught it badly, by killing the pull request with it. A separate and much larger count of
+base-moved turns is what would catch a livelock without bringing that back.
+
+The TUI reads a run member's thread and moves the member to `blocked` when the watch ended
+that way **or** when its budget is spent, with the watch's own words, which is the run's own
+way of saying "a person has to look". Reading `watch.state` alone would bury the one member
+covey has stopped asking — #199's own shape a level up.
 
 **An agent asks from its shell.** `covey issue take <n>`, `covey pr open`, `covey pr comment`,
 `covey pr review`, `covey pr watch`, `covey pr policy`, `covey pr status` and, from a review

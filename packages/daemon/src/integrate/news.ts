@@ -393,6 +393,13 @@ export interface NewsContext {
   /** The round this delivery is, when one of its events asks for work. */
   rounds: number;
   maxRounds: number;
+  /**
+   * True for the batch a spent budget held back (#199). It is a note for a
+   * person and not a turn, so it names no round: the rounds are gone, and
+   * "This is round 3 of 3." under a sentence that says so reads as a countdown
+   * that never moves.
+   */
+  spent?: boolean;
   /** Who merges, so the text after a pass says what happens next. */
   merge: MergePolicy;
   /** Which side of the review reads this. Omitted reads as `author`. */
@@ -411,14 +418,24 @@ export function describeNews(pr: PullRequestFacts, events: WatchEvent[], ctx: Ne
   return lines.join("\n");
 }
 
+/**
+ * Which round this is, with the space before it, or nothing at all.
+ *
+ * It carries its own leading space so that a batch with no round left to name
+ * ends at its full stop rather than at a space.
+ */
+function roundLine(ctx: NewsContext): string {
+  return ctx.spent ? "" : ` This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
+}
+
 /** One event in words the agent can act on: what happened, and what to do. */
 export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsContext): string {
-  const round = `This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
+  const round = roundLine(ctx);
   switch (ev.kind) {
     case "checks": {
       if (ev.ci === "failing") {
         const names = ev.failed.map((c) => `\`${checkLabel(c)}\`${c.url ? ` (${c.url})` : ""}`).join(", ");
-        return `The checks failed on ${short(ev.head)}: ${names}. Read the failure, fix it, commit, and push to ${ctx.branch}. Covey watches the checks again after the push. ${round}`;
+        return `The checks failed on ${short(ev.head)}: ${names}. Read the failure, fix it, commit, and push to ${ctx.branch}. Covey watches the checks again after the push.${round}`;
       }
       if (ev.ci === "stale") {
         return `The checks passed on ${short(ev.head)}, but against an older ${pr.baseRefName}. Covey merges only a change tested on the current base. Merge ${pr.baseRefName} into ${ctx.branch} and push, so the checks run again.`;
@@ -438,16 +455,16 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
       return ev.block ? `${none} ${blockLead(ev.block)} either: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}` : none;
     }
     case "conflict":
-      return `The branch conflicts with ${pr.baseRefName} at ${short(ev.head)}. Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
+      return `The branch conflicts with ${pr.baseRefName} at ${short(ev.head)}. Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push.${round}`;
     case "head": {
       const base = ctx.base ?? pr.baseRefName;
-      return `The author pushed ${short(ev.head)} to ${pr.headRefName}; it was ${short(ev.was)}. Run \`git pull\` and read the change again: \`git diff ${short(ev.was)}..HEAD\` is what is new, and \`git diff origin/${base}...HEAD\` is the whole change. Then say \`covey review approve\` or \`covey review changes\`. ${round}`;
+      return `The author pushed ${short(ev.head)} to ${pr.headRefName}; it was ${short(ev.was)}. Run \`git pull\` and read the change again: \`git diff ${short(ev.was)}..HEAD\` is what is new, and \`git diff origin/${base}...HEAD\` is the whole change. Then say \`covey review approve\` or \`covey review changes\`.${round}`;
     }
     case "review": {
       const who = author(ev.review.author, pr);
       const verdict = reviewWord(ev.review.state);
       const body = quote(ev.review.body);
-      const ask = ev.review.state.toUpperCase() === "CHANGES_REQUESTED" ? ` Make the change, push, and answer the review. ${round}` : "";
+      const ask = ev.review.state.toUpperCase() === "CHANGES_REQUESTED" ? ` Make the change, push, and answer the review.${round}` : "";
       return `Review by ${who}: ${verdict}.${body ? `\n${body}` : ""}${ask}`;
     }
     case "comment": {
@@ -457,7 +474,7 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
       // A machine asked the author for changes. The author acts; a second
       // reviewer reading the same comment is reading a colleague, not a task.
       const ask = verdict === "changes" && ctx.role !== "reviewer"
-        ? `\nMake the change, commit, push to ${ctx.branch}, and answer it with \`covey pr comment\`. Covey tells the reviewer about the push. ${round}`
+        ? `\nMake the change, commit, push to ${ctx.branch}, and answer it with \`covey pr comment\`. Covey tells the reviewer about the push.${round}`
         : "";
       return `Comment by ${who}${where}:\n${quote(ev.comment.body)}${ask}`;
     }
@@ -476,12 +493,12 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
 
 /** What to do about a block: one instruction, or the wait and why. */
 function describeBlock(block: MergeBlock, pr: PullRequestFacts, ctx: NewsContext): string {
-  const round = `This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
+  const round = roundLine(ctx);
   switch (block.code) {
     case "behind":
       return `Merge ${pr.baseRefName} into ${ctx.branch} and push. The checks run again against the new base.`;
     case "conflict":
-      return `Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
+      return `Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push.${round}`;
     case "draft":
       return "Mark the pull request ready for review when the work is done. Covey does not merge a draft.";
     case "changes":
