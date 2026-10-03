@@ -1,6 +1,7 @@
 import {
   PROTOCOL_VERSION, USER_CLIENT, isPush, type RpcMethods, type RpcMethodName, type WireFromDaemon, type PushMessage,
   type MachineInfo, type ShellSnapshot, type ShellEvent, type ThreadEvent, type SavedMachine, type CommandEnvelope, type Command,
+  type TerminalEvent, type TerminalId,
   type MachineUpdate,
 } from "@covey/protocol";
 import { uuid } from "./uuid.js";
@@ -45,6 +46,18 @@ export interface ClientEvents {
   threadEvent(threadId: string, ev: ThreadEvent): void;
   threadSynchronized(threadId: string): void;
   machineUpdate(update: MachineUpdate): void;
+  /**
+   * Bytes and verdicts from a shell the caller opened (#10). Not held here the
+   * way a thread subscription is: a shell belongs to the panel that opened it,
+   * so the caller keeps the id, and a reconnect re-opens rather than replays —
+   * `terminal.open` answers with the scrollback, which is the whole of what a
+   * stream can give back.
+   *
+   * Optional, and the one optional member here, because a client that never
+   * calls `terminal.open` can never be sent one: the page and the phone have
+   * no shell panel, and a stub each would say they might.
+   */
+  terminalEvent?(terminalId: TerminalId, ev: TerminalEvent): void;
 }
 
 const BACKOFF = [500, 1000, 2000, 4000, 8000];
@@ -329,6 +342,9 @@ export class MachineClient {
         return;
       case "thread.synchronized":
         this.ev.threadSynchronized(m.threadId);
+        return;
+      case "terminal":
+        this.ev.terminalEvent?.(m.terminalId, m.event);
         return;
       case "machine.update":
         this.ev.machineUpdate(m.update);

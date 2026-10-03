@@ -20,6 +20,7 @@ import { Db } from "./db.js";
 import { Engine, EngineError } from "./engine.js";
 import { fakeHost, pr } from "./integrate/testHost.js";
 import { POLL_MAX_MS, WATCH_MAX_MS, pollDelayMs } from "./integrate/news.js";
+import { signComment } from "./integrate/sign.js";
 import { autoReply, fakeCli, settle } from "./claudeFake.js";
 
 const MACHINE: MachineInfo = {
@@ -221,7 +222,7 @@ test("a fix the agent pushes leads to a second round without a person, and a pas
   assert.equal(s.thread("t1").watch?.state, "watching", "green is not the end; a merge is");
 });
 
-test("a loop that cannot finish ends in blocked, with the reason in the transcript, and sends no more turns", async (t) => {
+test("a loop that cannot finish stops the work, puts it in the transcript, and keeps watching", async (t) => {
   const s = setup();
   t.after(s.cleanup);
   s.newThread("t1");
@@ -234,12 +235,55 @@ test("a loop that cannot finish ends in blocked, with the reason in the transcri
   await s.poll();
   assert.equal(s.turns("t1").length, 1, "the cap stops the work");
   const w = s.thread("t1").watch!;
-  assert.equal(w.state, "blocked");
-  assert.match(w.reason!, /sent 1 turn that asked for more work/);
+  assert.equal(w.state, "watching", "the budget bounds the work, never the watch (#199)");
+  assert.equal(w.rounds, 1);
+  assert.ok(w.spentAt, "and the row says when covey stopped waking the thread");
   const notes = s.notes("t1");
-  assert.match(notes.at(-1)!, /^Blocked pull request #101: The watch sent 1 turn/);
+  assert.match(notes.at(-1)!, /stops waking this thread for more/);
   assert.match(notes.at(-2)!, /The checks failed on 1111111/, "the news that stopped the loop is in the transcript for the reader");
-  assert.deepEqual(await s.poll(), [], "a blocked watch is not polled");
+  assert.ok((await s.poll()).includes("t1"), "and the pull request goes on being read");
+
+  // The reader fixed it by hand. The pass asks for no work, so it arrives as a
+  // turn like any other: this is the whole of what #199 lost.
+  facts.checks = GREEN;
+  facts.headRefOid = "2222222bbbb";
+  await s.poll();
+  assert.equal(s.turns("t1").length, 2, "a checks verdict with nothing to fix still reaches the thread");
+  assert.match(s.turns("t1").at(-1)!, /There is nothing to fix/);
+  assert.equal(s.thread("t1").watch?.rounds, 1, "and it spends no round");
+  assert.equal(s.notes("t1").filter((n) => /stops waking this thread/.test(n)).length, 1, "said once");
+
+  // And the merge still lands, which is the end of the watch. It is the one
+  // end that costs no turn: the thread is archived with the news in a note.
+  facts.state = "MERGED";
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.state, "merged");
+  assert.equal(s.turns("t1").length, 2, "the merge asks the agent for nothing");
+  assert.match(s.notes("t1").at(-1)!, /Pull request #101 merged/);
+  assert.ok(s.thread("t1").archivedAt);
+});
+
+test("a watch out of rounds still merges under auto when the pull request comes good", async (t) => {
+  // #199 itself: three rounds went on a base that moved, the watch ended, and
+  // the pull request sat approved with six green checks and nobody to merge it.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1", { merge: "auto", maxRounds: 1 });
+  s.host.options.base = BASE;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  facts.checks = FAILED;
+  await s.poll();
+  facts.headRefOid = "1111111aaaa";
+  await s.poll();
+  assert.ok(s.thread("t1").watch?.spentAt, "the budget is spent");
+  assert.deepEqual(s.host.merges, []);
+
+  facts.checks = GREEN_ON_BASE;
+  facts.headRefOid = "2222222bbbb";
+  await s.poll();
+  assert.deepEqual(s.host.merges, [{ number: 101, method: "merge" }], "covey merges it, as it would have before the budget ran out");
+  assert.equal(s.thread("t1").watch?.state, "merged");
 });
 
 test("a review and its line comment arrive as one turn that carries the words", async (t) => {
@@ -473,7 +517,7 @@ test("under manual, a green pull request GitHub will not merge says so, and says
   assert.match(turn, /GitHub will not merge the pull request yet: the branch is out of date with main/);
   assert.match(turn, /Merge main into covey\/t1 and push/);
   assert.doesNotMatch(turn, /a person merges the pull request/);
-  assert.equal(s.thread("t1").watch?.rounds, 1, "this one is the agent's work, so it costs a round");
+  assert.equal(s.thread("t1").watch?.rounds, 0, "the base moved; the change did not fail, so it costs no round (#199)");
   assert.equal(s.thread("t1").watch?.readiness?.ready, false);
 
   // The agent merged main in and pushed. Nothing blocks the merge now.
@@ -525,7 +569,7 @@ test("under auto, covey merges when the checks pass, but never under a running t
   assert.match(s.notes("t1").at(-1)!, /Pull request #101 merged: \S+\nCovey merged it \(merge\) under the auto policy\./);
 });
 
-test("under auto, a pass against an older base is a round for the agent, not a merge", async (t) => {
+test("under auto, a pass against an older base is work for the agent, not a merge and not a round", async (t) => {
   const s = setup();
   t.after(s.cleanup);
   s.newThread("t1");
@@ -535,7 +579,7 @@ test("under auto, a pass against an older base is a round for the agent, not a m
   await s.poll();
   assert.deepEqual(s.host.merges, []);
   assert.match(s.turns("t1")[0]!, /but against an older main/);
-  assert.equal(s.thread("t1").watch?.rounds, 1);
+  assert.equal(s.thread("t1").watch?.rounds, 0, "the base moved under the pass; that is not the change failing (#199)");
 });
 
 test("under auto, a review that asks for changes holds the merge, and a refusal from GitHub is reported once per head", async (t) => {
@@ -689,9 +733,12 @@ test("a comment goes on the thread's pull request with its media, and a thread w
     // Media alone is a comment too.
     await s.engine.commentPullRequest({ threadId: "t1", attachments: [{ name: "demo.mp4", path: media(s, "demo.mp4") }] });
   });
+  // Every comment covey posts is signed with the thread that wrote it, so the
+  // watch never sends it back as news. The signature goes on last, after the
+  // attachment URLs.
   assert.deepEqual(s.host.comments, [
-    { number: 101, body: `After the fix:\n\n![after.png](${s.host.uploads[0]!.url})`, kind: "pull" },
-    { number: 101, body: s.host.uploads[1]!.url, kind: "pull" },
+    { number: 101, body: signComment(`After the fix:\n\n![after.png](${s.host.uploads[0]!.url})`, "t1"), kind: "pull" },
+    { number: 101, body: signComment(s.host.uploads[1]!.url, "t1"), kind: "pull" },
   ]);
   assert.match(s.notes("t1").at(-1)!, /Commented on pull request #101/);
   // A pull request handed to covey by hand takes a comment the same way.
@@ -699,5 +746,5 @@ test("a comment goes on the thread's pull request with its media, and a thread w
   s.host.options.prs!["covey/t2"] = pr({ number: 7, headRefName: "covey/t2" });
   await s.command({ type: "thread.watch", threadId: "t2", number: 7 });
   await s.engine.commentPullRequest({ threadId: "t2", body: "Seen." });
-  assert.deepEqual(s.host.comments.at(-1), { number: 7, body: "Seen.", kind: "pull" });
+  assert.deepEqual(s.host.comments.at(-1), { number: 7, body: signComment("Seen.", "t2"), kind: "pull" });
 });

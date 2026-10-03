@@ -136,8 +136,12 @@ never run `covey review` from the thread that wrote the change.
      stopping now is often your last one. Say there what is left open — a
      follow-up, a thing you did not do — rather than keeping it for after the
      merge.
-   - *Blocked*: covey sent as many rounds as it may, or watched for too long.
-     Stop. Tell the user what still fails and what you tried.
+   - *Blocked*: covey watched for too long. Stop. Tell the user what still
+     fails and what you tried.
+   - *Covey stops waking this thread*: covey sent as many rounds of work as it
+     may. Stop. Tell the user what still fails and what you tried. Covey goes
+     on watching the pull request, so a sign-off, a green check with nothing
+     left to fix, and the merge still reach you as turns.
 7. **Check the state** at any time with `covey pr status`. It names the issue,
    the pull request, the watch, and where each reviewer stands.
 
@@ -184,9 +188,10 @@ to say one of two things.
    covey review approve [--body "…"]   sign off, and end the review
    ```
 
-   Covey puts the comment on the pull request and adds the tagline that says a
-   machine wrote it. Do not write that tagline yourself, and do not use
-   `gh pr comment` or `gh pr review`.
+   Covey puts the comment on the pull request, adds the tagline that says a
+   machine wrote it, and signs it with this thread's id so your own review is
+   never sent back to you as news. Do not write either marker yourself, and do
+   not use `gh pr comment` or `gh pr review`.
 
 3. **Stop the turn.** Covey wakes you when the author pushes. Run `git pull`
    and read the change again from there.
@@ -220,6 +225,23 @@ list and an indented block are never touched. A column of lines you mean to
 keep apart belongs in a list or in a fenced block. An issue you open with
 `gh issue create` gets no such help, so write that body on one line per
 paragraph yourself.
+
+## Comment with `covey pr comment`, never with `gh pr comment`
+
+Covey signs every comment it posts for you with the id of the thread that
+wrote it, and the watch reads that signature back: a comment carrying your own
+id is never sent to you as news. That is what stops you hearing your own words
+back an hour later and spending a turn answering yourself. The signature is an
+HTML comment, so nobody reads it on GitHub and nobody reads it in covey.
+
+Two rules follow, and they are the tagline's rules again:
+
+- Comment on this thread's pull request with `covey pr comment`. A comment you
+  leave with `gh pr comment` carries no signature, so covey cannot tell it from
+  a person's and will send it back to you. Use `gh pr comment` only for a pull
+  request this thread neither opened nor watches.
+- Never write the marker yourself. Covey writes it; a marker you wrote by hand
+  is one that will one day read differently.
 
 ## Media on the pull request
 
@@ -377,4 +399,8 @@ covey review status           the pull request this thread reviews
 ```
 
 `--rounds N` bounds how many messages that ask for more work covey sends
-before it hands the thread to a person. The default is three.
+before it hands the thread to a person. The default is three. It bounds the
+work and not the watch: covey goes on reading the pull request after the
+rounds run out, and still tells you about a review that signs off, a checks
+verdict with nothing to fix, and the merge. A base branch that moved under you
+costs no round, so merging the base in and pushing is free.

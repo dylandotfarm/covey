@@ -437,7 +437,74 @@ responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Meth
 `thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
 `run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`,
-`thread.commentPullRequest`, `thread.showFiles`, `github.item/act`, `secrets.list/env`.
+`thread.commentPullRequest`, `thread.showFiles`, `github.item/act`, `secrets.list/env`,
+`terminal.open/input/signal/resize/close`.
+
+## A shell in the thread's directory (#10)
+
+`ctrl+\`` replaces the transcript with a shell standing in the thread's working
+directory, so a `git status` or an `ls` costs no second window. The diff panel is the
+precedent: Ink cannot paint under `position="absolute"`, so a pane replaces the one
+beside it.
+
+**The shell runs on the daemon's machine.** The thread's directory is a path there, and
+in the normal setup the client is a laptop somewhere else, so a shell the client spawned
+would open in the wrong place. The bytes cross the socket covey already has:
+`terminal.open` opens and subscribes in one call, `terminal.input` sends a line,
+`terminal.signal` interrupts, `terminal.resize` says how wide the pane is and
+`terminal.close` ends it. The push carries no seq and no replay, because a stream is not
+a timeline — what a reader who comes back needs is the screen, and `terminal.open` hands
+back `scrollback`.
+
+**There is no pty.** `node-pty` is a native module, this repository blocks install
+scripts, and node ships no pty of its own. So `packages/daemon/src/terminal.ts` drives
+bash through pipes, which is enough for `git status`, `ls` and `pnpm test` and is not
+enough for `vim`. Three things that costs, each answered rather than left for the reader
+to discover:
+
+- **No prompt.** A non-interactive shell prints none, so covey draws its own and the
+  driver reports `$PWD` after every command — which is also how a `cd` shows on screen.
+- **No ctrl+c as a character.** There is no terminal to turn the key into one, so
+  `terminal.signal` sends the real signal to the running command's process group.
+- **No colour.** A tool that sees a pipe turns colour off, so `shellEnv` asks for it back
+  by name, `color.ui=always` included.
+
+The arrangement that makes it work is four pipes. Commands go in on **fd 3**, the exit
+status and the directory come back on **fd 4**, and fd 0 stays the *command's* standard
+input — so `read` works, a `y/n` prompt can be answered, and a command that reads stdin
+cannot swallow the command queued behind it. Three details in the driver are each one
+character from a defect a reader finds with their finger, and the comment above `DRIVER`
+names all three: `eval` runs in the shell itself so `cd` lasts; `trap ':' INT` keeps the
+shell alive through the signal that kills its child, where `trap '' INT` would be
+inherited as ignored and kill nothing; and a `read` cut short by that signal returns a
+status above 128, which has to be told from the 1 that means the pipe closed, or a ctrl+c
+pressed at an idle prompt ends the shell.
+
+**One shell per thread, and the panel does not own it.** Shutting the panel keeps the
+shell: the directory the reader walked to and the build they left running are still
+there, and only ctrl+d lets go. It dies with the thread's worktree, with the thread, and
+with the daemon. `MAX_TERMINALS` bounds how many a long-lived daemon accumulates, and the
+one closed is always one that is running nothing.
+
+**The shell gets no secrets.** The agent needs them and covey takes them back out of
+everything it writes down; a reader needs none of them to run `git status`, and every
+value in an environment is one more way for a value to reach a screen. A reader who does
+need one types `covey env exec -- …` in this very shell, which works because the shell is
+on the machine that holds the secret. The output is redacted like a timeline item anyway.
+
+**The client reads the escapes rather than passing them on.** Ink measures the string it
+is given, so an escape left in the text would be counted as printable columns and the
+frame would be laid out too wide — the same trap `Span.link` and `media.ts` exist to
+avoid. `packages/tui/src/ansi.ts` turns them into `Span` fields, which the transcript's
+own renderer paints and `selectedText` copies. It is a *scrolling log* and must not grow
+into an emulator: SGR, `\r`, `CSI K`, `\b` and `\t` are honoured, because that is what a
+build writes on its way past, and every cursor move is dropped.
+
+`ctrl+\`` needs no ctrl fallback, unlike covey's cmd bindings. Under the kitty protocol
+it is codepoint 96 with the ctrl modifier; without it the terminal sends a bare NUL, and
+Ink's legacy parser turns a control byte into `String.fromCharCode(b + 96)` — which for 0
+is the backtick. Both routes arrive as `` input === "`" `` with `ctrl`. The one cost is
+that a terminal with no kitty protocol sends the same NUL for ctrl+space.
 
 ## Secrets: an environment the agent uses and never reads
 
@@ -682,13 +749,36 @@ and the agent reads the failure, fixes it, and pushes. The turn names the checks
 with their URLs, the review with its words, the comment with its file and line, and which
 round this is.
 
-**The loop is bounded.** An event that asks for work — a failing check, a conflict, a review
-that asks for changes — costs a round; a pass, a comment or an approval costs none. A watch
-sends at most `maxRounds` (default three) such turns; the next one ends the watch in
-`blocked`, with the news in the transcript as a note and the reason on the row. A watch that
-runs 72 hours without a merge or a close ends in `blocked` too. The TUI reads a run member's
-thread and moves the member to `blocked` with that reason, which is the run's own word for
-"a person has to look".
+**The loop is bounded, and the bound is on the work.** An event that asks for work — a
+failing check, a conflict, a review that asks for changes — costs a round; a pass, a comment
+or an approval costs none, and neither does a base branch that moved. `behind`, and the
+stale pass it is a sibling of under `auto`, are the base's news and not the change's:
+nothing the thread pushes stops the base moving again, and on a repository several covey
+threads land on they fire every few minutes. #199 is what charging for them cost — every
+open pull request of 2026-10-02 spent two of its three rounds merging `main`, and the first
+real failure met a budget that was already gone.
+
+A watch sends at most `maxRounds` (default three) turns that ask for work. The next one does
+not end the watch. `splitForBudget` holds the work-asking events back, they go in the
+transcript as a note a person reads, covey says once that it has stopped waking the thread,
+and `PullRequestWatch.spentAt` records when. The poll goes on, so a review that signs off, a
+checks verdict with nothing left to fix and the merge itself still arrive as turns, and an
+`auto` watch still merges. Ending the watch instead is the whole of #199: the rounds ran out
+on a base that moved, the watch stopped, and the pull request then sat approved with six
+green checks and nobody left to merge it. A `reviewer` watch is the one exception and still
+ends in `blocked` — a review that may not read another push can never sign off, and the
+author would wait for a verdict that is not coming. A batch that ends the watch skips the
+budget under either role: the pull request is over, so there is no work to hold back.
+
+A watch that runs 72 hours without a merge or a close ends in `blocked`. That is now the
+only bound on a base that churns for ever; the round budget no longer catches that case, and
+it caught it badly, by killing the pull request with it. A separate and much larger count of
+base-moved turns is what would catch a livelock without bringing that back.
+
+The TUI reads a run member's thread and moves the member to `blocked` when the watch ended
+that way **or** when its budget is spent, with the watch's own words, which is the run's own
+way of saying "a person has to look". Reading `watch.state` alone would bury the one member
+covey has stopped asking — #199's own shape a level up.
 
 **An agent asks from its shell.** `covey issue take <n>`, `covey pr open`, `covey pr comment`,
 `covey pr review`, `covey pr watch`, `covey pr policy`, `covey pr status` and, from a review
@@ -806,13 +896,23 @@ author already has in hand, and a round of a reviewer's budget spent on it is a 
 cannot spend on the code. Both hear every comment and the merge, because a reviewer with
 nothing left to review has to stop.
 
-**No thread hears a comment it wrote itself.** Every thread of one pull request writes from
-one GitHub account, so no author login can tell a reviewer's comment from the author's.
-Without this the reviewer's own review came back to it on the next poll as a turn asking it
-to answer itself, and a comment costs no round, so nothing bounded it. `WatchCursor.posted`
-holds the URLs the thread wrote; the URL is the key rather than the id because `gh pr
-comment` answers with a URL and `gh pr view` lists a node id, and only the URL is on both
-sides.
+**No thread hears a comment it wrote itself, and the proof is on the comment.** Every thread
+of one pull request writes from one GitHub account, so no author login can tell a reviewer's
+comment from the author's. Without this the reviewer's own review came back to it on the next
+poll as a turn asking it to answer itself, and a comment costs no round, so nothing bounded
+it. So covey signs every comment it posts with the id of the thread that wrote it
+(`integrate/sign.ts`), and the watch drops a comment carrying its own signature. The marker
+is an HTML comment, which GitHub renders as nothing; covey's own markdown escapes it, so
+`itemBase` strips it from what a client shows and `quote` strips it from what an agent is
+told. Covey writes it and the agent never does, for the reason the review tagline is covey's:
+a marker an agent had to remember is a marker that one day reads differently.
+
+`WatchCursor.posted` is the second half and was the first attempt. It holds the URLs the
+thread wrote, and a URL is on both sides only when GitHub lists one — it lists plenty of
+comments with none, and that is where the reviewer heard itself. It is also a bounded list on
+the thread row, so it holds nothing for a comment written before the watch started and
+nothing after a watch is stopped and started again. It stays, because a comment covey posted
+before it signed them carries no signature; it is never the only guard.
 
 **The review is a `mergeBlock`, and needs no event of its own.** A green check is not a
 merge, and the watch already carries what stands between the two — a draft, a conflict, a
@@ -847,11 +947,25 @@ the reader cannot reconcile with what is above it is worse than no number.
 pull request open sits still for minutes: without a mark it reads as stalled, which is the one
 thing hiding must not cause. `threadReviewing` counts the reviewers still working — one that
 asked for changes counts too, because it waits on the author and the loop is as live as when
-it was reading — and the TUI paints `⊙` beside the title, with the count when there is more
-than one. A glyph and not a colour, for the reason the agent mark is one: covey runs over ssh,
-in tmux, and on terminals with a narrow palette. The web client says it in words instead,
-through `threadStatusLabel`, which answered `idle` for the whole review before this; it comes
-after every state that needs the reader, because being reviewed is not something to act on.
+it was reading — and the TUI paints `⊙` in the status cell of the row, where the `●` of a
+thread at work and the `✓` of one that finished go. A glyph and not a colour, for the reason
+the agent mark is one: covey runs over ssh, in tmux, and on terminals with a narrow palette.
+The web client says it in words instead, through `threadStatusLabel`, which answered `idle`
+for the whole review before this; it comes after every state that needs the reader, because
+being reviewed is not something to act on.
+
+**And a thread under review is not finished.** The `✓` in the sidebar and the green dot on
+the phone both say one thing: this thread is yours again, so settle it, ask more of it, or
+leave it. A turn that ended is not that. Covey's own reviewers read the change after the
+author stops and the next turn comes from them, so a thread that painted both marks at once
+sent the reader to a thread with nothing in it to do. `threadIsFinished` is the one rule —
+the turn completed *and* no reviewer is still reading — and the three places that said a
+thread was done now ask it: the glyph (where the review comes first, because the cell paints
+one), the tone of the dot on the phone, and the bell. The bell is the same claim in another
+channel, so a turn that ends into a review rings nothing and says `under review` instead; the
+record is kept, and the turn that ends the review lands the `✓` it was holding. What the
+reader has to act on is nearer than any of this and is asked first: a failure and an approval
+come through whatever covey is doing with the change.
 
 **A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
 archives its reviewers: a session is 250 MB and a worktree is a checkout, and the change
@@ -1617,6 +1731,39 @@ no diff.
 
 Refused while a turn is running or queued. Verified live: after reverting an edit turn, the
 model answers "no" to "have you edited any files in this conversation?".
+
+## Clearing a thread
+
+`/clear` empties the conversation and keeps the thread. It is the first command covey answers
+itself: `COVEY_COMMANDS` in `@covey/client` is the list, one list for every client, and each
+entry carries `source: "covey"` so the send path can tell a command it must run from a line it
+must hand to the agent. A covey command hides the SDK command of the same name — Claude Code
+has a `/clear`, and that one empties the model's context and leaves covey's transcript on the
+screen, which reads as a command that did nothing.
+
+`thread.clear` is the command. What goes is the conversation and the memory of it: every row
+of `items`, the live subprocess, and the transcript that subprocess would resume from. The
+thread then holds a new `sessionId`, so `startSession` finds no transcript and starts rather
+than resumes. What stays is everything else the thread is — its id, its project, its worktree,
+its branch, its secrets, its issue and its pull request. The turn checkpoints stay as well:
+they name real git trees, and the clear touches no file.
+
+One `thread.cleared` event says it, not an `item.removed` per item, because a long transcript
+would be a thousand events for one act. A client that reconnects reads it after the upserts it
+replays, so it ends with an empty map either way.
+
+An automatic title goes back to `New thread` with `titleAuto` true, and the next message
+names the thread again through the path a first message takes. That needs no change in
+`startTurn`: it asks `titleIsAuto(t) && (firstMessage || t.title === "New thread")`, and the
+title alone answers both halves. So `lastMessageAt` is left alone, which is what keeps the
+thread where the reader left it — the sidebar orders a project's threads by that field.
+
+A title the reader typed is never taken back. `titleAuto` records whose title it is, a rename
+clears it, and every other writer of a title asks first; a name the clear took would be a name
+nothing could give back, because it is in no row and there is no undo.
+
+Refused, with `busy`, while a turn is running or a message is queued, for the reason
+`turn.revert` is: the rows it removes are the ones a running turn is still writing.
 
 ## Dependency policy
 

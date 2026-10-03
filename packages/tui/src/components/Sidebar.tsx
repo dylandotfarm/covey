@@ -5,7 +5,7 @@ import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { hyperlinksEnabled, osc8 } from "../links.js";
-import { runMemberStateLabel, runState, tallyRun, threadReviewing } from "@covey/protocol";
+import { runMemberStateLabel, runState, tallyRun, threadReviewing, type Thread } from "@covey/protocol";
 import { buildSkew } from "../build.js";
 
 const HYPERLINKS = hyperlinksEnabled();
@@ -64,8 +64,41 @@ export const AGENT_MARK = "◇";
  * sits still for minutes with nothing on screen to say why, and reads as
  * stalled. A glyph and not a colour, for the reason `AGENT_MARK` is one: covey
  * runs over ssh, in tmux, and on terminals with a narrow palette.
+ *
+ * It goes in the status cell, with the `●`, the `✓` and the `✗`, because that
+ * cell is where a reader looks to see what a thread is doing.
  */
 export const REVIEW_MARK = "⊙";
+
+/**
+ * The one glyph on the left of a thread row, and its colour.
+ *
+ * The cell holds one glyph and is two columns wide on every row, so that every
+ * thread title starts in the same column. The order is therefore the order of
+ * what the reader has to act on: a turn that failed, the thread's own work or
+ * an approval it has not seen, covey's automated review, a turn that finished,
+ * the pin.
+ *
+ * The review used to sit past the title, at the right edge of the row. That is
+ * not where a reader looks to see what a thread is doing — every other mark of
+ * that is this cell. And it comes before the `✓`, because the two can never
+ * both be true: the `✓` says the thread is the reader's again, to settle, to
+ * ask more of, or to leave, and a thread covey is still reviewing is none of
+ * those. The count of the reviewers did not come across with the mark; one
+ * cell is one glyph.
+ *
+ * `attention` is what the thread did while the reader was elsewhere
+ * (`Store.noticeTransition`), so it outlives the state that raised it and is
+ * cleared when the reader opens the thread.
+ */
+export function threadMark(t: Thread, attention: "approval" | "done" | "error" | undefined, pulse: boolean): { glyph: string; color: string } {
+  const st = t.pendingApprovals > 0 ? "waiting" : t.status;
+  if (attention === "error") return { glyph: "✗", color: T.danger };
+  if (st !== "idle" || attention === "approval") return { glyph: "●", color: statusColor(st, pulse) };
+  if (threadReviewing(t) > 0) return { glyph: REVIEW_MARK, color: T.awaiting };
+  if (attention === "done") return { glyph: "✓", color: T.success };
+  return { glyph: t.pinnedAt ? "⋆" : " ", color: statusColor(st, pulse) };
+}
 
 /**
  * How far from the left a row of each kind starts, in columns.
@@ -255,10 +288,7 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
     }
     case "thread": {
       const t = row.thread!;
-      const pulse = state.tick % 2 === 0;
-      const st = t.pendingApprovals > 0 ? "waiting" : t.status;
-      const attention = state.attention.get(`${row.machine}:${t.id}`);
-      const showDot = st !== "idle" || !!attention;
+      const mark = threadMark(t, state.attention.get(`${row.machine}:${t.id}`), state.tick % 2 === 0);
       const time = relTime(t.lastMessageAt ?? t.createdAt);
       // One row, one line, always. The indent and the two fixed cells below
       // come out of the same width the title is measured against, so a row can
@@ -288,16 +318,11 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // Which machine, when the project is on more than one. Short, because
       // the title is what the row is for.
       const tag = row.tag ? ` ${truncate(row.tag, 6)}` : "";
-      // How many automated reviewers are still on this thread's change. The
-      // count only when there is more than one, so the usual row spends two
-      // columns and not three.
-      const reviewing = threadReviewing(t);
-      const review = reviewing > 0 ? ` ${REVIEW_MARK}${reviewing > 1 ? reviewing : ""}` : "";
       // The same sum for a thread row: the gutter, the status dot and its
       // space, the space before the time, and the padding on the right. Every
       // piece painted to the right of the title is subtracted here, or the row
       // grows a second line and the mouse hit test silently breaks.
-      const titleW = Math.max(4, width - indent - 6 - time.length - held.length - tag.length - review.length);
+      const titleW = Math.max(4, width - indent - 6 - time.length - held.length - tag.length);
       // The issue the thread took goes before the title, the way a run member
       // row leads with its task key: the number is the link a reader follows,
       // and on a terminal that knows OSC 8 it is one (#108). The link wraps
@@ -309,10 +334,9 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={row.group ? T.subtle : T.awaiting}>{caret}</Text>
-          <Text color={attention === "done" ? T.success : attention === "error" ? T.danger : statusColor(st, pulse)}>{showDot ? (attention === "done" ? "✓" : attention === "error" ? "✗" : "●") : t.pinnedAt ? "⋆" : " "} </Text>
+          <Text color={mark.color}>{mark.glyph} </Text>
           <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{linked}</Text>
           <Text color={T.subtle}>{held}</Text>
-          <Text color={T.awaiting}>{review}</Text>
           <Text color={T.faint}>{tag}</Text>
           <Text color={T.faint}> {time}</Text>
         </Box>

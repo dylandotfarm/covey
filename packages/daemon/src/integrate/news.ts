@@ -42,6 +42,7 @@ import type { BaseHead, CheckSummary, MergeBlockCode, MergeMethod, MergePolicy, 
 import type { CommentEntry, PullRequestFacts, ReviewEntry, RollupEntry } from "./gh.js";
 import { summariseCheck, summariseChecks } from "./checks.js";
 import { reviewGate, reviewVerdictOf } from "./review.js";
+import { signedBy, unsign } from "./sign.js";
 
 export type WatchEvent =
   | {
@@ -186,6 +187,11 @@ export interface NewsOptions {
    * rather than read from the facts: `gh` knows nothing about it.
    */
   review?: ReviewRequirement | null;
+  /**
+   * The thread this watch belongs to. A comment carrying its signature
+   * (`integrate/sign.ts`) is a comment it wrote itself, and never news to it.
+   */
+  self?: string;
 }
 
 /**
@@ -227,9 +233,14 @@ export function news(
   for (const c of [...pr.comments, ...lineComments]) {
     if (next.comments.includes(c.id)) continue;
     next.comments.push(c.id);
-    // A comment this thread wrote itself is not news to it. The id is recorded
-    // above whether the URL matches or not, so this is safe to get wrong: a URL
-    // that failed to match would cost one turn, once, and never a loop.
+    // A comment this thread wrote itself is not news to it. The signature is
+    // the answer, because it is on the comment rather than in a memory of it:
+    // the URL holds only while the cursor does, and GitHub lists a comment with
+    // no URL at all. The cursor is still read, for a comment covey posted
+    // before it signed them. The id is recorded above whichever matched, so
+    // this is safe to get wrong: a miss would cost one turn, once, and never a
+    // loop.
+    if (options.self && signedBy(c.body) === options.self) continue;
     if (c.url && next.posted!.includes(c.url)) continue;
     events.push({ kind: "comment", comment: c });
   }
@@ -290,20 +301,49 @@ export function news(
  */
 export function asksForWork(ev: WatchEvent, role: WatchRole = "author"): boolean {
   if (ev.kind === "checks") {
-    // A block the agent clears with a push costs a round, like the stale pass
-    // it is a sibling of. A draft, a review and a rule of the repository all
-    // wait for a person, so they cost none: a round spent on a wait is a round
-    // the next real failure has lost. An automated review that has not signed
-    // off is a wait of that kind: the reviewer is reading, and there is nothing
-    // the author can push that makes it finish sooner.
-    if (ev.block) return ev.block.code === "behind" || ev.block.code === "conflict";
-    return ev.ci === "failing" || ev.ci === "stale";
+    // A draft, a review and a rule of the repository all wait for a person, so
+    // they cost no round: a round spent on a wait is a round the next real
+    // failure has lost. An automated review that has not signed off is a wait
+    // of that kind, because there is nothing the author can push that makes
+    // the reviewer finish sooner.
+    //
+    // `behind`, and the stale pass it is a sibling of, cost none either, and
+    // that is #199's lesson. A branch goes out of date because the *base*
+    // moved, not because the change failed: nothing the thread writes prevents
+    // the next one, and on a repository several covey threads land on, it
+    // fires every few minutes. Every open pull request of that day spent two
+    // of its three rounds merging main, and the one real failure met a budget
+    // that was already gone. A conflict is the change's own work and still
+    // costs a round; `WATCH_MAX_MS` is what bounds a base that never settles.
+    if (ev.block) return ev.block.code === "conflict";
+    return ev.ci === "failing";
   }
   if (ev.kind === "conflict") return true;
   if (ev.kind === "head") return role === "reviewer";
   if (ev.kind === "review") return ev.review.state.toUpperCase() === "CHANGES_REQUESTED";
   if (ev.kind === "comment") return role === "author" && reviewVerdictOf(ev.comment.body) === "changes";
   return false;
+}
+
+/**
+ * Split a batch for a thread whose round budget is spent.
+ *
+ * `tell` is what still reaches the thread as a turn and `hold` is what does
+ * not. The budget bounds the work covey asks for, so only the work is held:
+ * the sign-off, the checks verdict with nothing left to fix, the merge and the
+ * close all go on arriving. That is the whole of the fix for #199, where a
+ * watch that ran out of rounds stopped listening as well as stopped asking,
+ * and a pull request that turned green an hour later had nobody left to merge
+ * it.
+ *
+ * `hold` is never dropped: the engine writes it in the thread as a note, which
+ * a person reads and which costs no round.
+ */
+export function splitForBudget(events: WatchEvent[], role: WatchRole = "author"): { tell: WatchEvent[]; hold: WatchEvent[] } {
+  const tell: WatchEvent[] = [];
+  const hold: WatchEvent[] = [];
+  for (const ev of events) (asksForWork(ev, role) ? hold : tell).push(ev);
+  return { tell, hold };
 }
 
 /** True for an event after which there is nothing left to watch. */
@@ -353,6 +393,13 @@ export interface NewsContext {
   /** The round this delivery is, when one of its events asks for work. */
   rounds: number;
   maxRounds: number;
+  /**
+   * True for the batch a spent budget held back (#199). It is a note for a
+   * person and not a turn, so it names no round: the rounds are gone, and
+   * "This is round 3 of 3." under a sentence that says so reads as a countdown
+   * that never moves.
+   */
+  spent?: boolean;
   /** Who merges, so the text after a pass says what happens next. */
   merge: MergePolicy;
   /** Which side of the review reads this. Omitted reads as `author`. */
@@ -371,17 +418,27 @@ export function describeNews(pr: PullRequestFacts, events: WatchEvent[], ctx: Ne
   return lines.join("\n");
 }
 
+/**
+ * Which round this is, with the space before it, or nothing at all.
+ *
+ * It carries its own leading space so that a batch with no round left to name
+ * ends at its full stop rather than at a space.
+ */
+function roundLine(ctx: NewsContext): string {
+  return ctx.spent ? "" : ` This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
+}
+
 /** One event in words the agent can act on: what happened, and what to do. */
 export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsContext): string {
-  const round = `This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
+  const round = roundLine(ctx);
   switch (ev.kind) {
     case "checks": {
       if (ev.ci === "failing") {
         const names = ev.failed.map((c) => `\`${checkLabel(c)}\`${c.url ? ` (${c.url})` : ""}`).join(", ");
-        return `The checks failed on ${short(ev.head)}: ${names}. Read the failure, fix it, commit, and push to ${ctx.branch}. Covey watches the checks again after the push. ${round}`;
+        return `The checks failed on ${short(ev.head)}: ${names}. Read the failure, fix it, commit, and push to ${ctx.branch}. Covey watches the checks again after the push.${round}`;
       }
       if (ev.ci === "stale") {
-        return `The checks passed on ${short(ev.head)}, but against an older ${pr.baseRefName}. Covey merges only a change tested on the current base. Merge ${pr.baseRefName} into ${ctx.branch} and push, so the checks run again. ${round}`;
+        return `The checks passed on ${short(ev.head)}, but against an older ${pr.baseRefName}. Covey merges only a change tested on the current base. Merge ${pr.baseRefName} into ${ctx.branch} and push, so the checks run again.`;
       }
       if (ev.ci === "passing") {
         const n = ev.checks.filter((c) => c.state === "success").length;
@@ -398,16 +455,16 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
       return ev.block ? `${none} ${blockLead(ev.block)} either: ${ev.block.why}. ${describeBlock(ev.block, pr, ctx)}` : none;
     }
     case "conflict":
-      return `The branch conflicts with ${pr.baseRefName} at ${short(ev.head)}. Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
+      return `The branch conflicts with ${pr.baseRefName} at ${short(ev.head)}. Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push.${round}`;
     case "head": {
       const base = ctx.base ?? pr.baseRefName;
-      return `The author pushed ${short(ev.head)} to ${pr.headRefName}; it was ${short(ev.was)}. Run \`git pull\` and read the change again: \`git diff ${short(ev.was)}..HEAD\` is what is new, and \`git diff origin/${base}...HEAD\` is the whole change. Then say \`covey review approve\` or \`covey review changes\`. ${round}`;
+      return `The author pushed ${short(ev.head)} to ${pr.headRefName}; it was ${short(ev.was)}. Run \`git pull\` and read the change again: \`git diff ${short(ev.was)}..HEAD\` is what is new, and \`git diff origin/${base}...HEAD\` is the whole change. Then say \`covey review approve\` or \`covey review changes\`.${round}`;
     }
     case "review": {
       const who = author(ev.review.author, pr);
       const verdict = reviewWord(ev.review.state);
       const body = quote(ev.review.body);
-      const ask = ev.review.state.toUpperCase() === "CHANGES_REQUESTED" ? ` Make the change, push, and answer the review. ${round}` : "";
+      const ask = ev.review.state.toUpperCase() === "CHANGES_REQUESTED" ? ` Make the change, push, and answer the review.${round}` : "";
       return `Review by ${who}: ${verdict}.${body ? `\n${body}` : ""}${ask}`;
     }
     case "comment": {
@@ -417,7 +474,7 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
       // A machine asked the author for changes. The author acts; a second
       // reviewer reading the same comment is reading a colleague, not a task.
       const ask = verdict === "changes" && ctx.role !== "reviewer"
-        ? `\nMake the change, commit, push to ${ctx.branch}, and answer it with \`covey pr comment\`. Covey tells the reviewer about the push. ${round}`
+        ? `\nMake the change, commit, push to ${ctx.branch}, and answer it with \`covey pr comment\`. Covey tells the reviewer about the push.${round}`
         : "";
       return `Comment by ${who}${where}:\n${quote(ev.comment.body)}${ask}`;
     }
@@ -462,12 +519,12 @@ export function describeArchive(pr: PullRequestFacts, events: WatchEvent[], ctx:
 
 /** What to do about a block: one instruction, or the wait and why. */
 function describeBlock(block: MergeBlock, pr: PullRequestFacts, ctx: NewsContext): string {
-  const round = `This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
+  const round = roundLine(ctx);
   switch (block.code) {
     case "behind":
-      return `Merge ${pr.baseRefName} into ${ctx.branch} and push. The checks run again against the new base. ${round}`;
+      return `Merge ${pr.baseRefName} into ${ctx.branch} and push. The checks run again against the new base.`;
     case "conflict":
-      return `Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
+      return `Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push.${round}`;
     case "draft":
       return "Mark the pull request ready for review when the work is done. Covey does not merge a draft.";
     case "changes":
@@ -517,7 +574,10 @@ function reviewWord(state: string): string {
 const QUOTE_MAX = 4000;
 
 function quote(body: string): string {
-  const text = body.trim();
+  // The signature goes with it: the agent reading this never needs the id of
+  // the thread that wrote the comment, and a marker it was shown is a marker
+  // it may one day copy.
+  const text = unsign(body).trim();
   if (!text) return "";
   const cut = text.length > QUOTE_MAX ? `${text.slice(0, QUOTE_MAX)}\n[cut after ${QUOTE_MAX} characters]` : text;
   return cut.split("\n").map((l) => `  > ${l}`).join("\n");

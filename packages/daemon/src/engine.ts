@@ -4,9 +4,10 @@ import { existsSync, statSync, rmSync, readdirSync, readFileSync } from "node:fs
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
-  ThreadOrigin, SecretEntry, SecretWrite,
+  ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
 import { isUserClient, KNOWN_MODELS, MIN_CHAIN, type AssistantMessageItem,} from "@covey/protocol";
+import { MAX_TERMINAL_INPUT, MAX_TERMINALS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
@@ -19,6 +20,7 @@ import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThrea
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { ChainTracker, summariseActivity } from "./activity.js";
+import { ThreadTerminal, TerminalError } from "./terminal.js";
 import { summariseReply } from "./digest.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { ClaudeModels } from "./models.js";
@@ -33,8 +35,9 @@ import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
 import { unwrapMarkdown } from "./integrate/reflow.js";
-import { news, emptyCursor, describeNews, describeArchive, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
+import { news, emptyCursor, describeNews, describeArchive, asksForWork, endsWatch, splitForBudget, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
+import { signComment } from "./integrate/sign.js";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -63,6 +66,7 @@ function newMember(init: import("@covey/protocol").RunMemberInit, now: string): 
 
 type ShellListener = (ev: ShellEvent) => void;
 type ThreadListener = (threadId: string, ev: ThreadEvent) => void;
+type TerminalListener = (terminalId: string, ev: TerminalEvent) => void;
 
 /** How often the daemon looks for sessions nobody needs. */
 const SWEEP_INTERVAL_MS = 30_000;
@@ -159,6 +163,14 @@ export class Engine {
   /** Turns waiting behind a running one, per thread. */
   private queues = new Map<string, { turnId: string; text: string; attachments: Attachment[] }[]>();
   private shellListeners = new Set<ShellListener>();
+  private terminalListeners = new Set<TerminalListener>();
+  /**
+   * The shell each thread has open (#10), by thread id — one apiece, so a
+   * second reader of one thread looks at the same screen rather than at a
+   * shell of their own in the same directory. A shell outlives the panel that
+   * opened it and dies with the thread.
+   */
+  private terminals = new Map<string, ThreadTerminal>();
   private threadListeners = new Set<ThreadListener>();
   /** Per-item throttle for streaming upserts. */
   private streamTimers = new Map<string, { latest: TimelineItem; timer: NodeJS.Timeout }>();
@@ -736,6 +748,16 @@ export class Engine {
         return this.emitShell({ kind: "thread.upserted", thread: this.db.getThread(t.id) ?? t });
       }
       case "thread.rename": return this.mutateThread(cmd.threadId, (t) => { t.title = cmd.title; t.titleAuto = false; });
+      case "thread.clear": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
+        // The same two guards `turn.revert` keeps, for the same reason: the
+        // rows this removes are the ones a running turn is still writing.
+        if (t.latestTurn?.state === "running") throw new EngineError("busy", "interrupt the running turn first");
+        if ((this.queues.get(t.id)?.length ?? 0) > 0) throw new EngineError("busy", "cancel queued messages first");
+        return this.clearThread(t);
+      }
       case "thread.takeIssue": {
         const t = this.db.getThread(cmd.threadId);
         if (!t) throw new EngineError("not_found", "thread not found");
@@ -805,6 +827,7 @@ export class Engine {
         const t = this.db.getThread(cmd.threadId);
         if (!t) return this.db.shellSeq();
         this.dropSession(t.id);
+        this.closeTerminalsOf([t.id]);
         this.queues.delete(t.id);
         this.forgetAuthFailure(t.id);
         // Told before the row goes: `dropReviewer` reads this thread to find the
@@ -1264,8 +1287,11 @@ export class Engine {
   /**
    * Put one comment on the thread's pull request, tagged or plain.
    *
-   * The tagline goes on last, after the unwrap and after the attachment URLs,
-   * so it is the final line of the comment whatever else is in it.
+   * The tagline goes on after the unwrap and after the attachment URLs, so it
+   * is the last line a reader sees whatever else is in the comment. The
+   * signature goes on after that and renders as nothing, so every comment covey
+   * posts names the thread that wrote it and no thread ever hears its own words
+   * back as news (`integrate/sign.ts`).
    */
   private async postComment(t: Thread, rawBody: string, attachments: PullRequestAttachment[], tag: ReviewVerdict | null): Promise<{ number: number; url: string }> {
     if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
@@ -1279,6 +1305,7 @@ export class Engine {
     let body = await this.attachMedia(t, host, unwrapMarkdown(rawBody.trim()), attachments);
     if (!body && !tag) throw new EngineError("bad_body", "a comment needs a body or a file to attach");
     if (tag && t.reviewOf) body = tagComment(body, tag, { index: t.reviewOf.index, of: t.reviewOf.of });
+    body = signComment(body, t.id);
     let left: { url: string };
     try {
       left = await host.commentPullRequest(number, body);
@@ -1292,9 +1319,11 @@ export class Engine {
 
   /**
    * Record a comment this thread wrote, so its own watch never delivers it back
-   * as news. Without this a reviewer is woken by its own review, and asked to
-   * answer itself: every thread of one pull request writes from one GitHub
-   * account, so no author login can tell the two apart.
+   * as news. The signature on the comment is the first answer to that and this
+   * is the second: it covers a comment covey posted before it signed them, and
+   * costs one write. It is the weaker half — a cursor holds nothing for a watch
+   * that has not started, and `gh` lists plenty of comments with no URL — so
+   * never read it as the only guard.
    */
   private rememberPosted(threadId: string, url: string): void {
     if (!url) return;
@@ -1810,7 +1839,7 @@ export class Engine {
       // at their fastest.
       const base = facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
       const role: WatchRole = live.role === "reviewer" ? "reviewer" : "author";
-      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base, role, review: live.review });
+      const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base, role, review: live.review, self: fresh.id });
       live.cursor = cursor;
       live.polledAt = nowIso;
       live.error = null;
@@ -1849,13 +1878,12 @@ export class Engine {
       }
       if (events.length === 0) { this.db.putThread(fresh); return; }
 
-      const work = events.some((e) => asksForWork(e, role));
-      const end = events.find(endsWatch);
       const ctx = {
         branch: fresh.pullRequest?.branch ?? fresh.reviewOf?.branch ?? fresh.branch ?? "",
         rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge,
         role, review: live.review, base: fresh.reviewOf?.base ?? facts.baseRefName,
       };
+      const end = events.find(endsWatch);
       // A merge is the end of the loop, and by default the thread goes with
       // it. The only answer a turn could bring back is "it merged", and that
       // answer costs a session, a model call and a row on the screen the
@@ -1872,29 +1900,60 @@ export class Engine {
         await this.archiveWhenIdle(fresh.id);
         return;
       }
-      if (work && live.rounds >= live.maxRounds) {
-        // The budget is spent. The news goes in the transcript for the
-        // reader, and the thread stops here rather than working for ever.
-        this.note(fresh.id, "warning", describeNews(facts, events, ctx));
-        const why = role === "reviewer"
-          ? `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`
-          : `The watch sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work, and the pull request still needs work. A person has to look at it.`;
-        this.endWatch(fresh, "blocked", why);
-        this.putThreadAndEmit(fresh);
-        // A reviewer that blocks can never sign off, and the author would wait
-        // for a verdict that is not coming.
-        if (role === "reviewer") await this.dropReviewer(fresh, "its own watch ran out of rounds");
-        return;
+      // The budget is spent, and what covey does about it differs by role.
+      //
+      // A reviewer ends here: a review that may not read another push can never
+      // sign off, so the watch stops and the author is told at once rather than
+      // waiting for a verdict that is not coming.
+      //
+      // An author does not. The budget bounds the work covey asks a thread for,
+      // and it never bounded the watch — #199 is what ending the watch with it
+      // costs. So the work-asking news becomes a note a person reads, covey
+      // says once that it has stopped waking the thread, and the poll goes on:
+      // a review that signs off, a checks verdict with nothing to fix and the
+      // merge itself still arrive as turns, and an `auto` watch still merges.
+      //
+      // A batch that ends the watch skips all of it, under either role. The
+      // pull request is over, so there is no work to hold back and no budget
+      // left to spend — and `news` collects a reviewer's `head` event before
+      // its `MERGED` return, so `[head, merged]` is a real batch, which blocked
+      // a reviewer and told the author its review was dropped about a pull
+      // request that had merged.
+      let batch = events;
+      if (!end && events.some((e) => asksForWork(e, role)) && live.rounds >= live.maxRounds) {
+        if (role === "reviewer") {
+          this.note(fresh.id, "warning", describeNews(facts, events, { ...ctx, spent: true }));
+          this.endWatch(fresh, "blocked", `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`);
+          this.putThreadAndEmit(fresh);
+          await this.dropReviewer(fresh, "its own watch ran out of rounds");
+          return;
+        }
+        const split = splitForBudget(events, role);
+        batch = split.tell;
+        this.note(fresh.id, "warning", describeNews(facts, split.hold, { ...ctx, spent: true }));
+        if (!live.spentAt) {
+          live.spentAt = nowIso;
+          // The last clause is not a detail: a base that moved asks for no work
+          // and so still arrives as a turn, and an agent that read this note as
+          // "do nothing further" would leave the branch behind for ever.
+          this.note(fresh.id, "warning", `Covey sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work on pull request #${live.number}, and stops waking this thread for more. A person has to look at what is left, which the note above holds. Covey goes on watching: a review that signs off, a checks verdict with nothing to fix, and the merge still arrive here — and so does a base branch that moved, which costs no round, so go on merging it in and pushing.`);
+        }
+        this.opts.log?.(`watch budget spent thread=${fresh.id.slice(0, 8)} pr=#${live.number} held=${split.hold.map((e) => e.kind).join(",")}`);
       }
-      if (work) live.rounds++;
+      // Nothing survived the split: the whole batch was work. The cursor still
+      // has to be kept, or the same news comes round again on the next poll.
+      if (batch.length === 0) { this.putThreadAndEmit(fresh); return; }
+      // A round is budget for work still to come, and a pull request that is
+      // over has none.
+      if (!end && batch.some((e) => asksForWork(e, role))) live.rounds++;
       ctx.rounds = live.rounds;
-      const text = describeNews(facts, events, ctx);
+      const text = describeNews(facts, batch, ctx);
       if (end) this.endWatch(fresh, end.kind, this.watchEndReason(end));
       this.putThreadAndEmit(fresh);
       // The pull request is over, so the reviewer's seat is too. The author is
       // not told: it is reading the same merge on its own watch.
       if (end && role === "reviewer") this.markReviewerOver(fresh, end.kind === "closed" ? "the pull request was closed" : "the pull request was merged");
-      this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
+      this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${batch.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
       // A turn, not a note: a note is read by a person, and a turn resumes a
       // session the engine released. This is the whole reason the watch exists.
       await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text, system: true })
@@ -2191,6 +2250,202 @@ export class Engine {
     return this.putThreadAndEmit(t);
   }
 
+  /**
+   * Empty a thread's conversation and keep the thread (#16).
+   *
+   * What goes is the conversation and the memory of it: every item, the live
+   * process, and the transcript that process would otherwise resume from. What
+   * stays is everything else the thread is — its id, its project, its
+   * worktree, its branch, its secrets, its issue and its pull request. The
+   * turn checkpoints stay as well, because they name real commits. So does any
+   * shell the reader has open on it (#10): the shell stands in the worktree,
+   * and the worktree is one of the things this keeps — a clear that took the
+   * directory somebody had walked to would be clearing more than a
+   * conversation.
+   *
+   * The next message names the thread again, and `startTurn` needs no change
+   * for that: it asks `titleIsAuto(t) && (firstMessage || t.title === "New
+   * thread")`, and the title alone answers both halves. So `lastMessageAt`
+   * stands, which is what keeps the thread where the reader left it — the
+   * sidebar orders by that field, and a cleared thread must not fall to the
+   * bottom of its project.
+   *
+   * A title the reader typed is never taken back, which is what `titleAuto`
+   * promises everywhere else: a rename clears the flag, `autoTitle` asks the
+   * same question before it writes, and a name covey takes here is a name
+   * nothing can give back.
+   *
+   * The guard above reads the turn and the queue, not `sessionBusy`, so a
+   * clear does end a session that is answering a background task of its own
+   * (#156) under no turn. That is meant: the reader asked for the process to
+   * go, and a refusal on a thread the sidebar paints as idle would read as a
+   * bug.
+   */
+  private clearThread(t: Thread): number {
+    // The live process holds the conversation in its own memory, so it goes
+    // with the rows. The next turn starts a fresh one: `startSession` reads
+    // the transcript of `sessionId` to decide whether to resume, and the new
+    // id has none.
+    this.dropSession(t.id);
+    this.db.clearItems(t.id);
+    this.db.deleteTranscript(t.sessionId);
+    this.chains.forget(t.id);
+    this.forgetAuthFailure(t.id);
+    // A title query in flight reads the message of a conversation that has
+    // gone, and on an auto-titled thread it would land on the empty one.
+    this.titling.get(t.id)?.abort();
+    this.emitThread(t.id, { kind: "thread.cleared" });
+    return this.mutateThread(t.id, (x) => {
+      x.sessionId = randomUUID();
+      if (titleIsAuto(x)) { x.title = "New thread"; x.titleAuto = true; }
+      x.latestTurn = null;
+      x.status = "idle";
+      x.lastError = null;
+      x.pendingApprovals = 0;
+    });
+  }
+
+  // ---- the thread's own shell (#10) -----------------------------------------
+
+  /**
+   * Open the thread's shell, or attach to the one already running.
+   *
+   * One shell per thread, which is what makes a `cd` and a `pnpm test` left
+   * running survive a reader shutting the panel: the next open is the same
+   * shell, with the same directory and the output it wrote while nobody
+   * watched. Shutting the panel does not end it; `terminalClose` does.
+   *
+   * It starts where the Claude session starts (`threadCwd`), so the reader's
+   * `ls` and the agent's `ls` list the same files.
+   */
+  terminalOpen(p: { threadId: string; cols?: number; rows?: number }): TerminalInfo {
+    const t = this.db.getThread(p.threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const cols = clampSize(p.cols, 80);
+    const rows = clampSize(p.rows, 24);
+    const live = this.terminals.get(t.id);
+    if (live && !live.ended) {
+      live.resize(cols, rows);
+      return this.terminalInfo(live);
+    }
+    const cwd = this.threadCwd(t);
+    if (!existsSync(cwd)) throw new EngineError("not_found", `${cwd} is gone, so there is nothing to open a shell in`);
+    // Past the cap, close the shell that has sat idle longest — never one that
+    // is running something, because that is work somebody is waiting for.
+    this.closeStalestTerminal();
+    const id = randomUUID();
+    const term = shellCall(() => new ThreadTerminal(id, {
+      threadId: t.id,
+      cwd,
+      cols,
+      rows,
+      onEvent: (ev) => this.emitTerminal(id, t.id, ev),
+    }));
+    this.terminals.set(t.id, term);
+    this.opts.log?.(`terminal opened thread=${t.id.slice(0, 8)} shell=${term.shell} cwd=${cwd}`);
+    return this.terminalInfo(term);
+  }
+
+  terminalInput(terminalId: string, data: string) {
+    if (data.length > MAX_TERMINAL_INPUT) throw new EngineError("too_large", `a shell takes ${MAX_TERMINAL_INPUT} characters at a time`);
+    const term = this.terminalById(terminalId);
+    shellCall(() => term.write(data));
+  }
+
+  terminalSignal(terminalId: string, signal: TerminalSignal) {
+    this.terminalById(terminalId).signal(signal);
+  }
+
+  terminalResize(terminalId: string, cols: number, rows: number) {
+    this.terminalById(terminalId).resize(clampSize(cols, 80), clampSize(rows, 24));
+  }
+
+  terminalClose(terminalId: string) {
+    // A shell already gone is a close that has nothing to do, not an error: a
+    // reader who presses ctrl+d twice means it once.
+    const term = this.findTerminal(terminalId);
+    if (!term) return;
+    term.close();
+    this.terminals.delete(term.threadId);
+  }
+
+  onTerminal(l: TerminalListener) { this.terminalListeners.add(l); return () => this.terminalListeners.delete(l); }
+
+  /** Everything a panel needs to paint the shell it just attached to. */
+  private terminalInfo(term: ThreadTerminal): TerminalInfo {
+    return {
+      terminalId: term.id, threadId: term.threadId, cwd: term.cwd, shell: term.shell,
+      busy: term.busy, exitCode: term.exitCode,
+      // Redacted like a timeline item, because a shell prints what it is
+      // given: `cat .env` in the worktree is not an agent misbehaving, it is a
+      // reader looking, and covey still does not write the value down (#126).
+      scrollback: this.redact(term.threadId, term.scrollback),
+    };
+  }
+
+  private terminalById(terminalId: string): ThreadTerminal {
+    const term = this.findTerminal(terminalId);
+    if (!term || term.ended) throw new EngineError("not_found", "that shell has ended; open it again");
+    return term;
+  }
+
+  /**
+   * The shell with this id, or null.
+   *
+   * The map is keyed by thread, because one thread has one shell, so this is
+   * the lookup the other way round. A scan rather than a second map:
+   * `MAX_TERMINALS` is eight, and two maps that can disagree about which shell
+   * is which is a bug that reads as somebody else's output.
+   */
+  private findTerminal(terminalId: string): ThreadTerminal | null {
+    for (const term of this.terminals.values()) if (term.id === terminalId) return term;
+    return null;
+  }
+
+  /**
+   * Pass one thing the shell said on to whoever is watching it.
+   *
+   * The thread is a parameter and not a lookup, because the last event a shell
+   * sends is `exit` and by then the shell is very often out of the map already
+   * — `closeTerminalsOf` took it out when the thread was archived. A lookup
+   * that threw here threw inside a child process's own event handler, which is
+   * the daemon going down rather than a shell ending.
+   */
+  private emitTerminal(terminalId: string, threadId: string, ev: TerminalEvent) {
+    if (ev.kind === "exit") {
+      const held = this.terminals.get(threadId);
+      if (held?.id === terminalId) this.terminals.delete(threadId);
+    }
+    // Redacted like a timeline item: a shell prints what it is given, and covey
+    // still does not write a secret's value down (#126).
+    const out = ev.kind === "output" ? { ...ev, data: this.redact(threadId, ev.data) } : ev;
+    for (const l of this.terminalListeners) l(terminalId, out);
+  }
+
+  /** Close the shell of these threads, because the threads themselves are going. */
+  private closeTerminalsOf(threadIds: string[]) {
+    for (const id of threadIds) {
+      const term = this.terminals.get(id);
+      if (!term) continue;
+      term.close();
+      this.terminals.delete(id);
+    }
+  }
+
+  private closeStalestTerminal() {
+    if (this.terminals.size < MAX_TERMINALS) return;
+    let oldest: ThreadTerminal | null = null;
+    for (const term of this.terminals.values()) {
+      if (term.busy) continue;
+      if (!oldest || term.touchedAt < oldest.touchedAt) oldest = term;
+    }
+    // Every shell is running something. Refuse rather than cut one short:
+    // eight builds in flight is a reader who knows what they are doing.
+    if (!oldest) throw new EngineError("busy", `all ${MAX_TERMINALS} shells on this machine are running something`);
+    oldest.close();
+    this.terminals.delete(oldest.threadId);
+  }
+
   // ---- worktrees ------------------------------------------------------------
 
   /** Clones in flight, by bare repository path. Two creates for one repository
@@ -2319,6 +2574,10 @@ export class Engine {
   private async releaseWorktree(t: Thread, did: "Archived" | "Moved" = "Archived"): Promise<void> {
     const p = this.db.getProject(t.projectId);
     if (!p || !t.worktreePath || !existsSync(t.worktreePath)) return;
+    // The shell stands in the directory that is about to go, so it goes first.
+    // Left running it would be a shell in a path that no longer exists, where
+    // every command fails with the same unhelpful line.
+    this.closeTerminalsOf([t.id]);
     const r = await removeWorktree(p.workspaceRoot, t.worktreePath);
     const now = new Date().toISOString();
     this.persistItem({
@@ -3053,6 +3312,10 @@ export class Engine {
     if (this.watchTimer) { clearInterval(this.watchTimer); this.watchTimer = null; }
     for (const s of this.sessions.values()) s.stop();
     this.sessions.clear();
+    // A shell is a process this daemon started, so it goes with the daemon.
+    // Nothing waits on it: there is no transcript to flush and nothing to save.
+    for (const term of this.terminals.values()) term.close();
+    this.terminals.clear();
     this.touchedAt.clear();
     this.released.clear();
     for (const a of this.titling.values()) a.abort();
@@ -3066,6 +3329,33 @@ export class Engine {
     this.retryTimers.clear();
     this.authRetry.clear();
   }
+}
+
+/**
+ * Run one call against a shell, and give its failures covey's own code.
+ *
+ * `terminal.ts` knows nothing of `EngineError` — it is a process and four
+ * pipes — so without this every refusal it writes reached the client as
+ * `internal`, which is the one code a client cannot act on.
+ */
+function shellCall<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof TerminalError) throw new EngineError(e.code, e.message);
+    throw e;
+  }
+}
+
+/**
+ * One side of a shell's size, as the shell will be told it.
+ *
+ * Bounded both ways, because `COLUMNS` goes into the environment of every
+ * command the shell runs: a zero makes some tools divide by it, and a client
+ * that sent a million would have `git log --graph` build a line a megabyte
+ * wide.
+ */
+function clampSize(v: number | undefined, fallback: number): number {
+  if (v === undefined || !Number.isFinite(v)) return fallback;
+  return Math.max(20, Math.min(1000, Math.floor(v)));
 }
 
 /** A whole number at or above `min`, or `null` for "no opinion". A client that

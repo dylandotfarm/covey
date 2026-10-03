@@ -85,3 +85,33 @@ export function acceptCommand(command: SlashCommandInfo): { value: string; caret
 export function commandLabel(command: SlashCommandInfo): string {
   return command.argumentHint ? `/${command.name} ${command.argumentHint}` : `/${command.name}`;
 }
+
+/**
+ * The commands covey answers itself, in every client (#16).
+ *
+ * One list, here, because a command the TUI offers and the phone does not is a
+ * command the reader cannot find. Each entry is a command against covey's own
+ * store rather than a prompt for the agent, so `coveyCommand` below takes the
+ * line out of the send path and the client runs it instead.
+ *
+ * A command here hides the SDK command of the same name. `/clear` is that
+ * case: Claude Code has one of its own, and it empties the model's context
+ * and leaves covey's transcript on the screen, which reads as a command that
+ * did nothing.
+ */
+export const COVEY_COMMANDS: SlashCommandInfo[] = [
+  { name: "clear", description: "empty this conversation and name the thread again", argumentHint: "", source: "covey" },
+];
+
+/**
+ * The covey command `text` is, or `null` when the line goes to the agent.
+ *
+ * The name has to stand alone. Every command here takes no argument, so
+ * `/clear` is the command and `/clear the deck` is a sentence that starts with
+ * a slash — which the agent reads, as it reads any other prose.
+ */
+export function coveyCommand(text: string): SlashCommandInfo | null {
+  const name = text.trim().toLowerCase();
+  if (!name.startsWith("/")) return null;
+  return COVEY_COMMANDS.find((c) => c.name === name.slice(1)) ?? null;
+}

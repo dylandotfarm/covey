@@ -225,12 +225,28 @@ test("a reviewer's comment carries the tagline, and the reviewer never hears its
   assert.equal(left.number, 101);
   assert.match(left.body, /^`lines\.ts` line 20 drops the last row\./);
   assert.match(left.body, new RegExp(REVIEW_TAGLINE, "i"), "covey adds the tagline; the reviewer never writes it");
-  // The URL goes on the reviewer's own cursor, so its own comment is not news.
+  // Two guards, and the signature is the one that holds: covey signs the
+  // comment with the thread that wrote it, and the URL goes on that thread's
+  // own cursor as well.
+  assert.match(left.body, new RegExp(`<!-- covey-thread: ${reviewerId} -->$`), "covey signs it; the reviewer never writes the marker");
   assert.deepEqual(s.thread(reviewerId).watch!.cursor.posted, [`https://github.com/o/r/pull/101#issuecomment-1`]);
+
+  // The poll that follows is the whole point. GitHub lists this comment with no
+  // URL — which is what the cursor could never cover — so without the
+  // signature the reviewer is woken by its own review and asked to answer
+  // itself, and under `auto` it never signs off.
+  await s.poll();
+  const watched = s.turns(reviewerId).filter((x) => x.startsWith("covey watch:"));
+  assert.deepEqual(watched, [], "the reviewer hears nothing: it wrote the only comment there is");
+  const heard = s.turns("t1").filter((x) => x.startsWith("covey watch:")).join("\n");
+  assert.match(heard, /Comment by an automated covey review/, "the author hears it");
+  assert.match(heard, /lines\.ts` line 20 drops the last row/);
+  assert.doesNotMatch(heard, /covey-thread/, "and never sees the marker");
 
   // The author's comment carries no tagline: it is a person's thread's words.
   await s.engine.commentPullRequest({ threadId: "t1", body: "Fixed, thanks." });
   assert.doesNotMatch(s.host.comments.at(-1)!.body, new RegExp(REVIEW_TAGLINE, "i"));
+  assert.match(s.host.comments.at(-1)!.body, /<!-- covey-thread: t1 -->$/, "every comment covey posts is signed, review or not");
 });
 
 test("asking for changes holds the merge, and the reviewer keeps reviewing", async (t) => {
@@ -538,4 +554,40 @@ test("deleting the author archives its reviewers, and leaves no turn behind", as
   await settle();
   assert.equal(s.db.getThread("t1"), null, "the author's row is gone");
   assert.ok(s.thread(opened.reviewers[0]!).archivedAt);
+});
+
+test("a reviewer out of rounds hears the merge, rather than blocking over a pull request that landed", async (t) => {
+  // `news` collects a reviewer's `head` event before its `MERGED` return, so
+  // `[head, merged]` is a real batch. A reviewer whose rounds were gone read
+  // that as "the budget is spent", ended `blocked`, and told the author its
+  // review was dropped for running out of rounds — about a pull request that
+  // had already merged.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  await s.poll();
+  // Three pushes spend a reviewer's budget of three: reading a new diff is its
+  // work, and that is the one thing that costs it a round.
+  for (const sha of ["aaa1111", "bbb2222", "ccc3333"]) { facts.headRefOid = sha; await s.poll(); }
+  assert.equal(s.thread(reviewerId).watch!.rounds, 3);
+  assert.equal(s.thread(reviewerId).watch!.state, "watching");
+
+  // The author merged. The push and the merge arrive in one batch.
+  facts.headRefOid = "ddd4444";
+  facts.state = "MERGED";
+  await s.poll();
+  const w = s.thread(reviewerId).watch!;
+  assert.equal(w.state, "merged", "the pull request is over, so the budget has nothing left to bound");
+  assert.match(w.reason!, /merged/);
+  // The merge costs no turn: the reviewer is archived with the news in a note,
+  // and the push that came with it is in there too.
+  assert.ok(s.thread(reviewerId).archivedAt);
+  const told = s.notes(reviewerId).at(-1)!;
+  assert.match(told, /Pull request #101 merged: .*\nThere is nothing left to review\./s);
+  assert.match(told, /The author pushed ddd4444/);
+  assert.match(s.reviewers("t1")[0]!.note!, /the pull request was merged/, "and the author is told why, in the words that are true");
 });

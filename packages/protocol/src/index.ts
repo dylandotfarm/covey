@@ -723,6 +723,25 @@ export function threadReviewing(t: Thread): number {
   return review.reviewers.filter((x) => x.state === "reviewing" || x.state === "changesRequested").length;
 }
 
+/**
+ * True when a thread's own work is over and the next move is the reader's.
+ *
+ * The clients say this in their own way — a `✓` in the sidebar, a green dot on
+ * the phone — and both mean one thing: the thread is yours again, so settle it,
+ * ask for more, or leave it. So a turn that ended is not enough. Covey's own
+ * reviewers read the change after the author stops, and the next turn comes
+ * from them, not from the reader; a thread that said it was finished while a
+ * review ran sent the reader to a thread with nothing to do in it. The mark of
+ * the review (`threadReviewing`) is what the row carries instead.
+ *
+ * What a person has to act on is nearer than this and is asked first:
+ * `threadNeedsPerson` holds an error and an approval, and a reviewer that is
+ * blocked is painted whatever this says.
+ */
+export function threadIsFinished(t: Thread): boolean {
+  return t.latestTurn?.state === "completed" && threadReviewing(t) === 0;
+}
+
 /** The issue a thread took. The number is the link; the rest is for the reader. */
 export interface ThreadIssue {
   number: number;
@@ -913,10 +932,32 @@ export interface PullRequestWatch {
   /**
    * Turns this watch sent that asked for more work: a failing check, a merge
    * conflict, or a review that asked for changes. A turn that only reports
-   * news costs no round.
+   * news costs no round, and neither does a base branch that moved: `behind`
+   * and the stale pass it is a sibling of are the base's news, not the
+   * change's, and on a repository several threads land on they fire every few
+   * minutes through no fault of the branch.
    */
   rounds: number;
   maxRounds: number;
+  /**
+   * When the rounds ran out and covey stopped waking this thread for work.
+   *
+   * The budget bounds the work covey asks a thread for. It never bounded the
+   * watch, and ending the watch with it was the fault of #199: three rounds
+   * went on a base that moved, the watch ended, and the pull request then sat
+   * approved with six green checks and nobody left to merge it. So an `author`
+   * watch whose budget is spent goes on polling. What asks for work becomes a
+   * note a person reads; a review that signs off, a checks verdict with
+   * nothing to fix and the merge itself still arrive as turns, and an `auto`
+   * watch still merges.
+   *
+   * A `reviewer` watch is the one exception and still ends: a review that may
+   * not read another push can never sign off, and the author would wait for a
+   * verdict that is not coming.
+   *
+   * Null or absent while the budget holds.
+   */
+  spentAt?: string | null;
   /** Polls in a row that found nothing new. The back-off grows with it. */
   quiet: number;
   cursor: WatchCursor;
@@ -984,12 +1025,17 @@ export interface WatchCursor {
   comments: string[];
   /**
    * The URLs of the comments this thread wrote itself, which are never news to
-   * it. Without this a reviewer's own comment comes back to the reviewer on the
-   * next poll, as a turn that asks it to answer itself; the author and its
-   * reviewers all write from one GitHub account, so no author login can tell
-   * the two apart. The URL is the key and not the id because `gh pr comment`
-   * answers with a URL and `gh pr view` lists a node id, and only the URL is
-   * on both sides.
+   * it. A thread that hears its own comment answers itself, and the author and
+   * its reviewers all write from one GitHub account, so no author login can
+   * tell them apart.
+   *
+   * This is the second half of that guard and not the first. The signature
+   * covey writes into every comment it posts is the first
+   * (`daemon/src/integrate/sign.ts`): it travels on the comment, so it holds
+   * for a watch stopped and started again, for a comment written before the
+   * watch, and for a comment GitHub lists with no URL at all — which is what
+   * this list cannot cover, since the URL is its only key. It stays because a
+   * comment covey posted before it signed them carries no signature.
    *
    * Absent on a cursor written before this existed, which reads as empty.
    */
@@ -2057,6 +2103,21 @@ export type Command =
    * daemon merges on the next poll that finds it ready.
    */
   | { type: "thread.setMerge"; threadId: ThreadId; merge: MergePolicy; mergeMethod?: MergeMethod }
+  /**
+   * Empty the conversation and keep the thread (#16).
+   *
+   * Every item goes, the SDK session is dropped and its transcript deleted, so
+   * the next turn starts a process with no memory of what came before. The
+   * thread keeps its id, its project, its worktree, its secrets and its pull
+   * request: this clears the conversation and nothing else. The title goes
+   * back to the automatic state, so the next message names the thread again.
+   *
+   * The turn checkpoints stay. They describe real commits in the working tree,
+   * which the clear does not touch.
+   *
+   * Refused, with code `busy`, while a turn runs or a message is queued.
+   */
+  | { type: "thread.clear"; threadId: ThreadId }
   | { type: "thread.archive"; threadId: ThreadId; archived: boolean }
   | { type: "thread.pin"; threadId: ThreadId; pinned: boolean }
   | { type: "thread.delete"; threadId: ThreadId }
@@ -2179,6 +2240,13 @@ export type ThreadEvent =
   | { seq: number; kind: "item.upserted"; item: TimelineItem }
   | { seq: number; kind: "item.removed"; itemId: ItemId }
   | { seq: number; kind: "thread.updated"; thread: Thread }
+  /**
+   * Every item of the thread has gone (`thread.clear`, #16). One event rather
+   * than an `item.removed` for each, because a long transcript would be a
+   * thousand of them, and a client that reconnects reads this after the
+   * upserts it replays — so the empty map is what it ends with either way.
+   */
+  | { seq: number; kind: "thread.cleared" }
   /** The whole `/` menu, every time. The SDK replaces its list rather than
    *  patching it, so this event replaces the client's copy too. */
   | { seq: number; kind: "commands.updated"; commands: SlashCommandInfo[] };
@@ -2187,6 +2255,85 @@ export type ThreadEvent =
 export type DistributiveOmit<T, K extends keyof any> = T extends any ? Omit<T, K> : never;
 export type ShellEventBody = DistributiveOmit<ShellEvent, "seq">;
 export type ThreadEventBody = DistributiveOmit<ThreadEvent, "seq">;
+
+// ---------------------------------------------------------------------------
+// The thread's own shell (#10)
+// ---------------------------------------------------------------------------
+
+/**
+ * One shell a reader opened on a thread.
+ *
+ * The shell runs on the *daemon's* machine, because that is where the thread's
+ * working directory is: in the normal setup the client is a laptop and the
+ * worktree is a path on another host, so a shell spawned by the client would
+ * open in the wrong place. The bytes cross the same socket everything else
+ * does.
+ *
+ * There is no pty. `node-pty` is native and this repository blocks install
+ * scripts, and node has no pty of its own, so the shell is driven through
+ * pipes — enough for `git status`, `ls` and `pnpm test`, and not enough for a
+ * full-screen program. `terminal.ts` in the daemon says what that costs and
+ * what it buys.
+ */
+export interface TerminalInfo {
+  terminalId: TerminalId;
+  threadId: ThreadId;
+  /** Where the shell stands now, which a `cd` moves. */
+  cwd: string;
+  /** The shell covey started, as a path. */
+  shell: string;
+  /** A command is running, so the next thing typed goes to its stdin. */
+  busy: boolean;
+  /** What the last command exited with, or null before the first one. */
+  exitCode: number | null;
+  /**
+   * Everything the shell has written, up to `TERMINAL_SCROLLBACK_BYTES`.
+   *
+   * Handed back on every open, so a reader who shut the panel and opened it
+   * again — or whose client reconnected — reads what they were looking at.
+   * The same rule a thread snapshot follows, for the same reason.
+   */
+  scrollback: string;
+}
+
+export type TerminalId = string;
+
+export type TerminalEvent =
+  /**
+   * Bytes the shell wrote. stdout and stderr arrive as one stream, in the
+   * order the pipes delivered them, because that is the order a terminal
+   * would have shown them in.
+   */
+  | { kind: "output"; data: string }
+  /** A command ended. `cwd` is where the shell stands after it, so a `cd` shows. */
+  | { kind: "ran"; exitCode: number; cwd: string }
+  /** The shell itself ended, by `terminal.close`, by `exit`, or by dying. */
+  | { kind: "exit"; code: number | null; signal: string | null };
+
+/**
+ * How much of a shell's output the daemon keeps for a reader who comes back.
+ *
+ * A quarter of a megabyte is a few thousand lines of build output: enough that
+ * closing the panel to read the transcript and opening it again does not lose
+ * the failure the reader was looking at, and small enough that eight idle
+ * shells cost less than one Claude session.
+ */
+export const TERMINAL_SCROLLBACK_BYTES = 256 * 1024;
+
+/**
+ * The most shells one daemon keeps at once.
+ *
+ * A shell costs a few megabytes, so this is not a memory bound; it is a bound
+ * on how many forgotten shells a long-lived daemon accumulates. Past it the
+ * daemon closes the one idle longest, never one that is running something.
+ */
+export const MAX_TERMINALS = 8;
+
+/** The longest thing a client may send to a shell at once. */
+export const MAX_TERMINAL_INPUT = 64 * 1024;
+
+/** What a client may send to a shell's process group. Nothing else is allowed. */
+export type TerminalSignal = "int" | "quit" | "term";
 
 // ---------------------------------------------------------------------------
 // Thread transfer (move between machines)
@@ -2237,6 +2384,57 @@ export interface RpcMethods {
     result: { subscriptionId: string };
   };
   "unsubscribe": { params: { subscriptionId: string }; result: null };
+  /**
+   * Open the thread's shell, on the daemon that holds the thread, and
+   * subscribe this connection to it (#10).
+   *
+   * One shell per thread: a second open attaches to the one already running,
+   * which is what makes `cd` and a `pnpm test` left running survive a reader
+   * shutting the panel. The `scrollback` in the answer is what it has written
+   * so far, so the panel paints the same screen it had.
+   *
+   * The socket is the whole gate, exactly as it is for `turn.send`: a client
+   * that may tell an agent to run a command may run one itself. This is *not*
+   * `secrets.env`, which answers over loopback only, because the value of a
+   * secret must never leave the machine that holds it and a working directory
+   * is not a secret.
+   */
+  "terminal.open": {
+    params: { threadId: ThreadId; cols?: number; rows?: number };
+    result: TerminalInfo & { subscriptionId: string };
+  };
+  /**
+   * Send `data` to the shell.
+   *
+   * With the shell idle this is a command line, and the daemon runs it. With a
+   * command running it is that command's standard input, so a script that asks
+   * a question can be answered. The client says which it meant by waiting for
+   * the `ran` event; the daemon decides, because the daemon is the only side
+   * that knows for certain.
+   */
+  "terminal.input": { params: { terminalId: TerminalId; data: string }; result: null };
+  /**
+   * Interrupt what the shell is running, the way ctrl+c does.
+   *
+   * The signal goes to the process group of the running command and not to the
+   * shell, so the shell survives it and keeps its directory. A shell with
+   * nothing running is left alone.
+   */
+  "terminal.signal": { params: { terminalId: TerminalId; signal: TerminalSignal }; result: null };
+  /**
+   * Tell the shell how wide the panel is, as `COLUMNS` and `LINES`.
+   *
+   * There is no pty, so this cannot reach a command that is already running;
+   * it reaches the next one. That is still worth doing — `git log --graph` and
+   * every progress bar read those two variables — and it is the whole of what
+   * a resize can mean without a pty.
+   */
+  "terminal.resize": { params: { terminalId: TerminalId; cols: number; rows: number }; result: null };
+  /**
+   * End the shell and forget its output. Shutting the panel does not do this;
+   * only a reader asking for it does, because a shell is where their work is.
+   */
+  "terminal.close": { params: { terminalId: TerminalId }; result: null };
   "command": { params: CommandEnvelope; result: CommandAck };
   "thread.export": { params: { threadId: ThreadId }; result: ThreadExport };
   "thread.import": {
@@ -2567,6 +2765,9 @@ export type PushMessage =
   | { push: "shell.synchronized"; subscriptionId: string }
   | { push: "thread"; subscriptionId: string; threadId: ThreadId; event: ThreadEvent }
   | { push: "thread.synchronized"; subscriptionId: string; threadId: ThreadId }
+  /** Bytes and verdicts from a thread's shell (#10). No seq and no replay:
+   *  a stream is not a timeline, and `terminal.open` hands back the scrollback. */
+  | { push: "terminal"; subscriptionId: string; terminalId: TerminalId; event: TerminalEvent }
   /** Update progress. Broadcast to every client — an update affects them all. */
   | { push: "machine.update"; update: MachineUpdate };
 
