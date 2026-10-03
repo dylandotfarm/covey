@@ -560,9 +560,17 @@
   covey review`), which covey writes and the reviewer never does, anchored to the start
   of a line so a comment that *quotes* a review is not read as one. `PullRequestWatch.role`
   splits what the two sides hear: the author owns the build and hears every checks verdict,
-  the reviewer owns the code and hears the *push* and no checks at all. `WatchCursor.posted`
-  is why no thread hears a comment it wrote itself — every thread of one pull request writes
-  from one account, and without it a reviewer was woken by its own review for ever.
+  the reviewer owns the code and hears the *push* and no checks at all. No thread hears a comment it wrote itself, and the proof is
+  on the comment: covey signs every comment it posts with the id of the thread that wrote it
+  (`integrate/sign.ts`), and the watch drops a comment carrying its own signature. Every
+  thread of one pull request writes from one account, so no author login can tell them apart,
+  and without this a reviewer was woken by its own review for ever. The marker is an HTML
+  comment — nothing on GitHub — and covey's own markdown escapes it, so `itemBase` strips it
+  from what a client shows and `quote` from what an agent is told. `WatchCursor.posted` is
+  the second half and was the first attempt: a URL is a key only when GitHub lists one, and a
+  cursor is a bounded list on the row, so it covered neither a comment GitHub listed with no
+  URL nor a watch stopped and started again. It stays for a comment covey posted before it
+  signed them, and is never the only guard.
   The review needs no watch event of its own: it is a `mergeBlock` under the code
   `unreviewed`, so the checks verdict is keyed on it and the pass is re-delivered the moment
   the review signs off. It is the one block that is covey's refusal and not GitHub's, which
