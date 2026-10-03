@@ -385,6 +385,10 @@ export class Db {
   deleteCheckpoint(threadId: string, turnId: string) {
     this.sql.prepare("DELETE FROM turn_checkpoints WHERE thread_id=? AND turn_id=?").run(threadId, turnId);
   }
+  /** Delete every item of a thread (`thread.clear`, #16). */
+  clearItems(threadId: string) {
+    this.sql.prepare("DELETE FROM items WHERE thread_id=?").run(threadId);
+  }
   /** Delete items with seq >= fromSeq; returns their ids. */
   deleteItemsFrom(threadId: string, fromSeq: number): string[] {
     const ids = (this.sql.prepare("SELECT id FROM items WHERE thread_id=? AND seq>=?").all(threadId, fromSeq) as any[]).map((r) => r.id as string);

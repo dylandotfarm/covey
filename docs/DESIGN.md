@@ -1649,6 +1649,39 @@ no diff.
 Refused while a turn is running or queued. Verified live: after reverting an edit turn, the
 model answers "no" to "have you edited any files in this conversation?".
 
+## Clearing a thread
+
+`/clear` empties the conversation and keeps the thread. It is the first command covey answers
+itself: `COVEY_COMMANDS` in `@covey/client` is the list, one list for every client, and each
+entry carries `source: "covey"` so the send path can tell a command it must run from a line it
+must hand to the agent. A covey command hides the SDK command of the same name — Claude Code
+has a `/clear`, and that one empties the model's context and leaves covey's transcript on the
+screen, which reads as a command that did nothing.
+
+`thread.clear` is the command. What goes is the conversation and the memory of it: every row
+of `items`, the live subprocess, and the transcript that subprocess would resume from. The
+thread then holds a new `sessionId`, so `startSession` finds no transcript and starts rather
+than resumes. What stays is everything else the thread is — its id, its project, its worktree,
+its branch, its secrets, its issue and its pull request. The turn checkpoints stay as well:
+they name real git trees, and the clear touches no file.
+
+One `thread.cleared` event says it, not an `item.removed` per item, because a long transcript
+would be a thousand events for one act. A client that reconnects reads it after the upserts it
+replays, so it ends with an empty map either way.
+
+An automatic title goes back to `New thread` with `titleAuto` true, and the next message
+names the thread again through the path a first message takes. That needs no change in
+`startTurn`: it asks `titleIsAuto(t) && (firstMessage || t.title === "New thread")`, and the
+title alone answers both halves. So `lastMessageAt` is left alone, which is what keeps the
+thread where the reader left it — the sidebar orders a project's threads by that field.
+
+A title the reader typed is never taken back. `titleAuto` records whose title it is, a rename
+clears it, and every other writer of a title asks first; a name the clear took would be a name
+nothing could give back, because it is in no row and there is no undo.
+
+Refused, with `busy`, while a turn is running or a message is queued, for the reason
+`turn.revert` is: the rows it removes are the ones a running turn is still writing.
+
 ## Dependency policy
 
 See README → "the 7-day rule". pnpm's `minimumReleaseAge` enforces it at resolution time;
