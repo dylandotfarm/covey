@@ -684,6 +684,36 @@ test("a restart puts away the review threads an earlier refusal left behind", as
   assert.equal(s.db.getThread("t1")!.archivedAt, null, "and the author it reviewed is left alone");
 });
 
+test("the restart repair leaves the reviewer a spent budget kept", async (t) => {
+  // A reviewer out of rounds is `dropped` on the seat and alive on purpose: the
+  // watch ends `blocked`, covey says a person has to read the change, and the
+  // worktree stays on the branch so that person has the review and the code
+  // together. A sweep that read `dropped` as "over" took, at the next start,
+  // exactly what that path meant to keep.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  // Only the reviewer polls, so the verdict this writes onto the author's row
+  // is not raced by the author's own poll writing that row back.
+  await s.command({ type: "thread.watch", threadId: "t1", number: null });
+  await s.poll();
+  // A reviewer's budget of three is spent by three pushes; the fourth is the
+  // one that finds nothing left.
+  for (const sha of ["aaa1111", "bbb2222", "ccc3333", "ddd4444"]) { facts.headRefOid = sha; await s.poll(); }
+  assert.equal(s.thread(reviewerId).watch!.state, "blocked", "the budget ended the watch");
+  assert.equal(s.reviewers("t1")[0]!.state, "dropped");
+  assert.equal(s.thread(reviewerId).archivedAt, null, "and the thread stayed, which is the point");
+
+  const engine = s.restart();
+  await engine.sweepFinishedReviewers();
+  await settle();
+  assert.equal(s.db.getThread(reviewerId)!.archivedAt, null, "the repair must not undo that");
+});
+
 test("the restart repair leaves a reviewer that is still reading", async (t) => {
   const s = setup();
   t.after(s.cleanup);

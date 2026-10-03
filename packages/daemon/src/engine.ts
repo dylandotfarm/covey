@@ -1579,26 +1579,42 @@ export class Engine {
    * Put away every review thread whose review is already over.
    *
    * A repair, run once at start, beside "anything that was running when we last
-   * exited is now idle". A reviewer is archived the moment it decides and again
-   * when its author is put away, so one still on the screen with a finished seat
-   * is a row some earlier refusal left behind — `archivePending` is memory only,
-   * so a daemon restarted between a sign-off and the end of that turn forgets
-   * the archive it owed. Without this the row stays for ever: nothing polls it,
-   * nothing wakes it, and no reader knows why it is there.
+   * exited is now idle". A reviewer is archived the moment it signs off and
+   * again when its author is put away, so one still on the screen in either of
+   * those states is a row some earlier refusal left behind — `archivePending`
+   * is memory only, so a daemon restarted between a sign-off and the end of
+   * that turn forgets the archive it owed. Without this the row stays for ever:
+   * nothing polls it, nothing wakes it, and no reader knows why it is there.
    *
-   * The test is the *seat*, never the reviewer's own watch: a watch ends on a
-   * merge, on a close and on a budget, and a reviewer whose budget ran out has
-   * still not decided. A reviewer that asked for changes is live work and stays,
-   * unless the author it is waiting on has itself been archived.
+   * Three states are archived and `dropped` is not one of them, which is the
+   * whole care in this function. Covey writes `dropped` when a reviewer's own
+   * watch runs out of rounds, and *that* path keeps the thread alive on
+   * purpose: it ends the watch `blocked`, says "a person has to read the
+   * change", and leaves the worktree on the branch so the person who comes to
+   * read it has the half-finished review and the code in front of them. A
+   * sweep that archived it would take, at the next start, exactly what the
+   * budget path meant to keep. Every other `dropped` belongs to a thread that
+   * is being archived or deleted in the same breath, so the sweep never meets
+   * one.
+   *
+   * The test is the *seat* on the author's watch and never the reviewer's own
+   * watch, because the question is what the review decided and a watch answers
+   * a different one — it ends on a merge, on a close and on that budget alike.
+   * A reviewer that asked for changes is live work and stays, unless the author
+   * it waits on has itself been archived.
    */
   async sweepFinishedReviewers(): Promise<void> {
     for (const t of this.db.listThreads()) {
       if (!t.reviewOf || t.archivedAt || t.movedTo) continue;
       const author = this.db.getThread(t.reviewOf.authorThreadId);
       const seat = author?.watch?.review?.reviewers.find((x) => x.threadId === t.id);
-      const over = !author || !!author.archivedAt || !seat || seat.state === "signedOff" || seat.state === "dropped";
-      if (!over) continue;
-      this.opts.log?.(`archiving review thread ${t.id.slice(0, 8)} of #${t.reviewOf.number}: ${seat ? `the review ${seat.state === "signedOff" ? "signed off" : "was dropped"}` : "the author no longer records it"}`);
+      const why = !author ? "the author is gone"
+        : author.archivedAt ? "the thread that wrote the change is archived"
+        : !seat ? "the author no longer records this review"
+        : seat.state === "signedOff" ? "the review signed off"
+        : null;
+      if (!why) continue;
+      this.opts.log?.(`archiving review thread ${t.id.slice(0, 8)} of #${t.reviewOf.number}: ${why}`);
       await this.archiveWhenIdle(t.id);
     }
   }

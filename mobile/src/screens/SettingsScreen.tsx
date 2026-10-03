@@ -16,7 +16,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, RefreshControl, ScrollView, Switch, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { LOD_LABEL, LOD_ORDER, type Lod } from "@covey/protocol";
-import { bindLabel, hiddenPanel, relTime, updateLabel } from "@covey/web";
+import { hiddenPanel } from "@covey/client";
+import { allThreads, bindLabel, relTime, updateLabel } from "@covey/web";
 import { store } from "../store";
 import { Icon, iconFontFailure } from "../Icon";
 import { useStore } from "../useStore";
@@ -45,7 +46,7 @@ export function SettingsScreen({ navigation }: Props) {
   const [checking, setChecking] = useState(false);
   const [ready, setReady] = useState(false);
   const [otaWord, setOtaWord] = useState<string | null>(null);
-  const hidden = hiddenPanel(s);
+  const hidden = hiddenPanel(allThreads(s), s.showHidden);
 
   useEffect(() => {
     void updateMachineName().then((name) => setOta(updateStatus(name)));
@@ -123,18 +124,23 @@ export function SettingsScreen({ navigation }: Props) {
 
         {/*
           The reviewers covey starts for a pull request, which it hides from
-          every client (`Thread.hidden`). The switch is the page's, in the page's
-          own words — `hiddenPanel` owns the sentence, so the phone and the page
-          cannot name the same switch two ways.
+          every client (`Thread.hidden`). The words are `hiddenPanel` in
+          `@covey/client`, which the TUI and the page read too, so no two
+          clients name one switch two ways.
 
           It is this device's preference and travels in no command, like the
           level of detail above it. One rule it does not reach: a hidden thread
           that needs a person is painted whatever this says, which is why the
           hint says so.
+
+          The `Switch` owns the tap and the `Row` carries no `onPress`, which is
+          what the Bluetooth row below does. Two handlers over one control fire
+          twice under `react-native-web` — the switch turns on and straight off
+          again, which reads as a control that does nothing.
         */}
         <SectionTitle text="Hidden threads" />
         <View style={S.card}>
-          <Row first onPress={() => store.setShowHidden(!s.showHidden)}>
+          <Row first>
             <View style={S.grow}>
               <Text style={S.title}>{hidden.label}</Text>
               <Text style={S.subtle}>{hidden.hint}</Text>

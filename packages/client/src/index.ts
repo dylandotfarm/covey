@@ -2,6 +2,7 @@ export { MachineClient, TRIES, type ClientEvents, type ClientOptions, type ConnS
 export { uuid } from "./uuid.js";
 export { COVEY_COMMANDS, acceptCommand, commandLabel, commandMenu, commandToken, coveyCommand } from "./commands.js";
 export { projectPool } from "./projects.js";
+export { hiddenPanel, type HiddenPanel } from "./hidden.js";
 export {
   IDLE_CHOICES, LIVE_CHOICES, budgetValue, idleChoices, idleLabel, idleValueLabel,
   liveChoices, liveValueLabel, sessionMemoryLabel, type BudgetChoice,

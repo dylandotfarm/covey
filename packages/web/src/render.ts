@@ -8,12 +8,12 @@
  * so the skeleton is built once and kept, and each timeline row is keyed by
  * item id and rebuilt only when the daemon re-sent that item.
  */
-import { acceptCommand, commandLabel, cutTag, noteFold, spliceTags, tagSpanAt } from "@covey/client";
+import { acceptCommand, commandLabel, cutTag, hiddenPanel, noteFold, spliceTags, tagSpanAt } from "@covey/client";
 import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Attachment, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, hiddenPanel, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, allThreads, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
 import type { ChainRow, TimelineRow } from "@covey/client";
 
 export interface Actions {
@@ -569,11 +569,11 @@ export class Renderer {
    * reviewers.
    *
    * A preference of the device, beside `lod` and for the same reason. The words
-   * are `hiddenPanel` in `state.ts`, because the app offers the same switch and
-   * one of them had to own the sentence.
+   * are `hiddenPanel` in `@covey/client`, because the TUI and the app offer the
+   * same switch and one of the three had to own the sentence.
    */
   private hiddenRow(s: State): HTMLElement {
-    const panel = hiddenPanel(s);
+    const panel = hiddenPanel(allThreads(s), s.showHidden);
     return h("div", { class: "lod" },
       h("button", {
         type: "button",

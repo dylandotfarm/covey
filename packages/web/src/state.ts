@@ -317,22 +317,13 @@ export function projectRows(s: State): ProjectRow[] {
 }
 
 /**
- * The switch that paints covey's hidden threads, in the words both clients use.
+ * Every thread of every machine, for a reader that wants them all.
  *
- * One function and not two labels: the page and the app offer the same switch,
- * and a phone that called it something else would read as a different feature.
- * The hint counts what is hidden right now, because a switch over nothing reads
- * as a bug, and it names the one case the switch does not cover — a hidden
- * thread that needs the reader is never hidden.
+ * `hiddenPanel` in `@covey/client` takes plain threads, because the TUI keeps
+ * its machines in a shape of its own; this is the page's shape flattened.
  */
-export function hiddenPanel(s: State): { label: string; hint: string; count: number } {
-  let count = 0;
-  for (const m of s.machines.values()) {
-    for (const t of m.threads.values()) if (threadIsHidden(t, false) && !t.archivedAt && !t.movedTo) count++;
-  }
-  if (s.showHidden) return { label: "Hidden threads: shown", hint: "painted under the threads they review", count };
-  const hint = count === 0 ? "covey's automated reviewers, when it has any" : `${count} hidden now; one that needs you is never hidden`;
-  return { label: "Hidden threads: hidden", hint, count };
+export function allThreads(s: State): Thread[] {
+  return [...s.machines.values()].flatMap((m) => [...m.threads.values()]);
 }
 
 function byRecency(a: Thread, b: Thread): number {

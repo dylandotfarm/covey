@@ -655,9 +655,11 @@
   blocked on an approval would hang the pull request for ever off the screen. The switch is
   the device's (`prefs.showHidden`, `localStorage`, `AsyncStorage` on the phone), and the
   hiding goes where the lists are built (`liveThreads`, `projectRows`) so the counts hide what
-  the rows hide. All three clients offer the switch and `hiddenPanel` in `web/src/state.ts`
-  owns its two sentences, because a phone that worded it differently would read as a
-  different feature. Because the
+  the rows hide. All three clients offer the switch and `hiddenPanel` in
+  `client/src/hidden.ts` owns its two sentences — in `client`, because the TUI cannot import
+  `web`, and over plain threads, because each client keeps its machines in a shape of its own.
+  Three copies is what it was, and they had drifted: "2 automated reviews hidden" on one
+  screen and "2 hidden now" on another, about the same two threads. Because the
   reviewers are invisible the thread under review must say so, or it reads as stalled:
   `threadReviewing` counts them and the TUI paints `⊙` (a glyph, like `AGENT_MARK`), while the
   web says it in `threadStatusLabel`, which answered `idle` for the whole review before; one that signed off is archived by covey itself and
@@ -671,8 +673,14 @@
   the review decided and never whether the thread went, so `reviewing` is not the test for
   "still on the screen". And because `archivePending` is memory only,
   `Engine.sweepFinishedReviewers` repairs the rest at start, beside "anything that was running
-  when we last exited is now idle" — it reads the *seat*, never the reviewer's own watch,
-  because a watch also ends on a budget and a reviewer out of rounds has still not decided.
+  when we last exited is now idle". It reads the *seat* on the author's watch and never the
+  reviewer's own watch, because the question is what the review decided and a watch answers a
+  different one. **A `dropped` seat is the one it leaves.** Covey writes `dropped` when a
+  reviewer's own watch runs out of rounds, and that path keeps the thread alive on purpose —
+  the watch ends `blocked`, covey says a person has to read the change, and the worktree stays
+  on the branch so that person has the half-finished review and the code together. Every other
+  `dropped` belongs to a thread archived or deleted in the same breath, so the sweep never
+  meets one.
   Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
   with the loop and `covey env`.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon
