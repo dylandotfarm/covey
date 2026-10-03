@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
-import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
+import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsFinished, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
 import { MachineClient, projectPool, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
@@ -688,13 +688,21 @@ export class Store {
   private noticeTransition(ms: MachineState, prev: Thread, next: Thread) {
     const key = `${ms.key}:${next.id}`;
     const nowWaiting = (next.pendingApprovals > 0 || next.status === "waiting") && !(prev.pendingApprovals > 0 || prev.status === "waiting");
-    const nowDone = prev.latestTurn?.state === "running" && next.latestTurn?.state === "completed";
+    const turnEnded = prev.latestTurn?.state === "running" && next.latestTurn?.state === "completed";
+    const nowDone = turnEnded && threadIsFinished(next);
     const nowError = prev.latestTurn?.state === "running" && next.latestTurn?.state === "error";
+    const who = () => `${next.title.slice(0, 40)} @${ms.info?.name ?? ms.saved.name}`;
+    // A turn that ended into a review did not finish the thread. Covey's own
+    // reviewers are still reading the change and the next turn comes from
+    // them, so the `✓` waits — it says "this is yours again" — and the bell
+    // waits with it, because there is nothing here for the reader to do. Say
+    // what is happening instead: a background thread that falls silent with
+    // no word reads as stalled, which is what the mark on the row is for.
+    if (turnEnded && !nowDone && !nowWaiting && !nowError) { this.notify(`under review: ${who()}`); return; }
     if (!nowWaiting && !nowDone && !nowError) return;
     this.state.attention.set(key, nowWaiting ? "approval" : nowError ? "error" : "done");
     if (!this.config.prefs.quiet) process.stdout.write("\x07");
-    const who = `${next.title.slice(0, 40)} @${ms.info?.name ?? ms.saved.name}`;
-    this.notify(nowWaiting ? `needs approval: ${who}` : nowError ? `failed: ${who}` : `done: ${who}`, nowWaiting ? "info" : nowError ? "error" : "success");
+    this.notify(nowWaiting ? `needs approval: ${who()}` : nowError ? `failed: ${who()}` : `done: ${who()}`, nowWaiting ? "info" : nowError ? "error" : "success");
   }
 
   /** A running update is worth a line even when its panel is closed. */

@@ -857,11 +857,25 @@ the reader cannot reconcile with what is above it is worse than no number.
 pull request open sits still for minutes: without a mark it reads as stalled, which is the one
 thing hiding must not cause. `threadReviewing` counts the reviewers still working — one that
 asked for changes counts too, because it waits on the author and the loop is as live as when
-it was reading — and the TUI paints `⊙` beside the title, with the count when there is more
-than one. A glyph and not a colour, for the reason the agent mark is one: covey runs over ssh,
-in tmux, and on terminals with a narrow palette. The web client says it in words instead,
-through `threadStatusLabel`, which answered `idle` for the whole review before this; it comes
-after every state that needs the reader, because being reviewed is not something to act on.
+it was reading — and the TUI paints `⊙` in the status cell of the row, where the `●` of a
+thread at work and the `✓` of one that finished go. A glyph and not a colour, for the reason
+the agent mark is one: covey runs over ssh, in tmux, and on terminals with a narrow palette.
+The web client says it in words instead, through `threadStatusLabel`, which answered `idle`
+for the whole review before this; it comes after every state that needs the reader, because
+being reviewed is not something to act on.
+
+**And a thread under review is not finished.** The `✓` in the sidebar and the green dot on
+the phone both say one thing: this thread is yours again, so settle it, ask more of it, or
+leave it. A turn that ended is not that. Covey's own reviewers read the change after the
+author stops and the next turn comes from them, so a thread that painted both marks at once
+sent the reader to a thread with nothing in it to do. `threadIsFinished` is the one rule —
+the turn completed *and* no reviewer is still reading — and the three places that said a
+thread was done now ask it: the glyph (where the review comes first, because the cell paints
+one), the tone of the dot on the phone, and the bell. The bell is the same claim in another
+channel, so a turn that ends into a review rings nothing and says `under review` instead; the
+record is kept, and the turn that ends the review lands the `✓` it was holding. What the
+reader has to act on is nearer than any of this and is asked first: a failure and an approval
+come through whatever covey is doing with the change.
 
 **A reviewer outlives nothing.** Archiving or deleting the thread that wrote the change
 archives its reviewers: a session is 250 MB and a worktree is a checkout, and the change

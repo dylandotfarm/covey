@@ -770,4 +770,12 @@ test("a thread sitting still under review does not read as idle", () => {
   // Anything the reader has to act on is the nearer answer.
   assert.equal(threadStatusLabel({ ...reviewing("reviewing"), pendingApprovals: 1 }), "needs approval");
   assert.equal(threadStatusLabel({ ...reviewing("reviewing"), status: "error", lastError: null }), "error");
+  // The dot says the same thing as the line beside it. A green `done` dot on a
+  // thread the line calls "under review" is the mark of a thread the reader can
+  // pick up, on one they cannot.
+  const ended = { turnId: "x", state: "completed" as const, startedAt: "", completedAt: "" };
+  assert.equal(threadTone({ ...reviewing("reviewing"), latestTurn: ended }), "idle");
+  assert.equal(threadTone({ ...reviewing("changesRequested"), latestTurn: ended }), "idle");
+  assert.equal(threadTone({ ...reviewing("signedOff"), latestTurn: ended }), "done", "the review is over");
+  assert.equal(threadTone({ ...thread("t", "p1"), latestTurn: ended }), "done");
 });
