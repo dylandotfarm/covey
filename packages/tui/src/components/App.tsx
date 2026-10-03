@@ -2784,8 +2784,10 @@ export function App({ store }: { store: Store }) {
     summaryRow.kind === "project" ? summaryRow.project!.title
     : summaryRow.kind === "fleet" ? summaryRow.fleet ?? ""
     // A machines header carries no machine of its own, so it says which
-    // fleet's it is — the same thing its section's rows say.
-    : summaryRow.kind === "machines" ? `${summaryRow.fleet ?? DEFAULT_FLEET} machines`
+    // fleet's it is — and only when there is a second fleet to tell it from,
+    // which is the question the pane below it already asks. A reader who
+    // never makes one must not meet the word here and nowhere else.
+    : summaryRow.kind === "machines" ? (store.fleets().length > 1 ? `${summaryRow.fleet ?? DEFAULT_FLEET} machines` : "machines")
     : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
   // A project's subtitle names its pool, a fleet's and a machines header's
   // counts what is in it, and a machine's says what it is.
