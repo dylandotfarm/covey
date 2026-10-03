@@ -37,6 +37,7 @@ import { Store, type MachineState, type ThreadView } from "./store.js";
 import { App, SIDEBAR_W } from "./components/App.js";
 import { inkOptions } from "./index.js";
 import { width } from "./lines.js";
+import { AnsiLog } from "./ansi.js";
 
 const PI = "ws://pi:3790";
 const AT = "2026-01-01T00:00:00Z";
@@ -320,6 +321,29 @@ test("so is the diff panel", async () => {
   await show(120, "Changes");
   assert.deepEqual(overflow(await app.resize(80), 80), [],
     "rows too wide for 80 columns with the diff panel open");
+});
+
+test("so is the shell panel, whose rows are somebody else's output (#10)", async () => {
+  app.store.state.diffView = null;
+  // The one pane whose content covey did not write. A build's line is as long
+  // as the build felt like making it, and the escapes in it must cost no
+  // columns — so this is the case that fails if `AnsiLog` ever leaves one in
+  // the text, as well as the case that fails if the panel trusts a stale width.
+  const log = new AnsiLog(100);
+  log.write(`\x1b[32m${"x".repeat(300)}\x1b[39m\n`);
+  log.write(`${PROSE.repeat(3)}\n`);
+  app.store.state.terminal = {
+    machine: PI, threadId: "alpha", terminalId: "x1", open: true,
+    cwd: "/src/covey/.covey/worktrees/a-very-long-worktree-name-indeed", shell: "/bin/bash",
+    busy: false, exitCode: 1, log, logGen: log.generation,
+    draft: "git log --oneline --graph --decorate --all | head -40", caret: 10,
+    scroll: 0, history: [], historyAt: null, ended: false,
+  };
+  app.store.setFocus("composer");
+  await show(120, "Shell");
+  assert.deepEqual(overflow(await app.resize(80), 80), [],
+    "rows too wide for 80 columns with the shell panel open");
+  app.store.state.terminal = null;
 });
 
 /**
