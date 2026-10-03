@@ -437,7 +437,74 @@ responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Meth
 `thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
 `run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`,
-`thread.commentPullRequest`, `thread.showFiles`, `github.item/act`, `secrets.list/env`.
+`thread.commentPullRequest`, `thread.showFiles`, `github.item/act`, `secrets.list/env`,
+`terminal.open/input/signal/resize/close`.
+
+## A shell in the thread's directory (#10)
+
+`ctrl+\`` replaces the transcript with a shell standing in the thread's working
+directory, so a `git status` or an `ls` costs no second window. The diff panel is the
+precedent: Ink cannot paint under `position="absolute"`, so a pane replaces the one
+beside it.
+
+**The shell runs on the daemon's machine.** The thread's directory is a path there, and
+in the normal setup the client is a laptop somewhere else, so a shell the client spawned
+would open in the wrong place. The bytes cross the socket covey already has:
+`terminal.open` opens and subscribes in one call, `terminal.input` sends a line,
+`terminal.signal` interrupts, `terminal.resize` says how wide the pane is and
+`terminal.close` ends it. The push carries no seq and no replay, because a stream is not
+a timeline — what a reader who comes back needs is the screen, and `terminal.open` hands
+back `scrollback`.
+
+**There is no pty.** `node-pty` is a native module, this repository blocks install
+scripts, and node ships no pty of its own. So `packages/daemon/src/terminal.ts` drives
+bash through pipes, which is enough for `git status`, `ls` and `pnpm test` and is not
+enough for `vim`. Three things that costs, each answered rather than left for the reader
+to discover:
+
+- **No prompt.** A non-interactive shell prints none, so covey draws its own and the
+  driver reports `$PWD` after every command — which is also how a `cd` shows on screen.
+- **No ctrl+c as a character.** There is no terminal to turn the key into one, so
+  `terminal.signal` sends the real signal to the running command's process group.
+- **No colour.** A tool that sees a pipe turns colour off, so `shellEnv` asks for it back
+  by name, `color.ui=always` included.
+
+The arrangement that makes it work is four pipes. Commands go in on **fd 3**, the exit
+status and the directory come back on **fd 4**, and fd 0 stays the *command's* standard
+input — so `read` works, a `y/n` prompt can be answered, and a command that reads stdin
+cannot swallow the command queued behind it. Three details in the driver are each one
+character from a defect a reader finds with their finger, and the comment above `DRIVER`
+names all three: `eval` runs in the shell itself so `cd` lasts; `trap ':' INT` keeps the
+shell alive through the signal that kills its child, where `trap '' INT` would be
+inherited as ignored and kill nothing; and a `read` cut short by that signal returns a
+status above 128, which has to be told from the 1 that means the pipe closed, or a ctrl+c
+pressed at an idle prompt ends the shell.
+
+**One shell per thread, and the panel does not own it.** Shutting the panel keeps the
+shell: the directory the reader walked to and the build they left running are still
+there, and only ctrl+d lets go. It dies with the thread's worktree, with the thread, and
+with the daemon. `MAX_TERMINALS` bounds how many a long-lived daemon accumulates, and the
+one closed is always one that is running nothing.
+
+**The shell gets no secrets.** The agent needs them and covey takes them back out of
+everything it writes down; a reader needs none of them to run `git status`, and every
+value in an environment is one more way for a value to reach a screen. A reader who does
+need one types `covey env exec -- …` in this very shell, which works because the shell is
+on the machine that holds the secret. The output is redacted like a timeline item anyway.
+
+**The client reads the escapes rather than passing them on.** Ink measures the string it
+is given, so an escape left in the text would be counted as printable columns and the
+frame would be laid out too wide — the same trap `Span.link` and `media.ts` exist to
+avoid. `packages/tui/src/ansi.ts` turns them into `Span` fields, which the transcript's
+own renderer paints and `selectedText` copies. It is a *scrolling log* and must not grow
+into an emulator: SGR, `\r`, `CSI K`, `\b` and `\t` are honoured, because that is what a
+build writes on its way past, and every cursor move is dropped.
+
+`ctrl+\`` needs no ctrl fallback, unlike covey's cmd bindings. Under the kitty protocol
+it is codepoint 96 with the ctrl modifier; without it the terminal sends a bare NUL, and
+Ink's legacy parser turns a control byte into `String.fromCharCode(b + 96)` — which for 0
+is the backtick. Both routes arrive as `` input === "`" `` with `ctrl`. The one cost is
+that a terminal with no kitty protocol sends the same NUL for ctrl+space.
 
 ## Secrets: an environment the agent uses and never reads
 

@@ -102,8 +102,18 @@
   the stream ink owns and never inside a span; a placeholder cell costs 1 and a combining
   mark 0, so a painted row measures exactly the cells it covers. Every escape carries
   `q=2`, because the terminal's answer would arrive on stdin and `useInput` would read it
-  as typing — which is also why `CELL_SIZE_QUERY`'s reply is picked off in `App.tsx`
-  before the mouse parse. Inline in the transcript is the next step and it waits on #24:
+  as typing — which is also why every `CSI … t` the terminal writes back, covey's own
+  cell size answer and the window reports some terminals send unasked, is taken out in
+  `App.tsx` (`takeWindowReports`) before the mouse parse. Match one whole and you match
+  nothing: ink splits a chunk into one event per escape sequence and then drops that
+  event's *leading* escape, so the answer arrives as `[6;34;16t`, and the guard that
+  wanted the escape put thirty-eight of them in a reader's composer. It is read from
+  anywhere in the chunk all the same, because a bracketed paste is the one chunk that
+  carries text around a report — covey registers no `usePaste`, so ink hands the whole
+  of a paste to `useInput` — and a report inside pasted text goes with nothing said.
+  The question is asked once the resize stops (`CELL_SIZE_DELAY_MS`), because a window
+  dragged by its corner resizes tens of times and every question is answered.
+  Inline in the transcript is the next step and it waits on #24:
   `width()` counts a combining mark as a column, so `wrapSpans` would misjudge a row. The
   overlay builds its own rows and never calls it. kitty takes PNG and raw RGB alone, so
   `mediaView.ts` converts with the four tools `attachments.ts` already looks for, and a
@@ -247,6 +257,32 @@
   rule `shrinkImage` follows. With no display, `cargo run --bin covey-desktop -- --render
   f.png` draws one frame and `--probe ws://…` dials a daemon and prints what came back; both
   run under an agent. `docs/DESKTOP.md` holds the reasoning and the rules.
+- ctrl+` opens a shell in the thread's working directory (#10), in place of the
+  transcript as the diff panel is. The shell runs on the *daemon's* machine, because
+  that is where the directory is, and the bytes cross the same socket: `terminal.open`
+  / `input` / `signal` / `resize` / `close`, and a `terminal` push that carries no seq
+  and no replay, because a stream is not a timeline. There is no pty and there will not
+  be one cheaply — `node-pty` is native and this repo blocks install scripts — so
+  `packages/daemon/src/terminal.ts` drives bash through four pipes. Commands go in on
+  **fd 3** and the exit status and `$PWD` come back on **fd 4**, which keeps fd 0 as the
+  *command's* own stdin, so `read` works and a command cannot swallow the command queued
+  behind it. Three characters in `DRIVER` are the whole thing and each is one edit from a
+  bug a reader finds with their finger: `eval` runs in the shell itself, so `cd` lasts;
+  `trap ':' INT` keeps the shell alive through the ctrl+c that kills what it runs, where
+  `trap '' INT` would be inherited as ignored and kill nothing; and a `read` cut short by
+  that signal returns above 128, which has to be told from the 1 that means the pipe
+  closed, or a ctrl+c pressed at an idle prompt ends the shell. One shell per thread, and
+  shutting the panel does not end it — `cd` and a running `pnpm test` survive, and
+  `TerminalInfo.scrollback` paints the screen the reader left. The shell gets no secrets
+  (`covey env exec` is the route, and it runs on the right machine), and its output is
+  redacted like a timeline item anyway. A shell dies with its thread's worktree. The
+  client parses the escapes rather than passing them to Ink: `packages/tui/src/ansi.ts`
+  is a *scrolling log*, never an emulator — SGR, `\r`, `CSI K`, `\b` and `\t` are
+  honoured and every cursor move is dropped — because an escape left in the text is
+  columns `width()` would count, which is the invariant `resize.test.ts` holds. ctrl+`
+  needs no ctrl fallback, unlike covey's cmd bindings: under the kitty protocol it is
+  codepoint 96 with ctrl, and without it the terminal sends a bare NUL that Ink's legacy
+  parser turns into `String.fromCharCode(0 + 96)` — the backtick either way.
 - Ink cannot paint under `position="absolute"`; overlays render in place of the transcript.
 - A paint is the client's dearest act — 30–45 ms of its one thread on this project's
   Pi, at 120×45 with a 200-item transcript — and the keyboard waits behind it. So the
@@ -317,7 +353,15 @@
   the *middle* (`elide`), because a line reads "what failed: why" and the repository's
   name alone can be fifty columns. Never hand that row an unbounded `Text` — Ink wraps it
   inside the `height={1}` box, paints the remainder over the transcript, and the reader
-  keeps the last two words of the sentence and none of the reason.
+  keeps the last two words of the sentence and none of the reason. A keybinding hint is
+  ranked the other way round (#87): it takes only what the title leaves, in the longest
+  of its forms that fits whole, and below the shortest it is not painted — a hint cut
+  from either end is a hint nobody can read, and the composer's own status row says the
+  same keys anyway. `titleBar.ts` shares the row out and node tests it; the boxes keep
+  their own shrink as a net only because Ink measures with `string-width` and covey with
+  its own `width`. Never let two children of that row both want more than there is: what
+  flex settles there depends on a cached text measurement, which is how the width the
+  client *mounted* at used to change this row and no other.
 - A project's URL names the *repository*; how to reach it is each machine's own business
   (#157). The client sends one URL to the whole pool, and every daemon works out its own
   clone URL with `cloneUrlsFor` — two machines may be set up for different styles of

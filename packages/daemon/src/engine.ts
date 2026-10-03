@@ -4,9 +4,10 @@ import { existsSync, statSync, rmSync, readdirSync, readFileSync } from "node:fs
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
-  ThreadOrigin, SecretEntry, SecretWrite,
+  ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
 import { isUserClient, KNOWN_MODELS, MIN_CHAIN, type AssistantMessageItem,} from "@covey/protocol";
+import { MAX_TERMINAL_INPUT, MAX_TERMINALS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
@@ -19,6 +20,7 @@ import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThrea
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, projectsDir, saveFleet } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { ChainTracker, summariseActivity } from "./activity.js";
+import { ThreadTerminal, TerminalError } from "./terminal.js";
 import { summariseReply } from "./digest.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
 import type { ClaudeModels } from "./models.js";
@@ -64,6 +66,7 @@ function newMember(init: import("@covey/protocol").RunMemberInit, now: string): 
 
 type ShellListener = (ev: ShellEvent) => void;
 type ThreadListener = (threadId: string, ev: ThreadEvent) => void;
+type TerminalListener = (terminalId: string, ev: TerminalEvent) => void;
 
 /** How often the daemon looks for sessions nobody needs. */
 const SWEEP_INTERVAL_MS = 30_000;
@@ -160,6 +163,14 @@ export class Engine {
   /** Turns waiting behind a running one, per thread. */
   private queues = new Map<string, { turnId: string; text: string; attachments: Attachment[] }[]>();
   private shellListeners = new Set<ShellListener>();
+  private terminalListeners = new Set<TerminalListener>();
+  /**
+   * The shell each thread has open (#10), by thread id — one apiece, so a
+   * second reader of one thread looks at the same screen rather than at a
+   * shell of their own in the same directory. A shell outlives the panel that
+   * opened it and dies with the thread.
+   */
+  private terminals = new Map<string, ThreadTerminal>();
   private threadListeners = new Set<ThreadListener>();
   /** Per-item throttle for streaming upserts. */
   private streamTimers = new Map<string, { latest: TimelineItem; timer: NodeJS.Timeout }>();
@@ -809,6 +820,7 @@ export class Engine {
         const t = this.db.getThread(cmd.threadId);
         if (!t) return this.db.shellSeq();
         this.dropSession(t.id);
+        this.closeTerminalsOf([t.id]);
         this.queues.delete(t.id);
         this.forgetAuthFailure(t.id);
         // Told before the row goes: `dropReviewer` reads this thread to find the
@@ -2187,7 +2199,11 @@ export class Engine {
    * process, and the transcript that process would otherwise resume from. What
    * stays is everything else the thread is — its id, its project, its
    * worktree, its branch, its secrets, its issue and its pull request. The
-   * turn checkpoints stay as well, because they name real commits.
+   * turn checkpoints stay as well, because they name real commits. So does any
+   * shell the reader has open on it (#10): the shell stands in the worktree,
+   * and the worktree is one of the things this keeps — a clear that took the
+   * directory somebody had walked to would be clearing more than a
+   * conversation.
    *
    * The next message names the thread again, and `startTurn` needs no change
    * for that: it asks `titleIsAuto(t) && (firstMessage || t.title === "New
@@ -2229,6 +2245,147 @@ export class Engine {
       x.lastError = null;
       x.pendingApprovals = 0;
     });
+  }
+
+  // ---- the thread's own shell (#10) -----------------------------------------
+
+  /**
+   * Open the thread's shell, or attach to the one already running.
+   *
+   * One shell per thread, which is what makes a `cd` and a `pnpm test` left
+   * running survive a reader shutting the panel: the next open is the same
+   * shell, with the same directory and the output it wrote while nobody
+   * watched. Shutting the panel does not end it; `terminalClose` does.
+   *
+   * It starts where the Claude session starts (`threadCwd`), so the reader's
+   * `ls` and the agent's `ls` list the same files.
+   */
+  terminalOpen(p: { threadId: string; cols?: number; rows?: number }): TerminalInfo {
+    const t = this.db.getThread(p.threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const cols = clampSize(p.cols, 80);
+    const rows = clampSize(p.rows, 24);
+    const live = this.terminals.get(t.id);
+    if (live && !live.ended) {
+      live.resize(cols, rows);
+      return this.terminalInfo(live);
+    }
+    const cwd = this.threadCwd(t);
+    if (!existsSync(cwd)) throw new EngineError("not_found", `${cwd} is gone, so there is nothing to open a shell in`);
+    // Past the cap, close the shell that has sat idle longest — never one that
+    // is running something, because that is work somebody is waiting for.
+    this.closeStalestTerminal();
+    const id = randomUUID();
+    const term = shellCall(() => new ThreadTerminal(id, {
+      threadId: t.id,
+      cwd,
+      cols,
+      rows,
+      onEvent: (ev) => this.emitTerminal(id, t.id, ev),
+    }));
+    this.terminals.set(t.id, term);
+    this.opts.log?.(`terminal opened thread=${t.id.slice(0, 8)} shell=${term.shell} cwd=${cwd}`);
+    return this.terminalInfo(term);
+  }
+
+  terminalInput(terminalId: string, data: string) {
+    if (data.length > MAX_TERMINAL_INPUT) throw new EngineError("too_large", `a shell takes ${MAX_TERMINAL_INPUT} characters at a time`);
+    const term = this.terminalById(terminalId);
+    shellCall(() => term.write(data));
+  }
+
+  terminalSignal(terminalId: string, signal: TerminalSignal) {
+    this.terminalById(terminalId).signal(signal);
+  }
+
+  terminalResize(terminalId: string, cols: number, rows: number) {
+    this.terminalById(terminalId).resize(clampSize(cols, 80), clampSize(rows, 24));
+  }
+
+  terminalClose(terminalId: string) {
+    // A shell already gone is a close that has nothing to do, not an error: a
+    // reader who presses ctrl+d twice means it once.
+    const term = this.findTerminal(terminalId);
+    if (!term) return;
+    term.close();
+    this.terminals.delete(term.threadId);
+  }
+
+  onTerminal(l: TerminalListener) { this.terminalListeners.add(l); return () => this.terminalListeners.delete(l); }
+
+  /** Everything a panel needs to paint the shell it just attached to. */
+  private terminalInfo(term: ThreadTerminal): TerminalInfo {
+    return {
+      terminalId: term.id, threadId: term.threadId, cwd: term.cwd, shell: term.shell,
+      busy: term.busy, exitCode: term.exitCode,
+      // Redacted like a timeline item, because a shell prints what it is
+      // given: `cat .env` in the worktree is not an agent misbehaving, it is a
+      // reader looking, and covey still does not write the value down (#126).
+      scrollback: this.redact(term.threadId, term.scrollback),
+    };
+  }
+
+  private terminalById(terminalId: string): ThreadTerminal {
+    const term = this.findTerminal(terminalId);
+    if (!term || term.ended) throw new EngineError("not_found", "that shell has ended; open it again");
+    return term;
+  }
+
+  /**
+   * The shell with this id, or null.
+   *
+   * The map is keyed by thread, because one thread has one shell, so this is
+   * the lookup the other way round. A scan rather than a second map:
+   * `MAX_TERMINALS` is eight, and two maps that can disagree about which shell
+   * is which is a bug that reads as somebody else's output.
+   */
+  private findTerminal(terminalId: string): ThreadTerminal | null {
+    for (const term of this.terminals.values()) if (term.id === terminalId) return term;
+    return null;
+  }
+
+  /**
+   * Pass one thing the shell said on to whoever is watching it.
+   *
+   * The thread is a parameter and not a lookup, because the last event a shell
+   * sends is `exit` and by then the shell is very often out of the map already
+   * — `closeTerminalsOf` took it out when the thread was archived. A lookup
+   * that threw here threw inside a child process's own event handler, which is
+   * the daemon going down rather than a shell ending.
+   */
+  private emitTerminal(terminalId: string, threadId: string, ev: TerminalEvent) {
+    if (ev.kind === "exit") {
+      const held = this.terminals.get(threadId);
+      if (held?.id === terminalId) this.terminals.delete(threadId);
+    }
+    // Redacted like a timeline item: a shell prints what it is given, and covey
+    // still does not write a secret's value down (#126).
+    const out = ev.kind === "output" ? { ...ev, data: this.redact(threadId, ev.data) } : ev;
+    for (const l of this.terminalListeners) l(terminalId, out);
+  }
+
+  /** Close the shell of these threads, because the threads themselves are going. */
+  private closeTerminalsOf(threadIds: string[]) {
+    for (const id of threadIds) {
+      const term = this.terminals.get(id);
+      if (!term) continue;
+      term.close();
+      this.terminals.delete(id);
+    }
+  }
+
+  private closeStalestTerminal() {
+    if (this.terminals.size < MAX_TERMINALS) return;
+    let oldest: ThreadTerminal | null = null;
+    for (const term of this.terminals.values()) {
+      if (term.busy) continue;
+      if (!oldest || term.touchedAt < oldest.touchedAt) oldest = term;
+    }
+    // Every shell is running something. Refuse rather than cut one short:
+    // eight builds in flight is a reader who knows what they are doing.
+    if (!oldest) throw new EngineError("busy", `all ${MAX_TERMINALS} shells on this machine are running something`);
+    oldest.close();
+    this.terminals.delete(oldest.threadId);
   }
 
   // ---- worktrees ------------------------------------------------------------
@@ -2359,6 +2516,10 @@ export class Engine {
   private async releaseWorktree(t: Thread, did: "Archived" | "Moved" = "Archived"): Promise<void> {
     const p = this.db.getProject(t.projectId);
     if (!p || !t.worktreePath || !existsSync(t.worktreePath)) return;
+    // The shell stands in the directory that is about to go, so it goes first.
+    // Left running it would be a shell in a path that no longer exists, where
+    // every command fails with the same unhelpful line.
+    this.closeTerminalsOf([t.id]);
     const r = await removeWorktree(p.workspaceRoot, t.worktreePath);
     const now = new Date().toISOString();
     this.persistItem({
@@ -3093,6 +3254,10 @@ export class Engine {
     if (this.watchTimer) { clearInterval(this.watchTimer); this.watchTimer = null; }
     for (const s of this.sessions.values()) s.stop();
     this.sessions.clear();
+    // A shell is a process this daemon started, so it goes with the daemon.
+    // Nothing waits on it: there is no transcript to flush and nothing to save.
+    for (const term of this.terminals.values()) term.close();
+    this.terminals.clear();
     this.touchedAt.clear();
     this.released.clear();
     for (const a of this.titling.values()) a.abort();
@@ -3106,6 +3271,33 @@ export class Engine {
     this.retryTimers.clear();
     this.authRetry.clear();
   }
+}
+
+/**
+ * Run one call against a shell, and give its failures covey's own code.
+ *
+ * `terminal.ts` knows nothing of `EngineError` — it is a process and four
+ * pipes — so without this every refusal it writes reached the client as
+ * `internal`, which is the one code a client cannot act on.
+ */
+function shellCall<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof TerminalError) throw new EngineError(e.code, e.message);
+    throw e;
+  }
+}
+
+/**
+ * One side of a shell's size, as the shell will be told it.
+ *
+ * Bounded both ways, because `COLUMNS` goes into the environment of every
+ * command the shell runs: a zero makes some tools divide by it, and a client
+ * that sent a million would have `git log --graph` build a line a megabyte
+ * wide.
+ */
+function clampSize(v: number | undefined, fallback: number): number {
+  if (v === undefined || !Number.isFinite(v)) return fallback;
+  return Math.max(20, Math.min(1000, Math.floor(v)));
 }
 
 /** A whole number at or above `min`, or `null` for "no opinion". A client that

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TimelineItem } from "@covey/protocol";
-import { Store, type ThreadView } from "./store.js";
+import { Store, paneOf, type AppState, type ThreadView } from "./store.js";
 import { CACHE_ITEMS, CACHE_VIEWS, type ViewCache } from "./viewCache.js";
 
 /** A store with no machines and its own config directory, so nothing connects. */
@@ -238,3 +238,36 @@ test("browsing a hundred threads leaves the cache and the subscription where the
  * this file was written for was in neither place; it was in React, and
  * `render.leak.test.ts` is what watches for it.
  */
+
+/**
+ * One pane holds the place the transcript lives, and one function says which.
+ *
+ * `paneOf` exists because the shell panel's first draft let the painter, the
+ * key handler and the mouse hit test each read their own ordering of the same
+ * three fields, and they disagreed — see the note on the function.
+ */
+test("one answer says which pane is in the place the transcript lives", () => {
+  const bare = { overlay: null, terminal: null, diffView: null } as unknown as Pick<AppState, "overlay" | "terminal" | "diffView">;
+  const term = { ...bare, terminal: { open: true } } as typeof bare;
+  const shut = { ...bare, terminal: { open: false } } as typeof bare;
+  const diff = { ...bare, diffView: {} } as typeof bare;
+
+  assert.equal(paneOf(bare, false), "transcript");
+  assert.equal(paneOf(bare, true), "summary");
+  assert.equal(paneOf(diff, false), "diff");
+  assert.equal(paneOf(term, false), "terminal");
+  // A shell whose panel is shut is still a shell running on the daemon, and it
+  // is not the pane on screen.
+  assert.equal(paneOf(shut, false), "transcript");
+  assert.equal(paneOf({ ...diff, terminal: { open: false } } as typeof bare, false), "diff");
+
+  // An overlay covers everything, and the shell comes above the diff because
+  // the shell is the pane that takes typing. The toggles keep the two from
+  // being set at once, so this order is braces rather than belt — but a reader
+  // must never be shown one pane while another holds the keyboard.
+  assert.equal(paneOf({ ...term, diffView: {} } as typeof bare, true), "terminal");
+  assert.equal(paneOf({ ...term, diffView: {}, overlay: { kind: "help" } } as typeof bare, true), "overlay");
+  assert.equal(paneOf({ ...diff, overlay: { kind: "help" } } as typeof bare, true), "overlay");
+  // A summary row loses to both panes, as it always has.
+  assert.equal(paneOf(diff, true), "diff");
+});
