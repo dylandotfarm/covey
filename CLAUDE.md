@@ -554,7 +554,19 @@
   every check passing, and a watch that said only "the checks passed" taught the agent to
   answer "ready to merge" about a pull request GitHub refuses. That block *is* part of the
   checks cursor's key, never a note beside it, because the base branch moves under a pass
-  the thread has already heard. `mergeStateStatus` is still never a checks verdict: GitHub
+  the thread has already heard.
+  `maxRounds` bounds the *work* covey asks a thread for, and it never bounds the watch
+  (#199). Two rules come out of that. A base that moved costs no round — `behind`, and the
+  stale pass it is a sibling of, are the base's news and not the change's, and on a
+  repository several covey threads land on they fire every few minutes, so every open pull
+  request of 2026-10-02 spent two of its three rounds merging main and met the first real
+  failure with nothing left. And a budget that *is* spent mutes the work rather than ending
+  the watch: `splitForBudget` holds back what asks for work, which goes in the transcript as
+  a note a person reads, and everything else — a review that signs off, a checks verdict
+  with nothing to fix, the merge — still arrives as a turn, so an `auto` watch still merges.
+  `PullRequestWatch.spentAt` records when covey stopped waking the thread. A `reviewer` watch
+  is the one exception and still ends `blocked`: a review that may not read another push can
+  never sign off, and the author would wait for a verdict that is not coming. `mergeStateStatus` is still never a checks verdict: GitHub
   answers `BLOCKED` while the checks run, so every reader of it here waits for them first.
   The base head is read on every poll under either policy — `isStale` refuses on doubt, so
   an unknown base made `PullRequestWatch.readiness` (#172) call every `manual` watch not

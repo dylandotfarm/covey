@@ -533,3 +533,34 @@ test("deleting the author archives its reviewers, and leaves no turn behind", as
   assert.equal(s.db.getThread("t1"), null, "the author's row is gone");
   assert.ok(s.thread(opened.reviewers[0]!).archivedAt);
 });
+
+test("a reviewer out of rounds hears the merge, rather than blocking over a pull request that landed", async (t) => {
+  // `news` collects a reviewer's `head` event before its `MERGED` return, so
+  // `[head, merged]` is a real batch. A reviewer whose rounds were gone read
+  // that as "the budget is spent", ended `blocked`, and told the author its
+  // review was dropped for running out of rounds — about a pull request that
+  // had already merged.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+  const facts = s.host.options.prs!["covey/t1"]!;
+  await s.poll();
+  // Three pushes spend a reviewer's budget of three: reading a new diff is its
+  // work, and that is the one thing that costs it a round.
+  for (const sha of ["aaa1111", "bbb2222", "ccc3333"]) { facts.headRefOid = sha; await s.poll(); }
+  assert.equal(s.thread(reviewerId).watch!.rounds, 3);
+  assert.equal(s.thread(reviewerId).watch!.state, "watching");
+
+  // The author merged. The push and the merge arrive in one batch.
+  facts.headRefOid = "ddd4444";
+  facts.state = "MERGED";
+  await s.poll();
+  const w = s.thread(reviewerId).watch!;
+  assert.equal(w.state, "merged", "the pull request is over, so the budget has nothing left to bound");
+  assert.match(w.reason!, /merged/);
+  assert.match(s.turns(reviewerId).at(-1)!, /merged, so there is nothing left to review/);
+  assert.match(s.reviewers("t1")[0]!.note!, /the pull request was merged/, "and the author is told why, in the words that are true");
+});

@@ -35,7 +35,7 @@ import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
 import { unwrapMarkdown } from "./integrate/reflow.js";
-import { news, emptyCursor, describeNews, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
+import { news, emptyCursor, describeNews, asksForWork, endsWatch, splitForBudget, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 import { signComment } from "./integrate/sign.js";
 
@@ -1867,36 +1867,66 @@ export class Engine {
       }
       if (events.length === 0) { this.db.putThread(fresh); return; }
 
-      const work = events.some((e) => asksForWork(e, role));
-      const end = events.find(endsWatch);
       const ctx = {
         branch: fresh.pullRequest?.branch ?? fresh.reviewOf?.branch ?? fresh.branch ?? "",
         rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge,
         role, review: live.review, base: fresh.reviewOf?.base ?? facts.baseRefName,
       };
-      if (work && live.rounds >= live.maxRounds) {
-        // The budget is spent. The news goes in the transcript for the
-        // reader, and the thread stops here rather than working for ever.
-        this.note(fresh.id, "warning", describeNews(facts, events, ctx));
-        const why = role === "reviewer"
-          ? `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`
-          : `The watch sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work, and the pull request still needs work. A person has to look at it.`;
-        this.endWatch(fresh, "blocked", why);
-        this.putThreadAndEmit(fresh);
-        // A reviewer that blocks can never sign off, and the author would wait
-        // for a verdict that is not coming.
-        if (role === "reviewer") await this.dropReviewer(fresh, "its own watch ran out of rounds");
-        return;
+      // The budget is spent, and what covey does about it differs by role.
+      //
+      // A reviewer ends here: a review that may not read another push can never
+      // sign off, so the watch stops and the author is told at once rather than
+      // waiting for a verdict that is not coming.
+      //
+      // An author does not. The budget bounds the work covey asks a thread for,
+      // and it never bounded the watch — #199 is what ending the watch with it
+      // costs. So the work-asking news becomes a note a person reads, covey
+      // says once that it has stopped waking the thread, and the poll goes on:
+      // a review that signs off, a checks verdict with nothing to fix and the
+      // merge itself still arrive as turns, and an `auto` watch still merges.
+      //
+      // A batch that ends the watch skips all of it, under either role. The
+      // pull request is over, so there is no work to hold back and no budget
+      // left to spend — and `news` collects a reviewer's `head` event before
+      // its `MERGED` return, so `[head, merged]` is a real batch, which blocked
+      // a reviewer and told the author its review was dropped about a pull
+      // request that had merged.
+      const end = events.find(endsWatch);
+      let batch = events;
+      if (!end && events.some((e) => asksForWork(e, role)) && live.rounds >= live.maxRounds) {
+        if (role === "reviewer") {
+          this.note(fresh.id, "warning", describeNews(facts, events, { ...ctx, spent: true }));
+          this.endWatch(fresh, "blocked", `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`);
+          this.putThreadAndEmit(fresh);
+          await this.dropReviewer(fresh, "its own watch ran out of rounds");
+          return;
+        }
+        const split = splitForBudget(events, role);
+        batch = split.tell;
+        this.note(fresh.id, "warning", describeNews(facts, split.hold, { ...ctx, spent: true }));
+        if (!live.spentAt) {
+          live.spentAt = nowIso;
+          // The last clause is not a detail: a base that moved asks for no work
+          // and so still arrives as a turn, and an agent that read this note as
+          // "do nothing further" would leave the branch behind for ever.
+          this.note(fresh.id, "warning", `Covey sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work on pull request #${live.number}, and stops waking this thread for more. A person has to look at what is left, which the note above holds. Covey goes on watching: a review that signs off, a checks verdict with nothing to fix, and the merge still arrive here — and so does a base branch that moved, which costs no round, so go on merging it in and pushing.`);
+        }
+        this.opts.log?.(`watch budget spent thread=${fresh.id.slice(0, 8)} pr=#${live.number} held=${split.hold.map((e) => e.kind).join(",")}`);
       }
-      if (work) live.rounds++;
+      // Nothing survived the split: the whole batch was work. The cursor still
+      // has to be kept, or the same news comes round again on the next poll.
+      if (batch.length === 0) { this.putThreadAndEmit(fresh); return; }
+      // A round is budget for work still to come, and a pull request that is
+      // over has none.
+      if (!end && batch.some((e) => asksForWork(e, role))) live.rounds++;
       ctx.rounds = live.rounds;
-      const text = describeNews(facts, events, ctx);
+      const text = describeNews(facts, batch, ctx);
       if (end) this.endWatch(fresh, end.kind, end.kind === "closed" ? "The pull request was closed without a merge." : end.by === "covey" ? `Covey merged the pull request (${end.method}) under the auto policy.` : "The pull request was merged.");
       this.putThreadAndEmit(fresh);
       // The pull request is over, so the reviewer's seat is too. The author is
       // not told: it is reading the same merge on its own watch.
       if (end && role === "reviewer") this.markReviewerOver(fresh, end.kind === "closed" ? "the pull request was closed" : "the pull request was merged");
-      this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
+      this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${batch.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
       // A turn, not a note: a note is read by a person, and a turn resumes a
       // session the engine released. This is the whole reason the watch exists.
       await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text, system: true })

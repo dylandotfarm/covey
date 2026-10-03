@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  news, emptyCursor, asksForWork, endsWatch, describeNews, pollDelayMs, checksVerdict, mergeBlock, mergeReadiness,
+  news, emptyCursor, asksForWork, endsWatch, splitForBudget, describeNews, pollDelayMs, checksVerdict, mergeBlock, mergeReadiness,
   NO_CHECKS_GRACE_MS, POLL_MIN_MS, POLL_MAX_MS,
 } from "./news.js";
 import { pr } from "./testHost.js";
@@ -168,7 +168,9 @@ test("under auto, a pass against an older base is stale, and asks the agent to u
   const moved = { oid: "newer", committedAt: "2026-09-21T09:45:00Z" };
   const auto = news(facts, [], emptyCursor(), T0, { merge: "auto", base: moved });
   assert.equal(auto.events[0]!.kind === "checks" && auto.events[0]!.ci, "stale");
-  assert.equal(asksForWork(auto.events[0]!), true, "the agent has to merge the base in and push");
+  // It is still work the agent does, and it still costs no round: the base
+  // moved, and nothing the thread pushes stops it moving again (#199).
+  assert.equal(asksForWork(auto.events[0]!), false, "the base moved; the change did not fail");
   assert.match(describeNews(facts, auto.events, { ...CTX, merge: "auto" }), /passed on abc1234, but against an older main.*Merge main into covey\/abc and push/);
   assert.deepEqual(news(facts, [], auto.cursor, later(60_000), { merge: "auto", base: moved }).events, [], "delivered once");
   // The same facts under manual are a plain pass: staleness is the person's question there.
@@ -391,7 +393,7 @@ test("a pass behind a branch rule is not a pass to act on, and names the fix", (
   const ev = r.events[0]!;
   assert.equal(ev.kind === "checks" && ev.ci, "passing", "the checks did pass; it is the merge that is blocked");
   assert.equal(ev.kind === "checks" && ev.block?.code, "behind");
-  assert.equal(asksForWork(ev), true, "the agent clears this one with a merge and a push");
+  assert.equal(asksForWork(ev), false, "the agent clears it with a merge, and it costs no round (#199)");
   const text = describeNews(facts, r.events, CTX);
   assert.match(text, /The checks passed on fe1a5a2: 1 check succeeded\./);
   assert.match(text, /GitHub will not merge the pull request yet: the branch is out of date with main/);
@@ -486,4 +488,34 @@ test("covey never calls a pull request ready that GitHub reports as blocked", ()
   // while they run: a pending check is named as a pending check.
   const pending = mergeReadiness(pr({ number: 7, checks: PENDING, mergeStateStatus: "BLOCKED" }), base);
   assert.match(pending.ready ? "" : pending.why, /has not finished/);
+});
+
+test("a thread out of rounds still hears everything that does not ask it for work", () => {
+  // #199: the budget bounds the work covey asks for. Split a batch by it and
+  // the sign-off, the pass with nothing to fix and the merge all stand.
+  const facts = pr({ number: 199, checks: FAILED, headRefOid: "aaa" });
+  const approved = { id: "r9", author: "covey", state: "APPROVED", body: "Signed off.", submittedAt: T0, url: null };
+  const { tell, hold } = splitForBudget([
+    { kind: "checks", ci: "failing", head: "aaa", checks: [], failed: [], block: null },
+    { kind: "review", review: approved },
+    { kind: "merged" },
+  ]);
+  assert.deepEqual(hold.map((e) => e.kind), ["checks"], "only the work is held");
+  assert.deepEqual(tell.map((e) => e.kind), ["review", "merged"]);
+  // And the held events are still words a person can read in the transcript.
+  assert.match(describeNews(facts, hold, CTX), /The checks failed on aaa/);
+});
+
+test("a batch held back by a spent budget names no round", () => {
+  // It is a note for a person, under a sentence that says the rounds are gone.
+  // "This is round 3 of 3." there reads as a countdown that never moves.
+  const facts = pr({ number: 199, checks: FAILED, headRefOid: "aaa" });
+  const r = news(facts, [], emptyCursor(), T0);
+  const spent = { ...CTX, rounds: 3, maxRounds: 3, spent: true };
+  const held = describeNews(facts, r.events, spent);
+  assert.match(held, /Covey watches the checks again after the push\.$/m);
+  assert.doesNotMatch(held, /round 3 of 3/);
+  assert.doesNotMatch(held, / \n|  $/, "and it ends at its full stop, not at a space");
+  // The same batch as a turn still counts the round out loud.
+  assert.match(describeNews(facts, r.events, { ...CTX, rounds: 2 }), /This is round 2 of 3\./);
 });
