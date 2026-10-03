@@ -327,7 +327,15 @@
   the *middle* (`elide`), because a line reads "what failed: why" and the repository's
   name alone can be fifty columns. Never hand that row an unbounded `Text` — Ink wraps it
   inside the `height={1}` box, paints the remainder over the transcript, and the reader
-  keeps the last two words of the sentence and none of the reason.
+  keeps the last two words of the sentence and none of the reason. A keybinding hint is
+  ranked the other way round (#87): it takes only what the title leaves, in the longest
+  of its forms that fits whole, and below the shortest it is not painted — a hint cut
+  from either end is a hint nobody can read, and the composer's own status row says the
+  same keys anyway. `titleBar.ts` shares the row out and node tests it; the boxes keep
+  their own shrink as a net only because Ink measures with `string-width` and covey with
+  its own `width`. Never let two children of that row both want more than there is: what
+  flex settles there depends on a cached text measurement, which is how the width the
+  client *mounted* at used to change this row and no other.
 - A project's URL names the *repository*; how to reach it is each machine's own business
   (#157). The client sends one URL to the whole pool, and every daemon works out its own
   clone URL with `cloneUrlsFor` — two machines may be set up for different styles of
