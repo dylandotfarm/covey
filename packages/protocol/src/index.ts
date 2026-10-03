@@ -712,6 +712,25 @@ export function threadReviewing(t: Thread): number {
   return review.reviewers.filter((x) => x.state === "reviewing" || x.state === "changesRequested").length;
 }
 
+/**
+ * True when a thread's own work is over and the next move is the reader's.
+ *
+ * The clients say this in their own way — a `✓` in the sidebar, a green dot on
+ * the phone — and both mean one thing: the thread is yours again, so settle it,
+ * ask for more, or leave it. So a turn that ended is not enough. Covey's own
+ * reviewers read the change after the author stops, and the next turn comes
+ * from them, not from the reader; a thread that said it was finished while a
+ * review ran sent the reader to a thread with nothing to do in it. The mark of
+ * the review (`threadReviewing`) is what the row carries instead.
+ *
+ * What a person has to act on is nearer than this and is asked first:
+ * `threadNeedsPerson` holds an error and an approval, and a reviewer that is
+ * blocked is painted whatever this says.
+ */
+export function threadIsFinished(t: Thread): boolean {
+  return t.latestTurn?.state === "completed" && threadReviewing(t) === 0;
+}
+
 /** The issue a thread took. The number is the link; the rest is for the reader. */
 export interface ThreadIssue {
   number: number;
