@@ -10,14 +10,20 @@ import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, trun
 import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
-import { ASSUMED_CELL, CELL_SIZE_QUERY, graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, parseCellSize, type CellSize } from "../media.js";
+import { ASSUMED_CELL, CELL_SIZE_QUERY, graphicsEnabled, kittyDelete, kittyTransmit, mediaBox, takeWindowReports, type CellSize } from "../media.js";
 import { loadPreview, nextImageId } from "../mediaView.js";
 
 const HYPERLINKS = hyperlinksEnabled();
 /** The words for the gesture that opens a link, read once like HYPERLINKS. */
 const OPEN_GESTURE = openGesture(process.platform, HYPERLINKS);
-/** The exact answer to `CELL_SIZE_QUERY`, and nothing else that looks like it. */
-const CELL_SIZE_REPLY = /^\u001b\[6;\d+;\d+t$/;
+/**
+ * How long covey waits after a resize before it asks the cell size again.
+ *
+ * A window dragged by its corner resizes tens of times, and a question per
+ * resize is an answer per resize on stdin. Long enough that a drag asks once
+ * when the hand stops, short enough that nothing could open a preview first.
+ */
+const CELL_SIZE_DELAY_MS = 250;
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
 import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
@@ -154,8 +160,12 @@ export function App({ store }: { store: Store }) {
   const cellSize = useRef<CellSize>(ASSUMED_CELL);
   useEffect(() => {
     // Asked again after a resize, because the reader may have changed the font
-    // size — which moves the cell and leaves the grid where it was.
-    if (graphicsEnabled()) stdout.write(CELL_SIZE_QUERY);
+    // size — which moves the cell and leaves the grid where it was. Asked once
+    // the resize stops, for the reason `CELL_SIZE_DELAY_MS` gives.
+    if (!graphicsEnabled()) return;
+    const timer = setTimeout(() => stdout.write(CELL_SIZE_QUERY), CELL_SIZE_DELAY_MS);
+    timer.unref?.();
+    return () => { clearTimeout(timer); };
   }, [stdout, size.cols, size.rows]);
 
   /**
@@ -1776,19 +1786,23 @@ export function App({ store }: { store: Store }) {
     // both would double each keystroke. Repeats are real input, so keep them.
     if (rawKey.eventType === "release") return;
     if (process.env.COVEY_KEYLOG) { try { appendFileSync(process.env.COVEY_KEYLOG, JSON.stringify({ input: rawInput, key: rawKey, focus: state.focus }) + "\n"); } catch { /* ignore */ } }
-    // The terminal's answer to `CELL_SIZE_QUERY` arrives the same way, and has
-    // to go the same way: an escape left in the stream is typing to `useInput`.
-    // Matched whole, so a chunk that merely contains something similar is still
-    // the reader's.
-    if (CELL_SIZE_REPLY.test(rawInput)) {
-      const cell = parseCellSize(rawInput);
-      if (cell) cellSize.current = cell;
-      return;
-    }
+    // The terminal's answers about its window arrive the same way, and have to
+    // go the same way: an escape left in the stream is typing to `useInput`.
+    // A resize is what raises them — covey's own question about the cell size,
+    // and the size reports some terminals send unasked — so the reader who
+    // dragged the window found them in the composer.
+    const reports = takeWindowReports(rawInput);
+    if (reports.cell) cellSize.current = reports.cell;
+    const input = reports.rest;
+    // Nothing of the chunk but the terminal's own words, so there is nothing
+    // left to do with it. What is left over is a paste that carried a report,
+    // which goes on as the reader's. A chunk that was empty to begin with is a
+    // key ink named instead, an arrow or a page, and it goes on too.
+    if (input === "" && rawInput !== "") return;
     // Mouse reports arrive through the same channel as keys; Ink leaves them
     // intact as an unrecognised CSI, so pick them off before anything can treat
     // them as typed text.
-    const mouseEvents = parseMouse(rawInput);
+    const mouseEvents = parseMouse(input);
     if (mouseEvents.length > 0) {
       for (const m of mouseEvents) handleMouse(m);
       return;
@@ -1800,13 +1814,13 @@ export function App({ store }: { store: Store }) {
     // composer a multi-char chunk is a paste; elsewhere replay it key by key.
     const special = rawKey.upArrow || rawKey.downArrow || rawKey.leftArrow || rawKey.rightArrow || rawKey.return || rawKey.escape || rawKey.tab || rawKey.backspace || rawKey.delete || rawKey.pageUp || rawKey.pageDown || rawKey.ctrl || rawKey.meta || rawKey.super;
     const editing = state.focus === "composer" && !state.overlay && !pending;
-    if (rawInput.length > 1 && !special && !(editing && !/^[\r\n]+$/.test(rawInput))) {
+    if (input.length > 1 && !special && !(editing && !/^[\r\n]+$/.test(input))) {
       // `pasted` marks a key with more of its chunk behind it. The last
       // character of a chunk is never marked: whatever ends a chunk is the
       // last thing the reader did, whether they pasted it or typed it, and a
       // rule that dropped it would eat the enter of a fast typist. Only the
       // one-line prompts read this (#128).
-      const chars = [...rawInput];
+      const chars = [...input];
       for (let i = 0; i < chars.length; i++) {
         const ch = chars[i]!;
         const k = { ...rawKey, pasted: i < chars.length - 1 };
@@ -1817,11 +1831,11 @@ export function App({ store }: { store: Store }) {
       }
       return;
     }
-    if (editing && rawInput.length > 1 && !special) {
-      pasteText(rawInput);
+    if (editing && input.length > 1 && !special) {
+      pasteText(input);
       return;
     }
-    handleKey(rawInput, rawKey);
+    handleKey(input, rawKey);
   });
 
   function handleKey(input: string, key: any) {
