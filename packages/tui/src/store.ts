@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals } from "@covey/protocol";
 import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsFinished, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
-import { MachineClient, projectPool, type ClientOptions, type ConnState } from "@covey/client";
+import { MachineClient, coveyCommand, projectPool, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
@@ -726,13 +726,21 @@ export class Store {
       case "item.upserted": v.items.set(ev.item.id, ev.item); break;
       case "item.removed": v.items.delete(ev.itemId); break;
       case "thread.updated": v.thread = ev.thread; break;
+      // `/clear` (#16): the whole transcript at once, and there is no older
+      // page behind an empty one.
+      case "thread.cleared": v.items.clear(); v.hasMore = false; break;
       // The SDK replaces its command list rather than patching it, so we do too.
       case "commands.updated": v.commands = ev.commands; break;
     }
     // A resent snapshot carries each item's own seq, which is older than the
     // subscription's, so take the highest and never go backwards.
     v.seq = Math.max(v.seq, ev.seq);
-    this.setFromMachine({ view: { ...v } });
+    // A count of lines from the bottom means nothing against no lines, so the
+    // cleared thread follows the bottom again rather than hold a scroll into
+    // a transcript that has gone.
+    this.setFromMachine(ev.kind === "thread.cleared"
+      ? { view: { ...v }, scrollFromBottom: 0, scrollAnchor: null }
+      : { view: { ...v } });
   }
 
   // ---- selection -----------------------------------------------------------
@@ -1348,6 +1356,9 @@ export class Store {
     const v = this.state.view;
     const client = v && this.clients.get(v.machine);
     if (!v || !client) return;
+    // A covey command is the client's own work and never reaches the agent.
+    const own = coveyCommand(text);
+    if (own) return this.runCoveyCommand(own.name);
     // The tag in the text is the file. Whatever lost its tag does not go.
     const kept = this.syncAttachments(v.threadId, text);
     // A chip for a file that did not attach is text in the draft and nothing
@@ -1363,6 +1374,36 @@ export class Store {
       this.clearPastes(v.threadId);
       this.set({ scrollFromBottom: 0, scrollAnchor: null });
     } catch (e: any) { this.notify(e.message, "error"); }
+  }
+
+  /**
+   * Run a `/` command covey answers itself (#16).
+   *
+   * The names are `COVEY_COMMANDS` in `@covey/client`, so a command that is
+   * offered in the menu and not answered here is a row that does nothing: add
+   * a case whenever you add an entry there.
+   */
+  private async runCoveyCommand(name: string) {
+    const v = this.state.view;
+    const client = v && this.clients.get(v.machine);
+    if (!v || !client) return;
+    switch (name) {
+      case "clear":
+        try {
+          await client.command({ type: "thread.clear", threadId: v.threadId });
+          // The draft went with the command, so whatever it held goes too: a
+          // chip for a file nothing will send is a chip the reader cannot use.
+          this.clearAttachments(v.threadId);
+          this.clearPastes(v.threadId);
+          // Only "cleared": whether the next message renames the thread
+          // depends on whose title it is, and this side cannot say without a
+          // second copy of the daemon's rule.
+          this.notify("cleared", "success");
+        } catch (e: any) { this.notify(e.message, "error"); }
+        return;
+      default:
+        this.notify(`/${name} is not a command covey answers`, "error");
+    }
   }
 
   async interrupt() {

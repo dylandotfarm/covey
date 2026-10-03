@@ -5,7 +5,7 @@
  * re-sends an item every few tens of milliseconds and the phone has one
  * thread for the paint and the keyboard.
  */
-import { applyDrop, budgetValue, MachineClient, uuid } from "@covey/client";
+import { applyDrop, budgetValue, coveyCommand, MachineClient, uuid } from "@covey/client";
 import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
 import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, baseHash, composerKey, emptyState, itemHash, mediaHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
@@ -258,6 +258,21 @@ const actions: Actions = {
     const v = state.view;
     if (!v) return;
     const { machine, threadId } = v;
+    // A covey command is the page's own work and never reaches the agent (#16).
+    const own = coveyCommand(text);
+    if (own) {
+      if (own.name !== "clear") { fail(new Error(`/${own.name} is not a command covey answers`)); return; }
+      // The draft and its chips go only once the daemon has taken the command.
+      // `thread.clear` is the one command here that is refused — `busy`, under
+      // a running turn — and a reader who loses the files they picked to a
+      // refusal has lost them for nothing.
+      clients.get(machine)?.command({ type: "thread.clear", threadId }).then(() => {
+        state.drafts.delete(composerKey(machine, threadId));
+        setPendingAttachments(state, machine, threadId, []);
+        schedule();
+      }).catch(fail);
+      return;
+    }
     // The tag in the text is the file. Whatever lost its tag does not go.
     const attachments = sendableAttachments(syncAttachments(state, machine, threadId, text));
     state.drafts.delete(composerKey(machine, threadId));

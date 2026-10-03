@@ -91,6 +91,68 @@ test("a rewind that goes through says it reverted", async (t) => {
   assert.equal(store.getState().notice?.tone, "success");
 });
 
+// ---- the commands covey answers itself (#16) --------------------------------
+
+test("/clear is run by the client and never sent to the agent", async (t) => {
+  const { store, cleanup } = scratchStore();
+  t.after(cleanup);
+  const c = new CommandClient();
+  storeWithClient(store, c);
+  store.state.view = openThread("t");
+
+  await store.sendTurn("/clear");
+
+  assert.deepEqual(c.sent, [{ type: "thread.clear", threadId: "t" }],
+    "no turn.send: the line is covey's own work, and an agent asked to /clear would answer in prose");
+  assert.equal(store.getState().notice?.tone, "success");
+});
+
+test("an ordinary message that starts with a slash still goes to the agent", async (t) => {
+  const { store, cleanup } = scratchStore();
+  t.after(cleanup);
+  const c = new CommandClient();
+  storeWithClient(store, c);
+  store.state.view = openThread("t");
+
+  // `/compact` is the SDK's, and `/clear the deck` is prose: every covey
+  // command takes no argument, so only the bare name is one.
+  await store.sendTurn("/compact");
+  await store.sendTurn("/clear the deck");
+
+  assert.deepEqual(c.sent.map((x: any) => x.type), ["turn.send", "turn.send"]);
+});
+
+test("a clear the daemon refuses says so, and says nothing else", async (t) => {
+  const { store, cleanup } = scratchStore();
+  t.after(cleanup);
+  const c = new CommandClient("interrupt the running turn first");
+  storeWithClient(store, c);
+  store.state.view = openThread("t");
+
+  await store.sendTurn("/clear");
+
+  assert.equal(store.getState().notice?.text, "interrupt the running turn first");
+  assert.equal(store.getState().notice?.tone, "error");
+});
+
+test("thread.cleared empties the open thread and lets go of the scroll", async (t) => {
+  const { store, cleanup } = scratchStore();
+  t.after(cleanup);
+  store.state.selected = { machine: "ws://fake", threadId: "t" };
+  store.state.view = { ...openThread("t"), items: new Map([["i0", item("i0", "hello")]]), hasMore: true };
+  store.state.scrollFromBottom = 40;
+  store.state.scrollAnchor = { id: "i0", offset: 2 };
+
+  (store as any).applyThread("ws://fake", "t", { seq: 9, kind: "thread.cleared" });
+
+  assert.equal(store.getState().view?.items.size, 0);
+  assert.equal(store.getState().view?.hasMore, false, "there is no older page behind an empty transcript");
+  // The scroll is a count of lines from the bottom, which means nothing
+  // against no lines: a kept count would leave the reader looking at nothing.
+  assert.equal(store.getState().scrollFromBottom, 0);
+  assert.equal(store.getState().scrollAnchor, null);
+});
+
 // ---- what the client keeps for every event it receives (issue #61) -----------
 
 /**

@@ -2090,6 +2090,21 @@ export type Command =
    * daemon merges on the next poll that finds it ready.
    */
   | { type: "thread.setMerge"; threadId: ThreadId; merge: MergePolicy; mergeMethod?: MergeMethod }
+  /**
+   * Empty the conversation and keep the thread (#16).
+   *
+   * Every item goes, the SDK session is dropped and its transcript deleted, so
+   * the next turn starts a process with no memory of what came before. The
+   * thread keeps its id, its project, its worktree, its secrets and its pull
+   * request: this clears the conversation and nothing else. The title goes
+   * back to the automatic state, so the next message names the thread again.
+   *
+   * The turn checkpoints stay. They describe real commits in the working tree,
+   * which the clear does not touch.
+   *
+   * Refused, with code `busy`, while a turn runs or a message is queued.
+   */
+  | { type: "thread.clear"; threadId: ThreadId }
   | { type: "thread.archive"; threadId: ThreadId; archived: boolean }
   | { type: "thread.pin"; threadId: ThreadId; pinned: boolean }
   | { type: "thread.delete"; threadId: ThreadId }
@@ -2212,6 +2227,13 @@ export type ThreadEvent =
   | { seq: number; kind: "item.upserted"; item: TimelineItem }
   | { seq: number; kind: "item.removed"; itemId: ItemId }
   | { seq: number; kind: "thread.updated"; thread: Thread }
+  /**
+   * Every item of the thread has gone (`thread.clear`, #16). One event rather
+   * than an `item.removed` for each, because a long transcript would be a
+   * thousand of them, and a client that reconnects reads this after the
+   * upserts it replays — so the empty map is what it ends with either way.
+   */
+  | { seq: number; kind: "thread.cleared" }
   /** The whole `/` menu, every time. The SDK replaces its list rather than
    *  patching it, so this event replaces the client's copy too. */
   | { seq: number; kind: "commands.updated"; commands: SlashCommandInfo[] };

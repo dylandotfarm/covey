@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { SlashCommandInfo } from "@covey/protocol";
-import { acceptCommand, commandLabel, commandMenu, commandToken } from "./commands.js";
+import { COVEY_COMMANDS, acceptCommand, commandLabel, commandMenu, commandToken, coveyCommand } from "./commands.js";
 import { uuid } from "./uuid.js";
 
 const sdk = (name: string, description = "", argumentHint = "", aliases?: string[]): SlashCommandInfo => ({
@@ -105,6 +105,45 @@ test("taking a row replaces the draft with the name and a space, which closes th
 test("a row shows the argument hint when the command takes arguments", () => {
   assert.equal(commandLabel(sdk("compact", "Free up context", "<instructions>")), "/compact <instructions>");
   assert.equal(commandLabel(sdk("resume", "Pick up a thread")), "/resume");
+});
+
+// ---- the commands covey answers itself (#16) -------------------------------
+
+test("every client offers the same covey commands, and /clear is one of them", () => {
+  // One list, so a command the TUI offers and the phone does not cannot exist.
+  assert.deepEqual(COVEY_COMMANDS.map((c) => c.name), ["clear"]);
+  assert.ok(COVEY_COMMANDS.every((c) => c.source === "covey"));
+  assert.ok(COVEY_COMMANDS.every((c) => c.description !== ""), "a row with no hint says nothing");
+  // None of them takes an argument, which is what lets `coveyCommand` ask for
+  // the bare name.
+  assert.ok(COVEY_COMMANDS.every((c) => c.argumentHint === ""));
+});
+
+test("a bare covey command is taken out of the send path", () => {
+  assert.equal(coveyCommand("/clear")?.name, "clear");
+  assert.equal(coveyCommand("  /clear  ")?.name, "clear");
+  assert.equal(coveyCommand("/CLEAR")?.name, "clear");
+});
+
+test("anything else goes to the agent", () => {
+  // The name has to stand alone: every covey command takes no argument, so a
+  // line with more in it is prose that happens to start with a slash.
+  assert.equal(coveyCommand("/clear the deck"), null);
+  assert.equal(coveyCommand("/clear\nand start again"), null);
+  // An SDK command is the agent's, and so is a path and ordinary prose.
+  assert.equal(coveyCommand("/compact"), null);
+  assert.equal(coveyCommand("/usr/local/bin"), null);
+  assert.equal(coveyCommand("clear"), null);
+  assert.equal(coveyCommand(""), null);
+  assert.equal(coveyCommand("tell me about /clear"), null);
+});
+
+test("the menu offers a covey command under the same token the composer reads", () => {
+  // The two halves have to agree: a row the menu offers for `/cl` and a send
+  // path that then hands `/clear` to the agent is a row that does nothing.
+  const menu = commandMenu([sdk("compact")], COVEY_COMMANDS, commandToken("/cl")!);
+  assert.deepEqual(menu.map((c) => c.name), ["clear"]);
+  assert.ok(coveyCommand(acceptCommand(menu[0]!).value.trim()));
 });
 
 // ---- uuid, on a runtime with no Web Crypto (#168) ---------------------------

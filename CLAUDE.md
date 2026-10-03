@@ -360,6 +360,22 @@
   the settings page in the web client. The rows a reader changed are a `toggled` set,
   never a list of open rows, because at `full` a tap shuts a row. No two rows share a
   key: a chain's is `chain:<id>`, never its head item's own id, or one tap opens both.
+- `/clear` empties the conversation and keeps the thread (#16). It is the first command
+  covey answers itself, and `COVEY_COMMANDS` in `@covey/client` is the whole list — one
+  list, because a command the TUI offers and the phone does not is a command the reader
+  cannot find. `coveyCommand` takes the line out of each client's send path, and a covey
+  command hides the SDK command of the same name: Claude Code's own `/clear` empties the
+  model's context and leaves covey's transcript on the screen. The name has to stand
+  alone, because none of these takes an argument. The daemon's half is `thread.clear`:
+  the items, the live session and the transcript go, the `sessionId` is new so the next
+  turn starts rather than resumes, and the thread keeps its worktree, its branch, its
+  secrets and its pull request. The checkpoints stay — they name real git trees and the
+  clear touches no file. **`lastMessageAt` is never reset**, or the thread falls to the
+  bottom of its project; `startTurn` names a thread again from the title alone, because
+  `titleIsAuto(t) && (firstMessage || t.title === "New thread")` is already satisfied by
+  putting the title back — and only an *automatic* title goes back, because a name the
+  reader typed is in no row and no undo gives it back. One `thread.cleared` event says it
+  all, never an `item.removed` per item.
 - Transcripts are keyed by thread id in the SDK session store on purpose (cwd-independent
   so threads can move between machines).
 - A thread's session is a subprocess of about 250 MB. That figure is `Pss` and never `Rss`:
