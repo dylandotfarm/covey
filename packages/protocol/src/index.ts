@@ -198,8 +198,8 @@ export interface MachineSettings {
   maxLiveSessions?: number | null;
   /**
    * Whether this daemon serves the web client for a phone. Absent or `null`
-   * means off. One machine in a fleet serves it; the TUI keeps it to one, and
-   * the machine's control panel turns it on and off.
+   * means off. One machine serves it, whatever fleet it is in; the TUI keeps it
+   * to one, and the machine's control panel turns it on and off.
    */
   webEnabled?: boolean | null;
   /**
@@ -213,6 +213,17 @@ export interface MachineSettings {
    * Off, the merge arrives as a turn and the thread stays on the screen.
    */
   archiveOnMerge?: boolean | null;
+  /**
+   * Which fleet this machine belongs to. Absent or `null` means the default
+   * fleet, `DEFAULT_FLEET`.
+   *
+   * A fleet is how a reader keeps two sets of machines apart — work and
+   * personal, on one tailnet. It is the machine's own answer and not the
+   * client's, so every client that dials the machine groups it the same way.
+   * The separation is real: a repository list, a project pool and a run's
+   * placement all stay inside one fleet.
+   */
+  fleet?: string | null;
   /**
    * Which addresses the daemon listens on: `loopback`, `tailnet` (plus
    * loopback), `all`, or one address. Changed while the daemon runs: it
@@ -330,16 +341,20 @@ export interface MachineAccess {
   addresses: WebAddress[];
   /**
    * The other machines the page should dial, so one address on a phone shows
-   * the whole fleet. The TUI hands the list to the machine that serves the
-   * page (`machine.fleet`), with each URL as the phone can reach it: a
-   * tailnet name or address, never loopback. Absent on a daemon that has not
-   * been given one, which reads as an empty list.
+   * every machine. The TUI hands the list to the machine that serves the page
+   * (`machine.peers`), with each URL as the phone can reach it: a tailnet name
+   * or address, never loopback. Absent on a daemon that has not been given
+   * one, which reads as an empty list.
+   *
+   * This is not a fleet. A fleet is what the reader groups machines into
+   * (`MachineSettings.fleet`); this list is every machine the page must dial,
+   * whatever fleet each one is in.
    */
-  fleet?: FleetMember[];
+  peers?: PeerMachine[];
 }
 
-/** One machine of the fleet, as a phone dials it. */
-export interface FleetMember {
+/** One machine the page dials, as a phone reaches it. */
+export interface PeerMachine {
   name: string;
   /** `ws://host:port`, reachable from the phone. */
   url: string;
@@ -2055,15 +2070,24 @@ export type Command =
       webEnabled?: boolean | null;
       /** Archive a thread when its pull request merges; `false` turns it off. */
       archiveOnMerge?: boolean | null;
+      /** Which fleet this machine belongs to; `null` or the default name puts it back in the default fleet. */
+      fleet?: string | null;
       /** Listen on these addresses from now on: `loopback`, `tailnet`, `all`, or one address. */
       bind?: string;
     }
   /**
    * The other machines the web client this daemon serves should dial. The
    * whole list, every time; the daemon keeps it and hands it to the page in
-   * `machine.access`. Only the TUI knows the fleet, so only the TUI sends it.
+   * `machine.access`. Only the TUI knows every machine, so only the TUI sends
+   * this.
    */
-  | { type: "machine.fleet"; machines: FleetMember[] }
+  | { type: "machine.peers"; machines: PeerMachine[] }
+  /**
+   * What `machine.peers` was called before fleets took the word. A covey
+   * older than fleets sends this name; the daemon reads it the same way. Do
+   * not send it from new code.
+   */
+  | { type: "machine.fleet"; machines: PeerMachine[] }
   | {
       type: "thread.create";
       projectId: ProjectId;
@@ -2791,6 +2815,13 @@ export interface SavedMachine {
   token?: string;
   /** Filled in after first successful hello. */
   machineId?: MachineId;
+  /**
+   * The fleet this machine last said it was in. A cache, not the truth: the
+   * machine declares its own fleet (`MachineSettings.fleet`), and this is what
+   * keeps an offline machine in the fleet the reader put it in instead of
+   * dropping it into the default one until it answers.
+   */
+  fleet?: string;
 }
 
 /**

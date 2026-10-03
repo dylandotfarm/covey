@@ -1,6 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { MACHINES_KEY, archiveKey, poolMachines, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { archiveKey, fleetMachines, fleetRowKey, machinesKey, poolMachines, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { DEFAULT_FLEET } from "@covey/client";
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -24,7 +25,7 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
             place the reader always looks says so. */}
         {state.clientStale
           ? <Text color={T.warning}>  ⚠ newer build on disk</Text>
-          : <Text color={T.subtle}>  {truncate(headerCount(rows, state), width - 9)}</Text>}
+          : <Text color={T.subtle}>  {truncate(headerCount(rows, state), headerRoom(width))}</Text>}
       </Box>
       {/* Painted from `cells`, not from `rows`: the blank lines above the
           projects and the scroll window have to be identical to what App uses
@@ -41,13 +42,35 @@ export function Sidebar({ state, rows, cells, cursor, width, focused }: { state:
   );
 }
 
-/** "3 projects · 2 machines": what the tree holds, at a glance. Read off the
- *  rows, which already hold one project row per group. */
+/**
+ * How many columns the count beside "covey" may take: the border takes one,
+ * the padding two, the word five, and the gap before the count two.
+ *
+ * One column over and Ink pays for it by shrinking a cell — and the cell it
+ * takes is the one holding "covey", so the header reads "cove". This row has
+ * the title bar's problem in miniature, and it is measured for the same
+ * reason.
+ */
+function headerRoom(width: number): number { return width - 10; }
+
+/**
+ * "3 projects · 2 machines": what the tree holds, at a glance. Read off the
+ * rows, which already hold one project row per group.
+ *
+ * With more than one fleet each fleet row says the same of itself, so the
+ * header leads with how many there are — the one number no row below it
+ * carries.
+ */
 function headerCount(rows: SidebarRow[], state: AppState): string {
-  let p = 0;
-  for (const r of rows) if (r.kind === "project") p++;
+  let p = 0, f = 0;
+  for (const r of rows) { if (r.kind === "project") p++; else if (r.kind === "fleet") f++; }
   const m = state.order.length;
-  return `${p} project${p === 1 ? "" : "s"} · ${m} machine${m === 1 ? "" : "s"}`;
+  const machines = `${m} machine${m === 1 ? "" : "s"}`;
+  // With fleets, the projects are counted on every fleet row already, and
+  // three counts do not fit the row. The number of fleets is the one nothing
+  // below says, so it takes the place of the one every row below repeats.
+  if (f > 1) return `${f} fleets · ${machines}`;
+  return `${p} project${p === 1 ? "" : "s"} · ${machines}`;
 }
 
 /**
@@ -116,6 +139,18 @@ export function threadMark(t: Thread, attention: "approval" | "done" | "error" |
  * projects, and keeps the one column they have.
  */
 export function threadIndent(depth: number): number { return Math.max(1, 1 + 2 * (depth - 1)); }
+/**
+ * How far in a heading starts: a fleet, a project, the machines section, and
+ * one machine row.
+ *
+ * Every one of these used to spend a literal — one column for a project, three
+ * for a machine — because the tree had one top level. A fleet puts a level
+ * above the projects, so the number is read from the depth instead, and the
+ * figures a reader has always seen come out of it unchanged when there is one
+ * fleet: a project at depth 0 keeps its single column, and a machine at depth
+ * 1 keeps its three.
+ */
+export function headIndent(depth: number): number { return 1 + 2 * depth; }
 export function runIndent(depth: number): number { return depth <= 0 ? 1 : threadIndent(depth) + 2; }
 export function memberIndent(depth: number): number { return runIndent(depth - 1) + 2; }
 
@@ -143,10 +178,11 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // A connected machine with nothing on it says so, and what to press:
       // its emptiness has no row of its own now that projects lead the tree.
       const meta = m.conn === "offline" ? "offline · enter" : m.conn !== "connected" ? m.conn : behind ? "⚠ old build" : m.projects.size === 0 ? "no projects · a" : (m.info?.os ?? "");
+      const indent = headIndent(row.depth);
       return (
-        <Box paddingLeft={3} paddingRight={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={dotColor}>{dot} </Text>
-          <Text color={T.text} bold>{truncate(name.toUpperCase(), width - 8 - meta.length)}</Text>
+          <Text color={T.text} bold>{truncate(name.toUpperCase(), width - indent - 5 - meta.length)}</Text>
           {/* The words that say what to press are held to the same bar as the
               mark. Every other row's meta keeps `T.subtle`, which the sidebar
               has always used and which this change does not widen. */}
@@ -155,23 +191,53 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       );
     }
     case "machines": {
-      const open = state.expanded[MACHINES_KEY] ?? false;
-      const offline = state.order.filter((k) => state.machines.get(k)?.conn === "offline").length;
-      const behind = state.order.filter((k) => { const x = state.machines.get(k); return x?.conn === "connected" && buildSkew(state.clientBuild, x.info?.build) === "behind"; }).length;
+      // One section per fleet, so the counts are that fleet's own and not the
+      // whole client's: a reader looking at `work` is told how many work
+      // machines are away, not how many machines are away somewhere.
+      const open = state.expanded[machinesKey(row.fleet ?? DEFAULT_FLEET)] ?? false;
+      const keys = fleetMachines(state, row.fleet ?? DEFAULT_FLEET);
+      const offline = keys.filter((k) => state.machines.get(k)?.conn === "offline").length;
+      const behind = keys.filter((k) => { const x = state.machines.get(k); return x?.conn === "connected" && buildSkew(state.clientBuild, x.info?.build) === "behind"; }).length;
       // Furled, the section still says what needs a person: a machine the
       // client no longer dials, or one on an old build.
-      const meta = offline ? `${offline} offline` : behind ? `${behind} old build` : String(state.order.length);
-      // The padding on both sides, the caret, its space, and the two before the meta.
+      const meta = offline ? `${offline} offline` : behind ? `${behind} old build` : String(keys.length);
+      const indent = headIndent(row.depth);
+      // The indent, the caret, its space, the two before the meta, and the padding on the right.
       return (
-        <Box paddingX={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>
-          <Text color={T.text} bold> {truncate("MACHINES", width - 6 - meta.length)}</Text>
+          <Text color={T.text} bold> {truncate("MACHINES", width - indent - 5 - meta.length)}</Text>
           <Text color={offline ? connColor("offline") : behind ? T.warning : T.faint}>  {meta}</Text>
         </Box>
       );
     }
+    case "fleet": {
+      // The row the reader makes a second of: the name of the fleet, what it
+      // holds, and a fold over the whole of it. Painted only when there is
+      // more than one fleet, so this row never appears to a reader who has
+      // not asked for it.
+      const open = state.expanded[fleetRowKey(row.fleet ?? DEFAULT_FLEET)] ?? true;
+      const { busy = false, waiting = false, count = 0, machineCount = 0 } = row;
+      // Furled, the fold may not hide that something inside needs a person —
+      // the rule a project row keeps, one level up.
+      const agg = !open && (waiting || busy)
+        ? <Text color={waiting ? T.awaiting : T.working}>●</Text>
+        : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
+      const meta = `${count} project${count === 1 ? "" : "s"} · ${machineCount} machine${machineCount === 1 ? "" : "s"}`;
+      const indent = headIndent(row.depth);
+      // The indent, the caret, the space after it, the two before the meta,
+      // and the padding on the right. The name takes what the count leaves,
+      // because the count is a fixed short phrase and the name is a reader's.
+      return (
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
+          {agg}
+          <Text color={T.text} bold> {truncate(row.fleet ?? "", Math.max(1, width - indent - 5 - meta.length))}</Text>
+          <Text color={T.faint}>  {meta}</Text>
+        </Box>
+      );
+    }
     case "empty":
-      return <Box paddingLeft={1} height={1} backgroundColor={bg}><Text color={T.subtle} italic>no projects — press a</Text></Box>;
+      return <Box paddingLeft={headIndent(row.depth)} height={1} backgroundColor={bg}><Text color={T.subtle} italic>no projects — press a</Text></Box>;
     case "project": {
       const open = state.expanded[row.groupKey!] ?? true;
       // Every machine in the pool answers the three questions: a fold may
@@ -200,11 +266,12 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // the same title — the base is the only thing that tells the work on
       // `main` from the work on a feature branch. It takes half the room at
       // most, so the title still reads.
-      const room = Math.max(1, width - 5 - num.length - pool.length);
+      const indent = headIndent(row.depth);
+      const room = Math.max(1, width - indent - 4 - num.length - pool.length);
       const branch = row.project!.baseBranch;
       const base = branch ? ` · ${truncate(branch, Math.max(3, Math.floor(room / 2) - 3))}` : "";
       return (
-        <Box paddingLeft={1} paddingRight={1} height={1} backgroundColor={bg}>
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
           <Text color={T.text} bold> {truncate(row.project!.title, Math.max(1, room - base.length))}</Text>
           <Text color={T.subtle}>{base}</Text>

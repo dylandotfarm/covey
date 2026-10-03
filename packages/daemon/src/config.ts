@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { homedir, hostname, platform, arch, totalmem } from "node:os";
 import { join } from "node:path";
 import { randomUUID, randomBytes } from "node:crypto";
-import type { FleetMember, MachineSettings, PermissionMode } from "@covey/protocol";
+import { DEFAULT_FLEET, cleanFleet, isDefaultFleet } from "@covey/client";
+import type { MachineSettings, PeerMachine, PermissionMode } from "@covey/protocol";
 
 /** Cross-platform app data dir: XDG on Linux, ~/Library/Application Support on
  *  macOS, %APPDATA% on Windows. Override with COVEY_HOME. */
@@ -73,8 +74,10 @@ export interface DaemonConfig {
   webEnabled?: boolean | null;
   /** Archive a thread when its pull request merges; null = the default, which is on. */
   archiveOnMerge?: boolean | null;
+  /** Which fleet this machine belongs to; null = the default fleet. */
+  fleet?: string | null;
   /** The machines the web client dials besides this one. The TUI sets it. */
-  fleet?: FleetMember[];
+  peers?: PeerMachine[];
 }
 
 /**
@@ -162,7 +165,7 @@ function readConfigFile(): Record<string, unknown> {
 }
 
 /** Settings written before these fields existed simply read as "no opinion". */
-export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled" | "archiveOnMerge" | "bind">>): MachineSettings {
+export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled" | "archiveOnMerge" | "fleet" | "bind">>): MachineSettings {
   return {
     defaultModel: cfg.defaultModel ?? null,
     defaultPermissionMode: cfg.defaultPermissionMode ?? null,
@@ -180,6 +183,17 @@ export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" |
     // written `false` turns it off. `COVEY_ARCHIVE_ON_MERGE=0` is the escape
     // for a daemon with no TUI to turn it off in.
     archiveOnMerge: cfg.archiveOnMerge ?? (process.env.COVEY_ARCHIVE_ON_MERGE === "0" ? false : null),
+    // The default fleet is what a machine that names none is in, so only
+    // another name is written down and `daemon.json` holds nothing for most
+    // machines.
+    //
+    // No environment escape, unlike the settings around it. The others read
+    // `cfg.x ?? process.env.X`, which means a written `null` falls back to the
+    // environment — and `null` is exactly how "the default fleet" is written.
+    // A machine started with one named in its environment could then never be
+    // moved back, however many times a reader pressed the row that says it
+    // moved. A fleet is set from the machine's control panel, like its name.
+    fleet: fleetSetting(cfg.fleet),
     ...(cfg.bind ? { bind: cfg.bind } : {}),
   };
 }
@@ -205,18 +219,44 @@ export function saveMachineSettings(patch: Partial<MachineSettings>): MachineSet
   return machineSettings(next as DaemonConfig);
 }
 
-/** Keep the fleet list the TUI sent, beside the settings. The whole list, every time. */
-export function saveFleet(fleet: FleetMember[]): FleetMember[] {
-  const cur = readConfigFile();
-  mkdirSync(dataDir(), { recursive: true });
-  writeFileSync(configFile(), JSON.stringify({ ...cur, fleet }, null, 2) + "\n", { mode: 0o600 });
-  return fleet;
+/**
+ * The fleet name to write down: another name as it was typed, or null for the
+ * default fleet. A machine in the default fleet records nothing, so a reader
+ * who never made a second fleet has an unchanged `daemon.json`.
+ */
+export function fleetSetting(name?: unknown): string | null {
+  // `unknown`, because a daemon.json written before fleets took the word
+  // holds an array of peers under this key. Anything that is not a name is
+  // no name.
+  const n = typeof name === "string" ? cleanFleet(name) : null;
+  return !n || isDefaultFleet(n) ? null : n;
 }
 
-/** The fleet list on disk, or none. Read on demand: a page asks for it seldom. */
-export function readFleet(): FleetMember[] {
-  const f = readConfigFile().fleet;
-  return Array.isArray(f) ? (f as FleetMember[]) : [];
+/** This machine's fleet, as a name rather than as a setting. */
+export function fleetName(cfg: Pick<DaemonConfig, "fleet">): string {
+  return fleetSetting(cfg.fleet) ?? DEFAULT_FLEET;
+}
+
+/** Keep the peer list the TUI sent, beside the settings. The whole list, every time. */
+export function savePeers(peers: PeerMachine[]): PeerMachine[] {
+  const cur = readConfigFile();
+  mkdirSync(dataDir(), { recursive: true });
+  writeFileSync(configFile(), JSON.stringify({ ...cur, peers }, null, 2) + "\n", { mode: 0o600 });
+  return peers;
+}
+
+/**
+ * The peer list on disk, or none. Read on demand: a page asks for it seldom.
+ *
+ * A daemon written before fleets took the word kept this list under `fleet`,
+ * which now names something else. The old key is read once more here so that
+ * an update does not leave a phone dialling one machine until the TUI next
+ * sends the list.
+ */
+export function readPeers(): PeerMachine[] {
+  const cfg = readConfigFile() as { peers?: unknown; fleet?: unknown };
+  const p = Array.isArray(cfg.peers) ? cfg.peers : Array.isArray(cfg.fleet) ? cfg.fleet : [];
+  return p as PeerMachine[];
 }
 
 export function loadDaemonConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {

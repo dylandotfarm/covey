@@ -3,9 +3,9 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { budgetValue, hiddenPanel, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
+import { DEFAULT_FLEET, budgetValue, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
-import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
+import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, machineFleet, machinesKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth, type Line } from "../lines.js";
 import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
@@ -521,9 +521,12 @@ export function App({ store }: { store: Store }) {
    * goes. Read from the store, not from this render's `state`: the pick
    * opens after a network wait, and a machine may have connected meanwhile.
    */
-  const machineOptions = (except: string[] = []): PickOption[] => {
+  const machineOptions = (except: string[] = [], fleet?: string): PickOption[] => {
     const live = store.getState();
-    return live.order.filter((k) => !except.includes(k)).map((k) => {
+    // A clone goes to the machines of one fleet. Offering the rest would make
+    // the reader the only thing keeping work off the machine at home.
+    const inFleet = fleet === undefined ? null : new Set(fleetMachines(live, fleet));
+    return live.order.filter((k) => !except.includes(k) && (!inFleet || inFleet.has(k))).map((k) => {
       const m = live.machines.get(k)!;
       const hint = m.conn === "connected" ? (m.info?.projectsDir ?? m.info?.os ?? "") : m.conn === "offline" ? "offline · clones when it answers" : m.conn;
       return { id: k, label: machineLabel(live, k), hint };
@@ -532,16 +535,17 @@ export function App({ store }: { store: Store }) {
 
   /**
    * New project: the repository, then the machines that hold it. The pick
-   * offers every machine, connected or not. An offline machine clones when it
-   * next answers. The connected ones start marked, because a pool is usually
-   * the whole fleet.
+   * offers every machine *of the fleet*, connected or not. An offline machine
+   * clones when it next answers. The connected ones start marked, because a
+   * pool is usually the whole of its fleet.
    */
-  /** The last step of a new project: which machines clone `url`. */
-  const chooseMachines = (url: string, baseBranch?: string) => {
+  /** The last step of a new project: which machines of `fleet` clone `url`. */
+  const chooseMachines = (url: string, fleet: string, baseBranch?: string) => {
     const live = store.getState();
-    const connected = live.order.filter((k) => live.machines.get(k)?.conn === "connected");
+    const keys = fleetMachines(live, fleet);
+    const connected = keys.filter((k) => live.machines.get(k)?.conn === "connected");
     const from = baseBranch ? ` from ${baseBranch}` : "";
-    openPickMany(`Clone ${url}${from} on which machines?`, machineOptions(), connected, (ids) => {
+    openPickMany(`Clone ${url}${from} on which machines?`, machineOptions([], fleet), connected, (ids) => {
       store.setOverlay(null);
       if (ids.length === 0) { store.notify("no machine picked; nothing cloned", "error"); return; }
       void store.createProjectOn(ids, url, undefined, baseBranch);
@@ -555,28 +559,28 @@ export function App({ store }: { store: Store }) {
    * stays open while `git ls-remote` runs on `asker`; a remote that cannot be
    * read goes straight to the machines with the default branch as the base.
    */
-  const chooseBranch = (url: string, asker: string | null) => {
-    openPick(`Base branch of ${url}`, [{ id: "wait", label: "reading its branches…", hint: "" }], (id) => { if (id === "wait") chooseMachines(url); });
+  const chooseBranch = (url: string, asker: string | null, fleet: string) => {
+    openPick(`Base branch of ${url}`, [{ id: "wait", label: "reading its branches…", hint: "" }], (id) => { if (id === "wait") chooseMachines(url, fleet); });
     const opened = store.getState().overlay;
     void store.listBranches(url, asker).then((r) => {
       if (store.getState().overlay !== opened) return;
-      if (r.error) { store.notify(r.error, "error"); chooseMachines(url); return; }
-      openPick(`Base branch of ${url}`, branchOptions(r), (id) => chooseMachines(url, id === DEFAULT_BASE ? undefined : id));
+      if (r.error) { store.notify(r.error, "error"); chooseMachines(url, fleet); return; }
+      openPick(`Base branch of ${url}`, branchOptions(r), (id) => chooseMachines(url, fleet, id === DEFAULT_BASE ? undefined : id));
     });
   };
 
   /** A repository by URL, for one `gh` cannot list: another host, or no `gh`. */
-  const askUrl = () => openInput("Repository to clone", (v) => {
+  const askUrl = (fleet: string) => openInput("Repository to clone", (v) => {
     const url = v.trim();
     if (!url) { store.setOverlay(null); return; }
-    chooseBranch(url, null);
+    chooseBranch(url, null, fleet);
   }, "", "git@github.com:org/repo.git or https://…");
 
   /**
    * A new repository on GitHub: its name, then private or public. `gh` on
    * `asker` makes it, and the clone goes to the machines picked next.
    */
-  const newRepo = (asker: string) => openInput("New repository: name, or owner/name", (name) => {
+  const newRepo = (asker: string, fleet: string) => openInput("New repository: name, or owner/name", (name) => {
     const n = name.trim();
     if (!n) { store.setOverlay(null); return; }
     openPick(`Make ${n}`, [
@@ -588,7 +592,7 @@ export function App({ store }: { store: Store }) {
       void store.createRepo(asker, { name: n, visibility: vis === "public" ? "public" : "private" }).then((made) => {
         if (!made) return;
         store.notify(`made ${made.nameWithOwner}`, "success");
-        chooseMachines(made.cloneUrl);
+        chooseMachines(made.cloneUrl, fleet);
       });
     });
   }, "", "my-repo, or acme/my-repo");
@@ -604,26 +608,32 @@ export function App({ store }: { store: Store }) {
    * sidebar, and an answer that arrives after the reader left the pick is
    * dropped rather than painted over whatever they opened next.
    */
-  const addProject = () => {
-    if (state.order.length === 0) { store.notify("add a machine first", "error"); return; }
-    if (store.ghMachines().length === 0) { askUrl(); return; }
+  const addProject = (fleet = contextFleet()) => {
+    const keys = fleetMachines(state, fleet);
+    if (keys.length === 0) { store.notify("add a machine first", "error"); return; }
+    // The repositories come from a machine *of this fleet*, never from the
+    // computer the client runs on and never from another fleet's machine. A
+    // `gh` logged in at work lists the work repositories, and that is the
+    // whole point of keeping the two apart.
+    if (store.ghMachines(fleet).length === 0) { askUrl(fleet); return; }
     const fixed: PickOption[] = [
       { id: "new", label: "New repository…", hint: "gh repo create" },
       { id: "url", label: "A URL…", hint: "any host" },
     ];
     // A clone URL always has a `:` or a `/`, so it can never read as a fixed row's id.
     const onPick = (id: string, asker: string | null) => {
-      if (id === "new") return asker ? newRepo(asker) : askUrl();
-      if (id === "url") return askUrl();
-      chooseBranch(id, asker);
+      if (id === "new") return asker ? newRepo(asker, fleet) : askUrl(fleet);
+      if (id === "url") return askUrl(fleet);
+      chooseBranch(id, asker, fleet);
     };
-    openPick("Repository", [...fixed, { id: "wait", label: "reading your repositories…", hint: "" }], (id) => onPick(id === "wait" ? "url" : id, null));
+    const title = store.fleets().length > 1 ? `Repository for ${fleet}` : "Repository";
+    openPick(title, [...fixed, { id: "wait", label: "reading your repositories…", hint: "" }], (id) => onPick(id === "wait" ? "url" : id, null));
     const opened = store.getState().overlay;
-    void store.listRepos().then(({ repos, error, machine }) => {
+    void store.listRepos(fleet).then(({ repos, error, machine }) => {
       if (store.getState().overlay !== opened) return;
       if (error) store.notify(error, "error");
       const rows = [...fixed, ...repoOptions(repos)];
-      store.setOverlay({ kind: "pick", title: "Repository", options: rows, onPick: (id) => onPick(id, machine) });
+      store.setOverlay({ kind: "pick", title, options: rows, onPick: (id) => onPick(id, machine) });
     });
   };
 
@@ -644,8 +654,8 @@ export function App({ store }: { store: Store }) {
     // offered: the clone goes in beside it. So is a machine that holds the
     // repository on another base — that is another project.
     const inPool = [...g.members.filter((x) => x.project.kind === "clone").map((x) => x.machine), ...store.pendingFor(url, baseBranch)];
-    const options = machineOptions(inPool);
-    if (options.length === 0) { store.notify("every machine already has this project"); return; }
+    const options = machineOptions(inPool, g.fleet);
+    if (options.length === 0) { store.notify(`every machine in ${g.fleet} already has this project`); return; }
     openPickMany(`Add ${g.title} to which machines?`, options, [], (ids) => {
       store.setOverlay(null);
       if (ids.length) void store.createProjectOn(ids, url, g.title, baseBranch);
@@ -837,6 +847,9 @@ export function App({ store }: { store: Store }) {
       { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
       // On unless the machine says otherwise, so an absent setting reads as on.
       { id: "archive", label: `Archive when merged: ${settings.archiveOnMerge === false ? "off" : "on"}`, hint: settings.archiveOnMerge === false ? "the merge arrives as a turn" : "no turn when a watch merges" },
+      // A fleet is the machine's own answer, so this is where it is set: every
+      // client reads it off the machine and groups it the same way.
+      { id: "fleet", label: `Fleet: ${machineFleet(state, machineKey!)}`, hint: "which machines this one works beside" },
       ...(settings.bind ? [{ id: "bind", label: `Reachable on: ${bindLabel(settings.bind)}`, hint: "where the daemon listens; changes at once" }] : []),
       // The memory dial of this machine. A session is a subprocess of about
       // 250 MB, so the ceiling is what the reader is really setting; the hint
@@ -898,6 +911,7 @@ export function App({ store }: { store: Store }) {
             : "the merge arrives as a turn"}`);
           return;
         }
+        case "fleet": return pickFleet(`Which fleet is ${info.name} in?`, (f) => void store.setMachineFleet(machineKey!, f), true, machineFleet(state, machineKey!));
         case "bind": return openPick(`Where ${info.name} listens`, BIND_MODES.map((o) => ({ ...o, hint: o.id === settings.bind ? "current" : o.hint })), (bid) => {
           store.setOverlay(null);
           if (bid === settings.bind) return;
@@ -928,6 +942,111 @@ export function App({ store }: { store: Store }) {
       }
     });
   };
+
+  /**
+   * Which fleet an act belongs to: the row under the cursor, else the machine
+   * the open thread is on, else the default fleet.
+   *
+   * Everything a fleet scopes — the repositories offered for a new project,
+   * the machines a clone goes to, where a run places — is read from here, so
+   * one rule says it once.
+   */
+  const contextFleet = (): string => {
+    const row = currentRow;
+    if (row?.fleet) return row.fleet;
+    if (row?.machine) return machineFleet(state, row.machine);
+    return contextMachine ? machineFleet(state, contextMachine) : DEFAULT_FLEET;
+  };
+
+  /** Ask for a machine's address, dial it, and put it in `fleet`. */
+  const askMachine = (fleet: string) => openInput(`Machine URL${isDefaultFleet(fleet) ? "" : ` for ${fleet}`}`, (v) => {
+    store.setOverlay(null);
+    const [url, token] = v.trim().split(/\s+/);
+    if (!url) return;
+    let host: string;
+    try { host = new URL(url).hostname; } catch { store.notify(`${url} is not a ws:// URL`, "error"); return; }
+    store.addMachine({ name: host, url, token }, true, fleet);
+  }, "ws://", "ws://host.tailnet.ts.net:3790 [token]");
+
+  /**
+   * Which fleet to act in, when the reader has more than one and the act is
+   * not already on a fleet's row. With one fleet there is nothing to ask, so
+   * nothing is asked.
+   */
+  const pickFleet = (title: string, then: (fleet: string) => void, offerNew = false, current?: string) => {
+    const fleets = store.fleets();
+    if (fleets.length <= 1 && !offerNew) return then(fleets[0] ?? DEFAULT_FLEET);
+    const rows: PickOption[] = fleets.map((f) => {
+      const n = fleetMachines(state, f).length;
+      return { id: `f:${f}`, label: f, hint: current && fleetKey(f) === fleetKey(current) ? "current" : `${n} machine${n === 1 ? "" : "s"}` };
+    });
+    // A name no fleet can take, so a fleet called `new` is still pickable.
+    if (offerNew) rows.push({ id: "\0new", label: "New fleet…", hint: "name it first" });
+    openPick(title, rows, (id) => {
+      store.setOverlay(null);
+      if (id === "\0new") return newFleet(then);
+      then(id.slice(2));
+    });
+  };
+
+  /** A fleet the reader names, and then whatever asked for it. */
+  const newFleet = (then: (fleet: string) => void) => openInput("New fleet", (v) => {
+    const name = v.trim();
+    const bad = fleetNameError(name);
+    if (bad) { store.notify(bad, "error"); return; }
+    store.setOverlay(null);
+    then(name);
+  }, "", "work, personal, …");
+
+  /**
+   * A fleet's own panel, on enter on its row: what a fleet is for is the
+   * machines in it and the work on them, so the panel adds one of each. A
+   * fleet is not a thing covey stores — it is the name its machines answer
+   * with — so there is nothing here to delete: move the last machine out and
+   * the fleet goes with it.
+   */
+  const fleetPanel = (fleet: string) => {
+    const keys = fleetMachines(state, fleet);
+    const open = store.isExpanded(fleetRowKey(fleet), true);
+    const opts: PickOption[] = [
+      { id: "fold", label: open ? "Fold this fleet" : "Unfold this fleet", hint: "← and →" },
+      { id: "machine", label: "Add a machine — ws://host:port", hint: "its tailnet address" },
+      { id: "project", label: "Add a project — a repository, cloned here", hint: `${keys.length} machine${keys.length === 1 ? "" : "s"}` },
+      ...(isDefaultFleet(fleet) ? [] : [{ id: "rename", label: "Rename this fleet", hint: "every machine in it" }]),
+    ];
+    openPick(`${fleet} — ${keys.length} machine${keys.length === 1 ? "" : "s"}`, opts, (id) => {
+      store.setOverlay(null);
+      switch (id) {
+        case "fold": return store.toggleExpanded(fleetRowKey(fleet), true);
+        case "machine": return askMachine(fleet);
+        case "project": return addProject(fleet);
+        case "rename": return renameFleet(fleet);
+      }
+    });
+  };
+
+  /**
+   * Rename a fleet: write the new name on every machine in it.
+   *
+   * The machines are the only record of a fleet, so a machine that is away
+   * keeps the old name and splits the fleet in two until it is renamed as
+   * well. The notice says which, rather than letting the reader find the
+   * second row themselves.
+   */
+  const renameFleet = (fleet: string) => openInput(`Rename ${fleet}`, (v) => {
+    const name = v.trim();
+    const bad = fleetNameError(name);
+    if (bad) { store.notify(bad, "error"); return; }
+    store.setOverlay(null);
+    const keys = fleetMachines(state, fleet);
+    const here = keys.filter((k) => state.machines.get(k)?.conn === "connected");
+    const away = keys.length - here.length;
+    void Promise.all(here.map((k) => store.setMachineFleet(k, name, true))).then(() => {
+      store.notify(away
+        ? `${fleet} is now ${name}; ${away} machine${away === 1 ? " is" : "s are"} away and still in ${fleet}`
+        : `${fleet} is now ${name}`, away ? "warning" : "success");
+    });
+  }, fleet, "work, personal, …");
 
   /** The connected daemon that runs on this machine, if the TUI has one. */
   const localMachineKey = () => state.order.find((k) => isLoopbackUrl(k) && state.machines.get(k)?.conn === "connected");
@@ -1293,12 +1412,13 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults, session memory", hint: "enter on a machine" });
     // Only offered when there is something to retry, so the list does not grow
-    // a row that does nothing on a fleet that is all up.
+    // a row that does nothing when every machine is up.
     const offline = state.order.filter((k) => state.machines.get(k)?.conn === "offline");
     if (offline.length) opts.push({ id: "retry", label: `Retry ${offline.length === 1 ? state.machines.get(offline[0]!)!.saved.name : `${offline.length} offline machines`}`, hint: "the client stopped dialling" });
     opts.push({ id: "updateclient", label: "Update covey — pull, rebuild, relaunch this client", hint: store.clientSource?.commit ?? "" });
-    opts.push({ id: "addmachine", label: "Add machine (ws://host:port)" });
+    opts.push({ id: "addmachine", label: "Add machine (ws://host:port)", hint: store.fleets().length > 1 ? "into a fleet" : "" });
     opts.push({ id: "rmmachine", label: "Remove machine" });
+    opts.push({ id: "newfleet", label: "New fleet — a second set of machines, kept apart", hint: store.fleets().filter((f) => f !== DEFAULT_FLEET).join(" · ") });
     opts.push({ id: "lod", label: `Detail: ${LOD_LABEL[state.lod].label}`, hint: "ctrl+o" });
     opts.push({ id: "settings", label: `Settings — theme, detail, the bell`, hint: themeFor(store.theme).label });
     opts.push({ id: "help", label: "Keyboard help", hint: "?" });
@@ -1336,7 +1456,11 @@ export function App({ store }: { store: Store }) {
         case "machine": return machinePanel();
         case "retry": { for (const k of offline) store.retryMachine(k); return; }
         case "updateclient": return updateClient();
-        case "addmachine": return openInput("Machine URL", (v) => { store.setOverlay(null); const [url, token] = v.split(/\s+/); if (url) store.addMachine({ name: new URL(url).hostname, url, token }); }, "ws://", "ws://host.tailnet.ts.net:3790 [token]");
+        // The fleet first, because a machine joins one at the moment it is
+        // added: the client tells it so at its first hello, and a machine
+        // added into the wrong fleet has to be moved from its own panel.
+        case "addmachine": return pickFleet("Add a machine to which fleet?", askMachine, true);
+        case "newfleet": return newFleet(askMachine);
         case "rmmachine": return openPick("Remove machine", state.order.map((k) => ({ id: k, label: state.machines.get(k)!.saved.name, hint: k })), (k) => { store.setOverlay(null); store.removeMachine(k); });
         case "lod": return lodPick();
         case "settings": return settingsPanel();
@@ -1364,7 +1488,7 @@ export function App({ store }: { store: Store }) {
         return;
       }
       case "project": return store.toggleExpanded(row.groupKey!);
-      case "machines": return store.toggleExpanded(MACHINES_KEY, false);
+      case "machines": return store.toggleExpanded(machinesKey(row.fleet ?? DEFAULT_FLEET), false);
       case "run": {
         setOvCursor(0);
         return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
@@ -1380,7 +1504,8 @@ export function App({ store }: { store: Store }) {
       }
       case "archived": return store.toggleExpanded(archiveKey(row.groupKey!), false);
       case "machine": return machinePanel(row.machine);
-      case "empty": return addProject();
+      case "fleet": return fleetPanel(row.fleet!);
+      case "empty": return addProject(row.fleet);
     }
   };
 
@@ -2178,6 +2303,9 @@ export function App({ store }: { store: Store }) {
     const groupOf = (r: SidebarRow): { key: string; dflt: boolean } | null =>
       r.kind === "thread" && r.group ? { key: threadGroupKey(r.machine, r.thread!.id), dflt: false }
       : r.kind === "run" ? { key: runKey(r.machine, r.run!.id), dflt: true }
+      // A fleet is open unless the reader furled it, the way a run is: what is
+      // inside it is the work, and the work is what the sidebar is for.
+      : r.kind === "fleet" ? { key: fleetRowKey(r.fleet!), dflt: true }
       : null;
     if (key.return || input === "l" || key.rightArrow) {
       // → unfurls a furled group, the way it unfurls a project. enter always
@@ -2195,7 +2323,15 @@ export function App({ store }: { store: Store }) {
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
       if (row.archived) { const k = archiveKey(row.groupKey!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
-      if (row.kind === "machine") { if (store.isExpanded(MACHINES_KEY, false)) store.toggleExpanded(MACHINES_KEY, false); return; }
+      if (row.kind === "machine" || row.kind === "machines") {
+        const k = machinesKey(row.fleet ?? DEFAULT_FLEET);
+        if (store.isExpanded(k, false)) { store.toggleExpanded(k, false); return; }
+        // A furled machines section: ← leaves the fleet, which is the row it
+        // sits under, so ←← is the way out of a fleet from any row in it.
+        if (row.fleet) { const at = rows.findIndex((r) => r.kind === "fleet" && r.fleet === row.fleet); if (at >= 0) { setCursorKey(rows[at]!.key); return; } }
+        return;
+      }
+      if (row.kind === "fleet") { const k = fleetRowKey(row.fleet!); if (store.isExpanded(k, true)) store.toggleExpanded(k, true); return; }
       // A member row carries its run too, so the kinds are told apart here: a
       // member's parent is the run it is in, and a run's is the thread that
       // asked for it. One ← that walked a member all the way out to the thread
@@ -2238,7 +2374,12 @@ export function App({ store }: { store: Store }) {
         const at = parent ? rows.findIndex((r) => r.kind === "thread" && r.machine === row.machine && r.thread!.id === parent) : -1;
         if (at >= 0) { setCursorKey(rows[at]!.key); return; }
       }
-      if (row.groupKey) { if (store.isExpanded(row.groupKey)) store.toggleExpanded(row.groupKey); }
+      if (row.groupKey) {
+        if (store.isExpanded(row.groupKey)) { store.toggleExpanded(row.groupKey); return; }
+        // A furled project: ← walks out to the fleet above it, the way it
+        // walks a child thread out to its parent.
+        if (row.kind === "project" && row.fleet) { const at = rows.findIndex((r) => r.kind === "fleet" && r.fleet === row.fleet); if (at >= 0) setCursorKey(rows[at]!.key); }
+      }
       return;
     }
     if (input === "n") { if (row.projectId) void newThread(row.machine, row.projectId); return; }

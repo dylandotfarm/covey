@@ -6,7 +6,7 @@ import { transcribe, TranscribeError } from "./transcribe.js";
 import { serveApk } from "./apk.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
-import { readFleet, type DaemonConfig } from "./config.js";
+import { readPeers, type DaemonConfig } from "./config.js";
 import { listRepos, createRepo, cloneUrlsFor, GH_CWD } from "./repos.js";
 import { listRemoteBranches } from "./git.js";
 import { findWebRoots, serveWeb } from "./web.js";
@@ -342,7 +342,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
       case "machine.access":
         // Every connection here passed `authenticate`, so it may hold the
         // token: a tailnet peer is the owner, and the others already have it.
-        return { token: o.config.token, addresses: webAddresses({ port: o.config.port, bind: o.config.bind, tailnetName: tailnet?.dnsName, tailnetIps: tailnet?.ips }), fleet: readFleet() };
+        return { token: o.config.token, addresses: webAddresses({ port: o.config.port, bind: o.config.bind, tailnetName: tailnet?.dnsName, tailnetIps: tailnet?.ips }), peers: readPeers() };
       case "machine.update":
         return o.updater.start({ restart: p.restart });
       case "run.issues":

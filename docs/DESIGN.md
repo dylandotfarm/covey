@@ -370,15 +370,39 @@ daemon serves it beside `/health`, so a machine that runs covey already runs the
   connection is no longer the http server's to close; the daemon test proves both. A
   `--bind` flag still wins at start and is never written, so what the machine reports is
   where it listens, not what the file says.
-- **The page dials the fleet.** A daemon holds no list of the others; the TUI does. So
-  `store.fleetFor` builds the list for the machine that serves the page — every other
+- **The page dials every machine.** A daemon holds no list of the others; the TUI does. So
+  `store.peersFor` builds the list for the machine that serves the page — every other
   machine, with a URL the phone can reach (a loopback entry becomes the machine's tailnet
-  name), the server itself left out — and sends it as `machine.fleet` when the web server
+  name), the server itself left out — and sends it as `machine.peers` when the web server
   starts there, when the machine list changes, and on every reconnect. The daemon keeps it
-  in `daemon.json` and hands it back in `machine.access`. The page dials each member the
+  in `daemon.json` and hands it back in `machine.access`. The page dials each one the
   way the TUI does, one `MachineClient` per machine, and groups projects across machines by
   repository the way the sidebar does. A machine that is down is a line on the settings
-  page, not a banner: the banner speaks for the page's own connection alone.
+  page, not a banner: the banner speaks for the page's own connection alone. The list is
+  every machine and not one fleet: a client shows the reader everything they have. Before
+  fleets took the word this command was `machine.fleet`, which the daemon still answers so
+  that an older TUI is understood.
+- **Fleets keep two sets of machines apart.** One tailnet may carry the machines at
+  work and the machines at home, and a reader needs them separate. A fleet is the name a
+  machine answers with — `MachineSettings.fleet`, written from its control panel, `null`
+  for the default fleet `covey` — so the terminal, the page and the phone all group it the
+  same way, and no client can put one machine in two fleets. A client caches the last
+  answer in `SavedMachine.fleet`, which is what holds a machine that is away in its own
+  fleet instead of dropping it into the default one. The rules are
+  `packages/client/src/fleets.ts`, pure and node-tested.
+
+  The line is real and not a heading, which is the whole of why fleets exist.
+  `projectGroups` pools a repository inside one fleet, so the same remote cloned at work
+  and at home is two rows with two sets of threads; `ghMachines` and `listRepos` read the
+  repository list from a `gh` in that fleet, because a work login lists work repositories
+  and offering them at home is the confusion fleets remove; and `placementMachines` places
+  a run's members inside the fleet its run is on. The sidebar gains one level of fold above
+  the projects — a `fleet` row with its own projects and its own machines section — and
+  **only when there is more than one fleet**, so a reader who never makes a second one sees
+  the tree they have always seen, at the depth they have always seen it at. For the same
+  reason the default fleet scopes no fold key (`fleetScope` is empty for it): a project's
+  key is written into the client's config, and a key that changed would unfurl the whole
+  tree the first time covey learned the word.
 - **An issue or a pull request is a screen (#108).** A thread row and the thread header
   carry the issue the thread took and the pull request it opened as chips, and every `#N`
   in the transcript is a link. A tap puts the item on screen over the thread or the list:
@@ -1087,7 +1111,8 @@ without committing to anything:
   spoke.
 - a **machine** row draws the machine: os/arch, daemon and Claude versions,
   tailnet name, the defaults new threads inherit there, the last update, and a
-  line per project. The **machines** header draws the fleet.
+  line per project. The **machines** header draws them all. A **fleet** row opens a
+  panel that adds a machine or a project to that fleet, and renames it.
 
 The cursor is a row *key*, not an index into the row list. The tree re-sorts
 under it — `byRecency` moves a thread to the top of its project on every turn

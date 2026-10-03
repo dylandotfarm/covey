@@ -2,6 +2,10 @@ export { MachineClient, TRIES, type ClientEvents, type ClientOptions, type ConnS
 export { uuid } from "./uuid.js";
 export { COVEY_COMMANDS, acceptCommand, commandLabel, commandMenu, commandToken, coveyCommand } from "./commands.js";
 export { projectPool } from "./projects.js";
+export {
+  DEFAULT_FLEET, MAX_FLEET_NAME, cleanFleet, fleetKey, fleetNameError, fleetOf, fleetScope,
+  isDefaultFleet, sortFleets,
+} from "./fleets.js";
 export { hiddenPanel, type HiddenPanel } from "./hidden.js";
 export {
   IDLE_CHOICES, LIVE_CHOICES, budgetValue, idleChoices, idleLabel, idleValueLabel,

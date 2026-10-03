@@ -4,11 +4,12 @@ import type { SidebarRow } from "./store.js";
  * The sidebar list, line by line.
  *
  * Rows and screen lines are not the same thing: a blank line sits above every
- * project after the first and above the machines section, and a long tree is
- * a window over the rows rather than all of them. Both facts have to be known in exactly one place, because
- * rendering and clicking have to agree on which row sits on which line —
- * the same reason the transcript's lines are built in App and handed to both
- * the painter and the hit test.
+ * project after the first, above the machines section and above every fleet,
+ * and a long tree is a window over the rows rather than all of them. Both
+ * facts have to be known in exactly one place, because rendering and clicking
+ * have to agree on which row sits on which line — the same reason the
+ * transcript's lines are built in App and handed to both the painter and the
+ * hit test.
  */
 export type SidebarCell = { kind: "blank" } | { kind: "row"; index: number };
 
@@ -21,12 +22,18 @@ export function sidebarCells(rows: SidebarRow[], cursor: number, height: number)
   if (height <= 0) return [];
   const all: SidebarCell[] = [];
   for (let i = 0; i < rows.length; i++) {
-    // A blank line above every project but the first, and above the machines
-    // section: the projects stand apart from each other, and the fleet from
-    // the last project. A run that no project can claim sits above the
-    // projects without one, as it did when it sat under the machine.
+    // A blank line above every project but the first, above the machines
+    // section, and above every fleet: the projects stand apart from each
+    // other, the machines from the last project, and a fleet from the fleet
+    // before it. A run that no project can claim sits above the projects
+    // without one, as it did when it sat under the machine.
+    //
+    // A project that leads a fleet takes no line of its own: the fleet row
+    // above it already carries one, and two blanks read as a gap rather than
+    // as a heading.
     const k = rows[i]!.kind;
-    if (i > 0 && (k === "project" || k === "machines")) all.push({ kind: "blank" });
+    const after = rows[i - 1]?.kind;
+    if (i > 0 && (k === "project" || k === "machines" || k === "fleet") && after !== "fleet") all.push({ kind: "blank" });
     all.push({ kind: "row", index: i });
   }
   if (all.length <= height) return all;
