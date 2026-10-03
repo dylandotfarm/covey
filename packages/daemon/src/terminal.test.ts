@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TerminalEvent } from "@covey/protocol";
+import { TERMINAL_SCROLLBACK_BYTES, type TerminalEvent } from "@covey/protocol";
 import { DRIVER, ThreadTerminal, findShell, shellEnv } from "./terminal.js";
 
 /**
@@ -189,6 +189,26 @@ test("the scrollback is kept for a reader who comes back", async () => {
     term.write("echo remembered\n");
     await until(() => ran(events).length === 1);
     assert.match(term.scrollback, /remembered/);
+  } finally { term.close(); }
+});
+
+test("the scrollback is bounded in the bytes it is named in", async () => {
+  const { term, events } = openShell();
+  try {
+    // Every character here is three bytes in UTF-8, so a bound that counted a
+    // string's `length` would keep three times what the constant says.
+    // One command, not two hundred: a second `write` while the first is still
+    // running is that command's standard input, which is the whole point of
+    // fd 0 — so a loop here would type into the first `printf` instead.
+    const line = "日".repeat(1000);
+    term.write(`for i in $(seq 1 400); do printf '%s\\n' '${line}'; done\n`);
+    await until(() => ran(events).length === 1, 30000);
+    const kept = Buffer.byteLength(term.scrollback, "utf8");
+    // One chunk of slack: the oldest goes whole, because half a chunk is a line
+    // cut mid-escape and the client would paint the rest in whatever colour the
+    // cut was in.
+    assert.ok(kept <= TERMINAL_SCROLLBACK_BYTES + 64 * 1024, `kept ${kept} bytes`);
+    assert.ok(kept > TERMINAL_SCROLLBACK_BYTES / 2, `kept only ${kept} bytes, so the cap is not the thing bounding it`);
   } finally { term.close(); }
 });
 

@@ -425,6 +425,36 @@ export interface Selection {
  */
 export { threadIsBusy };
 
+/**
+ * Which pane is in the one place the transcript lives.
+ *
+ * Ink cannot paint under `position="absolute"`, so a pane here replaces the one
+ * beside it — and that place is a single place, which five things now want.
+ * This is the one answer, read by the painter, by the key handler, by the
+ * scroll and by the mouse hit test.
+ *
+ * It exists because the first draft of the shell let each of them read its own
+ * ordering of the same `?:` chain, and they disagreed: with the diff panel and
+ * the shell both open the diff painted, the shell took the keyboard, and
+ * `hitTest` answered the diff again — so `j` went into a draft nobody could
+ * see, the diff's own keys were unreachable, and `esc` hid a pane that was not
+ * on the screen. Three orderings of one decision is a defect waiting for the
+ * next pane; one ordering cannot disagree with itself.
+ *
+ * `toggleDiff` and `toggleTerminal` each put the other away, so two of these
+ * are never set at once and the order below is braces rather than belt. It is
+ * still the order, and it puts the shell over the diff because the shell is
+ * the pane that takes typing.
+ */
+export type Pane = "overlay" | "terminal" | "diff" | "summary" | "transcript";
+
+export function paneOf(state: Pick<AppState, "overlay" | "terminal" | "diffView">, summary: boolean): Pane {
+  if (state.overlay) return "overlay";
+  if (state.terminal?.open) return "terminal";
+  if (state.diffView) return "diff";
+  return summary ? "summary" : "transcript";
+}
+
 export function selectionBounds(s: Selection): { from: { line: number; col: number }; to: { line: number; col: number } } {
   const { anchor, head } = s;
   const backwards = head.line < anchor.line || (head.line === anchor.line && head.col < anchor.col);
@@ -1467,7 +1497,16 @@ export class Store {
     const v = this.state.view;
     const client = v && this.clients.get(v.machine);
     if (!v || !client) return;
-    this.set({ diffView: { threadId: v.threadId, loading: true, diff: null, scroll: 0 } });
+    // The shell steps aside, because the two want the same place. Shut, not
+    // ended: the shell keeps running on the daemon, as it does for every other
+    // way of leaving the panel.
+    //
+    // No key reaches here while the shell is open — it takes every key before
+    // the focus is even consulted, so cmd+d, the palette and the sidebar's `d`
+    // are all its own. This is here so that "the two are never both set" is a
+    // rule both setters keep, rather than one setter plus a property of the key
+    // routing, which is the half most likely to change.
+    this.set({ diffView: { threadId: v.threadId, loading: true, diff: null, scroll: 0 }, ...this.hideTerminal() });
     try {
       const diff = await client.rpc("turn.diff", { threadId: v.threadId, turnId });
       const cur = this.state.diffView as AppState["diffView"];
@@ -1493,9 +1532,12 @@ export class Store {
     const v = this.state.view;
     const client = v && this.clients.get(v.machine);
     if (!v || !client) { this.notify("open a thread first", "error"); return; }
+    // The diff goes, for the same reason the shell goes when the diff opens:
+    // one place, and the reader just asked for this one. Cleared only where
+    // the shell really opens, so a refusal leaves the screen as it was.
     // The same shell, still running: show it again and do not ask the daemon.
     if (term && !term.ended && term.machine === v.machine && term.threadId === v.threadId) {
-      this.set({ terminal: { ...term, open: true } });
+      this.set({ terminal: { ...term, open: true }, diffView: null });
       void this.resizeTerminal();
       return;
     }
@@ -1509,6 +1551,7 @@ export class Store {
           cwd: info.cwd, shell: info.shell, busy: info.busy, exitCode: info.exitCode,
           log, logGen: log.generation, draft: "", caret: 0, scroll: 0, history: [], historyAt: null, ended: false,
         },
+        diffView: null,
       });
     } catch (e: any) { this.notify(`shell: ${e.message}`, "error"); }
   }
@@ -1556,6 +1599,12 @@ export class Store {
     this.set({ terminal: null });
     if (!term || !client) return;
     try { await client.rpc("terminal.close", { terminalId: term.terminalId }); } catch { /* it was already gone */ }
+  }
+
+  /** The shell put away, for a caller that is taking the place it was in. */
+  private hideTerminal(): Partial<AppState> {
+    const term = this.state.terminal;
+    return term?.open ? { terminal: { ...term, open: false } } : {};
   }
 
   setTerminalDraft(draft: string, caret: number) {

@@ -118,6 +118,28 @@ test("a chunk cut inside an escape is finished by the next one", () => {
   assert.equal(l.rows()[0]![0]!.color, "green");
 });
 
+test("an escape that is never finished does not swallow the stream", () => {
+  // `ESC ]` with no BEL and no ST is what a `cat` of a binary file writes. Held
+  // for ever, every byte after it buffers and the panel reads as frozen while
+  // the command is still running — which a reader cannot tell from a hung
+  // command. Past the cap the escape is given up on and the rest is text.
+  const l = new AnsiLog(100);
+  l.write("\x1b]0;" + "x".repeat(5000) + "\nafter\n");
+  const text = texts(l).join("\n");
+  assert.match(text, /after/, "the stream carries on");
+  assert.match(text, /xxxx/, "and what was held is painted rather than lost");
+});
+
+test("a short unfinished escape is still held for the next chunk", () => {
+  // The cap must not break the ordinary seam: a colour really does arrive in
+  // two pieces, and giving up on those would paint `[32m` into the output.
+  const l = new AnsiLog(100);
+  l.write("\x1b]0;a title");
+  assert.deepEqual(texts(l), []);
+  l.write("\x07text\n");
+  assert.deepEqual(texts(l), ["text"]);
+});
+
 test("a control character costs no column", () => {
   const row = log("a\x00b\x07c\n").rows()[0]!;
   assert.equal(lineText(row), "abc");

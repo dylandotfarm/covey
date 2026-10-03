@@ -5,7 +5,7 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, threadIsHidden, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
-import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
+import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth, type Line } from "../lines.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
 import { anchorAt, resolveScroll } from "../scroll.js";
@@ -244,15 +244,6 @@ export function App({ store }: { store: Store }) {
   const cells = useMemo(() => sidebarCells(rows, cursor, Math.max(0, size.rows - 2)), [rows, cursor, size.rows]);
   const mainW = size.cols - (sidebarVisible ? SIDEBAR_W : 0);
   const pending = store.pendingRequest();
-  /**
-   * The shell is the pane on screen (#10).
-   *
-   * Read as `open` rather than as "the state is there", because shutting the
-   * panel keeps the state: the shell is still running on the daemon, in the
-   * directory the reader walked to, and a glance at the transcript must not
-   * throw that away.
-   */
-  const termOpen = !!state.terminal?.open;
   // Wrap here rather than in Composer: the box has to be sized to the wrapped
   // row count, so both need the same answer.
   const editorRows = useMemo(() => Ed.wrapEditorLines(draft, mainW - 4), [draft, mainW]);
@@ -263,7 +254,7 @@ export function App({ store }: { store: Store }) {
   // Not while the diff panel or the shell is up: either takes the keys, so a
   // draft left over from before must not hold a menu open or take tab off the
   // focus.
-  const composerActive = state.focus === "composer" && !state.overlay && !state.diffView && !termOpen && !pending && !!state.view;
+  const composerActive = state.focus === "composer" && !state.overlay && !state.diffView && !state.terminal?.open && !pending && !!state.view;
   const token = composerActive ? commandToken(draft) : null;
   const mention = composerActive && token === null ? mentionAt(draft, caret) : null;
   // The directory being completed. The daemon reads it once; the leaf filters
@@ -489,7 +480,17 @@ export function App({ store }: { store: Store }) {
    * pane on screen — filling one nobody is looking at is the work we just went
    * to the trouble of not doing.
    */
-  const transcriptOnScreen = !state.overlay && !state.diffView && !termOpen && !summaryRow;
+  /**
+   * Which pane holds the place the transcript lives (#10).
+   *
+   * One answer for the painter, the keys, the scroll and the mouse — see
+   * `paneOf`. Everything below reads this and never its own `?:` chain over
+   * the same three fields.
+   */
+  const pane: Pane = paneOf(state, !!summaryRow);
+  /** The shell is that pane. Named, because a dozen places ask. */
+  const termOpen = pane === "terminal";
+  const transcriptOnScreen = pane === "transcript";
   const shortOfScreen = transcriptOnScreen && !!state.view && !state.view.loading && !state.view.loadingOlder && state.view.hasMore && layout.lines.length < transcriptH;
   useEffect(() => { if (shortOfScreen) void store.loadOlder(previewPage(transcriptH)); }, [shortOfScreen, transcriptH, store]);
 
@@ -1372,10 +1373,13 @@ export function App({ store }: { store: Store }) {
    *  `forcePane` clamps a drag to the pane it started in — that is what keeps a
    *  selection from leaking into the sidebar. */
   function hitTest(ev: MouseEvent, forcePane?: Selection["pane"]): { pane: Selection["pane"]; line: number; col: number; exact: boolean } | null {
-    const pane: Selection["pane"] = forcePane ?? (state.diffView ? "diff" : termOpen ? "terminal" : "transcript");
+    // The pane the keyboard is in, never a second reading of the same state:
+    // a hit test that answered `diff` while the shell held the keys made a drag
+    // select out of the pane the reader was not in.
+    const selPane: Selection["pane"] = forcePane ?? (pane === "diff" ? "diff" : pane === "terminal" ? "terminal" : "transcript");
     const rowInBox = ev.row - TRANSCRIPT_TOP;
     const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
-    if (pane === "terminal") {
+    if (selPane === "terminal") {
       if (!state.terminal || terminalLines.length === 0) return null;
       // One header row above and one prompt row below, and the log is painted
       // flush to the *bottom* of what is between them, so a short log has its
@@ -1388,15 +1392,15 @@ export function App({ store }: { store: Store }) {
       const pad = Math.max(0, bodyH - shown);
       const row = rowInBox - 1 - pad;
       const line = clamp(start + row, start, Math.max(start, start + shown - 1));
-      return { pane, line, col: Math.max(0, ev.col - 1 - mainX0 - 1), exact: row >= 0 && row < shown };
+      return { pane: selPane, line, col: Math.max(0, ev.col - 1 - mainX0 - 1), exact: row >= 0 && row < shown };
     }
-    if (pane === "diff") {
+    if (selPane === "diff") {
       if (!state.diffView || diffLines.length === 0) return null;
       const bodyH = Math.max(1, transcriptH - 2);
       const start = Math.min(state.diffView.scroll, Math.max(0, diffLines.length - bodyH));
       // DiffPanel has a 2-row header and paddingX={1}
       const line = clamp(start + (rowInBox - 2), 0, diffLines.length - 1);
-      return { pane, line, col: Math.max(0, ev.col - 1 - mainX0 - 1), exact: true };
+      return { pane: selPane, line, col: Math.max(0, ev.col - 1 - mainX0 - 1), exact: true };
     }
     if (layout.lines.length === 0) return null;
     const end = Math.max(0, layout.lines.length - scrollFromBottom);
@@ -1406,7 +1410,7 @@ export function App({ store }: { store: Store }) {
     // A short transcript is painted flush to the bottom; rows above it are
     // empty padding, and clamping them onto the first line is fine for a drag
     // but must not count as having clicked that line.
-    return { pane, line, col: Math.max(0, ev.col - 1 - mainX0), exact: rowInBox >= pad && start + (rowInBox - pad) < end };
+    return { pane: selPane, line, col: Math.max(0, ev.col - 1 - mainX0), exact: rowInBox >= pad && start + (rowInBox - pad) < end };
   }
 
   // ---- a drag held past the edge --------------------------------------------
@@ -1659,14 +1663,15 @@ export function App({ store }: { store: Store }) {
     // from the one before it. `store.set` writes and notifies synchronously,
     // so `getState()` is already the result of the last repeat.
     const live = store.getState();
-    if (live.diffView) {
+    const livePane = paneOf(live, !!summaryRow);
+    if (livePane === "diff") {
       const max = Math.max(0, diffLines.length - Math.max(1, transcriptH - 2));
-      store.setDiffScroll(Math.max(0, Math.min(max, live.diffView.scroll + lines)));
+      store.setDiffScroll(Math.max(0, Math.min(max, live.diffView!.scroll + lines)));
       return;
     }
-    if (live.terminal?.open) {
+    if (livePane === "terminal") {
       const max = Math.max(0, terminalLines.length - Math.max(1, transcriptH - 2));
-      store.setTerminalScroll(Math.max(0, Math.min(max, live.terminal.scroll - lines)));
+      store.setTerminalScroll(Math.max(0, Math.min(max, live.terminal!.scroll - lines)));
       return;
     }
     const max = Math.max(0, layout.lines.length - transcriptH);
@@ -1740,10 +1745,11 @@ export function App({ store }: { store: Store }) {
       // than from `state`, which is the last render's snapshot and does not
       // move inside the loop. Read the snapshot and five notches move one row.
       const live = store.getState();
-      if (live.diffView) return store.setDiffScroll(live.diffView.scroll - delta);
-      if (live.terminal?.open) {
+      const livePane = paneOf(live, !!summaryRow);
+      if (livePane === "diff") return store.setDiffScroll(live.diffView!.scroll - delta);
+      if (livePane === "terminal") {
         const max = Math.max(0, terminalLines.length - Math.max(1, transcriptH - 2));
-        return store.setTerminalScroll(Math.max(0, Math.min(max, live.terminal.scroll + delta)));
+        return store.setTerminalScroll(Math.max(0, Math.min(max, live.terminal!.scroll + delta)));
       }
       const max = Math.max(0, layout.lines.length - transcriptH);
       const next = Math.min(max, Math.max(0, liveScroll(live) + delta));
@@ -1953,8 +1959,8 @@ export function App({ store }: { store: Store }) {
       if (ch === "d") return void store.toggleDiff();
       if (ch === "o") return expandLastTool();
     }
-    if ((key.pageUp || key.pageDown) && (state.diffView || state.focus === "composer")) return scrollPane((key.pageUp ? -1 : 1) * Math.max(1, Math.floor(transcriptH / 2)));
-    if (state.diffView) {
+    if ((key.pageUp || key.pageDown) && (pane === "diff" || state.focus === "composer")) return scrollPane((key.pageUp ? -1 : 1) * Math.max(1, Math.floor(transcriptH / 2)));
+    if (pane === "diff") {
       if (key.escape || input === "d" || input === "q") return void store.toggleDiff();
       if (key.upArrow || input === "k") return scrollPane(-1);
       if (key.downArrow || input === "j") return scrollPane(1);
@@ -2600,8 +2606,8 @@ export function App({ store }: { store: Store }) {
   const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => machineLabel(state, x.machine)).join(" · ") : summaryRow.kind === "machines" ? `${state.order.length}` : "machine");
   // The hint the bar shows when nothing was raised. Each is short, so it
   // keeps its own width and only a notice ever takes the bar's two thirds.
-  const barHint = termOpen ? (state.terminal!.busy ? "running · ctrl+c interrupt · ctrl+` hides" : "shell · ↑ recall · ctrl+l clear · ctrl+d end · ctrl+` hides")
-    : state.diffView ? "diff: j/k scroll · d close"
+  const barHint = pane === "terminal" ? (state.terminal!.busy ? "running · ctrl+c interrupt · ctrl+` hides" : "shell · ↑ recall · ctrl+l clear · ctrl+d end · ctrl+` hides")
+    : pane === "diff" ? "diff: j/k scroll · d close"
     : scrollFromBottom > 0 ? "scrolled · cmd+shift+g follows"
     : state.focus === "sidebar" ? "↑↓ browse · enter open · click works too"
     : state.view?.thread?.latestTurn?.state === "running" ? "esc interrupt · ctrl+k commands"
@@ -2682,14 +2688,17 @@ export function App({ store }: { store: Store }) {
             and make the frame taller than the screen it is going to. */}
         <Box height={1}><Text color={T.border} wrap="truncate">{"─".repeat(Math.max(0, mainW))}</Text></Box>
         <Box height={transcriptH} flexDirection="column">
-          {state.overlay
-            ? <OverlayView overlay={state.overlay} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} run={overlayRun} machineNameOf={(id) => store.machineNameOf(id)} secretKeys={state.overlay.kind === "secrets" ? secretPanelKeys(state, state.overlay) : undefined} />
-            : state.diffView
-              ? <DiffPanel view={state.diffView} width={mainW} height={transcriptH} lines={diffLines} selection={state.selection} />
-              : termOpen
-                ? <TerminalPanel view={state.terminal!} width={mainW} height={transcriptH} lines={terminalLines} selection={state.selection} />
-                : summaryRow
-                  ? <Summary state={state} row={summaryRow} width={mainW} height={transcriptH} />
+          {/* `pane`, never a chain of its own: this is the order the keys and
+              the mouse follow too, and three readings of it is what #10's
+              first draft got wrong. */}
+          {pane === "overlay"
+            ? <OverlayView overlay={state.overlay!} cursor={ovCursor} filter={ovFilter} checked={ovToggle} width={mainW} height={transcriptH} update={overlayUpdate} machineName={overlayMachineName} tick={state.tick} run={overlayRun} machineNameOf={(id) => store.machineNameOf(id)} secretKeys={state.overlay!.kind === "secrets" ? secretPanelKeys(state, state.overlay!) : undefined} />
+            : pane === "terminal"
+              ? <TerminalPanel view={state.terminal!} width={mainW} height={transcriptH} lines={terminalLines} selection={state.selection} />
+              : pane === "diff"
+                ? <DiffPanel view={state.diffView!} width={mainW} height={transcriptH} lines={diffLines} selection={state.selection} />
+                : pane === "summary"
+                  ? <Summary state={state} row={summaryRow!} width={mainW} height={transcriptH} />
                   : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={scrollFromBottom} width={mainW} selection={state.selection} />}
         </Box>
         <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} menu={menu} />

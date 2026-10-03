@@ -29,10 +29,11 @@ interface Calls {
   recalled: number[];
   drafts: [string, number][];
   scrolls: number[];
+  diffScrolls: number[];
 }
 
-function mount(opts: { open: boolean; busy?: boolean; draft?: string; output?: string }) {
-  const calls: Calls = { toggle: 0, sent: [], interrupt: 0, ended: 0, cleared: 0, recalled: [], drafts: [], scrolls: [] };
+function mount(opts: { open: boolean; busy?: boolean; draft?: string; output?: string; diff?: boolean }) {
+  const calls: Calls = { toggle: 0, sent: [], interrupt: 0, ended: 0, cleared: 0, recalled: [], drafts: [], scrolls: [], diffScrolls: [] };
   const log = new AnsiLog(100);
   if (opts.output) log.write(opts.output);
   const machine = {
@@ -45,7 +46,10 @@ function mount(opts: { open: boolean; busy?: boolean; draft?: string; output?: s
     view: { machine: "pi", threadId: "t1", thread: { id: "t1", title: "work" }, items: new Map(), seq: 1 } as unknown as ThreadView,
     focus: "composer", sidebarCollapsed: true, showHidden: false, expanded: {}, toggledRows: new Set(),
     lod: "compact", overlay: null, notice: null, scrollFromBottom: 0, scrollAnchor: null,
-    drafts: new Map(), pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0, diffView: null,
+    drafts: new Map(), pendingAttachments: new Map(), pendingPastes: new Map(), tick: 0,
+    diffView: opts.diff
+      ? { threadId: "t1", loading: false, scroll: 0, diff: { turnId: "t1", additions: 1, deletions: 0, files: [{ path: "a.ts", additions: 1, deletions: 0, status: "M" }], patch: "diff --git a/a.ts b/a.ts\n+one\n" } }
+      : null,
     terminal: {
       machine: "pi", threadId: "t1", terminalId: "x1", open: opts.open, cwd: "/work", shell: "bash",
       busy: !!opts.busy, exitCode: null, log, logGen: log.generation,
@@ -60,6 +64,7 @@ function mount(opts: { open: boolean; busy?: boolean; draft?: string; output?: s
     attachments: () => [], pastes: () => [], draft: () => "", setDraft: () => {}, setFocus: () => {},
     select: async () => {}, loadOlder: async () => {}, clearSelection: () => {},
     notify: () => {}, setOverlay: () => {}, isExpanded: () => true, toggleExpanded: () => {}, shutdown: () => {},
+    setDiffScroll: (n: number) => { calls.diffScrolls.push(n); },
     toggleTerminal: async () => { calls.toggle++; },
     sendTerminal: async () => { calls.sent.push(state.terminal!.draft); },
     interruptTerminal: async () => { calls.interrupt++; },
@@ -223,5 +228,36 @@ test("the panel paints the output, the prompt and the directory", async () => {
     // The escapes became spans, so no raw `[32m` is painted — and the width
     // the frame was laid out with is the width the reader sees.
     assert.ok(!frame.includes("[32mon branch"), frame);
+  } finally { app.unmount(); }
+});
+
+test("the diff and the shell never disagree about which pane is on screen", async () => {
+  // The defect the review caught: `toggleTerminal` left `diffView` set, and the
+  // painter, the key handler and `hitTest` each read their own ordering of the
+  // same two fields. The diff painted, the shell held the keyboard, and `esc`
+  // hid a pane that was not on the screen — so the reader's first press read as
+  // a key that did nothing, with a shell really running on the daemon behind it.
+  //
+  // The store now puts one away when the other opens, so this state cannot be
+  // reached. It is built by hand here anyway, because what is being tested is
+  // that App has *one* answer rather than three: a future pane added to one of
+  // the three chains and not the others would put the bug straight back.
+  const app = mount({ open: true, diff: true });
+  try {
+    await until(() => app.stdout.lastFrame.includes("Shell"));
+    const frame = app.stdout.lastFrame;
+    assert.match(frame, /Shell/, "the shell paints");
+    assert.ok(!frame.includes("Changes "), "and the diff does not");
+    // The bar names the pane that is painted.
+    assert.match(frame, /ctrl\+` hides/);
+    // A letter goes to the pane that is painted, not to the diff's scroll.
+    app.stdin.type("j");
+    await until(() => app.calls.drafts.length > 0);
+    assert.deepEqual(app.calls.drafts.at(-1), ["j", 1]);
+    assert.deepEqual(app.calls.diffScrolls, [], "the diff's keys belong to the diff, and the diff is not up");
+    // And esc closes what the reader can see.
+    app.stdin.type("\x1b");
+    await until(() => app.calls.toggle > 0);
+    assert.equal(app.calls.toggle, 1);
   } finally { app.unmount(); }
 });

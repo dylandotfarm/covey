@@ -346,9 +346,14 @@ export class ThreadTerminal {
    */
   private keep(data: string) {
     this.history.push(data);
-    this.historyBytes += data.length;
+    // `byteLength`, not `length`: the cap is named in bytes and a string's
+    // length is a count of UTF-16 code units, so a shell writing anything but
+    // ASCII kept more than the number says. Both sides of the sum, or the
+    // running total drifts the other way — subtracting 1000 for a chunk that
+    // added 3000 trimmed the whole scrollback down to its last chunk.
+    this.historyBytes += Buffer.byteLength(data, "utf8");
     while (this.historyBytes > TERMINAL_SCROLLBACK_BYTES && this.history.length > 1) {
-      this.historyBytes -= this.history.shift()!.length;
+      this.historyBytes -= Buffer.byteLength(this.history.shift()!, "utf8");
     }
   }
 }

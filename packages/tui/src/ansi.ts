@@ -49,6 +49,23 @@ const BLANK: Style = {};
 const TAB = 8;
 
 /**
+ * How much of a half-read escape sequence is still worth waiting for.
+ *
+ * A chunk may end inside a sequence, and the remainder is held until the next
+ * one finishes it. Something has to bound that wait, because a sequence may
+ * never be finished: `ESC ]` with no BEL and no ST is what a `cat` of a binary
+ * file writes, and with no bound every byte after it buffers for ever — the
+ * panel reads as frozen while the command is still running, which is the one
+ * failure a reader cannot tell from a hung command.
+ *
+ * Past this the escape is given up on and what follows is painted as text. A
+ * mess on one row is a far better answer than a dead pane, and the longest
+ * sequence anything here really writes — an OSC 8 with a URL in it — is a
+ * small fraction of this.
+ */
+const MAX_PENDING_ESCAPE = 4096;
+
+/**
  * The eight ANSI colours and their bright forms, by Ink's own names.
  *
  * Names rather than hex on purpose: these are the reader's *terminal* colours,
@@ -191,7 +208,14 @@ export class AnsiLog {
       const ch = s[i]!;
       if (ch === "\x1b") {
         const esc = readEscape(s, i);
-        if (esc === null) { this.tail = s.slice(i); break; }
+        if (esc === null) {
+          // Still plausibly a sequence cut in two: hold it for the next chunk.
+          if (s.length - i <= MAX_PENDING_ESCAPE) { this.tail = s.slice(i); break; }
+          // Too long to be one. Step over the escape itself and read the rest
+          // as the text it evidently is — see `MAX_PENDING_ESCAPE`.
+          i++;
+          continue;
+        }
         this.escape(esc.seq);
         i = esc.end;
         continue;
