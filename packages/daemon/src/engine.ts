@@ -1972,15 +1972,36 @@ export class Engine {
   /**
    * Archive a thread whose work is over, now or when its turn ends.
    *
-   * Archiving takes the worktree back, so `thread.archive` refuses a thread
-   * with a turn running — and a pull request can merge while the thread works
-   * on something else. A busy thread is therefore remembered, and `finishTurn`
-   * archives it once nothing is running and nothing is queued.
+   * Two things stand in the way, and they end differently.
+   *
+   * A message nobody has answered keeps the thread for good: whoever wrote it
+   * has said the loop is not over, and a merge must not archive the thread out
+   * from under their question. That is the queue here, and the `archivePending`
+   * line in `turn.send` is the same rule for a message written after this poll.
+   * A message written *during* a turn of a live session is neither: it folds
+   * into that turn, so the agent answers it before the turn ends.
+   *
+   * A session that still owes somebody something only *delays* it. Archiving
+   * drops the session and takes the worktree back, so it must never happen
+   * under a running turn, an approval that waits, or a background task — which
+   * leaves no running turn behind (#156) and dies with its process, which is
+   * the whole of why `sessionBusy` exists. The thread is remembered instead,
+   * and `finishTurn` archives it at the end of the turn that the task's own
+   * report opens. A task that never reports leaves the thread on the screen,
+   * which is the safe way for this to fail.
    */
-  private async archiveWhenIdle(threadId: string): Promise<void> {
+  private async archiveWhenIdle(threadId: string, afterTurn = false): Promise<void> {
     const t = this.db.getThread(threadId);
     if (!t || t.archivedAt || t.movedTo) { this.archivePending.delete(threadId); return; }
-    if (t.latestTurn?.state === "running" || (this.queues.get(threadId)?.length ?? 0) > 0) {
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) { this.archivePending.delete(threadId); return; }
+    // `afterTurn` is the call from `finishTurn`, which runs inside the result
+    // handler: the CLI clears its own bookkeeping after that, so `sessionBusy`
+    // there still counts the turn that has just ended. `owes` is the half of it
+    // that outlives a turn, and is the right question at that moment.
+    const busy = afterTurn
+      ? !!this.sessions.get(threadId)?.owes
+      : t.latestTurn?.state === "running" || this.sessionBusy(threadId);
+    if (busy) {
       this.archivePending.add(threadId);
       return;
     }
@@ -2125,7 +2146,7 @@ export class Engine {
     if (!next) {
       // The pull request merged while this thread was working. The archive
       // waited for the turn, and the turn is over.
-      if (this.archivePending.has(threadId)) await this.archiveWhenIdle(threadId);
+      if (this.archivePending.has(threadId)) await this.archiveWhenIdle(threadId, true);
       return;
     }
     const item = this.db.getItem(`u:${next.turnId}`);

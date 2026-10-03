@@ -281,6 +281,10 @@ test("a pull request merged while a reviewer reads it archives the reviewer too,
   const before = s.turns(reviewerId).length;
 
   // Somebody merged it over the review. There is nothing left to read.
+  // The author's watch is stopped first, so this case is about the reviewer's
+  // own poll: both watches see the same merge, and the author archiving its
+  // reviewers is a second route to the same end that would hide this one.
+  await s.command({ type: "thread.watch", threadId: "t1", number: null });
   s.host.options.prs!["covey/t1"]!.state = "MERGED";
   await s.poll();
   assert.equal(s.thread(reviewerId).watch!.state, "merged");
@@ -339,7 +343,10 @@ test("signing off records the verdict, archives the review thread, and lets the 
   const told = s.notes("t1").find((x) => /which signed off/.test(x))!;
   assert.ok(told, s.notes("t1").join("\n---\n"));
   assert.match(told, /Pull request #101 merged/);
-  assert.match(told, /The checks passed on .*There is nothing to fix/s);
+  // A record of what happened, with nothing to do about it: the words the
+  // review wrote, and the pass that is no longer blocked by it.
+  assert.match(told, /The checks passed on \w+: 1 check succeeded\./);
+  assert.doesNotMatch(told, /nothing to fix|next poll|Wait;/, "nobody can act on a note in an archived thread");
 });
 
 test("before the sign-off, a green pull request reads as blocked by the review", async (t) => {
@@ -576,7 +583,10 @@ test("a reviewer out of rounds hears the merge, rather than blocking over a pull
   assert.equal(s.thread(reviewerId).watch!.rounds, 3);
   assert.equal(s.thread(reviewerId).watch!.state, "watching");
 
-  // The author merged. The push and the merge arrive in one batch.
+  // The author merged. The push and the merge arrive in one batch. The author's
+  // watch is stopped first, so what the reviewer does is read from its own poll
+  // and not from whichever of the two watches the clock let finish first.
+  await s.command({ type: "thread.watch", threadId: "t1", number: null });
   facts.headRefOid = "ddd4444";
   facts.state = "MERGED";
   await s.poll();

@@ -187,7 +187,20 @@ export class ClaudeSession {
    * build the user waits for.
    */
   get busy(): boolean {
-    return this.currentTurnId !== null || this.answering || this.pending.size > 0 || this.backgrounded.size > 0;
+    return this.currentTurnId !== null || this.answering || this.owes;
+  }
+
+  /**
+   * The half of `busy` that outlives the turn it started in: an approval or a
+   * question nobody has answered, and a background task.
+   *
+   * It exists for the one caller that runs *inside* the result handler — the
+   * CLI clears `currentTurnId` after the sink has been told, so `busy` there
+   * still counts the turn that has just ended, and a caller asking "is there
+   * anything left" would always hear yes.
+   */
+  get owes(): boolean {
+    return this.pending.size > 0 || this.backgrounded.size > 0;
   }
 
   start() {

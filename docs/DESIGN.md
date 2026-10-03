@@ -1005,10 +1005,14 @@ checks in the same breath and a reader must not lose a reviewer's words to the a
 The setting is `MachineSettings.archiveOnMerge`, a row on the machine's control panel and
 on the web client's machine sheet. It is on unless the machine says otherwise, so `null`
 reads as on and `daemon.json` holds only the refusal; off, the merge arrives as a turn and
-the thread stays where it was. Archiving takes the worktree back and `thread.archive`
-refuses a thread with a turn running, so a merge seen while the thread works waits for the
-end of that turn — and somebody who writes to the thread in the meantime keeps it, because
-a reader with more to say has said the loop is not over.
+the thread stays where it was. Archiving drops the session and takes the worktree
+back, so it waits for a session that still owes somebody something: a turn running, an
+approval nobody has answered, or a background task, which leaves no running turn behind
+(#156) and dies with its process. `ClaudeSession.owes` is the half of `busy` that outlives
+a turn, and it is what `finishTurn` asks, because the CLI clears its own bookkeeping after
+the result handler has run. A task that never reports leaves the thread on the screen,
+which is the safe way for this to fail. A message nobody has answered stops the archive
+outright rather than delaying it — whoever wrote it has said the loop is not over.
 
 **Who accepts the work.** The watch carries a merge policy, `PullRequestWatch.merge`, set at
 `thread.openPullRequest` or `thread.watch` and changed with `thread.setMerge` (`M` on the

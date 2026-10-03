@@ -63,7 +63,7 @@ function setup() {
   let engine = make(db);
   engines.push(engine);
   const s = {
-    db, dir, host,
+    db, dir, host, cli,
     /** Keep the next turns running until `release`. */
     hold() { cli.held = true; },
     async release() { cli.held = false; cli.release(); cli.release = () => {}; await settle(); },
@@ -367,6 +367,53 @@ test("a merge seen while the thread works waits for the turn, and a reader who w
 });
 
 // ---- the watch is bounded, and it is dropped with the thread -----------------
+
+test("a merge never takes a session that still owns a background task", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  // The agent pushed, started a build in the background, and ended its turn —
+  // which is what a thread looks like at the moment its pull request merges.
+  // A background task leaves no running turn behind (#156) and dies with its
+  // session, and archiving drops the session and takes the worktree back.
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "start the build in the background" });
+  await settle();
+  s.cli.backgroundTask("task-1");
+  await settle();
+  assert.equal(s.thread("t1").latestTurn?.state, "completed", "nothing is running, and the work is still there");
+
+  s.host.options.prs!["covey/t1"]!.state = "MERGED";
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.state, "merged", "the watch ends either way");
+  assert.equal(s.thread("t1").archivedAt, null, "but the thread keeps its session until the task is done");
+
+  // The task reports, the agent writes about it, and that turn ends.
+  s.cli.finishTask("task-1");
+  s.cli.woken("The build passed.");
+  await settle();
+  assert.ok(s.thread("t1").archivedAt, "and the thread goes at the end of the turn the report opened");
+});
+
+test("a message the agent reads inside the turn is answered, and the thread still goes", async (t) => {
+  // The other half of the rule above. A message written while the session is
+  // live is folded into the running turn rather than queued, so the agent reads
+  // it and answers it before the turn ends. It is not a message nobody has
+  // answered, and the loop is still over.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  s.hold();
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "working" });
+  await settle();
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "and check the logs" });
+  assert.equal(s.thread("t1").queuedTurns, 0, "folded into the turn, not queued behind it");
+  s.host.options.prs!["covey/t1"]!.state = "MERGED";
+  await s.poll();
+  await s.release();
+  assert.ok(s.thread("t1").archivedAt, "answered, so the merge puts the thread away with the answer in it");
+});
 
 test("a quiet watch backs off, and a watch that runs too long is handed to a person", async (t) => {
   const s = setup();
