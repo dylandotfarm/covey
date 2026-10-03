@@ -673,8 +673,10 @@
   the review decided and never whether the thread went, so `reviewing` is not the test for
   "still on the screen". And because `archivePending` is memory only,
   `Engine.sweepFinishedReviewers` repairs the rest at start, beside "anything that was running
-  when we last exited is now idle". **A `dropped` seat is the one it leaves**, because covey
-  writes `dropped` in three places and two of them keep the thread on purpose: a reviewer out
+  when we last exited is now idle". **A `dropped` seat is the one it leaves.** Most of what
+  writes `dropped` — `windUpReviewers`, `dropReviewer` — belongs to a thread archived or
+  deleted in the same breath, so the sweep never meets one. What it does meet is the three ends
+  of a reviewer's own watch, and two of those keep the thread on purpose: a reviewer out
   of rounds, whose watch ends `blocked` and whose worktree stays on the branch so the person
   covey asked for has the half-finished review and the code together; and a merge on a machine
   with `archiveOnMerge` off, which asked for its threads to be kept. The third is a closed pull

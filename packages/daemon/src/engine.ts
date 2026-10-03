@@ -1587,14 +1587,16 @@ export class Engine {
    * nothing polls it, nothing wakes it, and no reader knows why it is there.
    *
    * The seat on the author's watch answers "what did the review decide", and a
-   * `dropped` seat is the one this function will not act on. Covey writes
-   * `dropped` in three places and two of them keep the thread on purpose: a
-   * reviewer whose own watch ran out of rounds, which ends `blocked` and says a
-   * person has to read the change — the worktree stays on the branch so that
-   * person has the half-finished review and the code together — and a merge on
-   * a machine that turned `archiveOnMerge` off, which asked for its threads to
-   * be kept. A sweep that read `dropped` as "over" would take both away at the
-   * next start.
+   * `dropped` seat is the one this function will not act on. Most of what writes
+   * `dropped` — `windUpReviewers`, `dropReviewer` — belongs to a thread archived
+   * or deleted in the same breath, so the sweep never meets one. What it meets
+   * is the three ends of a reviewer's own watch, and two of those keep the
+   * thread on purpose: a reviewer whose own watch ran out of rounds, which ends
+   * `blocked` and says a person has to read the change — the worktree stays on
+   * the branch so that person has the half-finished review and the code
+   * together — and a merge on a machine that turned `archiveOnMerge` off, which
+   * asked for its threads to be kept. A sweep that read `dropped` as "over"
+   * would take both away at the next start.
    *
    * The third is a closed pull request, and that one is archived where it
    * happens, after the news. It is named here as well because the archive waits
