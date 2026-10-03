@@ -175,6 +175,18 @@ export class ChainTracker {
     return open.itemIds.length < MIN_CHAIN ? null : open;
   }
 
+  /**
+   * Drop the chain open on a thread without handing it back (#16).
+   *
+   * `close` is for a chain that ended: it asks for a sentence. A cleared
+   * thread has no items left to name, so this forgets the chain instead —
+   * a model paid to describe tool calls nobody can read is a model paid for
+   * nothing, and the sentence would land on an item that is gone.
+   */
+  forget(threadId: string) {
+    this.open.delete(threadId);
+  }
+
   /** Close every chain, for a daemon that is stopping. */
   closeAll(): OpenChain[] {
     const out: OpenChain[] = [];
