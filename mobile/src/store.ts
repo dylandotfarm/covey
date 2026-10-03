@@ -172,7 +172,12 @@ class Store {
   private askAccess(client: MachineClient, primary: boolean): void {
     client.rpc("machine.access", {}).then((a) => {
       if (primary || !this.state.access) this.state.access = a;
-      for (const m of a.peers ?? []) this.dialMember(m);
+      // `a.fleet` is the name this list had before fleets took the word. The
+      // phone is the one client that is not in step with the daemon it dials:
+      // its bundle comes over the air from one machine and the primary daemon
+      // is very often another, so a new bundle meets an old daemon and must
+      // not drop every machine but one.
+      for (const m of a.peers ?? a.fleet ?? []) this.dialMember(m);
       this.schedule();
     }).catch(() => {});
   }

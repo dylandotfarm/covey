@@ -104,6 +104,8 @@ function dial(slot: MachineSlot, token: string | undefined) {
 function askAccess(client: MachineClient) {
   client.rpc("machine.access", {}).then((a) => {
     state.access = a;
+    // No fallback to the old `a.fleet` name here, unlike the phone: this page
+    // is served by the daemon it asks, so the two are always one build.
     for (const m of a.peers ?? []) dialMember(m);
     schedule();
   }).catch(() => {});

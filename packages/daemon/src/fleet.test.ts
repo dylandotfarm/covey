@@ -13,7 +13,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.COVEY_HOME = mkdtempSync(join(tmpdir(), "covey-fleet-"));
-delete process.env.COVEY_FLEET;
 
 const { dataDir, fleetName, fleetSetting, machineSettings, readPeers, savePeers } = await import("./config.js");
 

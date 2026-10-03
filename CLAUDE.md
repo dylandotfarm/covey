@@ -351,7 +351,12 @@
   repository inside one fleet, `ghMachines` and `listRepos` read the repository list
   from a `gh` in that fleet — a work login lists work repositories, and offering them
   at home is exactly the confusion fleets remove — and `placementMachines` places a
-  run's members inside its own fleet. The sidebar grows one level of fold above the
+  run's members inside its own fleet. **covey never chooses a machine across the line;
+  the reader may still name one.** So `moveThread` offers every connected machine — a
+  move names both the machine and the project it lands in, and it is how a machine is
+  retired — while `moveMember` is scoped, because the store refuses a member placed
+  outside its run's fleet and a pick that offered one would report "no checkout" about a
+  machine that holds one. The sidebar grows one level of fold above the
   projects, **and only when there is more than one fleet**: a reader who never makes a
   second one sees the tree they always saw, at the depth they always saw it. For the
   same reason the default fleet scopes no fold key (`fleetScope` is empty for it) — a

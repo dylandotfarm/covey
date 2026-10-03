@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, PeerMachine, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals, TerminalEvent } from "@covey/protocol";
 import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsFinished, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
-import { DEFAULT_FLEET, MachineClient, coveyCommand, fleetKey, fleetOf, fleetScope, isDefaultFleet, projectPool, sortFleets, type ClientOptions, type ConnState } from "@covey/client";
+import { DEFAULT_FLEET, MachineClient, cleanFleet, coveyCommand, fleetKey, fleetOf, fleetScope, isDefaultFleet, projectPool, sortFleets, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
@@ -1349,13 +1349,23 @@ export class Store {
    * The machine always wins. The cache is read only when the machine has said
    * nothing, so a machine moved from another client is in its new fleet here
    * as soon as it answers.
+   *
+   * That rule is why **the default fleet is never written from here**. The
+   * pick that adds a machine can only offer the fleets some connected machine
+   * has already named, so on a second client, or after a fresh config, a
+   * reader meeting a work machine for the first time has `covey` and a typed
+   * name to choose between. Taking `covey` as an instruction would move that
+   * machine out of `work` on every client — and the reader was answering
+   * about a machine they had never seen. The default is "no opinion"; a
+   * reader who means to move a machine into it says so from its own control
+   * panel, where the machine is in front of them.
    */
   private settleFleet(ms: MachineState) {
     const want = ms.joining;
     if (want !== undefined) {
       delete ms.joining;
-      if (fleetKey(want) !== fleetKey(fleetOf(ms.info?.settings?.fleet))) {
-        void this.setMachineDefaults(ms.key, { fleet: isDefaultFleet(want) ? null : want });
+      if (!isDefaultFleet(want) && fleetKey(want) !== fleetKey(fleetOf(ms.info?.settings?.fleet))) {
+        void this.setMachineDefaults(ms.key, { fleet: want });
         return;
       }
     }
@@ -1378,8 +1388,12 @@ export class Store {
     if (!ms) return;
     const name = ms.info?.name ?? ms.saved.name;
     if (ms.conn !== "connected") { this.notify(`${name} is not connected; covey cannot move a machine that is away`, "error"); return; }
-    if (fleetKey(fleet) === fleetKey(machineFleet(this.state, machine))) return;
-    await this.setMachineDefaults(machine, { fleet: isDefaultFleet(fleet) ? null : fleet });
+    // What the machine would store, compared with what it stores now. Not the
+    // fold key: `work` to `Work` writes a new name and is a rename a reader
+    // can see, because the display name keeps the case they typed.
+    const next = isDefaultFleet(fleet) ? null : fleetOf(fleet);
+    if (next === (cleanFleet(ms.info?.settings?.fleet) ?? null)) return;
+    await this.setMachineDefaults(machine, { fleet: next });
     // `quiet` is for a rename, which moves every machine of a fleet at once:
     // the notice has one row, and one sentence per machine would leave the
     // reader the last of them.
@@ -3141,6 +3155,20 @@ export function fleetRowKey(fleet: string): string { return `fleet:${fleetKey(fl
 
 /** The fold key of the machines section of the default fleet. */
 export const MACHINES_KEY = "machines";
+
+/**
+ * True for a row of the machines area: a machines header of any fleet, or one
+ * machine inside it.
+ *
+ * It lives here, beside the keys it reads, because it is a *test on a key* and
+ * the keys are minted in this file. App's cursor guard asked the same question
+ * with its own two string tests, and the per-fleet header key slipped past
+ * both of them: `machines:covey` is neither `machines` nor a `m:` prefix, so
+ * the cursor could seat itself on the header after all.
+ */
+export function isMachinesRowKey(key: string): boolean {
+  return key === MACHINES_KEY || key.startsWith(`${MACHINES_KEY}:`) || key.startsWith("m:");
+}
 
 // ---------------------------------------------------------------------------
 // Usage windows and totals

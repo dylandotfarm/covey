@@ -351,6 +351,15 @@ export interface MachineAccess {
    * whatever fleet each one is in.
    */
   peers?: PeerMachine[];
+  /**
+   * What `peers` was called before fleets took the word.
+   *
+   * A daemon older than fleets answers under this name, and a client is not
+   * always in step with the daemon it dials: the phone takes its bundle over
+   * the air from one machine and very often dials another. So a reader is
+   * `a.peers ?? a.fleet ?? []`. Never written by a daemon that knows `peers`.
+   */
+  fleet?: PeerMachine[];
 }
 
 /** One machine the page dials, as a phone reaches it. */

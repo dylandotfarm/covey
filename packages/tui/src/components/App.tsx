@@ -5,7 +5,7 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { DEFAULT_FLEET, budgetValue, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
-import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, machineFleet, machinesKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
+import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth, type Line } from "../lines.js";
 import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
@@ -389,8 +389,7 @@ export function App({ store }: { store: Store }) {
   useEffect(() => {
     if (cursorKey === "" || rows.length === 0 || rows.some((r) => r.key === cursorKey)) return;
     const to = rows[cursor]!;
-    const fleet = (k: string) => k === "machines" || k.startsWith("m:");
-    if (fleet(to.key) && !fleet(cursorKey)) { setCursorKey(""); return; }
+    if (isMachinesRowKey(to.key) && !isMachinesRowKey(cursorKey)) { setCursorKey(""); return; }
     setCursorKey(to.key);
   }, [rows, cursorKey, cursor]);
   // Reset the answer buffer when a different request comes up, so a stale
@@ -478,7 +477,7 @@ export function App({ store }: { store: Store }) {
    * project or a machine. The archived folder is a container, not a place, so
    * it keeps showing whatever conversation is open.
    */
-  const summaryRow = sidebarVisible && state.focus === "sidebar" && currentRow && (currentRow.kind === "project" || currentRow.kind === "machine" || currentRow.kind === "machines" || currentRow.kind === "empty") ? currentRow : null;
+  const summaryRow = sidebarVisible && state.focus === "sidebar" && currentRow && (currentRow.kind === "project" || currentRow.kind === "machine" || currentRow.kind === "machines" || currentRow.kind === "fleet" || currentRow.kind === "empty") ? currentRow : null;
 
   /**
    * That page is sized in items but the pane is measured in lines, so a thread
@@ -709,8 +708,12 @@ export function App({ store }: { store: Store }) {
       await store.createThread(machine, projectId);
       return;
     }
-    const ready = store.rankedPool(pool).filter((m) => m.projectId !== null);
-    if (ready.length === 0) { store.notify("no connected machine has this project", "error"); return; }
+    // Inside the fleet of the machine whose project this is. A thread and a
+    // run land by one rule, and the pool is a repository and a base — never a
+    // fleet — so without this the most ordinary act in covey is the one that
+    // crosses the line the rest of this guards.
+    const ready = store.rankedPool(pool, machineFleet(state, machine)).filter((m) => m.projectId !== null);
+    if (ready.length === 0) { store.notify("no connected machine in this fleet has this project", "error"); return; }
     if (ready.length === 1) { await store.createThread(ready[0]!.key, ready[0]!.projectId!); return; }
     const load = store.machineLoad();
     openPick("New thread on which machine?", ready.map((m) => {
@@ -728,6 +731,10 @@ export function App({ store }: { store: Store }) {
     if (!sel) return;
     const srcThread = state.machines.get(sel.machine)?.threads.get(sel.threadId);
     const srcProject = srcThread && state.machines.get(sel.machine)?.projects.get(srcThread.projectId);
+    // Every connected machine, across fleets, and that is deliberate: covey
+    // never *chooses* a machine across the line, but a move is the reader
+    // naming one, together with the project it lands in. It is also how a
+    // machine is retired — its threads have to be able to go somewhere.
     const targets = state.order.filter((k) => k !== sel.machine && state.machines.get(k)?.conn === "connected");
     if (targets.length === 0) { store.notify("no other connected machine to move to", "error"); return; }
     openPick("Move thread to machine", targets.map((k) => ({ id: k, label: state.machines.get(k)!.info!.name, hint: state.machines.get(k)!.info!.os })), (mk) => {
@@ -1319,8 +1326,12 @@ export function App({ store }: { store: Store }) {
   /** Move a member to another machine, before it has a thread. */
   const moveMember = (ov: Extract<Overlay, { kind: "run" }>, run: Run, m: RunMember, at: number) => {
     if (m.threadId) { store.notify("this member already has a thread — withdraw it instead of moving it", "error"); return; }
-    const machines = store.placementMachines(runRepository(run));
-    if (machines.length < 2) { store.notify("no other machine has a checkout of this project", "error"); return; }
+    // The fleet of the machine the run is on, which is the same list
+    // `Store.moveMember` places against. Without it the pick offers a machine
+    // of another fleet and the store then refuses it, reporting "no checkout"
+    // about a machine that holds one.
+    const machines = store.placementMachines(runRepository(run), machineFleet(state, ov.machine));
+    if (machines.length < 2) { store.notify("no other machine in this fleet has a checkout of this project", "error"); return; }
     openPick(`Move ${m.task.key} to…`, machines.map((x) => ({
       id: x.machineId,
       label: x.name,
@@ -2769,9 +2780,20 @@ export function App({ store }: { store: Store }) {
   // The title bar follows the pane: naming the open thread over a project
   // summary would describe something that is not on screen.
   const summaryMachine = summaryRow ? state.machines.get(summaryRow.machine) : undefined;
-  const summaryTitle = summaryRow && (summaryRow.kind === "project" ? summaryRow.project!.title : summaryRow.kind === "machines" ? "machines" : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
-  // A project's subtitle names its pool; a machine's says what it is.
-  const summarySub = summaryRow && (summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => machineLabel(state, x.machine)).join(" · ") : summaryRow.kind === "machines" ? `${state.order.length}` : "machine");
+  const summaryTitle = summaryRow && (
+    summaryRow.kind === "project" ? summaryRow.project!.title
+    : summaryRow.kind === "fleet" ? summaryRow.fleet ?? ""
+    // A machines header carries no machine of its own, so it says which
+    // fleet's it is — the same thing its section's rows say.
+    : summaryRow.kind === "machines" ? `${summaryRow.fleet ?? DEFAULT_FLEET} machines`
+    : (summaryMachine?.info?.name ?? summaryMachine?.saved.name ?? ""));
+  // A project's subtitle names its pool, a fleet's and a machines header's
+  // counts what is in it, and a machine's says what it is.
+  const summarySub = summaryRow && (
+    summaryRow.kind === "project" ? (summaryRow.pool ?? []).map((x) => machineLabel(state, x.machine)).join(" · ")
+    : summaryRow.kind === "fleet" ? `${summaryRow.machineCount ?? 0} machine${summaryRow.machineCount === 1 ? "" : "s"}`
+    : summaryRow.kind === "machines" ? `${summaryRow.count ?? 0}`
+    : "machine");
   // The hint the bar shows when nothing was raised, longest form first. The
   // bar takes the longest one that fits whole beside the title and shows
   // nothing when none does, so a hint is never cut (`layoutTitleBar`, #87).

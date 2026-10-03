@@ -19,8 +19,9 @@ import { join } from "node:path";
 process.env.COVEY_CONFIG = mkdtempSync(join(tmpdir(), "covey-tui-fleets-"));
 
 import type { Project, Thread } from "@covey/protocol";
+import { DEFAULT_FLEET } from "@covey/client";
 import {
-  MACHINES_KEY, Store, fleetMachines, fleetRowKey, fleetsOf, machineFleet, machinesKey, projectGroups,
+  MACHINES_KEY, Store, fleetMachines, fleetRowKey, fleetsOf, isMachinesRowKey, machineFleet, machinesKey, projectGroups,
   sidebarRows, type AppState, type MachineState,
 } from "./store.js";
 
@@ -124,6 +125,26 @@ test("a fleet with no machine in it is not painted, and a client with none still
   assert.deepEqual(sidebarRows(empty).map((r) => r.kind), ["machines"]);
 });
 
+test("the cursor still refuses to seat itself on a machines header", () => {
+  // App moves the cursor off a row that is gone, and refuses to leave it on
+  // the machines area: at start, and whenever the projects go with their
+  // machine, that area is all there is, and a cursor seated there would sit
+  // below the projects when they came back. The header's key is per fleet
+  // now, so the test has to know both shapes.
+  assert.ok(isMachinesRowKey(MACHINES_KEY));
+  assert.ok(isMachinesRowKey(machinesKey("covey")));
+  assert.ok(isMachinesRowKey(machinesKey("work")), "the per-fleet key is the one that used to slip past");
+  assert.ok(isMachinesRowKey(`m:${PI}`));
+  assert.ok(!isMachinesRowKey("p:github.com/acme/api"));
+  assert.ok(!isMachinesRowKey("f:work"));
+  // And the keys the sidebar really mints answer the same way. At start,
+  // before any machine answers, the section is the whole of the tree: this is
+  // the moment the guard exists for.
+  const away = { ...machine(BOX, "box", null, [], []), conn: "offline", info: null } as MachineState;
+  assert.deepEqual(sidebarRows(stateOf([away], { [MACHINES_KEY]: true })).map((r) => [r.key, isMachinesRowKey(r.key)]),
+    [["machines:covey", true], [`m:${BOX}`, true]]);
+});
+
 // ---- the line itself -------------------------------------------------------
 
 test("one repository in two fleets is two project rows, and the default fleet's fold key is unchanged", () => {
@@ -172,6 +193,19 @@ test("a run places inside its own fleet, and the repository list is read there",
   assert.deepEqual(store.ghMachines(), [PI, BOX]);
 });
 
+test("a thread places inside its own fleet, the way a run does", () => {
+  const store = new Store([]);
+  for (const m of [
+    machine(PI, "pi", null, [project("p-covey", "covey", COVEY)], []),
+    machine(BOX, "box", "work", [project("b-covey", "covey", COVEY)], []),
+  ]) { store.state.machines.set(m.key, m); store.state.order.push(m.key); }
+  // `rankedPool` is what "New thread on which machine?" offers, and the pool
+  // is a repository and a base — never a fleet. Without the fleet beside it,
+  // the most ordinary act in covey is the one that crosses the line.
+  assert.deepEqual(store.rankedPool(COVEY, "covey").map((m) => m.key), [PI]);
+  assert.deepEqual(store.rankedPool(COVEY, "work").map((m) => m.key), [BOX]);
+});
+
 test("a machine the reader added to a fleet is told so at its first hello, once", async () => {
   const store = new Store([]);
   const sent: unknown[] = [];
@@ -185,4 +219,38 @@ test("a machine the reader added to a fleet is told so at its first hello, once"
   assert.equal(ms.joining, undefined);
   (store as any).settleFleet(ms);
   assert.deepEqual(sent.length, 1, "and told once: a second hello is not a second write");
+});
+
+test("adding a machine never writes the default fleet over the fleet the machine declares", async () => {
+  const store = new Store([]);
+  const sent: unknown[] = [];
+  // A machine that says it is at work, met for the first time by a client
+  // whose pick could only offer `covey` — because no connected machine had
+  // named `work` yet. The answer is about a machine the reader has never
+  // seen, so it is no instruction.
+  const ms = machine(BOX, "box", "work", [], [], { joining: DEFAULT_FLEET } as Partial<MachineState>);
+  store.state.machines.set(BOX, ms);
+  store.state.order.push(BOX);
+  (store as any).clients.set(BOX, { command: async (c: unknown) => { sent.push(c); return { ok: true }; }, rpc: async () => ({}), stop() {} });
+
+  (store as any).settleFleet(ms);
+  assert.deepEqual(sent, [], "the machine's own answer stands");
+  assert.equal(machineFleet(store.state as AppState, BOX), "work");
+  assert.equal(ms.saved.fleet, "work", "and the client caches it, so it is in work while away");
+});
+
+test("a rename that changes only the case still reaches the machine", async () => {
+  const store = new Store([]);
+  const sent: unknown[] = [];
+  const ms = machine(BOX, "box", "work", [], []);
+  store.state.machines.set(BOX, ms);
+  store.state.order.push(BOX);
+  (store as any).clients.set(BOX, { command: async (c: unknown) => { sent.push(c); return { ok: true }; }, rpc: async () => ({}), stop() {} });
+
+  await store.setMachineFleet(BOX, "work");
+  assert.deepEqual(sent, [], "the same name writes nothing");
+  // `work` and `Work` are one fleet, and the display name keeps the case the
+  // reader typed — so this is a rename they can see, and the machine stores it.
+  await store.setMachineFleet(BOX, "Work", true);
+  assert.deepEqual(sent, [{ type: "machine.settings", fleet: "Work" }]);
 });
