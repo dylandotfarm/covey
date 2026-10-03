@@ -684,6 +684,56 @@ test("a restart puts away the review threads an earlier refusal left behind", as
   assert.equal(s.db.getThread("t1")!.archivedAt, null, "and the author it reviewed is left alone");
 });
 
+test("a closed pull request archives its reviewer, after it has read why", async (t) => {
+  // The merge end archives the reviewer; the close end left it hidden on a
+  // branch nothing will look at again, with no watch and nothing to wake it.
+  // Unlike a spent budget there is nobody coming to read it.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+  s.cli.held = true;
+  s.host.options.prs!["covey/t1"]!.state = "CLOSED";
+  await s.poll();
+
+  // The news goes as a turn, so the archive waits for it: a reviewer is told
+  // why it is finished before its worktree goes.
+  assert.equal(s.thread(reviewerId).watch!.state, "closed");
+  assert.match(s.turns(reviewerId).at(-1)!, /closed/);
+  assert.equal(s.thread(reviewerId).archivedAt, null, "the turn is still running");
+
+  s.cli.held = false;
+  s.cli.release();
+  await settle();
+  assert.ok(s.thread(reviewerId).archivedAt, "and the thread goes at the end of it");
+  assert.equal(s.thread("t1").archivedAt, null, "the author may reopen, so it stays");
+});
+
+test("the restart repair puts away a reviewer whose pull request closed", async (t) => {
+  // The archive above waits for a turn and `archivePending` is memory only, so
+  // a restart inside that turn loses it exactly as a restart inside a sign-off
+  // does. The seat says `dropped` here and a `dropped` seat is the one the
+  // sweep will not act on, so this is read from the reviewer's own watch.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+  s.cli.held = true;
+  s.host.options.prs!["covey/t1"]!.state = "CLOSED";
+  await s.poll();
+  assert.equal(s.reviewers("t1")[0]!.state, "dropped", "the seat alone cannot tell this from a spent budget");
+  assert.equal(s.thread(reviewerId).archivedAt, null);
+
+  const engine = s.restart();
+  await engine.sweepFinishedReviewers();
+  await settle();
+  assert.ok(s.db.getThread(reviewerId)!.archivedAt, "the restart lost the archive, and the sweep makes it good");
+});
+
 test("the restart repair leaves the reviewer a spent budget kept", async (t) => {
   // A reviewer out of rounds is `dropped` on the seat and alive on purpose: the
   // watch ends `blocked`, covey says a person has to read the change, and the

@@ -673,14 +673,18 @@
   the review decided and never whether the thread went, so `reviewing` is not the test for
   "still on the screen". And because `archivePending` is memory only,
   `Engine.sweepFinishedReviewers` repairs the rest at start, beside "anything that was running
-  when we last exited is now idle". It reads the *seat* on the author's watch and never the
-  reviewer's own watch, because the question is what the review decided and a watch answers a
-  different one. **A `dropped` seat is the one it leaves.** Covey writes `dropped` when a
-  reviewer's own watch runs out of rounds, and that path keeps the thread alive on purpose —
-  the watch ends `blocked`, covey says a person has to read the change, and the worktree stays
-  on the branch so that person has the half-finished review and the code together. Every other
-  `dropped` belongs to a thread archived or deleted in the same breath, so the sweep never
-  meets one.
+  when we last exited is now idle". **A `dropped` seat is the one it leaves**, because covey
+  writes `dropped` in three places and two of them keep the thread on purpose: a reviewer out
+  of rounds, whose watch ends `blocked` and whose worktree stays on the branch so the person
+  covey asked for has the half-finished review and the code together; and a merge on a machine
+  with `archiveOnMerge` off, which asked for its threads to be kept. The third is a closed pull
+  request, and **the close archives its own reviewer** where it happens, after the news, the
+  way the merge branch above it does — a reviewer left there sits hidden on a branch nothing
+  will look at again, and unlike a spent budget there is nobody coming to read it. The sweep
+  names the close as well, from the reviewer's *own* watch rather than the seat, because that
+  archive waits for a turn and a restart inside it loses the archive exactly as a restart
+  inside a sign-off does; `blocked`, `merged` and `closed` are what tell those three apart, and
+  the seat cannot.
   Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
   with the loop and `covey env`.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon

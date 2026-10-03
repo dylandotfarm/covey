@@ -1586,20 +1586,26 @@ export class Engine {
    * that turn forgets the archive it owed. Without this the row stays for ever:
    * nothing polls it, nothing wakes it, and no reader knows why it is there.
    *
-   * Three states are archived and `dropped` is not one of them, which is the
-   * whole care in this function. Covey writes `dropped` when a reviewer's own
-   * watch runs out of rounds, and *that* path keeps the thread alive on
-   * purpose: it ends the watch `blocked`, says "a person has to read the
-   * change", and leaves the worktree on the branch so the person who comes to
-   * read it has the half-finished review and the code in front of them. A
-   * sweep that archived it would take, at the next start, exactly what the
-   * budget path meant to keep. Every other `dropped` belongs to a thread that
-   * is being archived or deleted in the same breath, so the sweep never meets
-   * one.
+   * The seat on the author's watch answers "what did the review decide", and a
+   * `dropped` seat is the one this function will not act on. Covey writes
+   * `dropped` in three places and two of them keep the thread on purpose: a
+   * reviewer whose own watch ran out of rounds, which ends `blocked` and says a
+   * person has to read the change — the worktree stays on the branch so that
+   * person has the half-finished review and the code together — and a merge on
+   * a machine that turned `archiveOnMerge` off, which asked for its threads to
+   * be kept. A sweep that read `dropped` as "over" would take both away at the
+   * next start.
    *
-   * The test is the *seat* on the author's watch and never the reviewer's own
-   * watch, because the question is what the review decided and a watch answers
-   * a different one — it ends on a merge, on a close and on that budget alike.
+   * The third is a closed pull request, and that one is archived where it
+   * happens, after the news. It is named here as well because the archive waits
+   * for that turn and `archivePending` is memory only, so a restart inside it
+   * loses the archive exactly as a restart inside a sign-off does. The fact
+   * read is the *reviewer's own* watch rather than the seat, because here the
+   * question really is what became of the pull request: `blocked` is the budget
+   * and keeps its thread, `merged` is the machine's choice and keeps its
+   * thread, and `closed` has no review left to finish and nobody coming to
+   * read it.
+   *
    * A reviewer that asked for changes is live work and stays, unless the author
    * it waits on has itself been archived.
    */
@@ -1612,6 +1618,7 @@ export class Engine {
         : author.archivedAt ? "the thread that wrote the change is archived"
         : !seat ? "the author no longer records this review"
         : seat.state === "signedOff" ? "the review signed off"
+        : t.watch?.state === "closed" ? "the pull request was closed"
         : null;
       if (!why) continue;
       this.opts.log?.(`archiving review thread ${t.id.slice(0, 8)} of #${t.reviewOf.number}: ${why}`);
@@ -2012,6 +2019,19 @@ export class Engine {
       // session the engine released. This is the whole reason the watch exists.
       await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text, system: true })
         .catch((e: any) => this.note(fresh.id, "warning", `Could not deliver the news on pull request #${w.number} as a turn: ${e?.message ?? String(e)}`));
+      // A closed pull request ends a reviewer the way a merge does, and the
+      // merge branch above already returned — so this is where the other end is
+      // put away. `archiveWhenIdle` waits for the turn just dispatched, so the
+      // reviewer reads why it is finished and hands the worktree back when it
+      // stops. Without it the thread sits hidden on a branch nothing will look
+      // at again, with no watch and nothing that can wake it, and unlike a
+      // spent budget there is nobody coming to read it.
+      //
+      // Only a reviewer, and only a close. The author of a closed pull request
+      // may reopen it, and a *merge* that reaches a thread here at all is one
+      // whose machine turned `archiveOnMerge` off — it asked for its threads to
+      // be kept.
+      if (end?.kind === "closed" && role === "reviewer") await this.archiveWhenIdle(fresh.id);
     } finally {
       this.polling.delete(t.id);
     }
