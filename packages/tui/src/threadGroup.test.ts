@@ -963,14 +963,41 @@ test("a thread under review carries the mark, painted on the screen", async () =
   } finally { unmount(); }
 });
 
-test("two reviewers put the count beside the mark, and the row stays one line", async () => {
+test("the mark sits where the reader looks, and the row stays one line", async () => {
+  // In the status cell, with the `●` of a thread at work and the `✓` of one
+  // that finished — not past the title at the right edge of the row, which is
+  // not where a reader looks to see what a thread is doing.
   const store = storeWith([underReview("author", "2026-01-09T00:00:00Z", "reviewing", "reviewing")]);
   const { frame, unmount } = await paint(store);
   try {
     const line = frame().find((l) => l.slice(0, 33).includes("author")) ?? "";
-    assert.ok(line.includes(`${REVIEW_MARK}2`), `the count is not beside the mark: "${line}"`);
+    const at = line.indexOf(REVIEW_MARK);
+    assert.ok(at >= 0 && at < line.indexOf("author"), `the mark is not left of the title: "${line}"`);
+    // One glyph, however many reviewers are reading: the cell is two columns on
+    // every row, so that every thread title starts in the same one. The count
+    // did not come across with the mark.
+    assert.ok(!line.includes(`${REVIEW_MARK}2`), `the count is in the cell: "${line}"`);
     // One row, one line, always: a second line silently breaks the mouse hit
     // test, because `sidebarCells` gives every row exactly one.
     assert.equal(frame().filter((l) => l.slice(0, 33).includes("author")).length, 1);
+  } finally { unmount(); }
+});
+
+test("a thread under review is never also finished", async () => {
+  // The `✓` says the thread is the reader's again — settle it, ask more of it,
+  // or leave it. Both marks at once sent the reader to a thread with nothing in
+  // it to do. The record is kept, not dropped, so the turn that ends the review
+  // lands the `✓` it was holding.
+  const store = storeWith([
+    underReview("author", "2026-01-09T00:00:00Z", "reviewing"),
+    underReview("signed", "2026-01-08T00:00:00Z", "signedOff"),
+  ]);
+  for (const id of ["author", "signed"]) store.state.attention.set(`${PI}:${id}`, "done");
+  const { frame, unmount } = await paint(store);
+  try {
+    const lineOf = (text: string) => frame().find((l) => l.slice(0, 33).includes(text)) ?? "";
+    assert.ok(!lineOf("author").includes("✓"), `finished while under review: "${lineOf("author")}"`);
+    assert.ok(lineOf("author").includes(REVIEW_MARK), `no mark on the thread being reviewed: "${lineOf("author")}"`);
+    assert.ok(lineOf("signed").includes("✓"), `the review is over: "${lineOf("signed")}"`);
   } finally { unmount(); }
 });

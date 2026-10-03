@@ -20,6 +20,7 @@ import { Db } from "./db.js";
 import { Engine, EngineError } from "./engine.js";
 import { fakeHost, pr } from "./integrate/testHost.js";
 import { POLL_MAX_MS, WATCH_MAX_MS, pollDelayMs } from "./integrate/news.js";
+import { signComment } from "./integrate/sign.js";
 import { autoReply, fakeCli, settle } from "./claudeFake.js";
 
 const MACHINE: MachineInfo = {
@@ -684,9 +685,12 @@ test("a comment goes on the thread's pull request with its media, and a thread w
     // Media alone is a comment too.
     await s.engine.commentPullRequest({ threadId: "t1", attachments: [{ name: "demo.mp4", path: media(s, "demo.mp4") }] });
   });
+  // Every comment covey posts is signed with the thread that wrote it, so the
+  // watch never sends it back as news. The signature goes on last, after the
+  // attachment URLs.
   assert.deepEqual(s.host.comments, [
-    { number: 101, body: `After the fix:\n\n![after.png](${s.host.uploads[0]!.url})`, kind: "pull" },
-    { number: 101, body: s.host.uploads[1]!.url, kind: "pull" },
+    { number: 101, body: signComment(`After the fix:\n\n![after.png](${s.host.uploads[0]!.url})`, "t1"), kind: "pull" },
+    { number: 101, body: signComment(s.host.uploads[1]!.url, "t1"), kind: "pull" },
   ]);
   assert.match(s.notes("t1").at(-1)!, /Commented on pull request #101/);
   // A pull request handed to covey by hand takes a comment the same way.
@@ -694,5 +698,5 @@ test("a comment goes on the thread's pull request with its media, and a thread w
   s.host.options.prs!["covey/t2"] = pr({ number: 7, headRefName: "covey/t2" });
   await s.command({ type: "thread.watch", threadId: "t2", number: 7 });
   await s.engine.commentPullRequest({ threadId: "t2", body: "Seen." });
-  assert.deepEqual(s.host.comments.at(-1), { number: 7, body: "Seen.", kind: "pull" });
+  assert.deepEqual(s.host.comments.at(-1), { number: 7, body: signComment("Seen.", "t2"), kind: "pull" });
 });

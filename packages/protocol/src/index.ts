@@ -712,6 +712,25 @@ export function threadReviewing(t: Thread): number {
   return review.reviewers.filter((x) => x.state === "reviewing" || x.state === "changesRequested").length;
 }
 
+/**
+ * True when a thread's own work is over and the next move is the reader's.
+ *
+ * The clients say this in their own way — a `✓` in the sidebar, a green dot on
+ * the phone — and both mean one thing: the thread is yours again, so settle it,
+ * ask for more, or leave it. So a turn that ended is not enough. Covey's own
+ * reviewers read the change after the author stops, and the next turn comes
+ * from them, not from the reader; a thread that said it was finished while a
+ * review ran sent the reader to a thread with nothing to do in it. The mark of
+ * the review (`threadReviewing`) is what the row carries instead.
+ *
+ * What a person has to act on is nearer than this and is asked first:
+ * `threadNeedsPerson` holds an error and an approval, and a reviewer that is
+ * blocked is painted whatever this says.
+ */
+export function threadIsFinished(t: Thread): boolean {
+  return t.latestTurn?.state === "completed" && threadReviewing(t) === 0;
+}
+
 /** The issue a thread took. The number is the link; the rest is for the reader. */
 export interface ThreadIssue {
   number: number;
@@ -995,12 +1014,17 @@ export interface WatchCursor {
   comments: string[];
   /**
    * The URLs of the comments this thread wrote itself, which are never news to
-   * it. Without this a reviewer's own comment comes back to the reviewer on the
-   * next poll, as a turn that asks it to answer itself; the author and its
-   * reviewers all write from one GitHub account, so no author login can tell
-   * the two apart. The URL is the key and not the id because `gh pr comment`
-   * answers with a URL and `gh pr view` lists a node id, and only the URL is
-   * on both sides.
+   * it. A thread that hears its own comment answers itself, and the author and
+   * its reviewers all write from one GitHub account, so no author login can
+   * tell them apart.
+   *
+   * This is the second half of that guard and not the first. The signature
+   * covey writes into every comment it posts is the first
+   * (`daemon/src/integrate/sign.ts`): it travels on the comment, so it holds
+   * for a watch stopped and started again, for a comment written before the
+   * watch, and for a comment GitHub lists with no URL at all — which is what
+   * this list cannot cover, since the URL is its only key. It stays because a
+   * comment covey posted before it signed them carries no signature.
    *
    * Absent on a cursor written before this existed, which reads as empty.
    */

@@ -12,6 +12,7 @@ import {
   NO_CHECKS_GRACE_MS, POLL_MIN_MS, POLL_MAX_MS,
 } from "./news.js";
 import { pr } from "./testHost.js";
+import { signComment } from "./sign.js";
 
 const T0 = "2026-09-21T10:00:00Z";
 const later = (ms: number) => new Date(Date.parse(T0) + ms).toISOString();
@@ -249,6 +250,27 @@ test("a thread never hears a comment it wrote itself", () => {
   const r = news(pr({ number: 7, comments: [mine, theirs] }), [], cursor, T0, REVIEWER);
   assert.deepEqual(r.events.map((e) => (e.kind === "comment" ? e.comment.id : e.kind)), ["c2"]);
   assert.deepEqual(r.cursor.comments, ["c1", "c2"], "the one it wrote is still recorded, so the match runs once");
+});
+
+test("a thread never hears a comment it signed, with nothing in the cursor", () => {
+  // The cursor is a memory and the signature is a fact. GitHub lists plenty of
+  // comments with no URL, and a watch stopped and started again begins with an
+  // empty cursor, so this is the case the URL could never cover: the reviewer
+  // heard its own review back and was asked to answer itself.
+  const mine = { id: "c1", author: "agent", body: signComment(tagged("Changes requested"), "rev-1"), createdAt: T0, url: null, path: null, line: null };
+  const theirs = { id: "c2", author: "agent", body: signComment("I pushed the fix.", "author-1"), createdAt: T0, url: null, path: null, line: null };
+  const facts = pr({ number: 7, comments: [mine, theirs] });
+  const r = news(facts, [], emptyCursor(), T0, { ...REVIEWER, self: "rev-1" });
+  assert.deepEqual(r.events.map((e) => (e.kind === "comment" ? e.comment.id : e.kind)), ["c2"]);
+  assert.deepEqual(r.cursor.comments, ["c1", "c2"], "the one it wrote is still recorded, so the match runs once");
+
+  const author = news(facts, [], emptyCursor(), T0, { self: "author-1" });
+  assert.deepEqual(author.events.filter((e) => e.kind === "comment").map((e) => e.kind === "comment" && e.comment.id), ["c1"], "the author hears the review and not its own answer");
+
+  // And the marker never reaches the agent that is told about the comment.
+  const text = describeNews(facts, author.events, CTX);
+  assert.doesNotMatch(text, /covey-thread/);
+  assert.match(text, /Line 20 is wrong/);
 });
 
 test("a tagged comment reads as a machine's, and asks the author for the change", () => {

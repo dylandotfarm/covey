@@ -42,6 +42,7 @@ import type { BaseHead, CheckSummary, MergeBlockCode, MergeMethod, MergePolicy, 
 import type { CommentEntry, PullRequestFacts, ReviewEntry, RollupEntry } from "./gh.js";
 import { summariseCheck, summariseChecks } from "./checks.js";
 import { reviewGate, reviewVerdictOf } from "./review.js";
+import { signedBy, unsign } from "./sign.js";
 
 export type WatchEvent =
   | {
@@ -186,6 +187,11 @@ export interface NewsOptions {
    * rather than read from the facts: `gh` knows nothing about it.
    */
   review?: ReviewRequirement | null;
+  /**
+   * The thread this watch belongs to. A comment carrying its signature
+   * (`integrate/sign.ts`) is a comment it wrote itself, and never news to it.
+   */
+  self?: string;
 }
 
 /**
@@ -227,9 +233,14 @@ export function news(
   for (const c of [...pr.comments, ...lineComments]) {
     if (next.comments.includes(c.id)) continue;
     next.comments.push(c.id);
-    // A comment this thread wrote itself is not news to it. The id is recorded
-    // above whether the URL matches or not, so this is safe to get wrong: a URL
-    // that failed to match would cost one turn, once, and never a loop.
+    // A comment this thread wrote itself is not news to it. The signature is
+    // the answer, because it is on the comment rather than in a memory of it:
+    // the URL holds only while the cursor does, and GitHub lists a comment with
+    // no URL at all. The cursor is still read, for a comment covey posted
+    // before it signed them. The id is recorded above whichever matched, so
+    // this is safe to get wrong: a miss would cost one turn, once, and never a
+    // loop.
+    if (options.self && signedBy(c.body) === options.self) continue;
     if (c.url && next.posted!.includes(c.url)) continue;
     events.push({ kind: "comment", comment: c });
   }
@@ -520,7 +531,10 @@ function reviewWord(state: string): string {
 const QUOTE_MAX = 4000;
 
 function quote(body: string): string {
-  const text = body.trim();
+  // The signature goes with it: the agent reading this never needs the id of
+  // the thread that wrote the comment, and a marker it was shown is a marker
+  // it may one day copy.
+  const text = unsign(body).trim();
   if (!text) return "";
   const cut = text.length > QUOTE_MAX ? `${text.slice(0, QUOTE_MAX)}\n[cut after ${QUOTE_MAX} characters]` : text;
   return cut.split("\n").map((l) => `  > ${l}`).join("\n");
