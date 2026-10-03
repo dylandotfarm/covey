@@ -13,8 +13,8 @@ test("a draft that starts a command name opens the popover, best match first", (
   assert.deepEqual(m.commands.map((c) => c.name), ["compact", "context"]);
 });
 
-test("a bare slash offers every command", () => {
-  assert.deepEqual(commandMenuFor("/", LIST)?.commands.map((c) => c.name), ["compact", "context", "resume"]);
+test("a bare slash offers every command, covey's own among them", () => {
+  assert.deepEqual(commandMenuFor("/", LIST)?.commands.map((c) => c.name), ["clear", "compact", "context", "resume"]);
 });
 
 test("prose, a path and a chosen command have no popover", () => {
@@ -30,10 +30,13 @@ test("a token that matches nothing says so", () => {
   assert.equal(m?.empty, "no command matches");
 });
 
-test("a thread that has not started a session says the list is not here yet", () => {
+test("a thread that has not started a session still offers covey's own commands", () => {
+  // `/clear` is covey's, not the SDK's, so it is there before the first turn:
+  // a thread the reader wants to start again on has never run one.
   const m = commandMenuFor("/", null);
-  assert.deepEqual(m?.commands, []);
-  assert.match(m?.empty ?? "", /first turn/);
+  assert.deepEqual(m?.commands.map((c) => c.name), ["clear"]);
+  // And the line that stands in for an empty list still says why it is empty.
+  assert.match(commandMenuFor("/zzz", null)?.empty ?? "", /first turn/);
 });
 
 test("the highlighted row moves inside the list and stops at its ends", () => {
