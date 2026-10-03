@@ -7,9 +7,10 @@
  * row moves. `render.ts` paints it and reads the keys.
  *
  * Which names match is the client's `commandMenu`, so the phone and the TUI
- * rank the same list the same way.
+ * rank the same list the same way, and the commands covey answers itself are
+ * `COVEY_COMMANDS` there, so both offer the same ones (#16).
  */
-import { commandMenu, commandToken } from "@covey/client";
+import { COVEY_COMMANDS, commandMenu, commandToken } from "@covey/client";
 import type { SlashCommandInfo, ThreadCommands } from "@covey/protocol";
 
 export interface CommandMenu {
@@ -32,7 +33,7 @@ export function commandMenuFor(draft: string, commands: ThreadCommands): Command
   if (token === null) return null;
   return {
     token,
-    commands: commandMenu(commands, [], token),
+    commands: commandMenu(commands, COVEY_COMMANDS, token),
     empty: commands === null ? "the commands arrive when this thread starts its first turn" : "no command matches",
   };
 }

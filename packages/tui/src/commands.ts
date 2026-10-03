@@ -1,5 +1,5 @@
 import type { SlashCommandInfo } from "@covey/protocol";
-import { commandLabel } from "@covey/client";
+import { COVEY_COMMANDS, commandLabel } from "@covey/client";
 import type { MenuRow } from "./composerMenu.js";
 
 /**
@@ -11,16 +11,16 @@ import type { MenuRow } from "./composerMenu.js";
  * module keeps what is the TUI's own: the commands covey answers itself, and
  * the shape of a row for `Composer`.
  */
-export { acceptCommand, commandMenu, commandToken } from "@covey/client";
+export { acceptCommand, commandMenu, commandToken, coveyCommand } from "@covey/client";
 
 /**
- * Commands covey answers itself, without the agent.
+ * Commands covey answers itself, without the agent (#16).
  *
- * Empty for now. Issue #16 (`/clear`) adds the first entry here: give it a
- * `source` of `"covey"` and act on it where the composer sends a turn. A local
- * command with the same name as an SDK one hides the SDK one.
+ * The list is `COVEY_COMMANDS` in `@covey/client`, because the phone offers
+ * the same menu; `Store.sendTurn` is where one is taken out of the send path
+ * and run. A local command with the same name as an SDK one hides the SDK one.
  */
-export const LOCAL_COMMANDS: SlashCommandInfo[] = [];
+export const LOCAL_COMMANDS: SlashCommandInfo[] = COVEY_COMMANDS;
 
 /** The row to paint for a command: `/name <args>` and what it does. */
 export function commandRows(commands: SlashCommandInfo[]): MenuRow[] {
