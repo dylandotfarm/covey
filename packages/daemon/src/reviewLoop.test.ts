@@ -271,6 +271,29 @@ test("asking for changes holds the merge, and the reviewer keeps reviewing", asy
   assert.equal(s.host.merges.length, 0, "nothing merged");
 });
 
+test("a pull request merged while a reviewer reads it archives the reviewer too, with no turn", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+  const before = s.turns(reviewerId).length;
+
+  // Somebody merged it over the review. There is nothing left to read.
+  // The author's watch is stopped first, so this case is about the reviewer's
+  // own poll: both watches see the same merge, and the author archiving its
+  // reviewers is a second route to the same end that would hide this one.
+  await s.command({ type: "thread.watch", threadId: "t1", number: null });
+  s.host.options.prs!["covey/t1"]!.state = "MERGED";
+  await s.poll();
+  assert.equal(s.thread(reviewerId).watch!.state, "merged");
+  assert.equal(s.turns(reviewerId).length, before, "a reviewer is not woken to say a merge happened");
+  assert.match(s.notes(reviewerId).at(-1)!, /Pull request #101 merged: .*\nThere is nothing left to review\./s);
+  assert.ok(s.thread(reviewerId).archivedAt);
+  assert.equal(s.reviewers("t1")[0]!.state, "dropped", "its seat is over, and the author is reading the same merge");
+});
+
 test("a review that asks for changes with no words is refused before anything is posted", async (t) => {
   const s = setup();
   t.after(s.cleanup);
@@ -312,12 +335,18 @@ test("signing off records the verdict, archives the review thread, and lets the 
   await s.poll();
   assert.deepEqual(s.thread("t1").watch!.readiness, { ready: true });
   assert.deepEqual(s.host.merges, [{ number: 101, method: "merge" }], "covey merges, now that the review is in");
-  // One turn carries both: the reviewer's own words, and the pass that is no
-  // longer blocked by the review. The review is a `mergeBlock`, so the verdict
-  // is re-delivered the moment the block goes.
-  const told = s.turns("t1").find((x) => /which signed off/.test(x))!;
-  assert.ok(told, s.turns("t1").join("\n---\n"));
-  assert.match(told, /The checks passed on .*There is nothing to fix/s);
+  // The same poll merged, so the thread is archived and hears none of this as
+  // a turn. Nothing is lost: the note carries the whole batch — the reviewer's
+  // own words, and the pass that is no longer blocked by the review. The review
+  // is a `mergeBlock`, so the verdict is re-delivered the moment the block goes.
+  assert.ok(s.thread("t1").archivedAt, "the merge is the end of the loop");
+  const told = s.notes("t1").find((x) => /which signed off/.test(x))!;
+  assert.ok(told, s.notes("t1").join("\n---\n"));
+  assert.match(told, /Pull request #101 merged/);
+  // A record of what happened, with nothing to do about it: the words the
+  // review wrote, and the pass that is no longer blocked by it.
+  assert.match(told, /The checks passed on \w+: 1 check succeeded\./);
+  assert.doesNotMatch(told, /nothing to fix|next poll|Wait;/, "nobody can act on a note in an archived thread");
 });
 
 test("before the sign-off, a green pull request reads as blocked by the review", async (t) => {
@@ -554,13 +583,21 @@ test("a reviewer out of rounds hears the merge, rather than blocking over a pull
   assert.equal(s.thread(reviewerId).watch!.rounds, 3);
   assert.equal(s.thread(reviewerId).watch!.state, "watching");
 
-  // The author merged. The push and the merge arrive in one batch.
+  // The author merged. The push and the merge arrive in one batch. The author's
+  // watch is stopped first, so what the reviewer does is read from its own poll
+  // and not from whichever of the two watches the clock let finish first.
+  await s.command({ type: "thread.watch", threadId: "t1", number: null });
   facts.headRefOid = "ddd4444";
   facts.state = "MERGED";
   await s.poll();
   const w = s.thread(reviewerId).watch!;
   assert.equal(w.state, "merged", "the pull request is over, so the budget has nothing left to bound");
   assert.match(w.reason!, /merged/);
-  assert.match(s.turns(reviewerId).at(-1)!, /merged, so there is nothing left to review/);
+  // The merge costs no turn: the reviewer is archived with the news in a note,
+  // and the push that came with it is in there too.
+  assert.ok(s.thread(reviewerId).archivedAt);
+  const told = s.notes(reviewerId).at(-1)!;
+  assert.match(told, /Pull request #101 merged: .*\nThere is nothing left to review\./s);
+  assert.match(told, /The author pushed ddd4444/);
   assert.match(s.reviewers("t1")[0]!.note!, /the pull request was merged/, "and the author is told why, in the words that are true");
 });

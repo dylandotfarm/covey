@@ -472,6 +472,9 @@ test("the machine sheet is the defaults new threads there inherit, and may hand 
     ["model", "Sonnet"],
     ["mode", "From Claude settings"],
     ["streaming", "On"],
+    // A setting this daemon never sent reads as on: the archive is what covey
+    // does unless the machine says otherwise.
+    ["archive", "On"],
     // This daemon sent no `sessionBudget`, so neither limit can name the
     // number it resolves to — and says the word alone rather than a guess.
     ["live", "from memory"],
@@ -497,7 +500,7 @@ test("the web server row is offered on a fleet machine and withheld from the one
   }
   const ids = (key: string) => sheetRows(s, { target: { kind: "machine", machine: key }, page: "" }).map((r) => r.id);
   assert.ok(!ids(here.key).includes("web"), "the page must not offer to close itself");
-  assert.deepEqual(ids(there.key), ["model", "mode", "streaming", "web", "live", "idle"]);
+  assert.deepEqual(ids(there.key), ["model", "mode", "streaming", "web", "archive", "live", "idle"]);
 });
 
 test("the session limits name the number the daemon resolved them to, and price the memory", () => {

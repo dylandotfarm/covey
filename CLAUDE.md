@@ -545,7 +545,17 @@
   branch polls the pull request and sends every checks verdict, review, comment and merge to
   the thread as a turn (`integrate/news.ts` decides what is news; `Engine.pollWatches` polls).
   Read the checks from the check runs, never from `mergeStateStatus`, and give every watch an
-  end — `watch.test.ts` and `news.test.ts` hold the rules. An engine test passes
+  end — `watch.test.ts` and `news.test.ts` hold the rules. The merge is the one end that
+  sends no turn: the loop is over, so the only answer a turn could bring back is "it
+  merged", and covey writes the news as a note (`describeArchive`, which carries the rest
+  of the batch so a sign-off delivered by the same poll is not lost) and archives the
+  thread. `MachineSettings.archiveOnMerge` turns it off and is on unless the machine says
+  otherwise, so `null` reads as on. Archiving drops the session, so it waits for anything
+  that session still owes — a turn, an approval, or a background task, which leaves no
+  running turn behind and dies with the process (`ClaudeSession.owes`, the half of `busy`
+  that outlives a turn, because the CLI clears its own bookkeeping after the result
+  handler). A message nobody has answered stops it outright. Change `plugin/skills/covey/SKILL.md` with it: the
+  agent's last turn is then the one before the merge. An engine test passes
   `EngineOptions.ghHost` so no test reaches GitHub. A watch's merge policy is `manual` unless
   the caller says `auto`; under `auto` the daemon merges only what `mergeReadiness` calls
   ready, and never under a running turn. A green check is not a merge, and the other half

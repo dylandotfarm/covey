@@ -19,10 +19,37 @@ export interface FakeCli {
   held: boolean;
   /** Let every held turn answer. Set to `held = false` first. */
   release(): void;
+  /**
+   * Write one message to the session started last, as the CLI's own stream.
+   * The three helpers under it are the shapes a test needs; anything else goes
+   * in by hand.
+   */
+  push(message: unknown): void;
+  /** A task the model put in the background: it holds the session (#156). */
+  backgroundTask(taskId: string): void;
+  /** That task reporting. The session owes nothing more once it lands. */
+  finishTask(taskId: string): void;
+  /** Prose nobody asked for, and the result that ends the turn it opens. */
+  woken(text: string): void;
 }
 
 export function fakeCli(): FakeCli {
-  return { held: false, release: () => {} };
+  const cli: FakeCli = {
+    held: false,
+    release: () => {},
+    push: () => {},
+    backgroundTask(taskId) {
+      cli.push({ type: "system", subtype: "task_started", task_id: taskId, tool_use_id: `tu-${taskId}`, is_backgrounded: true });
+    },
+    finishTask(taskId) {
+      cli.push({ type: "system", subtype: "task_notification", task_id: taskId, status: "completed", summary: "done", ambient: false, skip_transcript: false });
+    },
+    woken(text) {
+      cli.push({ type: "assistant", parent_tool_use_id: null, message: { id: `msg-${crypto.randomUUID()}`, model: "opus", content: [{ type: "text", text }] } });
+      cli.push({ type: "result", subtype: "success", is_error: false, result: text, modelUsage: {}, user_message_uuid: null });
+    },
+  };
+  return cli;
 }
 
 /** A `QueryFactory` that answers "ok" to every message, unless `cli.held`. */
@@ -32,6 +59,9 @@ export function autoReply(cli: FakeCli): QueryFactory {
     let wake: (() => void) | null = null;
     let done = false;
     const push = (m: unknown) => { out.push(m); wake?.(); wake = null; };
+    // The handle writes to the session started last, which is the one a test
+    // has just made; a test that wants an older one holds its own `push`.
+    cli.push = push;
     options.abortController?.signal.addEventListener("abort", () => { done = true; wake?.(); });
     void (async () => {
       for await (const _ of prompt as AsyncIterable<SDKUserMessage>) {

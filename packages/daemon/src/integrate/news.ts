@@ -491,6 +491,79 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
   }
 }
 
+/**
+ * The last poll of a watch that merged, written for the reader instead of for
+ * the agent.
+ *
+ * Covey archives a thread whose pull request merged, and an archived thread
+ * runs no turn — so this note is the last thing in the transcript, and nobody
+ * acts on it. Two things follow. It says what became of the thread, which
+ * `describeEvent` never has to: there the agent is about to read it and the
+ * thread stays. And it carries the rest of the batch, because the poll that
+ * merges often reports the sign-off or the checks in the same breath, and a
+ * reader must not lose a reviewer's words to the archive.
+ */
+export function describeArchive(pr: PullRequestFacts, events: WatchEvent[], ctx: NewsContext): string {
+  const ev = events.find((e): e is Extract<WatchEvent, { kind: "merged" }> => e.kind === "merged");
+  const what = ctx.role === "reviewer"
+    ? "There is nothing left to review."
+    : ev?.by === "covey"
+      ? `Covey merged it (${ev.method ?? "merge"}) under the auto policy. The loop is done.`
+      : "The loop is done.";
+  // The URL ends its own line: a terminal that makes a link of it would take
+  // the full stop of a sentence with it.
+  const head = `Pull request #${pr.number} merged: ${pr.url}\n${what} Covey stopped the watch and archived this thread; write to it to bring it back.`;
+  const rest = events.filter((e) => e !== ev);
+  return rest.length ? [head, "", ...rest.map((e) => `- ${recordEvent(e, pr)}`)].join("\n") : head;
+}
+
+/**
+ * One event as a record of what happened, with nothing to do about it.
+ *
+ * This is not a second copy of `describeEvent`: that answers "what does the
+ * agent do now", and every line of it ends in an instruction and a round. Here
+ * the pull request is over and the thread is archived, so there is no next step
+ * and no round left — "Make the change, commit, push" under a note nobody can
+ * act on reads as work the reader has been handed. The words a person wrote are
+ * what must survive, so a review and a comment keep their whole body.
+ */
+function recordEvent(ev: WatchEvent, pr: PullRequestFacts): string {
+  switch (ev.kind) {
+    case "checks": {
+      if (ev.ci === "failing") {
+        const names = ev.failed.map((c) => `\`${checkLabel(c)}\``).join(", ");
+        return `The checks failed on ${short(ev.head)}: ${names}.`;
+      }
+      if (ev.ci === "stale") return `The checks passed on ${short(ev.head)}, against an older ${pr.baseRefName}.`;
+      if (ev.ci === "passing") {
+        const n = ev.checks.filter((c) => c.state === "success").length;
+        return `The checks passed on ${short(ev.head)}: ${n} check${n === 1 ? "" : "s"} succeeded.`;
+      }
+      return `No check ran on ${short(ev.head)}.`;
+    }
+    case "conflict":
+      return `The branch conflicted with ${pr.baseRefName} at ${short(ev.head)}.`;
+    case "head":
+      return `The author pushed ${short(ev.head)} to ${pr.headRefName}; it was ${short(ev.was)}.`;
+    case "review": {
+      const body = quote(ev.review.body);
+      return `Review by ${author(ev.review.author, pr)}: ${reviewWord(ev.review.state)}.${body ? `\n${body}` : ""}`;
+    }
+    case "comment": {
+      const verdict = reviewVerdictOf(ev.comment.body);
+      const who = verdict ? reviewerWord(verdict) : author(ev.comment.author, pr);
+      const where = ev.comment.path ? ` on ${ev.comment.path}${ev.comment.line !== null ? ` line ${ev.comment.line}` : ""}` : "";
+      return `Comment by ${who}${where}:\n${quote(ev.comment.body)}`;
+    }
+    case "merged":
+      return "The pull request was merged.";
+    case "closed":
+      return "The pull request was closed without a merge.";
+    case "mergeFailed":
+      return `Covey tried to merge the pull request and GitHub refused: ${ev.error}.`;
+  }
+}
+
 /** What to do about a block: one instruction, or the wait and why. */
 function describeBlock(block: MergeBlock, pr: PullRequestFacts, ctx: NewsContext): string {
   const round = roundLine(ctx);

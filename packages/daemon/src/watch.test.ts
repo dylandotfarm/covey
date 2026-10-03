@@ -63,7 +63,7 @@ function setup() {
   let engine = make(db);
   engines.push(engine);
   const s = {
-    db, dir, host,
+    db, dir, host, cli,
     /** Keep the next turns running until `release`. */
     hold() { cli.held = true; },
     async release() { cli.held = false; cli.release(); cli.release = () => {}; await settle(); },
@@ -253,11 +253,14 @@ test("a loop that cannot finish stops the work, puts it in the transcript, and k
   assert.equal(s.thread("t1").watch?.rounds, 1, "and it spends no round");
   assert.equal(s.notes("t1").filter((n) => /stops waking this thread/.test(n)).length, 1, "said once");
 
-  // So does the merge, which is the end of the watch.
+  // And the merge still lands, which is the end of the watch. It is the one
+  // end that costs no turn: the thread is archived with the news in a note.
   facts.state = "MERGED";
   await s.poll();
   assert.equal(s.thread("t1").watch?.state, "merged");
-  assert.match(s.turns("t1").at(-1)!, /The pull request was merged/);
+  assert.equal(s.turns("t1").length, 2, "the merge asks the agent for nothing");
+  assert.match(s.notes("t1").at(-1)!, /Pull request #101 merged/);
+  assert.ok(s.thread("t1").archivedAt);
 });
 
 test("a watch out of rounds still merges under auto when the pull request comes good", async (t) => {
@@ -304,7 +307,7 @@ test("a review and its line comment arrive as one turn that carries the words", 
   assert.equal(s.turns("t1").length, 2, "delivered once");
 });
 
-test("a merge ends the watch, and the thread hears it", async (t) => {
+test("a merge ends the watch and archives the thread, and spends no turn saying so", async (t) => {
   const s = setup();
   t.after(s.cleanup);
   s.newThread("t1");
@@ -313,12 +316,104 @@ test("a merge ends the watch, and the thread hears it", async (t) => {
   facts.state = "MERGED";
   await s.poll();
   assert.equal(s.thread("t1").watch?.state, "merged");
-  assert.match(s.turns("t1")[0]!, /was merged\. The loop is done/);
-  assert.match(s.notes("t1").at(-1)!, /Stopped watching pull request #101: The pull request was merged/);
+  assert.deepEqual(s.turns("t1"), [], "the only answer a turn could bring back is `it merged`");
+  assert.ok(s.thread("t1").archivedAt, "the loop is over, so the thread is put away");
+  const notes = s.notes("t1");
+  assert.match(notes.at(-2)!, /Stopped watching pull request #101: The pull request was merged/);
+  assert.match(notes.at(-1)!, /Pull request #101 merged: https:\/\/github\.com\/o\/r\/pull\/101\nThe loop is done\. Covey stopped the watch and archived this thread/);
   assert.deepEqual(await s.poll(), [], "nothing left to watch");
 });
 
+test("with the archive turned off, the merge reaches the thread as a turn and the thread stays", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  // A fresh object, not a write to the shared one: every engine of this file
+  // holds the same settings, and one test must not set another one's machine.
+  s.engine.machine.settings = { ...s.engine.machine.settings, archiveOnMerge: false };
+  s.newThread("t1");
+  await s.open("t1");
+  s.host.options.prs!["covey/t1"]!.state = "MERGED";
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.state, "merged");
+  assert.match(s.turns("t1")[0]!, /was merged\. The loop is done/);
+  assert.equal(s.thread("t1").archivedAt, null);
+});
+
+test("a merge seen while the thread works waits for the turn, and a reader who writes keeps the thread", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  s.hold();
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "still working" });
+  await settle();
+  s.host.options.prs!["covey/t1"]!.state = "MERGED";
+  await s.poll();
+  assert.equal(s.thread("t1").archivedAt, null, "archiving takes the worktree back, so it waits for the turn");
+  await s.release();
+  assert.ok(s.thread("t1").archivedAt, "and lands when the turn ends");
+
+  // The reader has more for this thread, so the next merge archives nothing.
+  s.newThread("t2");
+  await s.open("t2");
+  s.hold();
+  await s.command({ type: "turn.send", threadId: "t2", turnId: randomUUID(), text: "still working" });
+  await settle();
+  s.host.options.prs!["covey/t2"]!.state = "MERGED";
+  await s.poll();
+  await s.command({ type: "turn.send", threadId: "t2", turnId: randomUUID(), text: "one more thing" });
+  await s.release();
+  assert.equal(s.thread("t2").archivedAt, null, "somebody wrote to it, so the thread stays");
+});
+
 // ---- the watch is bounded, and it is dropped with the thread -----------------
+
+test("a merge never takes a session that still owns a background task", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  // The agent pushed, started a build in the background, and ended its turn —
+  // which is what a thread looks like at the moment its pull request merges.
+  // A background task leaves no running turn behind (#156) and dies with its
+  // session, and archiving drops the session and takes the worktree back.
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "start the build in the background" });
+  await settle();
+  s.cli.backgroundTask("task-1");
+  await settle();
+  assert.equal(s.thread("t1").latestTurn?.state, "completed", "nothing is running, and the work is still there");
+
+  s.host.options.prs!["covey/t1"]!.state = "MERGED";
+  await s.poll();
+  assert.equal(s.thread("t1").watch?.state, "merged", "the watch ends either way");
+  assert.equal(s.thread("t1").archivedAt, null, "but the thread keeps its session until the task is done");
+
+  // The task reports, the agent writes about it, and that turn ends.
+  s.cli.finishTask("task-1");
+  s.cli.woken("The build passed.");
+  await settle();
+  assert.ok(s.thread("t1").archivedAt, "and the thread goes at the end of the turn the report opened");
+});
+
+test("a message the agent reads inside the turn is answered, and the thread still goes", async (t) => {
+  // The other half of the rule above. A message written while the session is
+  // live is folded into the running turn rather than queued, so the agent reads
+  // it and answers it before the turn ends. It is not a message nobody has
+  // answered, and the loop is still over.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  s.hold();
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "working" });
+  await settle();
+  await s.command({ type: "turn.send", threadId: "t1", turnId: randomUUID(), text: "and check the logs" });
+  assert.equal(s.thread("t1").queuedTurns, 0, "folded into the turn, not queued behind it");
+  s.host.options.prs!["covey/t1"]!.state = "MERGED";
+  await s.poll();
+  await s.release();
+  assert.ok(s.thread("t1").archivedAt, "answered, so the merge puts the thread away with the answer in it");
+});
 
 test("a quiet watch backs off, and a watch that runs too long is handed to a person", async (t) => {
   const s = setup();
@@ -445,7 +540,7 @@ test("the policy is manual unless said otherwise: a green pull request waits for
   assert.deepEqual(s.host.merges, [{ number: 101, method: "squash" }]);
   assert.equal(s.thread("t1").watch?.state, "merged");
   assert.match(s.thread("t1").watch!.reason!, /Covey merged the pull request \(squash\)/);
-  assert.match(s.turns("t1").at(-1)!, /Covey merged the pull request \(squash\)/);
+  assert.match(s.notes("t1").at(-1)!, /Pull request #101 merged: \S+\nCovey merged it \(squash\) under the auto policy\./);
   await assert.rejects(
     () => s.command({ type: "thread.setMerge", threadId: "t1", merge: "manual" }),
     (e: unknown) => e instanceof EngineError && e.code === "no_watch",
@@ -518,7 +613,7 @@ test("under auto, covey merges when the checks pass, but never under a running t
   await s.poll();
   assert.deepEqual(s.host.merges, [{ number: 101, method: "merge" }]);
   assert.equal(s.thread("t1").watch?.state, "merged");
-  assert.match(s.turns("t1").at(-1)!, /Covey merged the pull request \(merge\)/);
+  assert.match(s.notes("t1").at(-1)!, /Pull request #101 merged: \S+\nCovey merged it \(merge\) under the auto policy\./);
 });
 
 test("under auto, a pass against an older base is work for the agent, not a merge and not a round", async (t) => {

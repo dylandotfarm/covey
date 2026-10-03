@@ -203,6 +203,17 @@ export interface MachineSettings {
    */
   webEnabled?: boolean | null;
   /**
+   * Whether a watch archives its thread when the pull request merges. Absent
+   * or `null` means the daemon's default, which is on; only `false` turns it
+   * off.
+   *
+   * A merged pull request is the end of the loop, so the thread has nothing
+   * left to do: covey writes the merge as a note and puts the thread away,
+   * rather than spending a turn on an agent that can only answer "it merged".
+   * Off, the merge arrives as a turn and the thread stays on the screen.
+   */
+  archiveOnMerge?: boolean | null;
+  /**
    * Which addresses the daemon listens on: `loopback`, `tailnet` (plus
    * loopback), `all`, or one address. Changed while the daemon runs: it
    * closes its listeners and opens new ones, and the connections already
@@ -2042,6 +2053,8 @@ export type Command =
       maxLiveSessions?: number | null;
       /** Serve the web client from this machine, or stop. */
       webEnabled?: boolean | null;
+      /** Archive a thread when its pull request merges; `false` turns it off. */
+      archiveOnMerge?: boolean | null;
       /** Listen on these addresses from now on: `loopback`, `tailnet`, `all`, or one address. */
       bind?: string;
     }

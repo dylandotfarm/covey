@@ -71,6 +71,8 @@ export interface DaemonConfig {
   maxLiveSessions: number | null;
   /** Whether this daemon serves the web client; null = off. */
   webEnabled?: boolean | null;
+  /** Archive a thread when its pull request merges; null = the default, which is on. */
+  archiveOnMerge?: boolean | null;
   /** The machines the web client dials besides this one. The TUI sets it. */
   fleet?: FleetMember[];
 }
@@ -160,7 +162,7 @@ function readConfigFile(): Record<string, unknown> {
 }
 
 /** Settings written before these fields existed simply read as "no opinion". */
-export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled" | "bind">>): MachineSettings {
+export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled" | "archiveOnMerge" | "bind">>): MachineSettings {
   return {
     defaultModel: cfg.defaultModel ?? null,
     defaultPermissionMode: cfg.defaultPermissionMode ?? null,
@@ -174,6 +176,10 @@ export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" |
     maxLiveSessions: cfg.maxLiveSessions ?? envNumber("COVEY_MAX_LIVE_SESSIONS"),
     // `COVEY_WEB=1` seeds a throwaway daemon that has no TUI to turn it on.
     webEnabled: cfg.webEnabled ?? (process.env.COVEY_WEB === "1" ? true : null),
+    // On unless the machine says otherwise, so `null` reads as on and only a
+    // written `false` turns it off. `COVEY_ARCHIVE_ON_MERGE=0` is the escape
+    // for a daemon with no TUI to turn it off in.
+    archiveOnMerge: cfg.archiveOnMerge ?? (process.env.COVEY_ARCHIVE_ON_MERGE === "0" ? false : null),
     ...(cfg.bind ? { bind: cfg.bind } : {}),
   };
 }

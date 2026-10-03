@@ -35,7 +35,7 @@ import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
 import { unwrapMarkdown } from "./integrate/reflow.js";
-import { news, emptyCursor, describeNews, asksForWork, endsWatch, splitForBudget, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
+import { news, emptyCursor, describeNews, describeArchive, asksForWork, endsWatch, splitForBudget, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 import { signComment } from "./integrate/sign.js";
 
@@ -224,6 +224,10 @@ export class Engine {
   /** Threads whose watch is being polled right now, so a slow `gh` is not
    *  asked twice. */
   private polling = new Set<string>();
+  /** Threads whose pull request merged while they were busy, to archive at the
+   *  end of the turn. Memory only: a daemon that restarts leaves the thread on
+   *  the screen, which is the safe way for this to fail. */
+  private archivePending = new Set<string>();
   private sessionStore;
 
   constructor(readonly db: Db, readonly machine: MachineInfo, private opts: EngineOptions = {}) {
@@ -598,6 +602,9 @@ export class Engine {
           ...(cmd.sessionIdleMinutes !== undefined ? { sessionIdleMinutes: clampSetting(cmd.sessionIdleMinutes, 0) } : {}),
           ...(cmd.maxLiveSessions !== undefined ? { maxLiveSessions: clampSetting(cmd.maxLiveSessions, 1) } : {}),
           ...(cmd.webEnabled !== undefined ? { webEnabled: cmd.webEnabled === true ? true : null } : {}),
+          // On is the default, so only the refusal is written down: a machine
+          // that says nothing archives, and `daemon.json` holds `false` alone.
+          ...(cmd.archiveOnMerge !== undefined ? { archiveOnMerge: cmd.archiveOnMerge === false ? false : null } : {}),
         });
         // The file may say a bind this daemon was not started with (`--bind`
         // wins at start and is never written). What the machine reports is
@@ -876,6 +883,10 @@ export class Engine {
         // Writing to an archived thread is how you un-archive it: the sidebar's
         // archived folder is "threads I am done with", and this says otherwise.
         if (t.archivedAt) { t.archivedAt = null; this.putThreadAndEmit(t); }
+        // The same words about an archive that is still waiting for a turn to
+        // end: somebody has more for this thread, so the merge no longer puts
+        // it away. A turn covey raised itself says nothing about that.
+        if (!cmd.system) this.archivePending.delete(t.id);
         const running = t.latestTurn?.state === "running";
         // Write any inline bytes to disk and strip them, so the persisted item
         // (and every snapshot that replays it) stays small.
@@ -1872,6 +1883,23 @@ export class Engine {
         rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge,
         role, review: live.review, base: fresh.reviewOf?.base ?? facts.baseRefName,
       };
+      const end = events.find(endsWatch);
+      // A merge is the end of the loop, and by default the thread goes with
+      // it. The only answer a turn could bring back is "it merged", and that
+      // answer costs a session, a model call and a row on the screen the
+      // reader has to put away by hand. So the news goes in a note — an
+      // archived thread runs no turn to read it — and the thread is archived.
+      // The rounds budget is not read here: nothing is being asked for.
+      const merged = end?.kind === "merged" ? end : undefined;
+      if (merged && this.machine.settings.archiveOnMerge !== false) {
+        this.endWatch(fresh, "merged", this.watchEndReason(merged));
+        this.note(fresh.id, "info", describeArchive(facts, events, ctx));
+        this.putThreadAndEmit(fresh);
+        if (role === "reviewer") this.markReviewerOver(fresh, "the pull request was merged");
+        this.opts.log?.(`watch merged thread=${fresh.id.slice(0, 8)} pr=#${w.number}; archived the thread`);
+        await this.archiveWhenIdle(fresh.id);
+        return;
+      }
       // The budget is spent, and what covey does about it differs by role.
       //
       // A reviewer ends here: a review that may not read another push can never
@@ -1891,7 +1919,6 @@ export class Engine {
       // its `MERGED` return, so `[head, merged]` is a real batch, which blocked
       // a reviewer and told the author its review was dropped about a pull
       // request that had merged.
-      const end = events.find(endsWatch);
       let batch = events;
       if (!end && events.some((e) => asksForWork(e, role)) && live.rounds >= live.maxRounds) {
         if (role === "reviewer") {
@@ -1921,7 +1948,7 @@ export class Engine {
       if (!end && batch.some((e) => asksForWork(e, role))) live.rounds++;
       ctx.rounds = live.rounds;
       const text = describeNews(facts, batch, ctx);
-      if (end) this.endWatch(fresh, end.kind, end.kind === "closed" ? "The pull request was closed without a merge." : end.by === "covey" ? `Covey merged the pull request (${end.method}) under the auto policy.` : "The pull request was merged.");
+      if (end) this.endWatch(fresh, end.kind, this.watchEndReason(end));
       this.putThreadAndEmit(fresh);
       // The pull request is over, so the reviewer's seat is too. The author is
       // not told: it is reading the same merge on its own watch.
@@ -1934,6 +1961,53 @@ export class Engine {
     } finally {
       this.polling.delete(t.id);
     }
+  }
+
+  /** Why the watch stopped, in the one sentence the row keeps. */
+  private watchEndReason(ev: Extract<WatchEvent, { kind: "merged" | "closed" }>): string {
+    if (ev.kind === "closed") return "The pull request was closed without a merge.";
+    return ev.by === "covey" ? `Covey merged the pull request (${ev.method}) under the auto policy.` : "The pull request was merged.";
+  }
+
+  /**
+   * Archive a thread whose work is over, now or when its turn ends.
+   *
+   * Two things stand in the way, and they end differently.
+   *
+   * A message nobody has answered keeps the thread for good: whoever wrote it
+   * has said the loop is not over, and a merge must not archive the thread out
+   * from under their question. That is the queue here, and the `archivePending`
+   * line in `turn.send` is the same rule for a message written after this poll.
+   * A message written *during* a turn of a live session is neither: it folds
+   * into that turn, so the agent answers it before the turn ends.
+   *
+   * A session that still owes somebody something only *delays* it. Archiving
+   * drops the session and takes the worktree back, so it must never happen
+   * under a running turn, an approval that waits, or a background task — which
+   * leaves no running turn behind (#156) and dies with its process, which is
+   * the whole of why `sessionBusy` exists. The thread is remembered instead,
+   * and `finishTurn` archives it at the end of the turn that the task's own
+   * report opens. A task that never reports leaves the thread on the screen,
+   * which is the safe way for this to fail.
+   */
+  private async archiveWhenIdle(threadId: string, afterTurn = false): Promise<void> {
+    const t = this.db.getThread(threadId);
+    if (!t || t.archivedAt || t.movedTo) { this.archivePending.delete(threadId); return; }
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) { this.archivePending.delete(threadId); return; }
+    // `afterTurn` is the call from `finishTurn`, which runs inside the result
+    // handler: the CLI clears its own bookkeeping after that, so `sessionBusy`
+    // there still counts the turn that has just ended. `owes` is the half of it
+    // that outlives a turn, and is the right question at that moment.
+    const busy = afterTurn
+      ? !!this.sessions.get(threadId)?.owes
+      : t.latestTurn?.state === "running" || this.sessionBusy(threadId);
+    if (busy) {
+      this.archivePending.add(threadId);
+      return;
+    }
+    this.archivePending.delete(threadId);
+    await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId, archived: true })
+      .catch((e: any) => this.note(threadId, "warning", `Could not archive this thread after the merge: ${e?.message ?? String(e)}`));
   }
 
   /** Store what a poll found out about itself, on the row as it is now. */
@@ -2069,7 +2143,12 @@ export class Engine {
     }
     const q = this.queues.get(threadId);
     const next = q?.shift();
-    if (!next) return;
+    if (!next) {
+      // The pull request merged while this thread was working. The archive
+      // waited for the turn, and the turn is over.
+      if (this.archivePending.has(threadId)) await this.archiveWhenIdle(threadId, true);
+      return;
+    }
     const item = this.db.getItem(`u:${next.turnId}`);
     if (item && item.kind === "user") { delete item.queued; this.persistItem(item); }
     const t = this.db.getThread(threadId);
