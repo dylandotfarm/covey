@@ -135,6 +135,24 @@ test("a re-sent item replaces its row, an event for another thread or machine is
   assert.equal(v.items.size, 2);
 });
 
+test("thread.cleared empties the open thread in one event (#16)", () => {
+  const s = emptyState();
+  const a = addMachine(s, "ws://a:3790", "a", true);
+  applyShellSnapshot(a, snap("a", [project("p", "alpha")], [thread("t1", "p")]));
+  const v = openView(s, "ws://a:3790", "t1");
+  applyThreadSnapshot(v, { seq: 10, thread: thread("t1", "p"), items: [item("i1", 7, "first"), item("i2", 8, "second")], hasMore: true, commands: null });
+
+  assert.equal(applyThreadEvent(s, "ws://a:3790", "t1", { seq: 11, kind: "thread.cleared" }), true);
+  assert.equal(v.items.size, 0);
+  // There is no older page behind an empty transcript, so the page must not
+  // offer to fetch one.
+  assert.equal(v.hasMore, false);
+  assert.equal(v.seq, 11);
+
+  // And it is one thread's conversation, like every other thread event.
+  assert.equal(applyThreadEvent(s, "ws://a:3790", "other", { seq: 12, kind: "thread.cleared" }), false);
+});
+
 test("the banner speaks for the primary alone; a fleet machine that is down is the settings page's business", () => {
   const s = emptyState();
   assert.equal(connectionSummary(s).state, "connecting");
@@ -773,4 +791,12 @@ test("a thread sitting still under review does not read as idle", () => {
   // Anything the reader has to act on is the nearer answer.
   assert.equal(threadStatusLabel({ ...reviewing("reviewing"), pendingApprovals: 1 }), "needs approval");
   assert.equal(threadStatusLabel({ ...reviewing("reviewing"), status: "error", lastError: null }), "error");
+  // The dot says the same thing as the line beside it. A green `done` dot on a
+  // thread the line calls "under review" is the mark of a thread the reader can
+  // pick up, on one they cannot.
+  const ended = { turnId: "x", state: "completed" as const, startedAt: "", completedAt: "" };
+  assert.equal(threadTone({ ...reviewing("reviewing"), latestTurn: ended }), "idle");
+  assert.equal(threadTone({ ...reviewing("changesRequested"), latestTurn: ended }), "idle");
+  assert.equal(threadTone({ ...reviewing("signedOff"), latestTurn: ended }), "done", "the review is over");
+  assert.equal(threadTone({ ...thread("t", "p1"), latestTurn: ended }), "done");
 });

@@ -184,9 +184,10 @@ to say one of two things.
    covey review approve [--body "…"]   sign off, and end the review
    ```
 
-   Covey puts the comment on the pull request and adds the tagline that says a
-   machine wrote it. Do not write that tagline yourself, and do not use
-   `gh pr comment` or `gh pr review`.
+   Covey puts the comment on the pull request, adds the tagline that says a
+   machine wrote it, and signs it with this thread's id so your own review is
+   never sent back to you as news. Do not write either marker yourself, and do
+   not use `gh pr comment` or `gh pr review`.
 
 3. **Stop the turn.** Covey wakes you when the author pushes. Run `git pull`
    and read the change again from there.
@@ -220,6 +221,23 @@ list and an indented block are never touched. A column of lines you mean to
 keep apart belongs in a list or in a fenced block. An issue you open with
 `gh issue create` gets no such help, so write that body on one line per
 paragraph yourself.
+
+## Comment with `covey pr comment`, never with `gh pr comment`
+
+Covey signs every comment it posts for you with the id of the thread that
+wrote it, and the watch reads that signature back: a comment carrying your own
+id is never sent to you as news. That is what stops you hearing your own words
+back an hour later and spending a turn answering yourself. The signature is an
+HTML comment, so nobody reads it on GitHub and nobody reads it in covey.
+
+Two rules follow, and they are the tagline's rules again:
+
+- Comment on this thread's pull request with `covey pr comment`. A comment you
+  leave with `gh pr comment` carries no signature, so covey cannot tell it from
+  a person's and will send it back to you. Use `gh pr comment` only for a pull
+  request this thread neither opened nor watches.
+- Never write the marker yourself. Covey writes it; a marker you wrote by hand
+  is one that will one day read differently.
 
 ## Media on the pull request
 
