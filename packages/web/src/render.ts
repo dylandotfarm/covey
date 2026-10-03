@@ -8,12 +8,12 @@
  * so the skeleton is built once and kept, and each timeline row is keyed by
  * item id and rebuilt only when the daemon re-sent that item.
  */
-import { acceptCommand, commandLabel, cutTag, noteFold, spliceTags, tagSpanAt } from "@covey/client";
-import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, threadIsHidden, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Attachment, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
+import { acceptCommand, commandLabel, cutTag, hiddenPanel, noteFold, spliceTags, tagSpanAt } from "@covey/client";
+import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type Lod, type ApprovalItem, type GitHubAction, type GitHubItem, type MergeMethod, type QuestionItem, type SlashCommandInfo, type Attachment, type Thread, type ThreadCommands, type TimelineItem, type ToolCallItem, type UserMessageItem } from "@covey/protocol";
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, allThreads, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
 import type { ChainRow, TimelineRow } from "@covey/client";
 
 export interface Actions {
@@ -543,7 +543,7 @@ export class Renderer {
    */
   private settingsPanel(s: State): HTMLElement {
     const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"));
-    panel.append(h("h3", {}, "Detail"), this.lodPanel(s), this.hiddenPanel(s));
+    panel.append(h("h3", {}, "Detail"), this.lodPanel(s), this.hiddenRow(s));
     panel.append(h("h3", {}, "Machines"));
     for (const m of s.machines.values()) panel.append(this.machineCard(m));
     if (s.machines.size === 1) panel.append(h("p", { class: "hint" }, "Other machines appear here once the TUI starts the web server on this one; it hands over the list."));
@@ -568,23 +568,18 @@ export class Renderer {
    * Whether this device paints the threads covey hides: its own automated
    * reviewers.
    *
-   * A preference of the device, beside `lod` and for the same reason. The hint
-   * counts what is hidden right now, because a switch over nothing reads as a
-   * bug, and it names the one case the switch does not cover: a hidden thread
-   * that needs the reader is never hidden.
+   * A preference of the device, beside `lod` and for the same reason. The words
+   * are `hiddenPanel` in `@covey/client`, because the TUI and the app offer the
+   * same switch and one of the three had to own the sentence.
    */
-  private hiddenPanel(s: State): HTMLElement {
-    let n = 0;
-    for (const m of s.machines.values()) for (const t of m.threads.values()) if (threadIsHidden(t, false) && !t.archivedAt && !t.movedTo) n++;
-    const hint = s.showHidden
-      ? "painted under the threads they review"
-      : n === 0 ? "covey's automated reviewers, when it has any" : `${n} hidden now; one that needs you is never hidden`;
+  private hiddenRow(s: State): HTMLElement {
+    const panel = hiddenPanel(allThreads(s), s.showHidden);
     return h("div", { class: "lod" },
       h("button", {
         type: "button",
         class: s.showHidden ? "chosen" : "",
         onclick: () => this.a.setShowHidden(!s.showHidden),
-      }, s.showHidden ? "Hidden threads: shown" : "Hidden threads: hidden", h("small", {}, hint)),
+      }, panel.label, h("small", {}, panel.hint)),
     );
   }
 

@@ -653,12 +653,41 @@
   painted**: `Thread.hidden`, read only through `threadIsHidden`, whose third term is the
   whole safety of it — a hidden thread that needs a person is never hidden, or a reviewer
   blocked on an approval would hang the pull request for ever off the screen. The switch is
-  the device's (`prefs.showHidden`, `localStorage`), and the hiding goes where the lists are
-  built (`liveThreads`, `projectRows`) so the counts hide what the rows hide. Because the
+  the device's (`prefs.showHidden`, `localStorage`, `AsyncStorage` on the phone), and the
+  hiding goes where the lists are built (`liveThreads`, `projectRows`) so the counts hide what
+  the rows hide. All three clients offer the switch and `hiddenPanel` in
+  `client/src/hidden.ts` owns its two sentences — in `client`, because the TUI cannot import
+  `web`, and over plain threads, because each client keeps its machines in a shape of its own.
+  Three copies is what it was, and they had drifted: "2 automated reviews hidden" on one
+  screen and "2 hidden now" on another, about the same two threads. Because the
   reviewers are invisible the thread under review must say so, or it reads as stalled:
   `threadReviewing` counts them and the TUI paints `⊙` (a glyph, like `AGENT_MARK`), while the
   web says it in `threadStatusLabel`, which answered `idle` for the whole review before; one that signed off is archived by covey itself and
-  is never a drop. Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
+  is never a drop.
+  **A reviewer is archived through `archiveWhenIdle` and never through a plain
+  `thread.archive`.** `covey review approve` runs from inside the reviewer's own turn, so the
+  thread is busy at the one moment it decides and a direct archive is refused as `busy` —
+  which is how ten reviewers of one afternoon stayed on the sidebar, each with a warning note
+  nobody reads and nothing left to wake it. For the same reason `windUpReviewers` archives
+  *every* live reviewer of a thread being put away, whatever its verdict: the seat says what
+  the review decided and never whether the thread went, so `reviewing` is not the test for
+  "still on the screen". And because `archivePending` is memory only,
+  `Engine.sweepFinishedReviewers` repairs the rest at start, beside "anything that was running
+  when we last exited is now idle". **A `dropped` seat is the one it leaves.** Most of what
+  writes `dropped` — `windUpReviewers`, `dropReviewer` — belongs to a thread archived or
+  deleted in the same breath, so the sweep never meets one. What it does meet is the three ends
+  of a reviewer's own watch, and two of those keep the thread on purpose: a reviewer out
+  of rounds, whose watch ends `blocked` and whose worktree stays on the branch so the person
+  covey asked for has the half-finished review and the code together; and a merge on a machine
+  with `archiveOnMerge` off, which asked for its threads to be kept. The third is a closed pull
+  request, and **the close archives its own reviewer** where it happens, after the news, the
+  way the merge branch above it does — a reviewer left there sits hidden on a branch nothing
+  will look at again, and unlike a spent budget there is nobody coming to read it. The sweep
+  names the close as well, from the reviewer's *own* watch rather than the seat, because that
+  archive waits for a turn and a restart inside it loses the archive exactly as a restart
+  inside a sign-off does; `blocked`, `merged` and `closed` are what tell those three apart, and
+  the seat cannot.
+  Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
   with the loop and `covey env`.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon
   merges the two into `options.env` of the Claude session, so a tool call reads `$STRIPE_KEY`

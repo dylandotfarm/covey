@@ -1501,8 +1501,12 @@ export class Engine {
       // hears the sign-off through its own poll, with the comment beside it:
       // what is on the pull request travels on one channel.
       this.note(t.id, "info", `Signed off on pull request #${r.number}. ${standing.signedOff} of ${standing.required} automated reviews have signed off. This thread is archived; there is nothing more to do.`);
-      await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId: t.id, archived: true })
-        .catch((e: any) => this.note(t.id, "warning", `Could not archive this review thread: ${e?.message ?? String(e)}`));
+      // `archiveWhenIdle`, never a plain archive: `covey review approve` runs
+      // from inside the reviewer's own turn, so the thread is always busy at
+      // this moment and a direct archive is refused as `busy`. Every reviewer
+      // that signed off between #196 and this line stayed on the sidebar for
+      // that reason, with nothing but a warning note to say so.
+      await this.archiveWhenIdle(t.id);
     } else {
       this.note(t.id, "info", `Asked for changes on pull request #${r.number}. Covey holds the merge until you sign off, and wakes this thread when the author pushes.`);
     }
@@ -1553,15 +1557,74 @@ export class Engine {
    * `record` the verdict is marked `dropped` first, which also keeps the
    * reviewer's own archive from raising a turn on a thread the reader just
    * archived; on a delete there is no record left to mark.
+   *
+   * **Every live reviewer goes, whatever its verdict.** The seat says what the
+   * review decided and never whether the thread was put away: a reviewer that
+   * signed off is archived by covey itself, so one that is still here signed
+   * off and something refused the archive. Reading `reviewing` as the test for
+   * "still on the screen" is what left ten of them under an author the reader
+   * had archived hours before. The verdict is marked for a reviewer that had
+   * not decided, because only that one is a drop.
    */
   private async windUpReviewers(t: Thread | null | undefined, why: string, record: boolean): Promise<void> {
     for (const r of t?.watch?.review?.reviewers ?? []) {
-      if (r.state !== "reviewing") continue;
       const rt = this.db.getThread(r.threadId);
       if (!rt || rt.archivedAt) continue;
-      if (record) this.recordVerdict(rt, "dropped", why);
-      await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId: rt.id, archived: true })
-        .catch((e: any) => this.opts.log?.(`could not archive reviewer ${rt.id.slice(0, 8)}: ${e?.message ?? e}`));
+      if (record && r.state === "reviewing") this.recordVerdict(rt, "dropped", why);
+      await this.archiveWhenIdle(rt.id);
+    }
+  }
+
+  /**
+   * Put away every review thread whose review is already over.
+   *
+   * A repair, run once at start, beside "anything that was running when we last
+   * exited is now idle". A reviewer is archived the moment it signs off and
+   * again when its author is put away, so one still on the screen in either of
+   * those states is a row some earlier refusal left behind — `archivePending`
+   * is memory only, so a daemon restarted between a sign-off and the end of
+   * that turn forgets the archive it owed. Without this the row stays for ever:
+   * nothing polls it, nothing wakes it, and no reader knows why it is there.
+   *
+   * The seat on the author's watch answers "what did the review decide", and a
+   * `dropped` seat is the one this function will not act on. Most of what writes
+   * `dropped` — `windUpReviewers`, `dropReviewer` — belongs to a thread archived
+   * or deleted in the same breath, so the sweep never meets one. What it meets
+   * is the three ends of a reviewer's own watch, and two of those keep the
+   * thread on purpose: a reviewer whose own watch ran out of rounds, which ends
+   * `blocked` and says a person has to read the change — the worktree stays on
+   * the branch so that person has the half-finished review and the code
+   * together — and a merge on a machine that turned `archiveOnMerge` off, which
+   * asked for its threads to be kept. A sweep that read `dropped` as "over"
+   * would take both away at the next start.
+   *
+   * The third is a closed pull request, and that one is archived where it
+   * happens, after the news. It is named here as well because the archive waits
+   * for that turn and `archivePending` is memory only, so a restart inside it
+   * loses the archive exactly as a restart inside a sign-off does. The fact
+   * read is the *reviewer's own* watch rather than the seat, because here the
+   * question really is what became of the pull request: `blocked` is the budget
+   * and keeps its thread, `merged` is the machine's choice and keeps its
+   * thread, and `closed` has no review left to finish and nobody coming to
+   * read it.
+   *
+   * A reviewer that asked for changes is live work and stays, unless the author
+   * it waits on has itself been archived.
+   */
+  async sweepFinishedReviewers(): Promise<void> {
+    for (const t of this.db.listThreads()) {
+      if (!t.reviewOf || t.archivedAt || t.movedTo) continue;
+      const author = this.db.getThread(t.reviewOf.authorThreadId);
+      const seat = author?.watch?.review?.reviewers.find((x) => x.threadId === t.id);
+      const why = !author ? "the author is gone"
+        : author.archivedAt ? "the thread that wrote the change is archived"
+        : !seat ? "the author no longer records this review"
+        : seat.state === "signedOff" ? "the review signed off"
+        : t.watch?.state === "closed" ? "the pull request was closed"
+        : null;
+      if (!why) continue;
+      this.opts.log?.(`archiving review thread ${t.id.slice(0, 8)} of #${t.reviewOf.number}: ${why}`);
+      await this.archiveWhenIdle(t.id);
     }
   }
 
@@ -1958,6 +2021,19 @@ export class Engine {
       // session the engine released. This is the whole reason the watch exists.
       await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text, system: true })
         .catch((e: any) => this.note(fresh.id, "warning", `Could not deliver the news on pull request #${w.number} as a turn: ${e?.message ?? String(e)}`));
+      // A closed pull request ends a reviewer the way a merge does, and the
+      // merge branch above already returned — so this is where the other end is
+      // put away. `archiveWhenIdle` waits for the turn just dispatched, so the
+      // reviewer reads why it is finished and hands the worktree back when it
+      // stops. Without it the thread sits hidden on a branch nothing will look
+      // at again, with no watch and nothing that can wake it, and unlike a
+      // spent budget there is nobody coming to read it.
+      //
+      // Only a reviewer, and only a close. The author of a closed pull request
+      // may reopen it, and a *merge* that reaches a thread here at all is one
+      // whose machine turned `archiveOnMerge` off — it asked for its threads to
+      // be kept.
+      if (end?.kind === "closed" && role === "reviewer") await this.archiveWhenIdle(fresh.id);
     } finally {
       this.polling.delete(t.id);
     }
@@ -2007,7 +2083,7 @@ export class Engine {
     }
     this.archivePending.delete(threadId);
     await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId, archived: true })
-      .catch((e: any) => this.note(threadId, "warning", `Could not archive this thread after the merge: ${e?.message ?? String(e)}`));
+      .catch((e: any) => this.note(threadId, "warning", `Could not archive this thread: ${e?.message ?? String(e)}`));
   }
 
   /** Store what a poll found out about itself, on the row as it is now. */

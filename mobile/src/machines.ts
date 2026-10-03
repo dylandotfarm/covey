@@ -27,6 +27,7 @@ export interface SavedMachine {
 
 const LIST_KEY = "covey.machines";
 const LOD_KEY = "covey.lod";
+const SHOW_HIDDEN_KEY = "covey.showHidden";
 
 /**
  * A key `expo-secure-store` accepts, made from a URL.
@@ -86,6 +87,21 @@ export async function readLod(): Promise<string | null> {
 
 export async function saveLod(lod: string): Promise<void> {
   await AsyncStorage.setItem(LOD_KEY, lod).catch(() => {});
+}
+
+/**
+ * Whether this device paints the threads covey hides: its automated reviewers.
+ *
+ * A preference of the device, beside the level of detail and under the same
+ * rule — it travels in no command and no daemon hears it. The page keeps the
+ * same switch in `localStorage` under the same name.
+ */
+export async function readShowHidden(): Promise<boolean> {
+  try { return (await AsyncStorage.getItem(SHOW_HIDDEN_KEY)) === "1"; } catch { return false; }
+}
+
+export async function saveShowHidden(on: boolean): Promise<void> {
+  await AsyncStorage.setItem(SHOW_HIDDEN_KEY, on ? "1" : "0").catch(() => {});
 }
 
 /** Whether the reader asked covey to look for a device (#178). */

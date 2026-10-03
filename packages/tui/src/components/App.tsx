@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, threadIsHidden, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { budgetValue, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice } from "@covey/client";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { budgetValue, hiddenPanel, idleChoices, idleValueLabel, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { Store, USAGE_WINDOWS, MACHINES_KEY, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth, type Line } from "../lines.js";
@@ -127,19 +127,16 @@ const MEMBER_STATE_HINT: Record<RunMemberState, string> = {
 const USAGE_GROUPINGS: UsageGroupBy[] = ["thread", "project", "model", "machine"];
 
 /**
- * What the hidden-threads switch says it is holding back.
+ * What the hidden-threads switch says, in the words every client uses.
  *
- * Covey hides its own automated reviewers, and a switch labelled "hidden" over
- * nothing reads as a bug. The count is of threads really hidden right now, so it
- * answers "hidden from what?" rather than naming the feature.
+ * `hiddenPanel` is `@covey/client`'s and not this file's: the page and the app
+ * offer the same switch, and all three wrote their own sentence for it until
+ * they had drifted. Pass it the threads of every machine; it counts what is
+ * really hidden right now, because a switch labelled "hidden" over nothing
+ * reads as a bug.
  */
-function hiddenHint(state: AppState): string {
-  if (state.showHidden) return "covey's automated reviewers are painted under the threads they review";
-  let n = 0;
-  for (const m of state.machines.values()) for (const t of m.threads.values()) if (threadIsHidden(t, false) && !t.archivedAt && !t.movedTo) n++;
-  return n === 0
-    ? "covey's automated reviewers, when it has any"
-    : `${n} automated review${n === 1 ? "" : "s"} hidden; one that needs you is never hidden`;
+function hiddenSwitch(state: AppState): HiddenPanel {
+  return hiddenPanel([...state.machines.values()].flatMap((m) => [...m.threads.values()]), state.showHidden);
 }
 
 export function App({ store }: { store: Store }) {
@@ -791,7 +788,7 @@ export function App({ store }: { store: Store }) {
       { id: "bell", label: `Bell: ${store.bell ? "on" : "off"}`, hint: store.bell ? "rings when a thread needs approval, finishes or fails" : "silent" },
       // The hidden threads are covey's automated reviewers. The hint counts
       // them, because a switch that says "off" over nothing reads as broken.
-      { id: "hidden", label: `Hidden threads: ${state.showHidden ? "shown" : "hidden"}`, hint: hiddenHint(state) },
+      { id: "hidden", ...hiddenSwitch(state) },
     ], (id) => {
       switch (id) {
         case "theme": return themePick();

@@ -316,6 +316,16 @@ export function projectRows(s: State): ProjectRow[] {
   return out;
 }
 
+/**
+ * Every thread of every machine, for a reader that wants them all.
+ *
+ * `hiddenPanel` in `@covey/client` takes plain threads, because the TUI keeps
+ * its machines in a shape of its own; this is the page's shape flattened.
+ */
+export function allThreads(s: State): Thread[] {
+  return [...s.machines.values()].flatMap((m) => [...m.threads.values()]);
+}
+
 function byRecency(a: Thread, b: Thread): number {
   if (!!a.pinnedAt !== !!b.pinnedAt) return a.pinnedAt ? -1 : 1;
   return (b.lastMessageAt ?? b.updatedAt).localeCompare(a.lastMessageAt ?? a.updatedAt);

@@ -120,6 +120,11 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   listeners = first.opened;
   const server = first.opened[0]!;
   log(`listening on ws://${first.host}:${server.port}  machine=${config.name} id=${config.machineId.slice(0, 8)}  build=${machine.daemonVersion}${ts ? `  tailnet=${ts.dnsName}` : ""}`);
+  // Put away the review threads whose review already ended. Archiving takes a
+  // worktree back, so it runs behind the listener like the two reads below, and
+  // reaches clients as ordinary thread events.
+  void engine.sweepFinishedReviewers()
+    .catch((e) => log(`could not sweep the finished review threads: ${e.message}`));
   // Which models this machine's Claude Code offers. The read starts a Claude
   // Code process, so it happens behind the listener and reaches clients as a
   // `machine.updated` push.

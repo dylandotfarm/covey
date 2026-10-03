@@ -36,7 +36,7 @@ import {
   syncAttachments, type MachineSlot, type SheetTarget, type State,
 } from "@covey/web";
 import { attachingLabel, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
-import { forgetMachine, readLod, readMachines, readToken, saveLod, saveMachine, type SavedMachine } from "./machines";
+import { forgetMachine, readLod, readMachines, readShowHidden, readToken, saveLod, saveMachine, saveShowHidden, type SavedMachine } from "./machines";
 import { shrinkOnDevice } from "./attach";
 import { primeUpdateToken } from "./ota";
 import { sheetCommand } from "./sheet";
@@ -110,6 +110,7 @@ class Store {
     // default, which is what a reader of that build now wants anyway: the small
     // view is decided by the screen and is no longer a preference.
     this.state.lod = asLod(await readLod()) ?? DEFAULT_LOD;
+    this.state.showHidden = await readShowHidden();
     this.saved = await readMachines();
     for (const [i, m] of this.saved.entries()) {
       const token = await readToken(m.url);
@@ -439,6 +440,18 @@ class Store {
     const next = new Set(this.state.toggledRows);
     if (next.has(key)) next.delete(key); else next.add(key);
     this.state.toggledRows = next;
+    this.schedule();
+  };
+
+  /**
+   * Whether this device paints the threads covey hides: its own reviewers.
+   *
+   * A preference of the device, like the level of detail. `projectRows` reads
+   * it, so the switch takes the rows and the counts above them together.
+   */
+  setShowHidden = (on: boolean): void => {
+    this.state.showHidden = on;
+    void saveShowHidden(on);
     this.schedule();
   };
 
