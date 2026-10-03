@@ -33,7 +33,7 @@ import { buildQueue } from "./integrate/queue.js";
 import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
 import { unwrapMarkdown } from "./integrate/reflow.js";
-import { news, emptyCursor, describeNews, asksForWork, endsWatch, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
+import { news, emptyCursor, describeNews, asksForWork, endsWatch, splitForBudget, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 
 export class EngineError extends Error {
@@ -1838,36 +1838,55 @@ export class Engine {
       }
       if (events.length === 0) { this.db.putThread(fresh); return; }
 
-      const work = events.some((e) => asksForWork(e, role));
-      const end = events.find(endsWatch);
       const ctx = {
         branch: fresh.pullRequest?.branch ?? fresh.reviewOf?.branch ?? fresh.branch ?? "",
         rounds: live.rounds, maxRounds: live.maxRounds, merge: live.merge,
         role, review: live.review, base: fresh.reviewOf?.base ?? facts.baseRefName,
       };
-      if (work && live.rounds >= live.maxRounds) {
-        // The budget is spent. The news goes in the transcript for the
-        // reader, and the thread stops here rather than working for ever.
-        this.note(fresh.id, "warning", describeNews(facts, events, ctx));
-        const why = role === "reviewer"
-          ? `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`
-          : `The watch sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work, and the pull request still needs work. A person has to look at it.`;
-        this.endWatch(fresh, "blocked", why);
-        this.putThreadAndEmit(fresh);
-        // A reviewer that blocks can never sign off, and the author would wait
-        // for a verdict that is not coming.
-        if (role === "reviewer") await this.dropReviewer(fresh, "its own watch ran out of rounds");
-        return;
+      // The budget is spent, and what covey does about it differs by role.
+      //
+      // A reviewer ends here: a review that may not read another push can never
+      // sign off, so the watch stops and the author is told at once rather than
+      // waiting for a verdict that is not coming.
+      //
+      // An author does not. The budget bounds the work covey asks a thread for,
+      // and it never bounded the watch — #199 is what ending the watch with it
+      // costs. So the work-asking news becomes a note a person reads, covey
+      // says once that it has stopped waking the thread, and the poll goes on:
+      // a review that signs off, a checks verdict with nothing to fix and the
+      // merge itself still arrive as turns, and an `auto` watch still merges.
+      let batch = events;
+      if (events.some((e) => asksForWork(e, role)) && live.rounds >= live.maxRounds) {
+        if (role === "reviewer") {
+          this.note(fresh.id, "warning", describeNews(facts, events, ctx));
+          this.endWatch(fresh, "blocked", `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`);
+          this.putThreadAndEmit(fresh);
+          await this.dropReviewer(fresh, "its own watch ran out of rounds");
+          return;
+        }
+        const split = splitForBudget(events, role);
+        batch = split.tell;
+        this.note(fresh.id, "warning", describeNews(facts, split.hold, ctx));
+        if (!live.spentAt) {
+          live.spentAt = nowIso;
+          this.note(fresh.id, "warning", `Covey sent ${live.maxRounds} turn${live.maxRounds === 1 ? "" : "s"} that asked for more work on pull request #${live.number}, and stops waking this thread for more. A person has to look at what is left, which the note above holds. Covey goes on watching: a review that signs off, a checks verdict with nothing to fix, and the merge still arrive here.`);
+        }
+        this.opts.log?.(`watch budget spent thread=${fresh.id.slice(0, 8)} pr=#${live.number} held=${split.hold.map((e) => e.kind).join(",")}`);
       }
+      // Nothing survived the split: the whole batch was work. The cursor still
+      // has to be kept, or the same news comes round again on the next poll.
+      if (batch.length === 0) { this.putThreadAndEmit(fresh); return; }
+      const work = batch.some((e) => asksForWork(e, role));
+      const end = batch.find(endsWatch);
       if (work) live.rounds++;
       ctx.rounds = live.rounds;
-      const text = describeNews(facts, events, ctx);
+      const text = describeNews(facts, batch, ctx);
       if (end) this.endWatch(fresh, end.kind, end.kind === "closed" ? "The pull request was closed without a merge." : end.by === "covey" ? `Covey merged the pull request (${end.method}) under the auto policy.` : "The pull request was merged.");
       this.putThreadAndEmit(fresh);
       // The pull request is over, so the reviewer's seat is too. The author is
       // not told: it is reading the same merge on its own watch.
       if (end && role === "reviewer") this.markReviewerOver(fresh, end.kind === "closed" ? "the pull request was closed" : "the pull request was merged");
-      this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${events.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
+      this.opts.log?.(`watch news thread=${fresh.id.slice(0, 8)} pr=#${w.number} events=${batch.map((e) => e.kind).join(",")} rounds=${live.rounds}/${live.maxRounds}`);
       // A turn, not a note: a note is read by a person, and a turn resumes a
       // session the engine released. This is the whole reason the watch exists.
       await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: fresh.id, turnId: randomUUID(), text, system: true })

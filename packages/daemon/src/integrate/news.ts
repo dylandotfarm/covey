@@ -290,20 +290,49 @@ export function news(
  */
 export function asksForWork(ev: WatchEvent, role: WatchRole = "author"): boolean {
   if (ev.kind === "checks") {
-    // A block the agent clears with a push costs a round, like the stale pass
-    // it is a sibling of. A draft, a review and a rule of the repository all
-    // wait for a person, so they cost none: a round spent on a wait is a round
-    // the next real failure has lost. An automated review that has not signed
-    // off is a wait of that kind: the reviewer is reading, and there is nothing
-    // the author can push that makes it finish sooner.
-    if (ev.block) return ev.block.code === "behind" || ev.block.code === "conflict";
-    return ev.ci === "failing" || ev.ci === "stale";
+    // A draft, a review and a rule of the repository all wait for a person, so
+    // they cost no round: a round spent on a wait is a round the next real
+    // failure has lost. An automated review that has not signed off is a wait
+    // of that kind, because there is nothing the author can push that makes
+    // the reviewer finish sooner.
+    //
+    // `behind`, and the stale pass it is a sibling of, cost none either, and
+    // that is #199's lesson. A branch goes out of date because the *base*
+    // moved, not because the change failed: nothing the thread writes prevents
+    // the next one, and on a repository several covey threads land on, it
+    // fires every few minutes. Every open pull request of that day spent two
+    // of its three rounds merging main, and the one real failure met a budget
+    // that was already gone. A conflict is the change's own work and still
+    // costs a round; `WATCH_MAX_MS` is what bounds a base that never settles.
+    if (ev.block) return ev.block.code === "conflict";
+    return ev.ci === "failing";
   }
   if (ev.kind === "conflict") return true;
   if (ev.kind === "head") return role === "reviewer";
   if (ev.kind === "review") return ev.review.state.toUpperCase() === "CHANGES_REQUESTED";
   if (ev.kind === "comment") return role === "author" && reviewVerdictOf(ev.comment.body) === "changes";
   return false;
+}
+
+/**
+ * Split a batch for a thread whose round budget is spent.
+ *
+ * `tell` is what still reaches the thread as a turn and `hold` is what does
+ * not. The budget bounds the work covey asks for, so only the work is held:
+ * the sign-off, the checks verdict with nothing left to fix, the merge and the
+ * close all go on arriving. That is the whole of the fix for #199, where a
+ * watch that ran out of rounds stopped listening as well as stopped asking,
+ * and a pull request that turned green an hour later had nobody left to merge
+ * it.
+ *
+ * `hold` is never dropped: the engine writes it in the thread as a note, which
+ * a person reads and which costs no round.
+ */
+export function splitForBudget(events: WatchEvent[], role: WatchRole = "author"): { tell: WatchEvent[]; hold: WatchEvent[] } {
+  const tell: WatchEvent[] = [];
+  const hold: WatchEvent[] = [];
+  for (const ev of events) (asksForWork(ev, role) ? hold : tell).push(ev);
+  return { tell, hold };
 }
 
 /** True for an event after which there is nothing left to watch. */
@@ -381,7 +410,7 @@ export function describeEvent(ev: WatchEvent, pr: PullRequestFacts, ctx: NewsCon
         return `The checks failed on ${short(ev.head)}: ${names}. Read the failure, fix it, commit, and push to ${ctx.branch}. Covey watches the checks again after the push. ${round}`;
       }
       if (ev.ci === "stale") {
-        return `The checks passed on ${short(ev.head)}, but against an older ${pr.baseRefName}. Covey merges only a change tested on the current base. Merge ${pr.baseRefName} into ${ctx.branch} and push, so the checks run again. ${round}`;
+        return `The checks passed on ${short(ev.head)}, but against an older ${pr.baseRefName}. Covey merges only a change tested on the current base. Merge ${pr.baseRefName} into ${ctx.branch} and push, so the checks run again.`;
       }
       if (ev.ci === "passing") {
         const n = ev.checks.filter((c) => c.state === "success").length;
@@ -439,7 +468,7 @@ function describeBlock(block: MergeBlock, pr: PullRequestFacts, ctx: NewsContext
   const round = `This is round ${ctx.rounds} of ${ctx.maxRounds}.`;
   switch (block.code) {
     case "behind":
-      return `Merge ${pr.baseRefName} into ${ctx.branch} and push. The checks run again against the new base. ${round}`;
+      return `Merge ${pr.baseRefName} into ${ctx.branch} and push. The checks run again against the new base.`;
     case "conflict":
       return `Merge ${pr.baseRefName} into ${ctx.branch}, resolve the conflict, and push. ${round}`;
     case "draft":

@@ -132,8 +132,12 @@ never run `covey review` from the thread that wrote the change.
      nothing to do. Say the pull request is ready for a person. Stop the turn.
    - *Covey merged the pull request*, or *the pull request was merged*: the
      loop is done. Give a two-line summary and stop.
-   - *Blocked*: covey sent as many rounds as it may, or watched for too long.
-     Stop. Tell the user what still fails and what you tried.
+   - *Blocked*: covey watched for too long. Stop. Tell the user what still
+     fails and what you tried.
+   - *Covey stops waking this thread*: covey sent as many rounds of work as it
+     may. Stop. Tell the user what still fails and what you tried. Covey goes
+     on watching the pull request, so a sign-off, a green check with nothing
+     left to fix, and the merge still reach you as turns.
 7. **Check the state** at any time with `covey pr status`. It names the issue,
    the pull request, the watch, and where each reviewer stands.
 
@@ -373,4 +377,8 @@ covey review status           the pull request this thread reviews
 ```
 
 `--rounds N` bounds how many messages that ask for more work covey sends
-before it hands the thread to a person. The default is three.
+before it hands the thread to a person. The default is three. It bounds the
+work and not the watch: covey goes on reading the pull request after the
+rounds run out, and still tells you about a review that signs off, a checks
+verdict with nothing to fix, and the merge. A base branch that moved under you
+costs no round, so merging the base in and pushing is free.

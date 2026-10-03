@@ -902,10 +902,32 @@ export interface PullRequestWatch {
   /**
    * Turns this watch sent that asked for more work: a failing check, a merge
    * conflict, or a review that asked for changes. A turn that only reports
-   * news costs no round.
+   * news costs no round, and neither does a base branch that moved: `behind`
+   * and the stale pass it is a sibling of are the base's news, not the
+   * change's, and on a repository several threads land on they fire every few
+   * minutes through no fault of the branch.
    */
   rounds: number;
   maxRounds: number;
+  /**
+   * When the rounds ran out and covey stopped waking this thread for work.
+   *
+   * The budget bounds the work covey asks a thread for. It never bounded the
+   * watch, and ending the watch with it was the fault of #199: three rounds
+   * went on a base that moved, the watch ended, and the pull request then sat
+   * approved with six green checks and nobody left to merge it. So an `author`
+   * watch whose budget is spent goes on polling. What asks for work becomes a
+   * note a person reads; a review that signs off, a checks verdict with
+   * nothing to fix and the merge itself still arrive as turns, and an `auto`
+   * watch still merges.
+   *
+   * A `reviewer` watch is the one exception and still ends: a review that may
+   * not read another push can never sign off, and the author would wait for a
+   * verdict that is not coming.
+   *
+   * Null or absent while the budget holds.
+   */
+  spentAt?: string | null;
   /** Polls in a row that found nothing new. The back-off grows with it. */
   quiet: number;
   cursor: WatchCursor;
