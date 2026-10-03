@@ -1501,8 +1501,12 @@ export class Engine {
       // hears the sign-off through its own poll, with the comment beside it:
       // what is on the pull request travels on one channel.
       this.note(t.id, "info", `Signed off on pull request #${r.number}. ${standing.signedOff} of ${standing.required} automated reviews have signed off. This thread is archived; there is nothing more to do.`);
-      await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId: t.id, archived: true })
-        .catch((e: any) => this.note(t.id, "warning", `Could not archive this review thread: ${e?.message ?? String(e)}`));
+      // `archiveWhenIdle`, never a plain archive: `covey review approve` runs
+      // from inside the reviewer's own turn, so the thread is always busy at
+      // this moment and a direct archive is refused as `busy`. Every reviewer
+      // that signed off between #196 and this line stayed on the sidebar for
+      // that reason, with nothing but a warning note to say so.
+      await this.archiveWhenIdle(t.id);
     } else {
       this.note(t.id, "info", `Asked for changes on pull request #${r.number}. Covey holds the merge until you sign off, and wakes this thread when the author pushes.`);
     }
@@ -1553,15 +1557,49 @@ export class Engine {
    * `record` the verdict is marked `dropped` first, which also keeps the
    * reviewer's own archive from raising a turn on a thread the reader just
    * archived; on a delete there is no record left to mark.
+   *
+   * **Every live reviewer goes, whatever its verdict.** The seat says what the
+   * review decided and never whether the thread was put away: a reviewer that
+   * signed off is archived by covey itself, so one that is still here signed
+   * off and something refused the archive. Reading `reviewing` as the test for
+   * "still on the screen" is what left ten of them under an author the reader
+   * had archived hours before. The verdict is marked for a reviewer that had
+   * not decided, because only that one is a drop.
    */
   private async windUpReviewers(t: Thread | null | undefined, why: string, record: boolean): Promise<void> {
     for (const r of t?.watch?.review?.reviewers ?? []) {
-      if (r.state !== "reviewing") continue;
       const rt = this.db.getThread(r.threadId);
       if (!rt || rt.archivedAt) continue;
-      if (record) this.recordVerdict(rt, "dropped", why);
-      await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId: rt.id, archived: true })
-        .catch((e: any) => this.opts.log?.(`could not archive reviewer ${rt.id.slice(0, 8)}: ${e?.message ?? e}`));
+      if (record && r.state === "reviewing") this.recordVerdict(rt, "dropped", why);
+      await this.archiveWhenIdle(rt.id);
+    }
+  }
+
+  /**
+   * Put away every review thread whose review is already over.
+   *
+   * A repair, run once at start, beside "anything that was running when we last
+   * exited is now idle". A reviewer is archived the moment it decides and again
+   * when its author is put away, so one still on the screen with a finished seat
+   * is a row some earlier refusal left behind — `archivePending` is memory only,
+   * so a daemon restarted between a sign-off and the end of that turn forgets
+   * the archive it owed. Without this the row stays for ever: nothing polls it,
+   * nothing wakes it, and no reader knows why it is there.
+   *
+   * The test is the *seat*, never the reviewer's own watch: a watch ends on a
+   * merge, on a close and on a budget, and a reviewer whose budget ran out has
+   * still not decided. A reviewer that asked for changes is live work and stays,
+   * unless the author it is waiting on has itself been archived.
+   */
+  async sweepFinishedReviewers(): Promise<void> {
+    for (const t of this.db.listThreads()) {
+      if (!t.reviewOf || t.archivedAt || t.movedTo) continue;
+      const author = this.db.getThread(t.reviewOf.authorThreadId);
+      const seat = author?.watch?.review?.reviewers.find((x) => x.threadId === t.id);
+      const over = !author || !!author.archivedAt || !seat || seat.state === "signedOff" || seat.state === "dropped";
+      if (!over) continue;
+      this.opts.log?.(`archiving review thread ${t.id.slice(0, 8)} of #${t.reviewOf.number}: ${seat ? `the review ${seat.state === "signedOff" ? "signed off" : "was dropped"}` : "the author no longer records it"}`);
+      await this.archiveWhenIdle(t.id);
     }
   }
 
@@ -2007,7 +2045,7 @@ export class Engine {
     }
     this.archivePending.delete(threadId);
     await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId, archived: true })
-      .catch((e: any) => this.note(threadId, "warning", `Could not archive this thread after the merge: ${e?.message ?? String(e)}`));
+      .catch((e: any) => this.note(threadId, "warning", `Could not archive this thread: ${e?.message ?? String(e)}`));
   }
 
   /** Store what a poll found out about itself, on the row as it is now. */

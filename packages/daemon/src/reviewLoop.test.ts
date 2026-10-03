@@ -63,7 +63,7 @@ function setup() {
   let engine = make(db);
   engines.push(engine);
   const s = {
-    db, dir, host,
+    db, dir, host, cli,
     get engine() { return engine; },
     advance: (ms: number) => { clock += ms; },
     newThread(id: string) { db.putThread(thread(id)); return id; },
@@ -600,4 +600,99 @@ test("a reviewer out of rounds hears the merge, rather than blocking over a pull
   assert.match(told, /Pull request #101 merged: .*\nThere is nothing left to review\./s);
   assert.match(told, /The author pushed ddd4444/);
   assert.match(s.reviewers("t1")[0]!.note!, /the pull request was merged/, "and the author is told why, in the words that are true");
+});
+
+// ---- a reviewer never outlives the work it was for ---------------------------
+
+test("a sign-off from inside the reviewer's own turn archives the thread when the turn ends", async (t) => {
+  // `covey review approve` is a command the reviewer runs *during* its turn, so
+  // the thread is always busy at the moment it decides and a plain archive is
+  // refused as `busy`. Ten reviewers of one afternoon stayed on the sidebar for
+  // that, each with a warning note nobody reads and nothing left to wake it.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+
+  s.cli.held = true;
+  await s.command({ type: "turn.send", threadId: reviewerId, turnId: randomUUID(), text: "read the change" });
+  await settle();
+  assert.equal(s.thread(reviewerId).latestTurn?.state, "running");
+
+  await s.engine.reviewDecide({ threadId: reviewerId, verdict: "approve", body: "Reads right." });
+  await settle();
+  assert.equal(s.reviewers("t1")[0]!.state, "signedOff", "the verdict is recorded at once either way");
+  assert.equal(s.thread(reviewerId).archivedAt, null, "but the worktree waits for the turn that is writing in it");
+
+  s.cli.held = false;
+  s.cli.release();
+  await settle();
+  assert.ok(s.thread(reviewerId).archivedAt, "and the archive lands at the end of that turn");
+  assert.deepEqual(s.notes(reviewerId).filter((n) => /Could not archive/.test(n)), []);
+});
+
+test("archiving the author winds up a reviewer that asked for changes", async (t) => {
+  // A reviewer is wound up by what its author is, never by what its verdict
+  // was. One that asked for changes is waiting on an author that is no longer
+  // working, so it waits for ever: `reviewing` as the test for "still here"
+  // left it with a session and a worktree and nothing to do with either.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+  await s.engine.reviewDecide({ threadId: reviewerId, verdict: "changes", body: "Name the file in the note." });
+  await settle();
+  assert.equal(s.thread(reviewerId).archivedAt, null, "it is waiting on the author's push");
+
+  await s.command({ type: "thread.archive", threadId: "t1", archived: true });
+  await settle();
+  assert.ok(s.thread(reviewerId).archivedAt, "and there is no push coming");
+  assert.equal(s.reviewers("t1")[0]!.state, "changesRequested", "the verdict stands: only one that had not decided is a drop");
+  assert.equal(s.turns("t1").filter((x) => /ended with no verdict/.test(x)).length, 0);
+});
+
+test("a restart puts away the review threads an earlier refusal left behind", async (t) => {
+  // `archivePending` is memory only, so a daemon that restarts between a
+  // sign-off and the end of that turn forgets the archive it owed. Nothing
+  // polls such a thread and nothing wakes it, so without this repair the row
+  // stays on the sidebar for good.
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+  const reviewerId = opened.reviewers[0]!;
+
+  // The state the refusal left: the seat says the review signed off, and the
+  // review thread is still here.
+  const author = s.thread("t1");
+  author.watch!.review = {
+    required: 1,
+    reviewers: [{ ...s.reviewers("t1")[0]!, state: "signedOff", note: "Good.", decidedAt: "2026-10-02T10:30:00Z" }],
+  };
+  s.db.putThread(author);
+  assert.equal(s.thread(reviewerId).archivedAt, null);
+
+  const engine = s.restart();
+  await engine.sweepFinishedReviewers();
+  await settle();
+  assert.ok(s.db.getThread(reviewerId)!.archivedAt, "the review is over, so the thread goes");
+  assert.equal(s.db.getThread("t1")!.archivedAt, null, "and the author it reviewed is left alone");
+});
+
+test("the restart repair leaves a reviewer that is still reading", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  const opened = await s.open("t1");
+  await settle();
+
+  const engine = s.restart();
+  await engine.sweepFinishedReviewers();
+  await settle();
+  assert.equal(s.db.getThread(opened.reviewers[0]!)!.archivedAt, null, "it has not decided, so it has work");
 });

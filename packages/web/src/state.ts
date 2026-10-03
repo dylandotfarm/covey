@@ -316,6 +316,25 @@ export function projectRows(s: State): ProjectRow[] {
   return out;
 }
 
+/**
+ * The switch that paints covey's hidden threads, in the words both clients use.
+ *
+ * One function and not two labels: the page and the app offer the same switch,
+ * and a phone that called it something else would read as a different feature.
+ * The hint counts what is hidden right now, because a switch over nothing reads
+ * as a bug, and it names the one case the switch does not cover — a hidden
+ * thread that needs the reader is never hidden.
+ */
+export function hiddenPanel(s: State): { label: string; hint: string; count: number } {
+  let count = 0;
+  for (const m of s.machines.values()) {
+    for (const t of m.threads.values()) if (threadIsHidden(t, false) && !t.archivedAt && !t.movedTo) count++;
+  }
+  if (s.showHidden) return { label: "Hidden threads: shown", hint: "painted under the threads they review", count };
+  const hint = count === 0 ? "covey's automated reviewers, when it has any" : `${count} hidden now; one that needs you is never hidden`;
+  return { label: "Hidden threads: hidden", hint, count };
+}
+
 function byRecency(a: Thread, b: Thread): number {
   if (!!a.pinnedAt !== !!b.pinnedAt) return a.pinnedAt ? -1 : 1;
   return (b.lastMessageAt ?? b.updatedAt).localeCompare(a.lastMessageAt ?? a.updatedAt);

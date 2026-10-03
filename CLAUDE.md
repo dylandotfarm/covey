@@ -653,12 +653,27 @@
   painted**: `Thread.hidden`, read only through `threadIsHidden`, whose third term is the
   whole safety of it — a hidden thread that needs a person is never hidden, or a reviewer
   blocked on an approval would hang the pull request for ever off the screen. The switch is
-  the device's (`prefs.showHidden`, `localStorage`), and the hiding goes where the lists are
-  built (`liveThreads`, `projectRows`) so the counts hide what the rows hide. Because the
+  the device's (`prefs.showHidden`, `localStorage`, `AsyncStorage` on the phone), and the
+  hiding goes where the lists are built (`liveThreads`, `projectRows`) so the counts hide what
+  the rows hide. All three clients offer the switch and `hiddenPanel` in `web/src/state.ts`
+  owns its two sentences, because a phone that worded it differently would read as a
+  different feature. Because the
   reviewers are invisible the thread under review must say so, or it reads as stalled:
   `threadReviewing` counts them and the TUI paints `⊙` (a glyph, like `AGENT_MARK`), while the
   web says it in `threadStatusLabel`, which answered `idle` for the whole review before; one that signed off is archived by covey itself and
-  is never a drop. Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
+  is never a drop.
+  **A reviewer is archived through `archiveWhenIdle` and never through a plain
+  `thread.archive`.** `covey review approve` runs from inside the reviewer's own turn, so the
+  thread is busy at the one moment it decides and a direct archive is refused as `busy` —
+  which is how ten reviewers of one afternoon stayed on the sidebar, each with a warning note
+  nobody reads and nothing left to wake it. For the same reason `windUpReviewers` archives
+  *every* live reviewer of a thread being put away, whatever its verdict: the seat says what
+  the review decided and never whether the thread went, so `reviewing` is not the test for
+  "still on the screen". And because `archivePending` is memory only,
+  `Engine.sweepFinishedReviewers` repairs the rest at start, beside "anything that was running
+  when we last exited is now idle" — it reads the *seat*, never the reviewer's own watch,
+  because a watch also ends on a budget and a reviewer out of rounds has still not decided.
+  Change `packages/cli/src/loop.ts` and the `/covey` skill together, as
   with the loop and `covey env`.
 - A project holds an environment and a thread may hold its own on top (#126): the daemon
   merges the two into `options.env` of the Claude session, so a tool call reads `$STRIPE_KEY`

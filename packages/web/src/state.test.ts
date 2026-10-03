@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ReviewerState, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
 import type { TaggedAttachment } from "@covey/client";
 import {
-  addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
+  addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, hiddenPanel, holderOf, isCurrentAddress,
   baseHash, isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaHash, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
   attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
@@ -770,6 +770,34 @@ test("a hidden thread is off the list until the reader asks, and never when it n
   assert.deepEqual(ids(), ["author", "rev"]);
   withReviewer({ status: "error" });
   assert.deepEqual(ids(), ["author", "rev"]);
+});
+
+test("the hidden-threads switch says the same thing on the page and on the phone", () => {
+  // One sentence, in `state.ts`, because both clients offer this switch and a
+  // phone that worded it differently would read as a different feature.
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  assert.deepEqual(hiddenPanel(s), {
+    label: "Hidden threads: hidden", hint: "covey's automated reviewers, when it has any", count: 0,
+  });
+
+  applyShellSnapshot(box, snap("box", [project("p1", "covey")], [
+    thread("author", "p1"),
+    thread("rev1", "p1", { hidden: true }),
+    thread("rev2", "p1", { hidden: true }),
+    thread("gone", "p1", { hidden: true, archivedAt: "2026-10-02T10:00:00Z" }),
+    thread("asks", "p1", { hidden: true, pendingApprovals: 1 }),
+  ]));
+  // An archived reviewer is not on the screen to begin with, and one waiting on
+  // an approval is painted whatever the switch says, so neither is counted.
+  assert.deepEqual(hiddenPanel(s), {
+    label: "Hidden threads: hidden", hint: "2 hidden now; one that needs you is never hidden", count: 2,
+  });
+
+  s.showHidden = true;
+  assert.deepEqual(hiddenPanel(s), {
+    label: "Hidden threads: shown", hint: "painted under the threads they review", count: 2,
+  });
 });
 
 test("a thread sitting still under review does not read as idle", () => {
