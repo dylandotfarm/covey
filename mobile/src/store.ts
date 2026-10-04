@@ -44,9 +44,28 @@ import { sheetCommand } from "./sheet";
 /** How long a notice stays on screen before it goes, in milliseconds. */
 const NOTICE_MS = 4000;
 
+/**
+ * How long the app waits for a thread the daemon is making.
+ *
+ * `thread.create` fetches and adds a worktree, which on a large repository over
+ * a slow link outlasts the client's own one-minute default. Here a timeout
+ * costs more than a notice: `whenMade` opens its gate when the create settles,
+ * so a wait that gives up early puts the subscription back in front of the
+ * worktree, which is the failure this gate exists to prevent. The TUI gives a
+ * call that may clone ten minutes; this is that budget, and the daemon's.
+ */
+const CREATE_WAIT_MS = 10 * 60_000 + 10_000;
+
 class Store {
   readonly state: State = emptyState();
   private readonly clients = new Map<string, MachineClient>();
+  /**
+   * The threads this app has asked for and the daemon has not yet made.
+   *
+   * Keyed by machine and thread, as a draft is. `whenMade` is what reads it,
+   * and the reason is there.
+   */
+  private readonly creating = new Map<string, Promise<unknown>>();
   private readonly listeners = new Set<() => void>();
   /** Bumped once per frame that changed something. `useSyncExternalStore` reads it. */
   private version = 0;
@@ -156,6 +175,9 @@ class Store {
         if (update.state === "restarting") client.expectRestart();
         this.schedule();
       },
+      // A build of the app this machine serves at `/apk` (#185). Nothing
+      // restarts at the end of one, so the socket is not expected to drop.
+      machineAppBuild: (run) => { slot.appBuild = run; this.schedule(); },
     }, { clientName: APP_CLIENT });
     this.clients.set(slot.key, client);
     client.start();
@@ -234,6 +256,31 @@ class Store {
 
   // ---- the thread on screen ----------------------------------------------
 
+  /**
+   * Wait for a thread the daemon is still making, then name it.
+   *
+   * The daemon makes a worktree inside `thread.create` — a fetch and a `git
+   * worktree add`, which is seconds — and the list opens the conversation the
+   * moment it has an id, because a tap must not wait on a clone. So a
+   * subscription and a first message can both reach the daemon before the
+   * thread exists, and the answer to each is `thread <id> not found`. A view
+   * keeps that error until the reader leaves the screen and comes back, which
+   * is the conversation reading as empty while the daemon holds every word of
+   * it. The page has no such gap: it navigates once the create is answered.
+   *
+   * Every command this store sends about a thread goes through here, and a
+   * thread this app did not just create is in no map and waits for nothing.
+   * Most of them cannot fire inside the window — an approval belongs to an item
+   * and an item belongs to a thread that exists — but the conversation opens on
+   * the id at once and its `⋮` sheet with it, so a rename, an archive and the
+   * model picker all can. One rule is cheaper than a list of exceptions, and
+   * the next call added here inherits it.
+   */
+  private whenMade = <T>(machine: string, threadId: string, run: () => Promise<T> | T): Promise<T> => {
+    const made = this.creating.get(composerKey(machine, threadId));
+    return made ? made.then(run) : Promise.resolve(run());
+  };
+
   /** Put a thread on screen. A screen calls this when it is focused. */
   showThread = (machine: string, threadId: string): void => {
     const client = this.clients.get(machine);
@@ -242,8 +289,13 @@ class Store {
     if (this.state.view) void this.clients.get(this.state.view.machine)?.unwatchThread();
     const v = openView(this.state, machine, threadId);
     this.schedule();
-    client.watchThread(threadId).then((snap) => {
-      if (this.state.view !== v) return; // the reader moved on
+    this.whenMade(machine, threadId, () => {
+      // The reader may have left while the worktree was being made, and a
+      // subscription nobody is reading is a transcript sent for nothing.
+      if (this.state.view !== v) return null;
+      return client.watchThread(threadId);
+    }).then((snap) => {
+      if (!snap || this.state.view !== v) return; // the reader moved on
       applyThreadSnapshot(v, snap);
       this.schedule();
     }).catch((e: Error) => {
@@ -332,6 +384,10 @@ class Store {
     const v = this.state.view;
     if (!v) return;
     const { machine, threadId } = v;
+    // Taken once, and nothing goes without it: a draft dropped into a machine
+    // this app cannot reach is a message the reader would have to write again.
+    const client = this.clients.get(machine);
+    if (!client) return;
     // A covey command is the app's own work and never reaches the agent (#16).
     // There is no `/` menu on this screen yet, so the command is typed whole.
     const own = coveyCommand(text);
@@ -340,7 +396,7 @@ class Store {
       // The draft and its chips go only once the daemon has taken the command,
       // as they do in the TUI: `thread.clear` is refused under a running turn,
       // and a reader must not lose the files they picked to a refusal.
-      this.clients.get(machine)?.command({ type: "thread.clear", threadId }).then(() => {
+      this.whenMade(machine, threadId, () => client.command({ type: "thread.clear", threadId })).then(() => {
         this.state.drafts.delete(composerKey(machine, threadId));
         setPendingAttachments(this.state, machine, threadId, []);
         this.schedule();
@@ -357,10 +413,10 @@ class Store {
     // acknowledges the command.
     if (bytes > 0) this.state.attaching = sendingLabel(bytes);
     this.schedule();
-    this.clients.get(machine)?.command({
+    this.whenMade(machine, threadId, () => client.command({
       type: "turn.send", threadId, turnId: uuid(), text,
       ...(attachments.length ? { attachments } : {}),
-    })
+    }))
       .catch(this.fail)
       .finally(() => { if (bytes > 0) { this.state.attaching = null; this.schedule(); } });
   };
@@ -401,30 +457,54 @@ class Store {
 
   interrupt = (): void => {
     const v = this.state.view;
-    if (v) this.clients.get(v.machine)?.command({ type: "turn.interrupt", threadId: v.threadId }).catch(this.fail);
+    const client = v && this.clients.get(v.machine);
+    if (!v || !client) return;
+    void this.whenMade(v.machine, v.threadId, () => client.command({ type: "turn.interrupt", threadId: v.threadId })).catch(this.fail);
   };
 
   respondApproval = (item: ApprovalItem, behavior: "allow" | "deny", always: boolean): void => {
-    this.viewClient()?.command({
+    const v = this.state.view;
+    const client = this.viewClient();
+    if (!v || !client) return;
+    void this.whenMade(v.machine, item.threadId, () => client.command({
       type: "approval.respond", threadId: item.threadId, requestId: item.requestId, behavior,
       ...(always ? { updatedPermissions: item.suggestions } : {}),
-    }).catch(this.fail);
+    })).catch(this.fail);
   };
 
   respondQuestion = (item: QuestionItem, answers: string[]): void => {
-    this.viewClient()?.command({
+    const v = this.state.view;
+    const client = this.viewClient();
+    if (!v || !client) return;
+    void this.whenMade(v.machine, item.threadId, () => client.command({
       type: "question.respond", threadId: item.threadId, requestId: item.requestId,
       answer: answers[0] ?? "", answers,
-    }).catch(this.fail);
+    })).catch(this.fail);
   };
 
   // ---- the list ----------------------------------------------------------
 
+  /**
+   * Ask for a thread and hand its id back at once, for the screen to open.
+   *
+   * The create is recorded in `creating` while it runs, so the screen that
+   * opens on this id subscribes the moment the daemon has a thread to
+   * subscribe to, and not before.
+   */
   newThread = (machine: string, projectId: string): string => {
     this.state.choosing = null;
     const threadId = uuid();
-    this.clients.get(machine)?.command({ type: "thread.create", projectId, threadId, sessionId: uuid() })
+    const client = this.clients.get(machine);
+    if (!client) return threadId;
+    const key = composerKey(machine, threadId);
+    // Caught here and nowhere else: this promise is a gate and must settle,
+    // and a waiter reports the failure of its own command. A create that
+    // failed leaves the subscription to say the thread is not there, which is
+    // the error the reader needs.
+    const made = client.command({ type: "thread.create", projectId, threadId, sessionId: uuid() }, CREATE_WAIT_MS)
       .catch(this.fail);
+    this.creating.set(key, made);
+    void made.then(() => this.creating.delete(key));
     return threadId;
   };
 
@@ -481,6 +561,22 @@ class Store {
       .catch(this.fail);
   };
 
+  /**
+   * Ask a machine to build the Android app from the code it holds (#185).
+   *
+   * The call answers as soon as the run starts — the build is tens of minutes
+   * — and every step after that arrives as a `machine.appBuild` push, to this
+   * client and to every other one watching the same machine.
+   */
+  buildApp = (machine: string): void => {
+    const slot = this.state.machines.get(machine);
+    const client = this.clients.get(machine);
+    if (!slot || !client) return;
+    client.rpc("machine.buildApp", {})
+      .then((r) => { slot.appBuild = r; this.schedule(); })
+      .catch(this.fail);
+  };
+
   restartMachine = (machine: string): void => {
     const client = this.clients.get(machine);
     if (!client) return;
@@ -489,11 +585,15 @@ class Store {
   };
 
   archiveThread = (machine: string, threadId: string): void => {
-    this.clients.get(machine)?.command({ type: "thread.archive", threadId, archived: true }).catch(this.fail);
+    const client = this.clients.get(machine);
+    if (!client) return;
+    void this.whenMade(machine, threadId, () => client.command({ type: "thread.archive", threadId, archived: true })).catch(this.fail);
   };
 
   renameThread = (machine: string, threadId: string, title: string): void => {
-    this.clients.get(machine)?.command({ type: "thread.rename", threadId, title }).catch(this.fail);
+    const client = this.clients.get(machine);
+    if (!client) return;
+    void this.whenMade(machine, threadId, () => client.command({ type: "thread.rename", threadId, title })).catch(this.fail);
   };
 
   /** How many turns are running on a machine, for a warning before a restart. */
@@ -523,7 +623,11 @@ class Store {
     if (!cmd) return;
     this.state.sheet = null;
     this.schedule();
-    client.command(cmd).catch(this.fail);
+    // The sheet of a thread opens from the conversation, which opens on the id
+    // — so the model picker can be used while the worktree is still being made.
+    // A machine's sheet names no thread and waits for nothing.
+    const send = () => client.command(cmd);
+    void (target.kind === "thread" ? this.whenMade(target.machine, target.threadId, send) : send()).catch(this.fail);
   };
 
   private viewClient(): MachineClient | undefined {

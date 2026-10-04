@@ -170,7 +170,14 @@
   and one ABI is four times less native compilation. Two screens are screens on
   purpose — a picture, which is #167's lesson, and the settings sheet, which fixes a bug
   the page still has — and the transcript is an inverted `FlatList`, this platform's
-  answer to #114. Relative imports carry no `.js`: Metro does not follow TypeScript's
+  answer to #114. A thread the app has just asked for does not exist on the daemon
+  yet — `thread.create` is awaited over a fetch and a `git worktree add` — and the
+  list opens the conversation the moment it has an id, because a tap must not wait
+  on a clone. So everything that names that thread to that daemon waits in
+  `store.whenMade` first: a subscription sent ahead of the worktree is answered
+  `thread not found`, and the view keeps that error until the reader leaves the
+  screen and comes back, which reads as a conversation the daemon lost.
+  Relative imports carry no `.js`: Metro does not follow TypeScript's
   convention. There is no device in this loop, so `pnpm run web` renders the app in a
   browser through `react-native-web` — not a platform covey ships, just a way to *look*:
   the components, the styles and the gestures are the real ones, the two packages are
@@ -243,7 +250,20 @@
   it (#185, `MachineInfo.appBuild`) — gated like `/updates`, with the token on
   the URL because a download carries no header. That is *not* the update channel
   and never becomes it: `/updates` ships JavaScript into an installed app,
-  `/apk` hands a whole binary to somebody who chose to install it.
+  `/apk` hands a whole binary to somebody who chose to install it. The same row
+  *asks* for a new one (`machine.buildApp`, `AppBuilder` in the daemon): the
+  three commands of the build on that machine, one run at a time, with every
+  step broadcast as a `machine.appBuild` push — because a machine update never
+  touches `mobile/`, so the binary a machine offers can be weeks older than the
+  code it runs. It refuses before the first step when nothing names
+  `EXPO_PUBLIC_COVEY_UPDATES_URL`, because `app.config.ts` then leaves the
+  `updates` block out and the app that comes out is off the channel until
+  somebody sideloads another one — a file is one line to write, a binary on a
+  phone is not. The progress goes at a step's boundary and never per chunk:
+  gradle is forty minutes of output nothing paints, and a client that arrives
+  mid-build is sent the record once on connect instead. `pnpm run export` is
+  never one of those steps: a bundle lands in every installed app of that
+  runtime version unasked, and an APK is installed by a person who chose to.
   `docs/DEVICE.md` holds the reasoning and the rules.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
