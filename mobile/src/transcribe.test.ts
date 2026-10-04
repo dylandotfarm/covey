@@ -122,11 +122,42 @@ test("`unavailable` is the one failure the phone answers for itself", async () =
 test("every other failure keeps the sentence the service wrote for the reader", async () => {
   const silence = "The microphone recorded only silence; check that it works.";
   const { client } = fake({ code: "no-speech", message: silence });
-  assert.deepEqual(await askMachine(client, machine(true), phoneRecording(tone(1600))), { failed: silence });
+  // The code comes with it, because a caller that heard the words itself has
+  // nothing to tell a reader about a recogniser that heard none.
+  assert.deepEqual(
+    await askMachine(client, machine(true), phoneRecording(tone(1600))),
+    { failed: silence, code: "no-speech" },
+  );
 
   const { client: broken } = fake({ code: "http-500", message: "" });
   const answer = await askMachine(broken, machine(true), phoneRecording(tone(1600)));
   assert.ok("failed" in answer && answer.failed, "a failure with no sentence still gets one");
+});
+
+test("a machine that answered `unavailable` once is not asked again", async () => {
+  // The flag cannot carry this: `COVEY_TRANSCRIBE_URL` is unset on most
+  // machines and the daemon then names its default, so an ordinary machine
+  // with no service says `true` and refuses everything it is sent.
+  const { client, seen } = fake({ code: "unavailable", message: "nothing set up" });
+  for (let i = 0; i < 4; i++) {
+    assert.deepEqual(await askMachine(client, machine(true), phoneRecording(tone(1600))), { fallBack: true });
+  }
+  assert.equal(seen.length, 1, "it uploaded a recording to a machine it knew would refuse it");
+
+  // Another machine is another answer. The memory is of the client and not of
+  // the fact, so a second machine is asked for itself.
+  const other = fake({ text: "heard on the other machine" });
+  const answer = await askMachine(other.client, machine(true), phoneRecording(tone(1600)));
+  assert.ok("words" in answer);
+});
+
+test("a failure that is not `unavailable` is asked again", async () => {
+  // A service that timed out or fell over is one that may answer the next
+  // utterance. Only "there is nothing here" is worth remembering.
+  const { client, seen } = fake({ code: "timeout", message: "The service did not answer." });
+  await askMachine(client, machine(true), phoneRecording(tone(1600)));
+  await askMachine(client, machine(true), phoneRecording(tone(1600)));
+  assert.equal(seen.length, 2);
 });
 
 test("a machine with nothing set up is never sent an utterance", async () => {

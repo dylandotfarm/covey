@@ -173,13 +173,7 @@ Measured, machine to service and back: a 5-second utterance in about 600 ms, an
 
 ### When it cannot
 
-A daemon that has nothing set up says so before it is asked:
-`MachineCapabilities.transcribes` is `false`, and a client keeps the recording
-at home rather than spend a minute of mobile data on an answer it can already
-predict. `undefined` is **not** `false` there — a daemon built before the field
-sends nothing, and the answer for one of those is to ask.
-
-A daemon asked anyway answers the code `unavailable`, and **only that
+A daemon answers the code `unavailable` when it has no service, and **only that
 code** makes the phone fall back to its own recogniser (Android's, which is what
 #180 was raised about — worse, but a device whose button does nothing is worse
 still). Every other failure is real and its sentence goes to the device's screen
@@ -195,6 +189,18 @@ The settings screen names which of the two wrote the last words, because the
 quality gap between them is wide enough that a reader seeing a bad transcript
 should be able to tell, and a daemon that quietly stopped answering would
 otherwise look like a recogniser that suddenly got worse.
+
+A reader pays for that answer **once**. `MachineCapabilities.transcribes` keeps
+a recording at home when a machine has turned the feature off by name, and
+`undefined` is not `false` there — a daemon built before the field sends
+nothing, and the answer for one of those is to ask. But `true` is a hope rather
+than a promise, because `COVEY_TRANSCRIBE_URL` is unset on most machines and
+the daemon then names its default: a machine that has never heard of this
+reports `true` and refuses the first recording it is sent. So the client
+remembers an `unavailable` against that machine and stops asking
+(`quiet` in `mobile/src/transcribe.ts`), which is what keeps a phone from
+uploading every sentence it ever hears to a machine that refuses all of them.
+A service set up while the app is running is a restart away.
 
 ## One thread at a time
 

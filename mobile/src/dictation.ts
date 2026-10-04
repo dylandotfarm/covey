@@ -166,7 +166,10 @@ export function useDictation(
       setError(null);
       return settle(answer.words.text);
     }
-    if ("failed" in answer) setError(answer.failed);
+    // And the same sentence the other way round. A machine that heard nothing
+    // has nothing to tell a reader who is looking at the words this phone
+    // heard; every other failure says why the worse recogniser wrote them.
+    if ("failed" in answer && !(answer.code === "no-speech" && heard.current)) setError(answer.failed);
     return settle(heard.current);
   }, [machine, onTranscript]);
 
@@ -203,16 +206,27 @@ export function useDictation(
 
   const start = useCallback(async () => {
     setError(null);
+    /*
+     * The hold begins here and not after the permission call.
+     *
+     * The composer clears the base it writes dictation onto as the finger goes
+     * down, so an answer that lands while this `await` is out would be settled
+     * onto a draft that no longer holds the words it is meant to replace — and
+     * the reader would get both. Moving the count above the await makes the
+     * guard cover the whole of the hold rather than most of it. Counting an
+     * utterance that permission then refuses costs nothing: the reader pressed
+     * the button, so the last answer is stale either way.
+     */
+    utterance.current++;
+    heard.current = "";
+    recorded.current = null;
+    setWriting(false);
     try {
       const granted = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
       if (!granted.granted) {
         setError("covey may not use the microphone. Android's settings can allow it.");
         return;
       }
-      utterance.current++;
-      heard.current = "";
-      recorded.current = null;
-      setWriting(false);
       ExpoSpeechRecognitionModule.start({
         lang: "en-US",
         // The words appear while they are spoken, which on a screen this small

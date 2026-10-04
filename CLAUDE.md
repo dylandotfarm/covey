@@ -237,9 +237,14 @@
   `recordingOptions.persist`, which wants Android 13 and takes the start and stop
   beep away, and sends `pcm16` rather than ADPCM — the protocol keeps that codec
   for a caller that already holds samples, and better words are the whole reason
-  the machine is asked. `MachineCapabilities.transcribes` is what stops a phone
-  uploading an utterance to a machine with no service: `undefined` is not `false`
-  there, because a daemon too old to say must still be asked.
+  the machine is asked. `MachineCapabilities.transcribes` is read one way only:
+  `false` is a machine that turned the feature off by name, and `undefined` is a
+  daemon too old to say, but `true` is merely "a URL is set" — the default on a
+  machine that has never heard of this and will answer `unavailable` to the first
+  recording. So the phone remembers that answer against the client that gave it
+  (`quiet`, a `WeakSet`, which needs no key and goes when the machine does), or
+  it would upload every sentence it ever heard to a machine that refuses all of
+  them.
   Android stops a *background* app from receiving Bluetooth scan results while
   the screen is off and kills a swiped-away process, so the device is
   unreachable with a locked phone (#184): `mobile/modules/covey-link` is a

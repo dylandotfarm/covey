@@ -57,8 +57,14 @@ export type MachineAnswer =
   | { words: MachineWords }
   /** Nothing is set up there. Write the words here, and say nothing about it. */
   | { fallBack: true }
-  /** The service answered, and this is its own sentence for the reader. */
-  | { failed: string };
+  /**
+   * The service answered, and this is its own sentence for the reader.
+   *
+   * `code` comes along because one of them is not always worth saying: a
+   * caller that has words of its own has nothing to tell a reader about a
+   * recogniser that heard none.
+   */
+  | { failed: string; code: string };
 
 /**
  * The longest recording this phone sends.
@@ -78,6 +84,11 @@ export const MAX_RECORDING_MS = 180_000;
  * `undefined` is not `false` — a daemon built before the field sends nothing,
  * and the answer for one of those is to ask and read `unavailable` back. Only
  * a daemon that said `false` is one covey keeps an utterance from.
+ *
+ * `true` is a hope and not a promise: `COVEY_TRANSCRIBE_URL` is unset on most
+ * machines and the daemon then names its default, so a machine that has never
+ * heard of this says `true` and answers `unavailable` to the first recording
+ * it is sent. `quiet` below is what keeps that to the first one.
  */
 export function machineWritesSpeech(info: MachineInfo | undefined): boolean {
   return info?.capabilities?.transcribes !== false;
@@ -134,6 +145,25 @@ export interface SpeechMachine {
 }
 
 /**
+ * Machines that answered `unavailable`, so a reader pays for that answer once.
+ *
+ * The flag above cannot carry this on its own. A daemon reports `false` only
+ * when somebody turned the feature off by name, and the ordinary machine with
+ * no service running reports `true` — so without this the phone would upload
+ * every recording it ever made to a machine that refuses all of them, which on
+ * a mobile link is the cost the flag was added to avoid.
+ *
+ * Held weakly and against the client itself, not against a machine's name.
+ * That takes no key, needs no clearing, and lands on the right rule by
+ * construction: the store keeps one client per machine and a reconnection
+ * keeps it, so an answer is remembered for as long as the machine is the same
+ * machine, and a machine taken out and added again is asked afresh. A service
+ * set up while the app runs is a restart away, which is the one cost of this
+ * and a smaller one than the uploads.
+ */
+const quiet = new WeakSet<SpeechMachine>();
+
+/**
  * Ask the machine to write out a recording.
  *
  * It never throws. Each of the three answers is something a caller has to do
@@ -145,7 +175,7 @@ export async function askMachine(
   info: MachineInfo | undefined,
   recording: Recording | null,
 ): Promise<MachineAnswer> {
-  if (!client || !recording || !machineWritesSpeech(info)) return { fallBack: true };
+  if (!client || !recording || !machineWritesSpeech(info) || quiet.has(client)) return { fallBack: true };
   try {
     const out = await client.transcribe(recording);
     const text = out.text.trim();
@@ -155,7 +185,10 @@ export async function askMachine(
     return { words: { text, backend: out.backend } };
   } catch (e) {
     const err = e as { code?: string; message?: string };
-    if (err.code === "unavailable") return { fallBack: true };
-    return { failed: err.message || "The words could not be made out." };
+    if (err.code === "unavailable") {
+      quiet.add(client);
+      return { fallBack: true };
+    }
+    return { failed: err.message || "The words could not be made out.", code: err.code || "failed" };
   }
 }
