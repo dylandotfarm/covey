@@ -340,6 +340,32 @@
   project on a base another one already holds. Never key any of this on
   `repositoryIdentity` alone: a thread would start from the wrong commit and open its pull
   request against the wrong base.
+- A **fleet** is the line between two sets of machines on one tailnet — the ones at work
+  and the ones at home. The machine declares its own (`MachineSettings.fleet`, `null`
+  for the default `covey`), so the terminal, the page and the phone group it the same
+  way and no client can put one machine in two fleets; `SavedMachine.fleet` is a
+  *cache* and nothing else, and it is what holds a machine that is away in its fleet
+  rather than dropping it into the default one. The rules are
+  `packages/client/src/fleets.ts`, pure and node-tested. The line is real and not a
+  heading, which is the whole reason the feature exists: `projectGroups` pools a
+  repository inside one fleet, `ghMachines` and `listRepos` read the repository list
+  from a `gh` in that fleet — a work login lists work repositories, and offering them
+  at home is exactly the confusion fleets remove — and `placementMachines` places a
+  run's members inside its own fleet. **covey never chooses a machine across the line;
+  the reader may still name one.** So `moveThread` offers every connected machine — a
+  move names both the machine and the project it lands in, and it is how a machine is
+  retired — while `moveMember` is scoped, because the store refuses a member placed
+  outside its run's fleet and a pick that offered one would report "no checkout" about a
+  machine that holds one. The sidebar grows one level of fold above the
+  projects, **and only when there is more than one fleet**: a reader who never makes a
+  second one sees the tree they always saw, at the depth they always saw it. For the
+  same reason the default fleet scopes no fold key (`fleetScope` is empty for it) — a
+  project's key lives in the client's config, and a key that changed would unfurl the
+  whole tree the first time covey learned the word. `machine.peers` is what
+  `machine.fleet` used to be, the machines the phone's page dials, which is *every*
+  machine and never one fleet; the daemon still answers the old name for an older TUI
+  and reads the old `fleet` key out of `daemon.json` once more, so an update does not
+  leave a phone dialling one machine.
 - A project needs a commit to exist (#176). A repository with no commits has no branch,
   so `git remote set-head origin --auto` fails after a fetch that worked, and nothing
   could branch a worktree from it anyway — so `cloneBare` refuses it by name rather than

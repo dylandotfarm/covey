@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { RpcMethodName, RpcMethods, BuildInfo, FleetMember, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals, TerminalEvent } from "@covey/protocol";
+import type { RpcMethodName, RpcMethods, BuildInfo, PeerMachine, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals, TerminalEvent } from "@covey/protocol";
 import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsFinished, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
-import { MachineClient, coveyCommand, projectPool, type ClientOptions, type ConnState } from "@covey/client";
+import { DEFAULT_FLEET, MachineClient, cleanFleet, coveyCommand, fleetKey, fleetOf, fleetScope, isDefaultFleet, projectPool, sortFleets, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
@@ -49,6 +49,17 @@ export interface MachineState {
   update: MachineUpdate | null;
   /** We asked the daemon to restart, so the drop that follows is expected. */
   restarting: boolean;
+  /**
+   * A fleet the reader asked this machine to join, which it has not been told
+   * about yet.
+   *
+   * A machine declares its own fleet, so moving one is a `machine.settings`
+   * write on that daemon — and the machine the reader just typed the address
+   * of is not connected yet. This holds the intent until its first `hello`,
+   * and is cleared the moment it is sent. Memory only: it is one dial long,
+   * and a client that was restarted in the middle has nothing to promise.
+   */
+  joining?: string;
 }
 
 export interface ThreadView {
@@ -633,9 +644,14 @@ export class Store {
 
   // ---- machines ------------------------------------------------------------
 
-  addMachine(saved: SavedMachine, persist = true) {
+  /**
+   * Dial a machine and keep it. `joining` names the fleet the reader added it
+   * to; the machine is told at its first `hello`, because a fleet is the
+   * machine's own setting and not this client's note about it.
+   */
+  addMachine(saved: SavedMachine, persist = true, joining?: string) {
     if (this.clients.has(saved.url)) return;
-    const ms: MachineState = { key: saved.url, saved, conn: "connecting", error: null, info: null, projects: new Map(), threads: new Map(), runs: new Map(), update: null, restarting: false };
+    const ms: MachineState = { key: saved.url, saved, conn: "connecting", error: null, info: null, projects: new Map(), threads: new Map(), runs: new Map(), update: null, restarting: false, ...(joining ? { joining } : {}) };
     this.state.machines.set(saved.url, ms);
     this.state.order.push(saved.url);
     // Everything a machine reports goes through `touchFromMachine`, and
@@ -656,9 +672,10 @@ export class Store {
         // A restarting daemon cannot report its own success — it is gone by
         // then. Reconnecting is the success, so say so here.
         if (s === "connected") void this.drainPending(ms.key);
-        // The machine that serves the phone's page needs the fleet as this
+        // The machine that serves the phone's page needs the list as this
         // client knows it now, and it may have changed while it was away.
-        if (s === "connected" && client.info?.settings?.webEnabled) void this.syncFleet(ms.key);
+        if (s === "connected" && client.info?.settings?.webEnabled) void this.syncPeers(ms.key);
+        if (s === "connected") this.settleFleet(ms);
         if (s === "connected" && ms.restarting) {
           ms.restarting = false;
           const at = ms.update?.state === "restarting" ? ms.update.toCommit : null;
@@ -674,6 +691,7 @@ export class Store {
         ms.threads = new Map(snap.threads.map((t) => [t.id, t]));
         ms.runs = new Map((snap.runs ?? []).map((r) => [r.id, r]));
         if (saved.machineId !== snap.machine.machineId) { saved.machineId = snap.machine.machineId; this.persist(); }
+        this.settleFleet(ms);
         this.touchFromMachine();
       },
       shellEvent: (ev) => this.applyShell(ms, ev),
@@ -694,7 +712,7 @@ export class Store {
     }, this.clientOpts);
     this.clients.set(saved.url, client);
     client.start();
-    if (persist) { this.config.machines.push(saved); this.persist(); void this.syncFleets(); }
+    if (persist) { this.config.machines.push(saved); this.persist(); void this.syncPeerLists(); }
     this.touch();
   }
 
@@ -710,7 +728,7 @@ export class Store {
     if (this.state.selected?.machine === key) this.select(null);
     this.viewCache.dropMachine(key);
     this.touch();
-    void this.syncFleets();
+    void this.syncPeerLists();
   }
 
   client(key: string): MachineClient | undefined { return this.clients.get(key); }
@@ -738,7 +756,7 @@ export class Store {
 
   private applyShell(ms: MachineState, ev: ShellEvent) {
     switch (ev.kind) {
-      case "machine.updated": ms.info = ev.machine; break;
+      case "machine.updated": ms.info = ev.machine; this.settleFleet(ms); break;
       case "project.upserted": ms.projects.set(ev.project.id, ev.project); break;
       case "project.removed": ms.projects.delete(ev.projectId); break;
       case "thread.upserted": {
@@ -1293,8 +1311,9 @@ export class Store {
   /**
    * Serve the web client from `machine`, or stop.
    *
-   * One machine in the fleet serves it. A phone keeps one address, and two
-   * daemons that both answer it would each hold half the reader's threads.
+   * One machine serves it, whatever fleet it is in. A phone keeps one
+   * address, and two daemons that both answer it would each hold half the
+   * reader's threads.
    * So turning it on here turns it off on every other connected machine
    * first. A machine the client cannot reach keeps its setting, and the
    * reader is told which one, so nothing is claimed that was not done.
@@ -1310,24 +1329,95 @@ export class Store {
       }
     }
     await this.setMachineDefaults(machine, { webEnabled: on });
-    if (on) await this.syncFleet(machine);
+    if (on) await this.syncPeers(machine);
     const at = this.state.machines.get(machine)?.info?.webAddresses?.find((a) => a.reachable)?.url;
     this.notify(on ? `${name(machine)}: web server on${at ? ` at ${at}` : ""}` : `${name(machine)}: web server off`, on ? "success" : "info");
   }
 
+  // ---- fleets --------------------------------------------------------------
+
   /**
-   * The fleet as a phone can dial it, for the page that `serving` serves.
+   * Put the client's record of a machine's fleet in step with the machine.
    *
-   * Every other machine this client knows, with a URL the phone can reach.
+   * Two things happen here, in this order. A machine the reader added to a
+   * fleet is told so once, at its first `hello`, because a fleet is a setting
+   * on that daemon and the daemon was not connected when the reader typed its
+   * address. Then whatever the machine says is cached in `SavedMachine.fleet`,
+   * which is what keeps the machine in its own fleet on the next start, while
+   * it is still dialling and after it has gone offline.
+   *
+   * The machine always wins. The cache is read only when the machine has said
+   * nothing, so a machine moved from another client is in its new fleet here
+   * as soon as it answers.
+   *
+   * That rule is why **the default fleet is never written from here**. The
+   * pick that adds a machine can only offer the fleets some connected machine
+   * has already named, so on a second client, or after a fresh config, a
+   * reader meeting a work machine for the first time has `covey` and a typed
+   * name to choose between. Taking `covey` as an instruction would move that
+   * machine out of `work` on every client — and the reader was answering
+   * about a machine they had never seen. The default is "no opinion"; a
+   * reader who means to move a machine into it says so from its own control
+   * panel, where the machine is in front of them.
+   */
+  private settleFleet(ms: MachineState) {
+    const want = ms.joining;
+    if (want !== undefined) {
+      delete ms.joining;
+      if (!isDefaultFleet(want) && fleetKey(want) !== fleetKey(fleetOf(ms.info?.settings?.fleet))) {
+        void this.setMachineDefaults(ms.key, { fleet: want });
+        return;
+      }
+    }
+    const now = fleetOf(ms.info?.settings?.fleet);
+    const cached = isDefaultFleet(now) ? undefined : now;
+    if (ms.saved.fleet === cached) return;
+    if (cached === undefined) delete ms.saved.fleet; else ms.saved.fleet = cached;
+    this.persist();
+  }
+
+  /**
+   * Move a machine into a fleet, or back into the default one.
+   *
+   * The write goes to that daemon, so the machine has to be connected: every
+   * client reads the fleet off the machine, and a note this client kept to
+   * itself would put the same machine in two fleets on two screens.
+   */
+  async setMachineFleet(machine: string, fleet: string, quiet = false) {
+    const ms = this.state.machines.get(machine);
+    if (!ms) return;
+    const name = ms.info?.name ?? ms.saved.name;
+    if (ms.conn !== "connected") { this.notify(`${name} is not connected; covey cannot move a machine that is away`, "error"); return; }
+    // What the machine would store, compared with what it stores now. Not the
+    // fold key: `work` to `Work` writes a new name and is a rename a reader
+    // can see, because the display name keeps the case they typed.
+    const next = isDefaultFleet(fleet) ? null : fleetOf(fleet);
+    if (next === (cleanFleet(ms.info?.settings?.fleet) ?? null)) return;
+    await this.setMachineDefaults(machine, { fleet: next });
+    // `quiet` is for a rename, which moves every machine of a fleet at once:
+    // the notice has one row, and one sentence per machine would leave the
+    // reader the last of them.
+    if (!quiet) this.notify(`${name} is in ${fleetOf(fleet)}`, "success");
+  }
+
+  /** Every fleet this client can see, the default one first. */
+  fleets(): string[] { return fleetsOf(this.state); }
+
+  /**
+   * The machines a phone can dial, for the page that `serving` serves.
+   *
+   * Every other machine this client knows, whatever fleet it is in, with a
+   * URL the phone can reach. Every machine and not one fleet: the page is a
+   * client, and a client shows the reader everything they have.
    * The client dials its own machine on loopback, and a phone that dialled
    * loopback would reach itself; that entry is rewritten to the machine's
    * tailnet name or address, taken from what the daemon said about itself.
    * A loopback machine that has no tailnet is left out: there is no address
    * to give. The serving machine itself is left out too; the page has it.
    */
-  fleetFor(serving: string): FleetMember[] {
+  peersFor(serving: string): PeerMachine[] {
     const self = this.state.machines.get(serving);
-    const out: FleetMember[] = [];
+    const out: PeerMachine[] = [];
     for (const [key, ms] of this.state.machines) {
       if (key === serving) continue;
       const id = ms.info?.machineId ?? ms.saved.machineId;
@@ -1343,16 +1433,25 @@ export class Store {
     return out;
   }
 
-  /** Hand `machine` the fleet, if it is connected. Quiet on failure: the page still works for that machine alone. */
-  async syncFleet(machine: string) {
+  /**
+   * Hand `machine` the list of machines its page should dial, if it is
+   * connected. Quiet on failure: the page still works for that machine alone.
+   *
+   * `machine.peers` was called `machine.fleet` before fleets took the word, so
+   * a daemon that refuses the new name is asked again with the old one. Drop
+   * the second call once no daemon that old is left.
+   */
+  async syncPeers(machine: string) {
     const client = this.clients.get(machine);
     if (!client || client.state !== "connected") return;
-    try { await client.command({ type: "machine.fleet", machines: this.fleetFor(machine) }); } catch { /* an older daemon does not know the command */ }
+    const machines = this.peersFor(machine);
+    try { await client.command({ type: "machine.peers", machines }); return; } catch { /* older daemon: try the old name */ }
+    try { await client.command({ type: "machine.fleet", machines }); } catch { /* older still: the page dials one machine */ }
   }
 
   /** The list changed: every machine that serves the page gets the new one. */
-  private async syncFleets() {
-    for (const [key, ms] of this.state.machines) if (ms.conn === "connected" && ms.info?.settings?.webEnabled) await this.syncFleet(key);
+  private async syncPeerLists() {
+    for (const [key, ms] of this.state.machines) if (ms.conn === "connected" && ms.info?.settings?.webEnabled) await this.syncPeers(key);
   }
 
   /** What the daemon is running (checkout, branch, commit). Null if unreachable. */
@@ -1869,11 +1968,15 @@ export class Store {
    * counts as one core and one member at a time, because guessing bigger is
    * how a Pi ends up with ten agents on it.
    */
-  placementMachines(pool: string | null): PlacementMachine[] {
+  placementMachines(pool: string | null, fleet?: string): PlacementMachine[] {
     const out: PlacementMachine[] = [];
     for (const key of this.state.order) {
       const m = this.state.machines.get(key);
       if (!m || m.conn !== "connected" || !m.info) continue;
+      // Work never lands outside its own fleet. A run started on a work
+      // machine places on work machines, however many personal ones hold a
+      // clone of the same repository.
+      if (fleet !== undefined && fleetKey(machineFleet(this.state, key)) !== fleetKey(fleet)) continue;
       // A machine may hold the repository twice: a clone, and a checkout from
       // before projects were clones. Work goes to the clone. A project of the
       // same repository on another base branch is not in this pool at all —
@@ -1904,8 +2007,8 @@ export class Store {
    * first one unless the reader says otherwise, so a thread and a run land
    * by one rule.
    */
-  rankedPool(pool: string | null): PlacementMachine[] {
-    return rankMachines(this.placementMachines(pool), this.membersPerMachine());
+  rankedPool(pool: string | null, fleet?: string): PlacementMachine[] {
+    return rankMachines(this.placementMachines(pool, fleet), this.membersPerMachine());
   }
 
   /** What each machine carries in run members, by machine id. */
@@ -1917,9 +2020,10 @@ export class Store {
    * client cannot ask GitHub itself. A `gh` on the path is not a `gh` that is
    * logged in, so the caller tries them in turn.
    */
-  ghMachines(): string[] {
+  ghMachines(fleet?: string): string[] {
     return this.state.order.filter((k) => {
       const m = this.state.machines.get(k);
+      if (fleet !== undefined && fleetKey(machineFleet(this.state, k)) !== fleetKey(fleet)) return false;
       return m?.conn === "connected" && m.info?.resources?.tools.some((t) => t.name === "gh");
     });
   }
@@ -1937,19 +2041,27 @@ export class Store {
    * machine that answers. The answer is kept for a minute: the pick opens
    * more than once a session, and the list changes on the order of days.
    */
-  async listRepos(): Promise<{ repos: RepoInfo[]; error: string | null; machine: string | null }> {
-    if (this.repoCache && Date.now() - this.repoCache.at < REPO_CACHE_MS) return this.repoCache.value;
-    let last: { repos: RepoInfo[]; error: string | null; machine: string | null } = { repos: [], error: "no connected machine has gh", machine: null };
-    for (const machine of this.ghMachines()) {
+  async listRepos(fleet?: string): Promise<{ repos: RepoInfo[]; error: string | null; machine: string | null }> {
+    // The list belongs to the fleet it was read in. A work machine's `gh` is
+    // logged in as somebody else and lists other repositories, so one cache
+    // for both would offer the reader work repositories to clone at home.
+    const ck = fleet === undefined ? "" : fleetKey(fleet);
+    const hit = this.repoCache.get(ck);
+    if (hit && Date.now() - hit.at < REPO_CACHE_MS) return hit.value;
+    const machines = this.ghMachines(fleet);
+    let last: { repos: RepoInfo[]; error: string | null; machine: string | null } =
+      { repos: [], error: `no connected machine${fleet === undefined ? "" : ` in ${fleet}`} has gh`, machine: null };
+    for (const machine of machines) {
       const r = await this.ask(machine, "repos.list", {}, (error) => ({ repos: [], error }), REPO_LIST_WAIT_MS);
       last = { ...r, machine };
       if (!r.error) break;
     }
-    if (!last.error) this.repoCache = { at: Date.now(), value: last };
+    if (!last.error) this.repoCache.set(ck, { at: Date.now(), value: last });
     return last;
   }
 
-  private repoCache: { at: number; value: { repos: RepoInfo[]; error: string | null; machine: string | null } } | null = null;
+  /** The repository list per fleet, by `fleetKey`. One read a minute each. */
+  private repoCache = new Map<string, { at: number; value: { repos: RepoInfo[]; error: string | null; machine: string | null } }>();
 
   /**
    * The branches of a repository, read with `git ls-remote` on `machine`, or
@@ -1965,7 +2077,7 @@ export class Store {
 
   /** Make a repository on GitHub through `gh` on `machine`; null, with a notice, when it could not. */
   async createRepo(machine: string, o: { name: string; visibility: "private" | "public"; description?: string }): Promise<{ nameWithOwner: string; cloneUrl: string } | null> {
-    this.repoCache = null;
+    this.repoCache.clear();
     return this.ask(machine, "repos.create", o, (message) => { this.notify(message, "error"); return null; });
   }
 
@@ -1995,8 +2107,9 @@ export class Store {
   }): Promise<string | null> {
     const client = this.clients.get(o.machine);
     if (!client) { this.notify("start a run from a connected machine", "error"); return null; }
-    const machines = this.placementMachines(o.pool);
-    if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return null; }
+    // A run is its machine's fleet's, so its members are too.
+    const machines = this.placementMachines(o.pool, machineFleet(this.state, o.machine));
+    if (machines.length === 0) { this.notify("no connected machine in this fleet has a checkout of this project", "error"); return null; }
     const runId = o.runId ?? randomUUID();
     // Placed against what every other run's live members already hold, the same
     // way `addTasks` is. A machine's concurrency limit is the machine's, not
@@ -2079,7 +2192,7 @@ export class Store {
     if (!m) return;
     if (m.threadId) { this.notify("this member already has a thread — withdraw it instead of moving it", "error"); return; }
     const run = this.run(machine, runId);
-    const to = this.placementMachines(this.runRepository(machine, runId)).find((x) => x.machineId === toMachineId);
+    const to = this.placementMachines(this.runRepository(machine, runId), machineFleet(this.state, machine)).find((x) => x.machineId === toMachineId);
     if (!to || !run) { this.notify("that machine has no checkout of this project", "error"); return; }
     const index = run.members.findIndex((x) => x.id === memberId);
     await this.patchMember(machine, runId, memberId, {
@@ -2205,8 +2318,8 @@ export class Store {
   async addTasks(machine: string, runId: string, tasks: RunTask[]) {
     const run = this.run(machine, runId);
     if (!run) return;
-    const machines = this.placementMachines(this.runRepository(machine, runId));
-    if (machines.length === 0) { this.notify("no connected machine has a checkout of this project", "error"); return; }
+    const machines = this.placementMachines(this.runRepository(machine, runId), machineFleet(this.state, machine));
+    if (machines.length === 0) { this.notify("no connected machine in this fleet has a checkout of this project", "error"); return; }
     // Placed against what the machines already carry, so a task added to a run
     // in flight lands where there is room and not on top of the full machine.
     const placed = placeTasks(tasks, machines, this.membersPerMachine());
@@ -2410,6 +2523,36 @@ export function machineLabel(s: AppState, key: string): string {
 }
 
 /**
+ * The fleet a machine is in: what it says, else what it last said, else the
+ * default fleet.
+ *
+ * A machine declares its own fleet, so every client groups it the same way.
+ * The cached answer is what holds a machine that is offline in its fleet
+ * instead of dropping it into the default one for as long as it is away —
+ * which is most of what a reader sees of a machine they are not using.
+ */
+export function machineFleet(s: AppState, key: string): string {
+  const m = s.machines.get(key);
+  return fleetOf(m?.info?.settings?.fleet, m?.saved.fleet);
+}
+
+/**
+ * Every fleet this client can see, the default one first.
+ *
+ * The default fleet is always in the list, even with no machine in it: it is
+ * where a machine lands when nobody says otherwise, and a reader who moved
+ * their only machine to `work` must still be able to move it back.
+ */
+export function fleetsOf(s: AppState): string[] {
+  return sortFleets([DEFAULT_FLEET, ...s.order.map((k) => machineFleet(s, k))]);
+}
+
+/** The machines of one fleet, in sidebar order. */
+export function fleetMachines(s: AppState, fleet: string): string[] {
+  return s.order.filter((k) => fleetKey(machineFleet(s, k)) === fleetKey(fleet));
+}
+
+/**
  * A repository as the sidebar shows it: one row, however many machines hold
  * it. Projects with the same normalised remote *and* the same base branch are
  * one group — `projectPool` in `@covey/client` holds that rule. A project with
@@ -2425,12 +2568,17 @@ export interface ProjectGroup {
   /**
    * The fold key of the project and of its archived folder: the pool key, or
    * `<machine>:<project id>` for a project with no remote, which is the key a
-   * project fold always had.
+   * project fold always had. A fleet other than the default scopes it
+   * (`fleetScope`), so one repository cloned at work and at home is two rows
+   * with two folds — and a reader who has made no second fleet keeps every
+   * fold they ever made.
    */
   key: string;
   title: string;
   /** The branch its threads start from, or null for the remote's default. */
   base: string | null;
+  /** The fleet every machine of this pool is in. */
+  fleet: string;
   members: PoolMember[];
 }
 
@@ -2439,14 +2587,20 @@ export interface ProjectGroup {
  * machines within a group keep the sidebar's machine order, so "the first
  * machine of the pool" is a stable choice.
  */
-export function projectGroups(s: AppState): ProjectGroup[] {
+export function projectGroups(s: AppState, fleet?: string): ProjectGroup[] {
   const groups = new Map<string, ProjectGroup>();
   for (const key of s.order) {
     const m = s.machines.get(key);
     if (!m) continue;
+    // A fleet is a real line and not a heading: two machines pool a
+    // repository only when they are in one fleet. The same repository cloned
+    // at work and at home is two projects, with their own threads and their
+    // own pool, because work must never land on the machine at home.
+    const f = machineFleet(s, key);
+    if (fleet !== undefined && fleetKey(f) !== fleetKey(fleet)) continue;
     for (const p of m.projects.values()) {
-      const gk = projectPool(p) ?? `${key}:${p.id}`;
-      const g = groups.get(gk) ?? { key: gk, title: p.title, base: p.baseBranch ?? null, members: [] };
+      const gk = fleetScope(f) + (projectPool(p) ?? `${key}:${p.id}`);
+      const g = groups.get(gk) ?? { key: gk, title: p.title, base: p.baseBranch ?? null, fleet: f, members: [] };
       g.members.push({ machine: key, projectId: p.id, project: p });
       groups.set(gk, g);
     }
@@ -2463,12 +2617,14 @@ export function groupOfProject(s: AppState, machine: string, projectId: string):
   if (!p) return null;
   const pool = projectPool(p);
   const base = p.baseBranch ?? null;
-  if (!pool) return { key: `${machine}:${projectId}`, title: p.title, base, members: [{ machine, projectId, project: p }] };
+  const fleet = machineFleet(s, machine);
+  if (!pool) return { key: `${fleetScope(fleet)}${machine}:${projectId}`, title: p.title, base, fleet, members: [{ machine, projectId, project: p }] };
   const members: PoolMember[] = [];
   for (const key of s.order) {
+    if (fleetKey(machineFleet(s, key)) !== fleetKey(fleet)) continue;
     for (const q of s.machines.get(key)?.projects.values() ?? []) if (projectPool(q) === pool) members.push({ machine: key, projectId: q.id, project: q });
   }
-  return { key: pool, title: members[0]!.project.title, base, members };
+  return { key: fleetScope(fleet) + pool, title: members[0]!.project.title, base, fleet, members };
 }
 
 /** Add `value` to the list at `key`, making the list on the first add. */
@@ -2531,11 +2687,13 @@ export function tallyThreads(threads: Iterable<Thread>): ThreadTally {
 export interface SidebarRow {
   key: string;
   /**
-   * `project` heads a repository, pooled across every machine that has it;
-   * `machines` heads the fleet, below the projects; `machine` is one row of
-   * that section. The rest sit under a project.
+   * `fleet` heads a group of machines and everything they hold, and is painted
+   * only when the reader has more than one; `project` heads a repository,
+   * pooled across every machine of one fleet that has it; `machines` heads the
+   * machines of a fleet, below its projects; `machine` is one row of that
+   * section. The rest sit under a project.
    */
-  kind: "project" | "thread" | "empty" | "archived" | "run" | "member" | "machines" | "machine";
+  kind: "fleet" | "project" | "thread" | "empty" | "archived" | "run" | "member" | "machines" | "machine";
   /**
    * The machine a row acts on. For a project row, the first machine of its
    * pool; a thread, run or member names the machine it lives on. Empty on the
@@ -2545,8 +2703,10 @@ export interface SidebarRow {
   projectId?: string;
   thread?: Thread;
   project?: Project;
-  /** Set on a project row: every machine that holds this repository. */
+  /** Set on a project row: every machine of this fleet that holds this repository. */
   pool?: PoolMember[];
+  /** Set on a `fleet` row, and on the `machines` row of each fleet. */
+  fleet?: string;
   /** The project group a row belongs to (`ProjectGroup.key`): the fold key
    *  of the project, and of its archived folder. */
   groupKey?: string;
@@ -2558,8 +2718,11 @@ export interface SidebarRow {
   /** Set on the archived folder and on every thread row inside it. */
   archived?: boolean;
   /** How many threads the archived folder holds; on a project row, its
-   *  threads and the run tasks that are not threads yet, over the pool. */
+   *  threads and the run tasks that are not threads yet, over the pool; on a
+   *  fleet row, its projects. */
   count?: number;
+  /** Set on a fleet row: how many machines are in it. */
+  machineCount?: number;
   /** Set on a project row: something in it is working, or waits on a person. */
   busy?: boolean;
   waiting?: boolean;
@@ -2772,178 +2935,240 @@ export function sidebarRows(s: AppState): SidebarRow[] {
       append(runsOf, `${key}:${p}`, { machine: key, run });
     }
   }
-  for (const { machine, run } of homeless) pushRun(machine, run, 0);
+  // The fleets, in the order `fleetsOf` gives: the default one first, then the
+  // rest by name. A fleet with no machine in it is not painted — there is
+  // nothing under it and nothing to press — except when that is all there is,
+  // because a client with no machine still needs a home for the row that says
+  // so.
+  const all = fleetsOf(s).filter((f) => fleetMachines(s, f).length > 0);
+  const fleets = all.length ? all : [DEFAULT_FLEET];
+  // One fleet is the shape covey has always had, and it keeps it: no fleet
+  // row, and every row at the depth it was at. A reader who never makes a
+  // second fleet never pays a column of indent for the word.
+  const headed = fleets.length > 1;
+  const base = headed ? 1 : 0;
+  for (const fleet of fleets) {
+    const keys = fleetMachines(s, fleet);
+    const groups = projectGroups(s, fleet);
+    if (headed) {
+      // What a furled fleet owes the reader is what a furled project owes:
+      // that something inside is working, that something waits on a person,
+      // and how much there is. The threads are walked once for that here
+      // rather than inside the fold, because the fold is exactly when the
+      // walk below does not run.
+      let fbusy = false, fwaiting = false;
+      for (const k of keys) {
+        const m = s.machines.get(k)!;
+        for (const run of m.runs.values()) { fbusy ||= runIsBusy(run); fwaiting ||= runNeedsPerson(s, run); }
+        for (const t of liveThreads(m, undefined, s.showHidden)) {
+          fbusy ||= t.status === "running" || t.status === "starting";
+          fwaiting ||= t.status === "waiting" || t.pendingApprovals > 0;
+        }
+      }
+      rows.push({ key: `f:${fleetKey(fleet)}`, kind: "fleet", machine: "", fleet, busy: fbusy, waiting: fwaiting, count: groups.length, machineCount: keys.length, depth: 0 });
+      if (!(s.expanded[fleetRowKey(fleet)] ?? true)) continue;
+    }
+    const inFleet = new Set(keys);
+    for (const { machine, run } of homeless) if (inFleet.has(machine)) pushRun(machine, run, base);
+    const connected = keys.find((k) => s.machines.get(k)?.conn === "connected");
+    if (groups.length === 0 && connected) rows.push({ key: `e:${fleetKey(fleet)}`, kind: "empty", machine: connected, fleet, depth: base });
+    for (const g of groups) {
+      const first = g.members[0]!;
+      const pooled = poolMachines(g.members) > 1;
+      rows.push({ key: `p:${g.key}`, kind: "project", machine: first.machine, projectId: first.projectId, project: first.project, pool: g.members, groupKey: g.key, fleet, depth: base });
+      // Every machine's threads of this repository, in one list by recency. A
+      // thread's row keeps the machine it lives on; the tag says which when the
+      // pool has more than one. The row's dot and count are summed here, once
+      // per rebuild, over the same walk that finds the threads.
+      const tagOf = (machine: string) => pooled ? machineLabel(s, machine) : undefined;
+      const owned: { machine: string; projectId: string; t: Thread }[] = [];
+      let busy = false, waiting = false, count = 0;
+      for (const x of g.members) {
+        const m = s.machines.get(x.machine)!;
+        const runs = (runsOf.get(`${x.machine}:${x.projectId}`) ?? []).map((r) => r.run);
+        busy ||= runs.some(runIsBusy);
+        waiting ||= runs.some((r) => runNeedsPerson(s, r));
+        for (const run of runs) for (const mem of run.members) if (!mem.threadId && !isFinalMemberState(mem.state)) count++;
+        for (const t of liveThreads(m, x.projectId, s.showHidden)) {
+          count++;
+          busy ||= t.status === "running" || t.status === "starting";
+          waiting ||= t.status === "waiting" || t.pendingApprovals > 0;
+          if (!inRun.has(`${x.machine}:${t.id}`)) owned.push({ machine: x.machine, projectId: x.projectId, t });
+        }
+      }
+      Object.assign(rows[rows.length - 1]!, { busy, waiting, count });
+      if (!(s.expanded[g.key] ?? true)) continue;
+      owned.sort((a, b) => byRecency(a.t, b.t));
+      const threads = owned.map((o) => o.t);
+      // One map serves both "is this thread here?" and "where does it live?".
+      const placeOf = new Map(owned.map((o) => [o.t.id, o]));
+      // A thread a program started sits under the thread that started it.
+      // `origin.parentThreadId` is the only record of that (#49); a parent that
+      // is not in this list — archived, deleted, or on another machine — leaves
+      // the child a top-level row, because a thread must never be lost behind a
+      // link that leads nowhere.
+      const parentOf = (t: Thread) => {
+        const id = t.origin?.parentThreadId;
+        return id && id !== t.id && placeOf.has(id) ? id : null;
+      };
+      const kids = new Map<string, Thread[]>();
+      for (const t of threads) {
+        const parent = parentOf(t);
+        if (parent) append(kids, parent, t);
+      }
+      // Which threads are top-level rows. A thread whose parent is here belongs
+      // under it — but two threads naming each other have no parent outside the
+      // pair, so neither would ever be a root and both would vanish. Claiming
+      // from the roots first says which threads a root can reach; whatever is
+      // left is a cycle, and its first thread becomes a root of its own.
+      //
+      // This is settled before anything paints, because a furled group paints
+      // none of its children, and "not painted" must not be mistaken for
+      // "nobody owns it".
+      const claimed = new Set<string>();
+      const claim = (t: Thread) => {
+        if (claimed.has(t.id)) return;
+        claimed.add(t.id);
+        for (const c of kids.get(t.id) ?? []) claim(c);
+      };
+      const roots: Thread[] = [];
+      for (const t of threads) if (!parentOf(t)) { roots.push(t); claim(t); }
+      for (const t of threads) if (!claimed.has(t.id)) { roots.push(t); claim(t); }
 
-  const groups = projectGroups(s);
-  const anyConnected = s.order.some((k) => s.machines.get(k)?.conn === "connected");
-  if (groups.length === 0 && anyConnected) rows.push({ key: "e:", kind: "empty", machine: s.order.find((k) => s.machines.get(k)?.conn === "connected") ?? "", depth: 0 });
-  for (const g of groups) {
-    const first = g.members[0]!;
-    const pooled = poolMachines(g.members) > 1;
-    rows.push({ key: `p:${g.key}`, kind: "project", machine: first.machine, projectId: first.projectId, project: first.project, pool: g.members, groupKey: g.key, depth: 0 });
-    // Every machine's threads of this repository, in one list by recency. A
-    // thread's row keeps the machine it lives on; the tag says which when the
-    // pool has more than one. The row's dot and count are summed here, once
-    // per rebuild, over the same walk that finds the threads.
-    const tagOf = (machine: string) => pooled ? machineLabel(s, machine) : undefined;
-    const owned: { machine: string; projectId: string; t: Thread }[] = [];
-    let busy = false, waiting = false, count = 0;
-    for (const x of g.members) {
-      const m = s.machines.get(x.machine)!;
-      const runs = (runsOf.get(`${x.machine}:${x.projectId}`) ?? []).map((r) => r.run);
-      busy ||= runs.some(runIsBusy);
-      waiting ||= runs.some((r) => runNeedsPerson(s, r));
-      for (const run of runs) for (const mem of run.members) if (!mem.threadId && !isFinalMemberState(mem.state)) count++;
-      for (const t of liveThreads(m, x.projectId, s.showHidden)) {
-        count++;
-        busy ||= t.status === "running" || t.status === "starting";
-        waiting ||= t.status === "waiting" || t.pendingApprovals > 0;
-        if (!inRun.has(`${x.machine}:${t.id}`)) owned.push({ machine: x.machine, projectId: x.projectId, t });
+      // The runs of this project, from every machine in the pool, split the way
+      // its threads are: a run whose parent thread has a row here sits under
+      // it, and the rest sit under the project. `placeOf` already leaves out
+      // the threads the runs themselves claim, so a run can never be filed
+      // under one of its own members.
+      const ownRuns = new Map<string, { machine: string; run: Run }[]>();
+      const projectRunRows: { machine: string; run: Run }[] = [];
+      for (const x of g.members) {
+        for (const r of runsOf.get(`${x.machine}:${x.projectId}`) ?? []) {
+          const parent = r.run.parentThreadId;
+          if (parent && placeOf.has(parent)) append(ownRuns, parent, r);
+          else projectRunRows.push(r);
+        }
+      }
+
+      // A fold must never bury the thing that needs a person. `needsPerson`
+      // says it of one thread; this says it of everything a thread is holding,
+      // because a group hides its children whole. A thread that is quietly
+      // working, with a blocked run under it or a failed thread under that,
+      // would otherwise stay inside its own parent's fold and take the
+      // approval with it — the deadlock of #69, one level further out, and
+      // invisible rather than merely furled.
+      //
+      // Each level filters by the same rule, so letting a thread through also
+      // lets through the path below it to whatever raised the need.
+      const wants = new Map<string, boolean>();
+      const wantsPerson = (t: Thread, seen: Set<string> = new Set()): boolean => {
+        const memo = wants.get(t.id);
+        if (memo !== undefined) return memo;
+        // A cycle answers for itself: whatever is in it is reached by the
+        // walk that is already running.
+        if (seen.has(t.id)) return false;
+        seen.add(t.id);
+        const v = needsPerson(t)
+          || (ownRuns.get(t.id) ?? []).some((r) => runNeedsPerson(s, r.run))
+          || (kids.get(t.id) ?? []).some((c) => wantsPerson(c, seen));
+        wants.set(t.id, v);
+        return v;
+      };
+
+      const painted = new Set<string>();
+      const pushThread = (t: Thread, depth: number) => {
+        // A cycle reached through an unfurled group would otherwise paint for
+        // ever. Whichever thread the walk reaches first keeps the row.
+        if (painted.has(t.id)) return;
+        painted.add(t.id);
+        const at = placeOf.get(t.id)!;
+        // What this thread holds: the runs it asked for, then the threads it
+        // started. A run first, because it is the larger piece of work and it
+        // names itself; the loose children follow it.
+        const mine = ownRuns.get(t.id) ?? [];
+        const children = kids.get(t.id) ?? [];
+        const held = mine.length + children.length;
+        const open = held > 0 && (s.expanded[threadGroupKey(at.machine, t.id)] ?? false);
+        // Furled hides the children that are working. It never hides one that
+        // has failed, is blocked on a person, or is holding something that is
+        // — see `wantsPerson` and `runNeedsPerson`.
+        const shownRuns = open ? mine : mine.filter((r) => runNeedsPerson(s, r.run));
+        const shown = open ? children : children.filter((c) => wantsPerson(c));
+        const tag = tagOf(at.machine);
+        rows.push({
+          key: `t:${at.machine}:${t.id}`, kind: "thread", machine: at.machine, projectId: at.projectId, thread: t, depth, groupKey: g.key,
+          ...(tag ? { tag } : {}),
+          ...(t.origin?.by === "agent" ? { agent: true } : {}),
+          ...(held > 0 ? { group: true, hidden: held - shownRuns.length - shown.length } : {}),
+        });
+        for (const r of shownRuns) pushRun(r.machine, r.run, depth + 1, at.projectId, g.key);
+        for (const c of shown) pushThread(c, depth + 1);
+      };
+      // A run above the threads, for the reason it always was: a run is why the
+      // work under it exists, and it is what the operator watches.
+      for (const r of projectRunRows) pushRun(r.machine, r.run, base + 1, g.members.find((x) => x.machine === r.machine)?.projectId, g.key);
+      for (const t of roots) pushThread(t, base + 1);
+      // The project's own archived folder, below its live threads and inside
+      // its fold: the old threads of this project on every machine, most
+      // recently archived first. Moved threads are tombstones, not archive —
+      // they stay hidden.
+      const archived: { machine: string; projectId: string; t: Thread }[] = [];
+      for (const x of g.members) {
+        const m = s.machines.get(x.machine)!;
+        for (const t of m.threads.values()) if (t.projectId === x.projectId && t.archivedAt && !t.movedTo) archived.push({ machine: x.machine, projectId: x.projectId, t });
+      }
+      if (archived.length === 0) continue;
+      archived.sort((a, b) => b.t.archivedAt!.localeCompare(a.t.archivedAt!));
+      const ak = archiveKey(g.key);
+      rows.push({ key: `a:${ak}`, kind: "archived", machine: first.machine, projectId: first.projectId, groupKey: g.key, archived: true, count: archived.length, depth: base + 1 });
+      if (!(s.expanded[ak] ?? false)) continue;
+      for (const x of archived) {
+        const tag = tagOf(x.machine);
+        rows.push({ key: `t:${x.machine}:${x.t.id}`, kind: "thread", machine: x.machine, projectId: x.projectId, groupKey: g.key, thread: x.t, archived: true, depth: base + 2, ...(tag ? { tag } : {}) });
       }
     }
-    Object.assign(rows[rows.length - 1]!, { busy, waiting, count });
-    if (!(s.expanded[g.key] ?? true)) continue;
-    owned.sort((a, b) => byRecency(a.t, b.t));
-    const threads = owned.map((o) => o.t);
-    // One map serves both "is this thread here?" and "where does it live?".
-    const placeOf = new Map(owned.map((o) => [o.t.id, o]));
-    // A thread a program started sits under the thread that started it.
-    // `origin.parentThreadId` is the only record of that (#49); a parent that
-    // is not in this list — archived, deleted, or on another machine — leaves
-    // the child a top-level row, because a thread must never be lost behind a
-    // link that leads nowhere.
-    const parentOf = (t: Thread) => {
-      const id = t.origin?.parentThreadId;
-      return id && id !== t.id && placeOf.has(id) ? id : null;
-    };
-    const kids = new Map<string, Thread[]>();
-    for (const t of threads) {
-      const parent = parentOf(t);
-      if (parent) append(kids, parent, t);
+    // The machines of this fleet, below its work. A machine row still opens
+    // the control panel, and an offline one still says what to press; the
+    // section is furled by default because the machines are where the work
+    // runs, not what it is.
+    rows.push({ key: `machines:${fleetKey(fleet)}`, kind: "machines", machine: "", fleet, count: keys.length, depth: base });
+    if (s.expanded[machinesKey(fleet)] ?? false) {
+      for (const key of keys) rows.push({ key: `m:${key}`, kind: "machine", machine: key, fleet, depth: base + 1 });
     }
-    // Which threads are top-level rows. A thread whose parent is here belongs
-    // under it — but two threads naming each other have no parent outside the
-    // pair, so neither would ever be a root and both would vanish. Claiming
-    // from the roots first says which threads a root can reach; whatever is
-    // left is a cycle, and its first thread becomes a root of its own.
-    //
-    // This is settled before anything paints, because a furled group paints
-    // none of its children, and "not painted" must not be mistaken for
-    // "nobody owns it".
-    const claimed = new Set<string>();
-    const claim = (t: Thread) => {
-      if (claimed.has(t.id)) return;
-      claimed.add(t.id);
-      for (const c of kids.get(t.id) ?? []) claim(c);
-    };
-    const roots: Thread[] = [];
-    for (const t of threads) if (!parentOf(t)) { roots.push(t); claim(t); }
-    for (const t of threads) if (!claimed.has(t.id)) { roots.push(t); claim(t); }
-
-    // The runs of this project, from every machine in the pool, split the way
-    // its threads are: a run whose parent thread has a row here sits under
-    // it, and the rest sit under the project. `placeOf` already leaves out
-    // the threads the runs themselves claim, so a run can never be filed
-    // under one of its own members.
-    const ownRuns = new Map<string, { machine: string; run: Run }[]>();
-    const projectRunRows: { machine: string; run: Run }[] = [];
-    for (const x of g.members) {
-      for (const r of runsOf.get(`${x.machine}:${x.projectId}`) ?? []) {
-        const parent = r.run.parentThreadId;
-        if (parent && placeOf.has(parent)) append(ownRuns, parent, r);
-        else projectRunRows.push(r);
-      }
-    }
-
-    // A fold must never bury the thing that needs a person. `needsPerson`
-    // says it of one thread; this says it of everything a thread is holding,
-    // because a group hides its children whole. A thread that is quietly
-    // working, with a blocked run under it or a failed thread under that,
-    // would otherwise stay inside its own parent's fold and take the
-    // approval with it — the deadlock of #69, one level further out, and
-    // invisible rather than merely furled.
-    //
-    // Each level filters by the same rule, so letting a thread through also
-    // lets through the path below it to whatever raised the need.
-    const wants = new Map<string, boolean>();
-    const wantsPerson = (t: Thread, seen: Set<string> = new Set()): boolean => {
-      const memo = wants.get(t.id);
-      if (memo !== undefined) return memo;
-      // A cycle answers for itself: whatever is in it is reached by the
-      // walk that is already running.
-      if (seen.has(t.id)) return false;
-      seen.add(t.id);
-      const v = needsPerson(t)
-        || (ownRuns.get(t.id) ?? []).some((r) => runNeedsPerson(s, r.run))
-        || (kids.get(t.id) ?? []).some((c) => wantsPerson(c, seen));
-      wants.set(t.id, v);
-      return v;
-    };
-
-    const painted = new Set<string>();
-    const pushThread = (t: Thread, depth: number) => {
-      // A cycle reached through an unfurled group would otherwise paint for
-      // ever. Whichever thread the walk reaches first keeps the row.
-      if (painted.has(t.id)) return;
-      painted.add(t.id);
-      const at = placeOf.get(t.id)!;
-      // What this thread holds: the runs it asked for, then the threads it
-      // started. A run first, because it is the larger piece of work and it
-      // names itself; the loose children follow it.
-      const mine = ownRuns.get(t.id) ?? [];
-      const children = kids.get(t.id) ?? [];
-      const held = mine.length + children.length;
-      const open = held > 0 && (s.expanded[threadGroupKey(at.machine, t.id)] ?? false);
-      // Furled hides the children that are working. It never hides one that
-      // has failed, is blocked on a person, or is holding something that is
-      // — see `wantsPerson` and `runNeedsPerson`.
-      const shownRuns = open ? mine : mine.filter((r) => runNeedsPerson(s, r.run));
-      const shown = open ? children : children.filter((c) => wantsPerson(c));
-      const tag = tagOf(at.machine);
-      rows.push({
-        key: `t:${at.machine}:${t.id}`, kind: "thread", machine: at.machine, projectId: at.projectId, thread: t, depth, groupKey: g.key,
-        ...(tag ? { tag } : {}),
-        ...(t.origin?.by === "agent" ? { agent: true } : {}),
-        ...(held > 0 ? { group: true, hidden: held - shownRuns.length - shown.length } : {}),
-      });
-      for (const r of shownRuns) pushRun(r.machine, r.run, depth + 1, at.projectId, g.key);
-      for (const c of shown) pushThread(c, depth + 1);
-    };
-    // A run above the threads, for the reason it always was: a run is why the
-    // work under it exists, and it is what the operator watches.
-    for (const r of projectRunRows) pushRun(r.machine, r.run, 1, g.members.find((x) => x.machine === r.machine)?.projectId, g.key);
-    for (const t of roots) pushThread(t, 1);
-    // The project's own archived folder, below its live threads and inside
-    // its fold: the old threads of this project on every machine, most
-    // recently archived first. Moved threads are tombstones, not archive —
-    // they stay hidden.
-    const archived: { machine: string; projectId: string; t: Thread }[] = [];
-    for (const x of g.members) {
-      const m = s.machines.get(x.machine)!;
-      for (const t of m.threads.values()) if (t.projectId === x.projectId && t.archivedAt && !t.movedTo) archived.push({ machine: x.machine, projectId: x.projectId, t });
-    }
-    if (archived.length === 0) continue;
-    archived.sort((a, b) => b.t.archivedAt!.localeCompare(a.t.archivedAt!));
-    const ak = archiveKey(g.key);
-    rows.push({ key: `a:${ak}`, kind: "archived", machine: first.machine, projectId: first.projectId, groupKey: g.key, archived: true, count: archived.length, depth: 1 });
-    if (!(s.expanded[ak] ?? false)) continue;
-    for (const x of archived) {
-      const tag = tagOf(x.machine);
-      rows.push({ key: `t:${x.machine}:${x.t.id}`, kind: "thread", machine: x.machine, projectId: x.projectId, groupKey: g.key, thread: x.t, archived: true, depth: 2, ...(tag ? { tag } : {}) });
-    }
-  }
-  // The fleet, below the work. A machine row still opens the control panel,
-  // and an offline one still says what to press; the section is furled by
-  // default because the machines are where the work runs, not what it is.
-  rows.push({ key: "machines", kind: "machines", machine: "", depth: 0 });
-  if (s.expanded[MACHINES_KEY] ?? false) {
-    for (const key of s.order) rows.push({ key: `m:${key}`, kind: "machine", machine: key, depth: 1 });
   }
   return rows;
 }
 
-/** The fold key of the machines section. */
+/**
+ * The fold key of a fleet's machines section.
+ *
+ * The default fleet keeps the bare key the section always had, so a reader who
+ * opened the machines once has it open still. A second fleet gets its own,
+ * because each fleet paints its own section.
+ */
+export function machinesKey(fleet: string): string {
+  return isDefaultFleet(fleet) ? MACHINES_KEY : `${MACHINES_KEY}:${fleetKey(fleet)}`;
+}
+
+/** The fold key of a fleet row. Open unless the reader furled it. */
+export function fleetRowKey(fleet: string): string { return `fleet:${fleetKey(fleet)}`; }
+
+/** The fold key of the machines section of the default fleet. */
 export const MACHINES_KEY = "machines";
+
+/**
+ * True for a row of the machines area: a machines header of any fleet, or one
+ * machine inside it.
+ *
+ * It lives here, beside the keys it reads, because it is a *test on a key* and
+ * the keys are minted in this file. App's cursor guard asked the same question
+ * with its own two string tests, and the per-fleet header key slipped past
+ * both of them: `machines:covey` is neither `machines` nor a `m:` prefix, so
+ * the cursor could seat itself on the header after all.
+ */
+export function isMachinesRowKey(key: string): boolean {
+  return key === MACHINES_KEY || key.startsWith(`${MACHINES_KEY}:`) || key.startsWith("m:");
+}
 
 // ---------------------------------------------------------------------------
 // Usage windows and totals

@@ -1,5 +1,5 @@
 /**
- * One web server across the fleet. A phone keeps one address, so the TUI
+ * One web server across every machine. A phone keeps one address, so the TUI
  * lets one machine serve the client and stops the others when a new one starts.
  */
 import { test } from "node:test";
@@ -39,8 +39,8 @@ test("starting the web server on one machine stops it on the connected machine t
   assert.deepEqual(sent, [
     { machine: "a", type: "machine.settings", webEnabled: false },
     { machine: "b", type: "machine.settings", webEnabled: true },
-    // The new server is handed the fleet at once.
-    { machine: "b", type: "machine.fleet" },
+    // The new server is handed the list at once.
+    { machine: "b", type: "machine.peers" },
   ]);
   assert.ok(notices.some((n) => n.includes("a: web server stopped")), notices.join(" | "));
   assert.ok(notices.some((n) => n.includes("b: web server on at http://b.tail.ts.net:3790/")), notices.join(" | "));
@@ -52,7 +52,7 @@ test("a machine that cannot be reached keeps its setting, and the reader is told
     { key: "b", conn: "connected", web: false },
   ]);
   await store.setWebServer("b", true);
-  assert.deepEqual(sent, [{ machine: "b", type: "machine.settings", webEnabled: true }, { machine: "b", type: "machine.fleet" }]);
+  assert.deepEqual(sent, [{ machine: "b", type: "machine.settings", webEnabled: true }, { machine: "b", type: "machine.peers" }]);
   assert.ok(notices.some((n) => n.includes("a also serves the web client and is not connected")), notices.join(" | "));
 });
 
@@ -65,7 +65,7 @@ test("stopping touches only the machine asked", async () => {
   assert.deepEqual(sent, [{ machine: "b", type: "machine.settings", webEnabled: false }]);
 });
 
-test("the fleet a phone dials: every other machine, loopback rewritten to the tailnet, the server itself left out", async () => {
+test("the machines a phone dials: every other machine, loopback rewritten to the tailnet, the server itself left out", async () => {
   const { store, sent } = harness([
     { key: "ws://127.0.0.1:3790", conn: "connected", web: false },
     { key: "ws://pi.tail.ts.net:3790", conn: "connected", web: false },
@@ -78,22 +78,22 @@ test("the fleet a phone dials: every other machine, loopback rewritten to the ta
   pi.info = { ...pi.info, machineId: "pi-id", name: "pi", settings: { webEnabled: true } };
   s.state.machines.get("ws://10.0.0.9:3790").saved.token = "tok";
 
-  assert.deepEqual(store.fleetFor("ws://pi.tail.ts.net:3790"), [
+  assert.deepEqual(store.peersFor("ws://pi.tail.ts.net:3790"), [
     { name: "box", url: "ws://box.tail.ts.net:3790", machineId: "box-id" },
     { name: "ws://10.0.0.9:3790", url: "ws://10.0.0.9:3790", token: "tok" },
   ]);
   // From box's own point of view the loopback entry is box, and pi is dialled as saved.
-  assert.deepEqual(store.fleetFor("ws://127.0.0.1:3790").map((m: { url: string }) => m.url), ["ws://pi.tail.ts.net:3790", "ws://10.0.0.9:3790"]);
+  assert.deepEqual(store.peersFor("ws://127.0.0.1:3790").map((m: { url: string }) => m.url), ["ws://pi.tail.ts.net:3790", "ws://10.0.0.9:3790"]);
 
-  // Starting the web server on pi hands it the fleet.
+  // Starting the web server on pi hands it the list.
   await store.setWebServer("ws://pi.tail.ts.net:3790", true);
-  assert.deepEqual(sent.filter((x) => x.machine === "ws://pi.tail.ts.net:3790").map((x) => x.type), ["machine.settings", "machine.fleet"]);
+  assert.deepEqual(sent.filter((x) => x.machine === "ws://pi.tail.ts.net:3790").map((x) => x.type), ["machine.settings", "machine.peers"]);
 });
 
-test("a loopback machine without a tailnet is left out of the fleet, not sent as loopback", () => {
+test("a loopback machine without a tailnet is left out of the list, not sent as loopback", () => {
   const { store } = harness([
     { key: "ws://127.0.0.1:3790", conn: "connected", web: false },
     { key: "ws://pi.tail.ts.net:3790", conn: "connected", web: true },
   ]);
-  assert.deepEqual(store.fleetFor("ws://pi.tail.ts.net:3790"), []);
+  assert.deepEqual(store.peersFor("ws://pi.tail.ts.net:3790"), []);
 });

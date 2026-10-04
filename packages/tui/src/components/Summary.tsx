@@ -2,7 +2,7 @@ import React from "react";
 import { Box, Text } from "ink";
 import { modelLabel, type MachineUpdate, type Project, type Thread } from "@covey/protocol";
 import type { AppState, MachineState, PoolMember, SidebarRow, ThreadTally } from "../store.js";
-import { liveThreads, byRecency, tallyThreads, permissionModeLabel, projectGroups, machineLabel } from "../store.js";
+import { liveThreads, byRecency, tallyThreads, permissionModeLabel, projectGroups, fleetMachines, fleetsOf, machineLabel } from "../store.js";
 import { threadIsHidden } from "@covey/protocol";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
@@ -20,8 +20,8 @@ export function Summary({ state, row, width, height }: { state: AppState; row: S
   const m = state.machines.get(row.machine);
   const body = row.kind === "project" && row.pool
     ? <ProjectSummary state={state} pool={row.pool} width={inner} height={height - 1} tick={state.tick} />
-    : row.kind === "machines" || !m
-      ? <MachinesSummary state={state} height={height - 1} />
+    : row.kind === "machines" || row.kind === "fleet" || !m
+      ? <MachinesSummary state={state} fleet={row.fleet} height={height - 1} />
       : <MachineSummary m={m} state={state} width={inner} height={height - 1} tick={state.tick} />;
   return (
     /* `100%` for the same reason as `Transcript`: this box clips. */
@@ -116,14 +116,23 @@ function PoolLine({ state, x, tally, width }: { state: AppState; x: PoolMember; 
   );
 }
 
-/** The fleet: every machine, its state, and how many projects it holds. */
-function MachinesSummary({ state, height }: { state: AppState; height: number }) {
-  const shown = state.order.slice(0, Math.max(1, height - 4));
-  const groups = projectGroups(state).length;
+/**
+ * Every machine of one fleet, its state, and how many projects it holds.
+ *
+ * `fleet` is the fleet whose row the cursor is on. Without one — a cursor on
+ * nothing, which is how this pane is reached before any machine answers — it
+ * is every machine the client has.
+ */
+function MachinesSummary({ state, fleet, height }: { state: AppState; fleet?: string; height: number }) {
+  const keys = fleet === undefined ? state.order : fleetMachines(state, fleet);
+  const shown = keys.slice(0, Math.max(1, height - 4));
+  const groups = projectGroups(state, fleet).length;
+  // The name only when there is a second fleet to tell it from.
+  const title = fleet !== undefined && fleetsOf(state).length > 1 ? `${fleet} — MACHINES` : "MACHINES";
   return (
     <>
-      <Text color={T.text} bold wrap="truncate">MACHINES</Text>
-      <Text color={T.subtle} wrap="truncate">{state.order.length} machine{state.order.length === 1 ? "" : "s"}  ·  {groups} project{groups === 1 ? "" : "s"}</Text>
+      <Text color={T.text} bold wrap="truncate">{title}</Text>
+      <Text color={T.subtle} wrap="truncate">{keys.length} machine{keys.length === 1 ? "" : "s"}  ·  {groups} project{groups === 1 ? "" : "s"}</Text>
       <Box height={1} />
       {shown.map((k) => {
         const m = state.machines.get(k)!;
@@ -138,7 +147,7 @@ function MachinesSummary({ state, height }: { state: AppState; height: number })
           </Text>
         );
       })}
-      {state.order.length === 0 && <Text color={T.subtle} italic>no machines — ctrl+k adds one</Text>}
+      {keys.length === 0 && <Text color={T.subtle} italic>no machines — ctrl+k adds one</Text>}
       <Box flexGrow={1} />
       <Text color={T.faint} wrap="truncate">enter unfold · enter on a machine opens its control panel · ctrl+k add machine</Text>
     </>

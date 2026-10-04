@@ -28,7 +28,7 @@
 import { AppState } from "react-native";
 import { applyDrop, coveyCommand, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
 import {
-  APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type FleetMember, type GitHubAction, type Lod, type QuestionItem,
+  APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type GitHubAction, type Lod, type PeerMachine, type QuestionItem,
 } from "@covey/protocol";
 import {
   addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState,
@@ -172,7 +172,12 @@ class Store {
   private askAccess(client: MachineClient, primary: boolean): void {
     client.rpc("machine.access", {}).then((a) => {
       if (primary || !this.state.access) this.state.access = a;
-      for (const m of a.fleet ?? []) this.dialMember(m);
+      // `a.fleet` is the name this list had before fleets took the word. The
+      // phone is the one client that is not in step with the daemon it dials:
+      // its bundle comes over the air from one machine and the primary daemon
+      // is very often another, so a new bundle meets an old daemon and must
+      // not drop every machine but one.
+      for (const m of a.peers ?? a.fleet ?? []) this.dialMember(m);
       this.schedule();
     }).catch(() => {});
   }
@@ -182,7 +187,7 @@ class Store {
    * dialled. A fleet member is never saved: the TUI owns that list and a copy
    * here would go stale.
    */
-  private dialMember(m: FleetMember): void {
+  private dialMember(m: PeerMachine): void {
     const primary = primaryMachine(this.state);
     if (m.machineId && primary?.info?.machineId === m.machineId) return;
     let key: string;

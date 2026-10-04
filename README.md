@@ -9,7 +9,8 @@ at the same time, and the last panel is the diff of one turn.](docs/media/thread
 *Four threads, two projects, one machine. Each thread works in its own git
 worktree, so they never collide, and `d` shows what a turn changed.*
 
-- Left sidebar: machines → projects → threads. Many threads run concurrently.
+- Left sidebar: projects → threads, with the machines below — and a row per fleet above
+  them once you have more than one. Many threads run concurrently.
 - One small daemon per machine. The TUI connects to any number of them at once.
 - Tailscale-native: a daemon bound to your tailnet accepts peers that `tailscale whois`
   says belong to you. No tokens to copy on a personal tailnet.
@@ -92,6 +93,21 @@ covey machines add ws://other-host.your-tailnet.ts.net:3790 --name other
 
 Outside Tailscale, append `--token <token from covey info>`.
 
+### Fleets
+
+One tailnet may carry machines that have nothing to do with each other — the ones at work
+and the ones at home. A **fleet** is the line between them. Every machine starts in the
+fleet called `covey`; a machine's control panel moves it to another, and the command
+palette makes one ("New fleet") and adds a machine to it by its tailnet address.
+
+The sidebar then grows one more level: a row per fleet, with its own projects, its own
+machines and its own fold. Nothing changes until you make a second fleet.
+
+The line is real. The repositories covey offers for a new project come from the `gh` on a
+machine *in that fleet*, so your work login never lists work repositories into the tree at
+home. A repository cloned in both fleets is two projects, with their own threads. And a run
+places its members on the machines of its own fleet.
+
 ### On a phone
 
 ![The covey web client on a phone. The list follows two threads that start
@@ -99,10 +115,10 @@ elsewhere, a tap opens a conversation, the composer sends a message, and the
 settings of that conversation come up from the foot of the
 page.](docs/media/phone.gif)
 
-*The same fleet from a phone. The list follows work that starts anywhere, and
+*The same machines from a phone. The list follows work that starts anywhere, and
 the composer sends from anywhere.*
 
-One machine in your fleet serves a web client at `http://<machine>:3790/`. Turn it on from
+One machine serves a web client at `http://<machine>:3790/`. Turn it on from
 the TUI: press enter on the machine row, then choose "Web server: off". The machine's info
 card shows whether it is on and at which address, and starting it on a second machine stops
 it on the first, so a phone always has one address to keep. `covey info` prints the
@@ -165,7 +181,8 @@ when the daemon is somewhere else. Nothing goes to GitHub and nothing is committ
 | `/` at the start | composer | commands: Claude Code's own, and covey's `/clear` — empty this conversation and keep the thread, its branch, its name if you typed one, and its place in the sidebar |
 | `cmd+d` / `d` | anywhere / sidebar | show the last turn's diff; `j/k` scroll, `d` or `esc` close |
 | `ctrl+k` → Revert | anywhere | restore files and conversation to before a chosen turn |
-| `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode, this client's settings |
+| `enter` on a machine | sidebar | control panel: update (pull, rebuild, restart), restart, default model, default mode, which fleet it is in, this client's settings |
+| `enter` on a fleet | sidebar | add a machine by its tailnet address, add a project, rename the fleet |
 | `ctrl+k` → Settings | anywhere | theme (eight palettes), detail, the bell — this client, not the daemon |
 | `ctrl+k` → Update covey | anywhere | pull, rebuild and relaunch the client itself (and, if you want, restart the local daemon) |
 | `ctrl+k` → Open issue / pull request | in a thread | open the thread's issue or pull request in the browser; a `#N` in the transcript is a hyperlink too — `cmd+click` it |

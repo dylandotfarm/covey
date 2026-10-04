@@ -17,7 +17,7 @@ import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } fro
 import { redactDeep, redactor } from "./redact.js";
 import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
-import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, projectsDir, saveFleet } from "./config.js";
+import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, fleetSetting, projectsDir, savePeers } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { ChainTracker, summariseActivity } from "./activity.js";
 import { ThreadTerminal, TerminalError } from "./terminal.js";
@@ -605,6 +605,9 @@ export class Engine {
           // On is the default, so only the refusal is written down: a machine
           // that says nothing archives, and `daemon.json` holds `false` alone.
           ...(cmd.archiveOnMerge !== undefined ? { archiveOnMerge: cmd.archiveOnMerge === false ? false : null } : {}),
+          // The default fleet is where a machine that names none sits, so the
+          // default name and `null` write the same thing: nothing.
+          ...(cmd.fleet !== undefined ? { fleet: fleetSetting(cmd.fleet) } : {}),
         });
         // The file may say a bind this daemon was not started with (`--bind`
         // wins at start and is never written). What the machine reports is
@@ -616,11 +619,14 @@ export class Engine {
         this.sweepSessions();
         return this.emitShell({ kind: "machine.updated", machine: this.machine });
       }
-      case "machine.fleet": {
+      // `machine.fleet` is the name this command had before fleets took the
+      // word; a covey older than fleets still sends it.
+      case "machine.fleet":
+      case "machine.peers": {
         // Not broadcast: the list is for the page this daemon serves, and it
         // is not part of `MachineInfo`. A client that wants it asks
         // `machine.access`.
-        saveFleet(Array.isArray(cmd.machines) ? cmd.machines.filter((m) => typeof m?.url === "string" && typeof m?.name === "string").map((m) => ({ name: m.name, url: m.url, ...(m.token ? { token: m.token } : {}), ...(m.machineId ? { machineId: m.machineId } : {}) })) : []);
+        savePeers(Array.isArray(cmd.machines) ? cmd.machines.filter((m) => typeof m?.url === "string" && typeof m?.name === "string").map((m) => ({ name: m.name, url: m.url, ...(m.token ? { token: m.token } : {}), ...(m.machineId ? { machineId: m.machineId } : {}) })) : []);
         return this.db.shellSeq();
       }
       case "project.create": {

@@ -45,7 +45,7 @@ function machine(key: string, name: string, conn: MachineState["conn"], projects
 const PI = "ws://pi:3790", MAC = "ws://mac:3790";
 
 /** Two machines that both hold `covey`; only the mac holds `other`. */
-function fleet(expanded: Record<string, boolean> = {}): AppState {
+function tree(expanded: Record<string, boolean> = {}): AppState {
   const pi = machine(PI, "pi", "connected",
     [project("p-covey", "covey", "github.com/dylandotfarm/covey", { kind: "clone", remoteUrl: "git@github.com:dylandotfarm/covey.git" })],
     [thread("on-pi", "p-covey", "2026-01-03T00:00:00Z"), thread("old-pi", "p-covey", "2026-01-01T00:00:00Z", { archivedAt: "2026-02-01T00:00:00Z" })]);
@@ -56,7 +56,7 @@ function fleet(expanded: Record<string, boolean> = {}): AppState {
 }
 
 test("one repository on two machines is one project row, with the threads of both under it", () => {
-  const rows = sidebarRows(fleet());
+  const rows = sidebarRows(tree());
   assert.deepEqual(rows.map((r) => `${r.kind}@${r.depth}`), [
     "project@0", "thread@1", "thread@1", "archived@1",
     "project@0", "thread@1",
@@ -78,7 +78,7 @@ test("one repository on two machines is one project row, with the threads of bot
 });
 
 test("a project row's dot reads every machine of the pool", () => {
-  const s = fleet();
+  const s = tree();
   s.machines.get(MAC)!.threads.get("on-mac")!.status = "running";
   const covey = sidebarRows(s)[0]!;
   assert.equal(covey.busy, true, "a thread working on the second machine lights the one row");
@@ -87,7 +87,7 @@ test("a project row's dot reads every machine of the pool", () => {
 });
 
 test("a project with no remote is a group of its own, keyed by machine and id, and its threads carry no tag", () => {
-  const rows = sidebarRows(fleet());
+  const rows = sidebarRows(tree());
   const other = rows.find((r) => r.kind === "project" && r.project!.title === "other")!;
   assert.equal(other.groupKey, `${MAC}:m-other`, "the same string a project fold always used, so an old fold still holds");
   assert.equal(other.pool!.length, 1);
@@ -96,22 +96,22 @@ test("a project with no remote is a group of its own, keyed by machine and id, a
 });
 
 test("folding a pooled project folds the threads of every machine in it, and the archive opens under the group key", () => {
-  const furled = sidebarRows(fleet({ "github.com/dylandotfarm/covey": false }));
+  const furled = sidebarRows(tree({ "github.com/dylandotfarm/covey": false }));
   assert.deepEqual(furled.map((r) => r.kind), ["project", "project", "thread", "machines"]);
-  const open = sidebarRows(fleet({ [archiveKey("github.com/dylandotfarm/covey")]: true }));
+  const open = sidebarRows(tree({ [archiveKey("github.com/dylandotfarm/covey")]: true }));
   const archived = open.filter((r) => r.kind === "thread" && r.archived);
   assert.deepEqual(archived.map((r) => [r.thread!.id, r.tag]), [["old-pi", "pi"]]);
 });
 
 test("the machines section is furled by default and lists every machine when opened", () => {
-  assert.deepEqual(sidebarRows(fleet()).filter((r) => r.kind === "machine"), []);
-  const rows = sidebarRows(fleet({ [MACHINES_KEY]: true }));
+  assert.deepEqual(sidebarRows(tree()).filter((r) => r.kind === "machine"), []);
+  const rows = sidebarRows(tree({ [MACHINES_KEY]: true }));
   const tail = rows.slice(rows.findIndex((r) => r.kind === "machines"));
   assert.deepEqual(tail.map((r) => `${r.kind}@${r.depth}:${r.machine}`), ["machines@0:", `machine@1:${PI}`, `machine@1:${MAC}`]);
 });
 
 test("projectGroups sorts by title and keeps a machine's own order inside a group", () => {
-  const groups = projectGroups(fleet());
+  const groups = projectGroups(tree());
   assert.deepEqual(groups.map((g) => g.title), ["covey", "other"]);
   assert.deepEqual(groups[0]!.members.map((x) => x.machine), [PI, MAC]);
 });

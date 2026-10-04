@@ -6,7 +6,7 @@
  * thread for the paint and the keyboard.
  */
 import { applyDrop, budgetValue, coveyCommand, MachineClient, uuid } from "@covey/client";
-import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type FleetMember, type PermissionMode, type QuestionItem } from "@covey/protocol";
+import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type PeerMachine, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
 import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, baseHash, composerKey, emptyState, itemHash, mediaHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
 import { attachingLabel, readPicked, sendingLabel } from "./attach.js";
@@ -104,13 +104,15 @@ function dial(slot: MachineSlot, token: string | undefined) {
 function askAccess(client: MachineClient) {
   client.rpc("machine.access", {}).then((a) => {
     state.access = a;
-    for (const m of a.fleet ?? []) dialMember(m);
+    // No fallback to the old `a.fleet` name here, unlike the phone: this page
+    // is served by the daemon it asks, so the two are always one build.
+    for (const m of a.peers ?? []) dialMember(m);
     schedule();
   }).catch(() => {});
 }
 
 /** Dial a machine the primary named, unless it is the primary or already dialled. */
-function dialMember(m: FleetMember) {
+function dialMember(m: PeerMachine) {
   const primary = primaryMachine(state);
   if (m.machineId && primary?.info?.machineId === m.machineId) return;
   let key: string;
