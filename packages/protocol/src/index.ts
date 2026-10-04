@@ -454,10 +454,17 @@ export interface AppBuild {
 /**
  * A run of `pnpm install`, `expo prebuild` and `assembleRelease` in `mobile/`.
  *
- * The record is re-sent whole on every change, as `MachineUpdate` is, so a
- * client that arrives in the middle of a build sees what one that watched from
- * the start sees. It is a long job — the gradle step is tens of minutes — so
- * the call that starts it answers at once and the progress arrives as pushes.
+ * The record is re-sent whole, as `MachineUpdate` is, so a client that arrives
+ * in the middle of a build sees what one that watched from the start sees — and
+ * a client that connects while one runs is sent it once, there and then,
+ * because the next report may be half an hour away. It is a long job, so the
+ * call that starts it answers at once and the progress arrives as pushes.
+ *
+ * Those pushes land at a step's boundary and nowhere else. The updater streams
+ * its output because an update takes a minute and a reader watches it; this
+ * takes forty, and a message per chunk of gradle's output is tens of megabytes
+ * to every client, including a phone, to paint a line that changes three times.
+ * `steps[].output` is the tail a failure is diagnosed from, not a stream.
  *
  * This does **not** export the bundle `/updates` serves. The two are separate
  * acts on purpose: an APK is installed by a person who chose to, and a bundle

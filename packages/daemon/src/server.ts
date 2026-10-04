@@ -431,6 +431,11 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
   const unUpdate = o.updater.on((update) => send({ push: "machine.update", update }));
   // And the app build, for the same reason: one machine builds one app.
   const unBuild = o.builder.on((run) => send({ push: "machine.appBuild", run }));
+  // A build reports at its steps' boundaries, and gradle is tens of minutes
+  // between two of them. So a client that arrives in the middle — a phone whose
+  // socket died while the screen was off, which is every phone — is told once,
+  // now, rather than waiting for the next step to end.
+  if (o.builder.current) send({ push: "machine.appBuild", run: o.builder.current });
 
   ws.on("message", async (data) => {
     let req: RpcRequest;

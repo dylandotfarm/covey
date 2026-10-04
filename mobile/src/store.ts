@@ -44,6 +44,18 @@ import { sheetCommand } from "./sheet";
 /** How long a notice stays on screen before it goes, in milliseconds. */
 const NOTICE_MS = 4000;
 
+/**
+ * How long the app waits for a thread the daemon is making.
+ *
+ * `thread.create` fetches and adds a worktree, which on a large repository over
+ * a slow link outlasts the client's own one-minute default. Here a timeout
+ * costs more than a notice: `whenMade` opens its gate when the create settles,
+ * so a wait that gives up early puts the subscription back in front of the
+ * worktree, which is the failure this gate exists to prevent. The TUI gives a
+ * call that may clone ten minutes; this is that budget, and the daemon's.
+ */
+const CREATE_WAIT_MS = 10 * 60_000 + 10_000;
+
 class Store {
   readonly state: State = emptyState();
   private readonly clients = new Map<string, MachineClient>();
@@ -256,8 +268,13 @@ class Store {
    * is the conversation reading as empty while the daemon holds every word of
    * it. The page has no such gap: it navigates once the create is answered.
    *
-   * Everything that names a thread to its daemon goes through here, and a
+   * Every command this store sends about a thread goes through here, and a
    * thread this app did not just create is in no map and waits for nothing.
+   * Most of them cannot fire inside the window — an approval belongs to an item
+   * and an item belongs to a thread that exists — but the conversation opens on
+   * the id at once and its `⋮` sheet with it, so a rename, an archive and the
+   * model picker all can. One rule is cheaper than a list of exceptions, and
+   * the next call added here inherits it.
    */
   private whenMade = <T>(machine: string, threadId: string, run: () => Promise<T> | T): Promise<T> => {
     const made = this.creating.get(composerKey(machine, threadId));
@@ -440,21 +457,29 @@ class Store {
 
   interrupt = (): void => {
     const v = this.state.view;
-    if (v) this.clients.get(v.machine)?.command({ type: "turn.interrupt", threadId: v.threadId }).catch(this.fail);
+    const client = v && this.clients.get(v.machine);
+    if (!v || !client) return;
+    void this.whenMade(v.machine, v.threadId, () => client.command({ type: "turn.interrupt", threadId: v.threadId })).catch(this.fail);
   };
 
   respondApproval = (item: ApprovalItem, behavior: "allow" | "deny", always: boolean): void => {
-    this.viewClient()?.command({
+    const v = this.state.view;
+    const client = this.viewClient();
+    if (!v || !client) return;
+    void this.whenMade(v.machine, item.threadId, () => client.command({
       type: "approval.respond", threadId: item.threadId, requestId: item.requestId, behavior,
       ...(always ? { updatedPermissions: item.suggestions } : {}),
-    }).catch(this.fail);
+    })).catch(this.fail);
   };
 
   respondQuestion = (item: QuestionItem, answers: string[]): void => {
-    this.viewClient()?.command({
+    const v = this.state.view;
+    const client = this.viewClient();
+    if (!v || !client) return;
+    void this.whenMade(v.machine, item.threadId, () => client.command({
       type: "question.respond", threadId: item.threadId, requestId: item.requestId,
       answer: answers[0] ?? "", answers,
-    }).catch(this.fail);
+    })).catch(this.fail);
   };
 
   // ---- the list ----------------------------------------------------------
@@ -476,7 +501,7 @@ class Store {
     // and a waiter reports the failure of its own command. A create that
     // failed leaves the subscription to say the thread is not there, which is
     // the error the reader needs.
-    const made = client.command({ type: "thread.create", projectId, threadId, sessionId: uuid() })
+    const made = client.command({ type: "thread.create", projectId, threadId, sessionId: uuid() }, CREATE_WAIT_MS)
       .catch(this.fail);
     this.creating.set(key, made);
     void made.then(() => this.creating.delete(key));
@@ -560,11 +585,15 @@ class Store {
   };
 
   archiveThread = (machine: string, threadId: string): void => {
-    this.clients.get(machine)?.command({ type: "thread.archive", threadId, archived: true }).catch(this.fail);
+    const client = this.clients.get(machine);
+    if (!client) return;
+    void this.whenMade(machine, threadId, () => client.command({ type: "thread.archive", threadId, archived: true })).catch(this.fail);
   };
 
   renameThread = (machine: string, threadId: string, title: string): void => {
-    this.clients.get(machine)?.command({ type: "thread.rename", threadId, title }).catch(this.fail);
+    const client = this.clients.get(machine);
+    if (!client) return;
+    void this.whenMade(machine, threadId, () => client.command({ type: "thread.rename", threadId, title })).catch(this.fail);
   };
 
   /** How many turns are running on a machine, for a warning before a restart. */
@@ -594,7 +623,11 @@ class Store {
     if (!cmd) return;
     this.state.sheet = null;
     this.schedule();
-    client.command(cmd).catch(this.fail);
+    // The sheet of a thread opens from the conversation, which opens on the id
+    // — so the model picker can be used while the worktree is still being made.
+    // A machine's sheet names no thread and waits for nothing.
+    const send = () => client.command(cmd);
+    void (target.kind === "thread" ? this.whenMade(target.machine, target.threadId, send) : send()).catch(this.fail);
   };
 
   private viewClient(): MachineClient | undefined {

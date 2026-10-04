@@ -275,7 +275,7 @@ On a machine with little memory add `--max-workers=2`.
 The settings screen's **Install** section lists every machine that holds an APK
 or could build one, and each row carries a **Build the app** button. It runs
 those same three commands on that machine — `pnpm install --frozen-lockfile`,
-`pnpm run prebuild`, `pnpm run apk` — and sends every step back as it goes, so
+`pnpm run prebuild`, `pnpm run apk` — and reports at each step's boundary, so
 the row says which one is running and how it ended. When it succeeds the
 machine's `appBuild` moves to the new version and the row above the button
 becomes the app to install.
@@ -288,8 +288,17 @@ right answer about the file on disk and the wrong one for the reader who wants
 the current app, and before this the only way to move it was a terminal on that
 machine.
 
-Three rules hold it:
+Four rules hold it:
 
+- **No `.env`, no build.** The run refuses before the first step when nothing
+  names `EXPO_PUBLIC_COVEY_UPDATES_URL` — neither the daemon's environment nor
+  `mobile/.env` beside the config. The section above says to set `.env` before
+  either step, and a person at a terminal who forgets can read the warning in
+  their own scrollback; a person who tapped a button on a phone cannot. With no
+  variable `app.config.ts` leaves the whole `updates` block out, so the app that
+  comes out is off the update channel, and covey keeps Expo's anti-bricking
+  measure — only another sideload mends it. A missing file is one line to write.
+  Forty minutes of gradle and a dead binary is not.
 - **One build per machine.** A second call while one is running answers with
   the run in flight. Two gradles in one output directory is a corrupt build and
   an hour lost.
@@ -301,6 +310,17 @@ Three rules hold it:
   daemon runs from a checkout that holds `mobile/`, and nothing more. A machine
   with no Android SDK and no JDK fails the gradle step, with gradle's own words
   in the step's output.
+
+The progress is pushed at a step's boundary and nowhere else. The updater
+streams its output and sends it every 150 ms, because an update takes a minute
+and a reader watches it fill; this takes forty, gradle writes thousands of
+lines, and every message carries a copy of all three steps' bounded output.
+Nothing paints that output — `appBuildLabel` reads the state, the error and the
+running step's name — so it accumulates on the daemon and rides along at the
+next boundary, which is where a failure's tail is wanted anyway. A whole build
+is about nine messages rather than tens of thousands. A client that connects
+while a build is running is sent the record once, there and then, because the
+next boundary may be half an hour away.
 
 #### What the APK is, and is not
 

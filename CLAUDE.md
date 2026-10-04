@@ -255,9 +255,15 @@
   three commands of the build on that machine, one run at a time, with every
   step broadcast as a `machine.appBuild` push — because a machine update never
   touches `mobile/`, so the binary a machine offers can be weeks older than the
-  code it runs. `pnpm run export` is never one of those steps: a bundle lands
-  in every installed app of that runtime version unasked, and an APK is
-  installed by a person who chose to.
+  code it runs. It refuses before the first step when nothing names
+  `EXPO_PUBLIC_COVEY_UPDATES_URL`, because `app.config.ts` then leaves the
+  `updates` block out and the app that comes out is off the channel until
+  somebody sideloads another one — a file is one line to write, a binary on a
+  phone is not. The progress goes at a step's boundary and never per chunk:
+  gradle is forty minutes of output nothing paints, and a client that arrives
+  mid-build is sent the record once on connect instead. `pnpm run export` is
+  never one of those steps: a bundle lands in every installed app of that
+  runtime version unasked, and an APK is installed by a person who chose to.
   `docs/DEVICE.md` holds the reasoning and the rules.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client

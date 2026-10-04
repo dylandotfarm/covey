@@ -21,6 +21,8 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { AppBuildRun, UpdateStep, UpdateStepName } from "@covey/protocol";
 import { appBuild, canBuildApp, MOBILE_DIR } from "./apk.js";
 import { childEnv, tail } from "./update.js";
@@ -52,7 +54,6 @@ export class AppBuilder {
   private listeners = new Set<Emit>();
   /** The run in flight, or the last one that finished. */
   current: AppBuildRun | null = null;
-  private flushTimer: NodeJS.Timeout | null = null;
 
   /** `dir` is the app's workspace; a test points it somewhere with nothing in it. */
   constructor(private machineId: string, private log: (m: string) => void, private dir = MOBILE_DIR) {}
@@ -62,16 +63,21 @@ export class AppBuilder {
     return () => { this.listeners.delete(l); };
   }
 
-  private emit(now = true) {
+  /**
+   * Send the record to every client, at a step's boundary and nowhere else.
+   *
+   * The updater streams its output and pushes every 150 ms, because an update
+   * takes a minute and a reader watches it. This job takes forty, gradle writes
+   * thousands of lines, and every push carries a `structuredClone` of all three
+   * steps' bounded output — tens of kilobytes, hundreds of times a minute, to
+   * every client including a phone on a mobile link, which would also render
+   * once per message. Nothing paints that output: `appBuildLabel` reads the
+   * state, the error and the running step's name. So the output accumulates
+   * here and rides along at the next boundary, which is where a failure's tail
+   * is wanted anyway, and a whole build costs about nine messages.
+   */
+  private emit() {
     if (!this.current) return;
-    if (!now) {
-      // Gradle writes thousands of lines. Coalesce, or a build is a message
-      // per line to every client for half an hour.
-      if (this.flushTimer) return;
-      this.flushTimer = setTimeout(() => { this.flushTimer = null; this.emit(); }, 150);
-      return;
-    }
-    if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
     const snapshot = structuredClone(this.current);
     for (const l of this.listeners) l(snapshot);
   }
@@ -119,6 +125,15 @@ export class AppBuilder {
   private async run() {
     const r = this.current!;
     if (!(await canBuildApp(this.dir))) return this.fail("this daemon does not run from a checkout that holds mobile/");
+    // Before anything runs, and not after forty minutes. With no
+    // `EXPO_PUBLIC_COVEY_UPDATES_URL` the app config leaves the whole `updates`
+    // block out, so the binary carries no update URL and the module is off —
+    // and covey keeps Expo's anti-bricking measure, so that app is off the
+    // channel for good. Only another sideload mends it. A missing file is one
+    // line to write; a binary already installed is not.
+    if (!(await updatesUrl(this.dir))) {
+      return this.fail("mobile/.env does not name EXPO_PUBLIC_COVEY_UPDATES_URL, so this build would make an app that can never take an update over the air. Copy mobile/.env.example to mobile/.env, name the machine that serves updates, and build again. docs/MOBILE.md says why.");
+    }
 
     if (!(await this.exec(this.stepByName("install"), "pnpm", ["install", "--frozen-lockfile"]))) {
       return this.fail("pnpm install failed in mobile/");
@@ -161,7 +176,8 @@ export class AppBuilder {
         s.note = `timed out after ${Math.round(timeout / 60_000)} minutes`;
         child.kill("SIGKILL");
       }, timeout);
-      const take = (b: Buffer) => { s.output = tail(s.output + b.toString()); this.emit(false); };
+      // Kept, not sent: see `emit`. The step's end carries the tail.
+      const take = (b: Buffer) => { s.output = tail(s.output + b.toString()); };
       child.stdout!.on("data", take);
       child.stderr!.on("data", take);
       child.on("error", (e: any) => {
@@ -181,6 +197,30 @@ export class AppBuilder {
       });
     });
   }
+}
+
+/**
+ * Where the app this build would make asks for its updates, or null for
+ * nowhere.
+ *
+ * Expo loads `mobile/.env` for every one of its own commands and inlines the
+ * variable into the bundle, and `app.config.ts` reads the same value for the
+ * native manifest — so these are the two places the answer can come from: the
+ * environment this daemon would hand the child, and the file beside the config.
+ * A line scan and not a dotenv parser: Expo's loader is the authority, and all
+ * this decides is whether to refuse.
+ */
+export async function updatesUrl(dir: string): Promise<string | null> {
+  const fromEnv = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL?.trim();
+  if (fromEnv) return fromEnv;
+  // `.env.local` first, because Expo lets it win over `.env`.
+  for (const name of [".env.local", ".env"]) {
+    const text = await readFile(join(dir, name), "utf8").catch(() => null);
+    const line = text ? /^[^\S\n]*EXPO_PUBLIC_COVEY_UPDATES_URL[^\S\n]*=(.*)$/m.exec(text) : null;
+    const value = line?.[1]?.trim().replace(/^["']|["']$/g, "").trim();
+    if (value) return value;
+  }
+  return null;
 }
 
 function step(name: AppBuildStep, label: string, command: string): UpdateStep {
