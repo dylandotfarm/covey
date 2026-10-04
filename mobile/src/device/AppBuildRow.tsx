@@ -1,5 +1,5 @@
 /**
- * A link to the app a machine has built (#185).
+ * The app a machine has built, and the button that asks it for a new one (#185).
  *
  * A native change moves the runtime version, so it cannot come over the air —
  * somebody has to install a binary. That used to mean typing an address into
@@ -7,16 +7,25 @@
  * already connected to and already has a token for, so it can simply be a row
  * to tap.
  *
- * Only a machine that has actually built an app offers one, which is most
- * likely one. The row says the version so a reader can see whether tapping it
- * is worth anything: an APK the same version as the running app is the one
- * already installed.
+ * The row says the version so a reader can see whether tapping it is worth
+ * anything: an APK the same version as the running app is the one already
+ * installed. What the version does *not* say is how old the code behind it is.
+ * A machine update runs `git pull`, `pnpm install` and `pnpm run build`, and
+ * none of those reach `mobile/`, so a machine can hold a binary built weeks
+ * before the code it now runs — which is what the build button is for. It is
+ * the whole of the answer to "give me the current app": ask the machine, watch
+ * the steps, then tap the row above them.
+ *
+ * A machine that has never built one is listed too, with no version and the
+ * same button. That is where the offer is worth most, and the old row showed
+ * such a machine nothing at all.
  */
 import { Linking, Text, View } from "react-native";
 import * as Updates from "expo-updates";
+import { appBuildLabel } from "@covey/web";
 import { store } from "../store";
 import { SIZE, T } from "../theme";
-import { Row, S, SectionTitle } from "../ui";
+import { Button, Row, S, SectionTitle } from "../ui";
 
 /**
  * The version of the app that is running.
@@ -53,40 +62,64 @@ function apkUrl(machineKey: string, token: string | undefined): string {
 }
 
 export function AppBuildRow() {
-  const builds = [...store.state.machines.values()]
-    .filter((m) => m.info?.appBuild)
-    .map((m) => ({ machine: m, build: m.info!.appBuild! }));
+  const machines = [...store.state.machines.values()].filter((m) => m.info?.appBuild || m.info?.canBuildApp);
 
-  if (builds.length === 0) return null;
+  if (machines.length === 0) return null;
 
   return (
     <>
       <SectionTitle text="Install" />
       <View style={S.card}>
-        {builds.map(({ machine, build }, i) => {
-          const current = RUNNING != null && build.version === RUNNING;
+        {machines.map((machine, i) => {
+          const build = machine.info?.appBuild ?? null;
+          const run = machine.appBuild;
+          const building = run?.state === "running";
+          const current = build != null && RUNNING != null && build.version === RUNNING;
           return (
-            <Row
-              key={machine.key}
-              first={i === 0}
-              onPress={() => void Linking.openURL(apkUrl(machine.key, machine.token))}
-            >
-              <View style={S.grow}>
-                <Text style={S.title}>
-                  covey {build.version}
-                  {current ? " — the one you are running" : ""}
-                </Text>
-                <Text style={S.subtle}>
-                  {machine.name} · {megabytes(build.bytes)}
-                  {day(build.builtAt) ? ` · built ${day(build.builtAt)}` : ""}
-                </Text>
-                <Text style={{ color: T.subtle, fontSize: SIZE.small }}>
-                  {current
-                    ? "Tap to install it again."
-                    : "Tap to install. Android asks once to allow it."}
-                </Text>
-              </View>
-            </Row>
+            <View key={machine.key}>
+              <Row
+                first={i === 0}
+                {...(build ? { onPress: () => void Linking.openURL(apkUrl(machine.key, machine.token)) } : {})}
+              >
+                <View style={S.grow}>
+                  <Text style={S.title}>
+                    {build ? `covey ${build.version}` : "No app built yet"}
+                    {current ? " — the one you are running" : ""}
+                  </Text>
+                  <Text style={S.subtle}>
+                    {machine.name}
+                    {build ? ` · ${megabytes(build.bytes)}` : ""}
+                    {build && day(build.builtAt) ? ` · built ${day(build.builtAt)}` : ""}
+                  </Text>
+                  <Text style={{ color: T.subtle, fontSize: SIZE.small }}>
+                    {!build
+                      ? "Build it here and this row becomes the app to install."
+                      : current
+                        ? "Tap to install it again."
+                        : "Tap to install. Android asks once to allow it."}
+                  </Text>
+                  {/* The one line of a build, where every other machine failure
+                      on this screen says its own. A failed build keeps saying
+                      so until the next one starts: it is the only record a
+                      reader has, and the daemon's log is not on this phone. */}
+                  {run ? (
+                    <Text style={{ color: run.state === "failed" ? T.danger : T.subtle, fontSize: SIZE.small }}>
+                      {appBuildLabel(run)}
+                    </Text>
+                  ) : null}
+                </View>
+              </Row>
+              {machine.info?.canBuildApp ? (
+                <View style={[S.row, S.rowDivider, { gap: 8 }]}>
+                  <Button
+                    label={building ? "Building the app" : "Build the app"}
+                    onPress={() => store.buildApp(machine.key)}
+                    disabled={machine.conn !== "connected"}
+                    busy={building}
+                  />
+                </View>
+              ) : null}
+            </View>
           );
         })}
       </View>

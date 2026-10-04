@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ReviewerState, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem } from "@covey/protocol";
+import type { AppBuildRun, GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ReviewerState, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem, UpdateStep } from "@covey/protocol";
 import type { TaggedAttachment } from "@covey/client";
 import {
-  addMachine, addressLink, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
+  addMachine, addressLink, appBuildLabel, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
   baseHash, isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaHash, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
   attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
@@ -799,4 +799,32 @@ test("a thread sitting still under review does not read as idle", () => {
   assert.equal(threadTone({ ...reviewing("changesRequested"), latestTurn: ended }), "idle");
   assert.equal(threadTone({ ...reviewing("signedOff"), latestTurn: ended }), "done", "the review is over");
   assert.equal(threadTone({ ...thread("t", "p1"), latestTurn: ended }), "done");
+});
+
+test("an app build says which step it is on, and what came out", () => {
+  const step = (name: UpdateStep["name"], status: UpdateStep["status"]): UpdateStep =>
+    ({ name, label: name, command: name, status, output: "", exitCode: null });
+  const run = (over: Partial<AppBuildRun>): AppBuildRun => ({
+    id: "b1", machineId: "m1", state: "running",
+    steps: [step("install", "ok"), step("prebuild", "running"), step("apk", "pending")],
+    startedAt: "", finishedAt: null, error: null, built: null, ...over,
+  });
+
+  assert.equal(appBuildLabel(null), "", "no build, no line");
+  assert.equal(appBuildLabel(run({})), "writing the native project…");
+  // Tens of minutes with nothing on the screen is what makes a reader press the
+  // button again, so the long step says it is the long one.
+  assert.match(appBuildLabel(run({ steps: [step("apk", "running")] })), /tens of minutes/);
+  // A run whose steps are all done but whose state has not landed yet still
+  // has a word: no step is running, and "building…" is true of all of them.
+  assert.equal(appBuildLabel(run({ steps: [step("apk", "ok")] })), "building…");
+  assert.equal(
+    appBuildLabel(run({ state: "succeeded", built: { version: "0.4.0", builtAt: "", bytes: 1 } })),
+    "built covey 0.4.0",
+    "the version is the whole question: is this one worth installing",
+  );
+  assert.equal(appBuildLabel(run({ state: "failed", error: "no JDK" })), "the build failed: no JDK");
+  // A failure the daemon could not name still reads as a failure rather than
+  // as an empty line, which is what a reader would take for "nothing happened".
+  assert.match(appBuildLabel(run({ state: "failed", error: null })), /^the build failed: /);
 });

@@ -24,15 +24,9 @@ import { stat, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { AppBuild } from "@covey/protocol";
 
-/** What the machine holds, for `MachineInfo.appBuild`. */
-export interface AppBuild {
-  /** The version the binary carries, which decides what it will accept. */
-  version: string;
-  /** When gradle wrote it. */
-  builtAt: string;
-  bytes: number;
-}
+export type { AppBuild };
 
 /*
  * Where gradle leaves it, and where prebuild writes the version.
@@ -42,9 +36,27 @@ export interface AppBuild {
  * counted out, exactly as `updates.ts` counts out `mobile/dist`.
  */
 const here = dirname(fileURLToPath(import.meta.url));
-const mobile = join(here, "..", "..", "..", "mobile");
-const APK = join(mobile, "android", "app", "build", "outputs", "apk", "release", "app-release.apk");
-const GRADLE = join(mobile, "android", "app", "build.gradle");
+/** The app's own workspace, which `appBuild.ts` builds in. */
+export const MOBILE_DIR = join(here, "..", "..", "..", "mobile");
+const apkPath = (dir: string) => join(dir, "android", "app", "build", "outputs", "apk", "release", "app-release.apk");
+const gradlePath = (dir: string) => join(dir, "android", "app", "build.gradle");
+
+/**
+ * Whether this machine holds the app's source at all, for
+ * `MachineInfo.canBuildApp`.
+ *
+ * `mobile/package.json` and nothing more: the Android SDK and a JDK are a
+ * person's business, and a machine without one fails the gradle step with the
+ * output that says so. A daemon installed some other way than from a checkout
+ * has no `mobile/` and is never offered the row.
+ */
+export async function canBuildApp(dir = MOBILE_DIR): Promise<boolean> {
+  try {
+    return (await stat(join(dir, "package.json"))).isFile();
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The version the APK carries.
@@ -54,9 +66,9 @@ const GRADLE = join(mobile, "android", "app", "build.gradle");
  * `expo prebuild` writes this line and the build that follows it in one go. A
  * gradle file without the line belongs to no APK worth offering.
  */
-async function versionName(): Promise<string | null> {
+async function versionName(dir: string): Promise<string | null> {
   try {
-    const text = await readFile(GRADLE, "utf8");
+    const text = await readFile(gradlePath(dir), "utf8");
     return /versionName\s+["']([^"']+)["']/.exec(text)?.[1] ?? null;
   } catch {
     return null;
@@ -64,11 +76,11 @@ async function versionName(): Promise<string | null> {
 }
 
 /** What this machine has, or null when it has never built the app. */
-export async function appBuild(): Promise<AppBuild | null> {
+export async function appBuild(dir = MOBILE_DIR): Promise<AppBuild | null> {
   try {
-    const info = await stat(APK);
+    const info = await stat(apkPath(dir));
     if (!info.isFile() || info.size === 0) return null;
-    const version = await versionName();
+    const version = await versionName(dir);
     if (!version) return null;
     return { version, builtAt: info.mtime.toISOString(), bytes: info.size };
   } catch {
@@ -103,5 +115,5 @@ export async function serveApk(req: IncomingMessage, res: ServerResponse): Promi
     res.end();
     return;
   }
-  createReadStream(APK).pipe(res);
+  createReadStream(apkPath(MOBILE_DIR)).pipe(res);
 }

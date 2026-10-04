@@ -44,7 +44,18 @@ export interface MachineInfo {
    * app already installed, and this carries a whole app to somebody who chose
    * to install it.
    */
-  appBuild?: { version: string; builtAt: string; bytes: number };
+  appBuild?: AppBuild;
+  /**
+   * Whether this machine could build that app if it were asked (#185).
+   *
+   * True when the daemon runs out of a checkout that holds `mobile/`. It is
+   * not a promise that the build will work — the Android SDK and a JDK are a
+   * person's business, and a machine that lacks one says so in the output of
+   * the step that failed. It is what lets a client offer the row at all on a
+   * machine that has never built an app, which is where the offer is worth
+   * most.
+   */
+  canBuildApp?: boolean;
   /**
    * The build in full, so a client can tell whether this machine runs older
    * code than it does. Optional: a daemon built before this field omits it,
@@ -400,7 +411,14 @@ export interface MachineSource {
   reason?: string;
 }
 
-export type UpdateStepName = "pull" | "install" | "build" | "restart";
+/**
+ * One step of a long job the daemon runs on its own machine.
+ *
+ * Two jobs share these: the update (`pull`, `install`, `build`, `restart`) and
+ * the Android app build (`install`, `prebuild`, `apk`). They share the step
+ * record as well, so a client paints progress for both the same way.
+ */
+export type UpdateStepName = "pull" | "install" | "build" | "restart" | "prebuild" | "apk";
 
 export interface UpdateStep {
   name: UpdateStepName;
@@ -431,6 +449,50 @@ export interface MachineUpdate {
   error: string | null;
   fromCommit: string | null;
   toCommit: string | null;
+}
+
+/**
+ * The Android app a machine holds, ready to hand over at `/apk` (#185).
+ *
+ * `version` is the binary's own, which is what decides the bundles it will
+ * accept, and is read from the generated gradle file rather than from inside
+ * the package.
+ */
+export interface AppBuild {
+  version: string;
+  builtAt: string;
+  bytes: number;
+}
+
+/**
+ * A run of `pnpm install`, `expo prebuild` and `assembleRelease` in `mobile/`.
+ *
+ * The record is re-sent whole, as `MachineUpdate` is, so a client that arrives
+ * in the middle of a build sees what one that watched from the start sees — and
+ * a client that connects while one runs is sent it once, there and then,
+ * because the next report may be half an hour away. It is a long job, so the
+ * call that starts it answers at once and the progress arrives as pushes.
+ *
+ * Those pushes land at a step's boundary and nowhere else. The updater streams
+ * its output because an update takes a minute and a reader watches it; this
+ * takes forty, and a message per chunk of gradle's output is tens of megabytes
+ * to every client, including a phone, to paint a line that changes three times.
+ * `steps[].output` is the tail a failure is diagnosed from, not a stream.
+ *
+ * This does **not** export the bundle `/updates` serves. The two are separate
+ * acts on purpose: an APK is installed by a person who chose to, and a bundle
+ * lands in every installed app of that runtime version, silently.
+ */
+export interface AppBuildRun {
+  id: string;
+  machineId: MachineId;
+  state: "running" | "succeeded" | "failed";
+  steps: UpdateStep[];
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+  /** What the machine holds now the run is over, so a client need not re-ask. */
+  built: AppBuild | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2614,6 +2676,16 @@ export interface RpcMethods {
    * returns the run in flight.
    */
   "machine.update": { params: { restart?: boolean }; result: MachineUpdate };
+  /**
+   * Build the Android app from the code this machine holds, so `/apk` hands
+   * over the current one (#185). Returns as soon as the run starts; progress
+   * arrives as `machine.appBuild` pushes. A second call while one is running
+   * returns the run in flight rather than starting a second gradle.
+   *
+   * A machine update does not do this: it runs `git pull`, `pnpm install` and
+   * `pnpm run build`, and none of those reach `mobile/`.
+   */
+  "machine.buildApp": { params: Record<string, never>; result: AppBuildRun };
   /** Restart the daemon without updating. `pid` is the process that will exit. */
   "machine.restart": { params: Record<string, never>; result: { pid: number } };
   /**
@@ -2815,7 +2887,10 @@ export type PushMessage =
    *  a stream is not a timeline, and `terminal.open` hands back the scrollback. */
   | { push: "terminal"; subscriptionId: string; terminalId: TerminalId; event: TerminalEvent }
   /** Update progress. Broadcast to every client — an update affects them all. */
-  | { push: "machine.update"; update: MachineUpdate };
+  | { push: "machine.update"; update: MachineUpdate }
+  /** App build progress. Broadcast for the same reason an update is: one
+   *  machine builds one app, and every client of it is watching the one row. */
+  | { push: "machine.appBuild"; run: AppBuildRun };
 
 export type WireFromClient = RpcRequest;
 export type WireFromDaemon = RpcResponse | PushMessage;

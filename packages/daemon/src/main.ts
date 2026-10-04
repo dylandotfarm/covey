@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { appBuild } from "./apk.js";
+import { appBuild, canBuildApp } from "./apk.js";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
 import { readModels } from "./models.js";
 import { dataDir, loadDaemonConfig, machineSettings, platformInfo, projectsDir, type DaemonConfig } from "./config.js";
@@ -12,6 +12,7 @@ import { startServer } from "./server.js";
 import { buildInfo, buildLabel } from "./build.js";
 import { tailscaleSelf } from "./tailscale.js";
 import { Updater } from "./update.js";
+import { AppBuilder } from "./appBuild.js";
 import { clearPidFile, writePidFile } from "./pidfile.js";
 import { machineResources } from "./resources.js";
 import { webAddresses } from "./addresses.js";
@@ -57,6 +58,9 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   // build that lands later is picked up by the next restart, and a daemon that
   // restarts is what a new build usually comes with.
   const app = await appBuild();
+  // And whether it could build a new one if a reader asked (#185). A machine
+  // that holds no `mobile/` is never offered the row.
+  const canBuild = await canBuildApp();
   const machine: MachineInfo = {
     machineId: config.machineId, name: config.name, ...platformInfo(),
     daemonVersion: buildLabel(build), build, protocolVersion: PROTOCOL_VERSION,
@@ -71,6 +75,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     settings: machineSettings(config),
     projectsDir: projectsDir(),
     ...(app ? { appBuild: app } : {}),
+    canBuildApp: canBuild,
     webAddresses: webAddresses({ port: config.port, bind: config.bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips }),
   };
   const db = new Db(join(dataDir()));
@@ -80,16 +85,18 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   const plugin = coveyPlugin(sourceRoot());
   log(plugin ? `plugin: ${plugin} (the /covey skill)` : "plugin: none, this daemon does not run from a checkout with plugin/");
   const updater = new Updater(config.machineId, log);
+  // One app build per machine, shared with every listener, as the updater is.
+  const builder = new AppBuilder(config.machineId, log);
   /** The listeners now open. `bind` moves them; `close` ends them. */
   let listeners: { close(): void; port: number }[] = [];
   const listen = async (bind: string, engine: Engine) => {
     const h = hostFor(bind);
     const opened: { close(): void; port: number }[] = [];
-    opened.push(await startServer({ config, engine, updater, host: h, log }));
+    opened.push(await startServer({ config, engine, updater, builder, host: h, log }));
     // Also listen on loopback so the local TUI never needs credentials. A
     // wildcard listener already covers it, and a second bind would fail.
     if (h !== "127.0.0.1" && h !== "0.0.0.0") {
-      try { opened.push(await startServer({ config: { ...config }, engine, updater, host: "127.0.0.1", log })); }
+      try { opened.push(await startServer({ config: { ...config }, engine, updater, builder, host: "127.0.0.1", log })); }
       catch (e: any) { log(`loopback listener unavailable: ${e.message}`); }
     }
     return { host: h, opened };
@@ -122,6 +129,9 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
       machine.webAddresses = webAddresses({ port: config.port, bind, tailnetName: ts?.dnsName, tailnetIps: ts?.ips });
     },
   });
+  // A finished build changes what `/apk` hands over, so the machine says the
+  // new version without waiting for a restart to read the file again.
+  builder.on((run) => { if (run.state === "succeeded") engine.setAppBuild(run.built); });
   const first = await listen(config.bind, engine);
   listeners = first.opened;
   const server = first.opened[0]!;

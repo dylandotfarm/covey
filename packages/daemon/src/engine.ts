@@ -3,7 +3,7 @@ import { basename, join, resolve, sep } from "node:path";
 import { existsSync, statSync, rmSync, readdirSync, readFileSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
-  ShellSnapshot, ThreadSnapshot, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
+  ShellSnapshot, ThreadSnapshot, AppBuild, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
 import { isUserClient, KNOWN_MODELS, MIN_CHAIN, type AssistantMessageItem,} from "@covey/protocol";
@@ -279,6 +279,19 @@ export class Engine {
    */
   setResources(resources: MachineResources) {
     this.machine.resources = resources;
+    this.emitShell({ kind: "machine.updated", machine: this.machine });
+  }
+
+  /**
+   * What `/apk` hands over now, after a build on this machine (#185).
+   *
+   * Quiet when nothing moved: a build reports progress many times and only the
+   * last of those changes the file, and a `machine.updated` per message would
+   * repaint every client's machine list for half an hour.
+   */
+  setAppBuild(build: AppBuild | null) {
+    if (!build || this.machine.appBuild?.builtAt === build.builtAt) return;
+    this.machine.appBuild = build;
     this.emitShell({ kind: "machine.updated", machine: this.machine });
   }
 
