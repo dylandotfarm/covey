@@ -237,6 +237,17 @@ export interface MachineCapabilities {
   claude: boolean;
   worktrees: boolean;
   moveThreads: boolean;
+  /**
+   * This machine can write out speech (#180): `COVEY_TRANSCRIBE_URL` names a
+   * service, or it is unset and the default one is assumed.
+   *
+   * `undefined` is not `false`. A daemon built before this field sends nothing
+   * here, and a client must still ask it and read `unavailable` from the
+   * answer. Only an explicit `false` means do not ask — which is what a phone
+   * needs, because an utterance nobody can write out is a minute of mobile
+   * data spent on a reply covey already knew it would not get.
+   */
+  transcribes?: boolean;
   /** Future: "codex", "acp" ... */
   providers: ProviderName[];
 }

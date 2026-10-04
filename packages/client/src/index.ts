@@ -29,9 +29,9 @@ export {
   ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, DEVICE_DOWNLINK_UUID, DEVICE_NAME_PREFIX,
   DEVICE_PROTOCOL, DEVICE_SERVICE_UUID, DEVICE_UPLINK_UUID, DeviceState, Down, FRAME_HEADER,
   MAX_TEXT_BYTES, MAX_THREADS, MAX_TITLE_BYTES, MIN_PAYLOAD, Reassembler, SAMPLE_RATE, TextKind,
-  Up, adpcmFromPcm, fragments, loudness, pcmFromAdpcm, readAck, readAudio, readHello, readSelect,
-  readState, readStatus, readText, readThreads, usablePayload, wavFromPcm16, writeAck, writeState,
-  writeText, writeThreads,
+  Up, adpcmFromPcm, fragments, loudness, pcm16FromWav, pcmFromAdpcm, readAck, readAudio,
+  readHello, readSelect, readState, readStatus, readText, readThreads, usablePayload,
+  wavFromPcm16, writeAck, writeState, writeText, writeThreads,
   type DeviceMessage, type DeviceStatus, type DeviceThread, type DownType, type Hello,
   type Selection, type UpType, type Utterance,
 } from "./device.js";

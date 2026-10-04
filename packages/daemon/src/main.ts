@@ -18,6 +18,7 @@ import { webAddresses } from "./addresses.js";
 import { sourceRoot } from "./update.js";
 import { coveyPlugin } from "./plugin.js";
 import { credentialExpiry, refreshCredentials } from "./auth.js";
+import { transcribeUrl } from "./transcribe.js";
 
 export interface RunDaemonOptions {
   port?: number;
@@ -61,7 +62,12 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     daemonVersion: buildLabel(build), build, protocolVersion: PROTOCOL_VERSION,
     claudeCodeVersion: detectClaudeVersion(),
     tailnetName: ts?.dnsName, tailnetIps: ts?.ips,
-    capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
+    // `transcribes` is read here and not per call: a client that knows this
+    // machine has no service set up never uploads an utterance to it (#180).
+    capabilities: {
+      claude: true, worktrees: true, moveThreads: true,
+      transcribes: transcribeUrl() !== null, providers: ["claude"],
+    },
     settings: machineSettings(config),
     projectsDir: projectsDir(),
     ...(app ? { appBuild: app } : {}),

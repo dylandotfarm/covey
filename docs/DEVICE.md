@@ -147,12 +147,20 @@ Three reasons it belongs there:
   secrets on the machine that runs the work (#126). A phone is not that machine.
 - The service can be changed without anybody installing an app — and an app
   changes only by somebody installing one.
-- The TUI and the web client get dictation from the same call.
+- Every other microphone covey has gets dictation from the same call.
+
+That last one is not a promise about the future: the microphone beside the
+app's composer takes this route too, and `mobile/src/transcribe.ts` holds the
+decision for both. A phone that asked the machine about the device's audio and
+not about its own would be a phone with two answers to one question. See
+*Dictation* in `docs/MOBILE.md` for what is particular to the composer.
 
 What travels is the device's **own ADPCM blocks**, not the samples: a quarter of
 the bytes, which on a phone's mobile link is a quarter of the wait. The daemon
 decodes with `pcmFromAdpcm` from `@covey/client` — the same decoder the
 firmware's encoder was written against, so there is one definition of the format.
+A caller that already holds samples sends `pcm16` instead, which is what the
+composer does; ADPCM is a trade for radio time, and only the device pays it.
 
 The RPC is `transcribe` and `packages/daemon/src/transcribe.ts` answers it.
 `COVEY_TRANSCRIBE_URL` names the service and defaults to
@@ -165,7 +173,13 @@ Measured, machine to service and back: a 5-second utterance in about 600 ms, an
 
 ### When it cannot
 
-A daemon with nothing set up answers the code `unavailable`, and **only that
+A daemon that has nothing set up says so before it is asked:
+`MachineCapabilities.transcribes` is `false`, and a client keeps the recording
+at home rather than spend a minute of mobile data on an answer it can already
+predict. `undefined` is **not** `false` there — a daemon built before the field
+sends nothing, and the answer for one of those is to ask.
+
+A daemon asked anyway answers the code `unavailable`, and **only that
 code** makes the phone fall back to its own recogniser (Android's, which is what
 #180 was raised about — worse, but a device whose button does nothing is worse
 still). Every other failure is real and its sentence goes to the device's screen
