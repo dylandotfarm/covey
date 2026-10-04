@@ -27,6 +27,7 @@ import { Db } from "./db.js";
 import { Engine, EngineError } from "./engine.js";
 import { startServer } from "./server.js";
 import { Updater } from "./update.js";
+import { AppBuilder } from "./appBuild.js";
 
 /** A port the OS says is free: `startServer` listens on what it is given. */
 function freePort(): Promise<number> {
@@ -336,7 +337,7 @@ test("a loopback client reads the names, and the environment behind them", async
       createdAt: "2026-01-01T00:00:00Z", defaultModel: null, defaultPermissionMode: null,
       defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null,
     } as any,
-    engine: s.engine, updater: new Updater("m1", () => {}), host: "127.0.0.1", log: () => {},
+    engine: s.engine, updater: new Updater("m1", () => {}), builder: new AppBuilder("m1", () => {}), host: "127.0.0.1", log: () => {},
   });
   t.after(() => server.close());
 

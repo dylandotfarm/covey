@@ -6,6 +6,7 @@ import { transcribe, TranscribeError } from "./transcribe.js";
 import { serveApk } from "./apk.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
+import { type AppBuilder } from "./appBuild.js";
 import { readPeers, type DaemonConfig } from "./config.js";
 import { listRepos, createRepo, cloneUrlsFor, GH_CWD } from "./repos.js";
 import { listRemoteBranches } from "./git.js";
@@ -22,6 +23,8 @@ export interface ServerOptions {
   engine: Engine;
   /** Shared with every listener, so one update streams to all of them. */
   updater: Updater;
+  /** The same, for the one app build a machine may be running (#185). */
+  builder: AppBuilder;
   host: string;
   log: (msg: string) => void;
 }
@@ -345,6 +348,8 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return { token: o.config.token, addresses: webAddresses({ port: o.config.port, bind: o.config.bind, tailnetName: tailnet?.dnsName, tailnetIps: tailnet?.ips }), peers: readPeers() };
       case "machine.update":
         return o.updater.start({ restart: p.restart });
+      case "machine.buildApp":
+        return o.builder.start();
       case "run.issues":
         return engine.runIssues(String(p.projectId), Array.isArray(p.numbers) ? p.numbers.map(Number) : []);
       case "repos.list":
@@ -424,13 +429,15 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
   // Update progress needs no subscription: there is at most one update per
   // machine and it concerns every client connected to it.
   const unUpdate = o.updater.on((update) => send({ push: "machine.update", update }));
+  // And the app build, for the same reason: one machine builds one app.
+  const unBuild = o.builder.on((run) => send({ push: "machine.appBuild", run }));
 
   ws.on("message", async (data) => {
     let req: RpcRequest;
     try { req = JSON.parse(data.toString()); } catch { return; }
     send(await rpc(req));
   });
-  ws.on("close", () => { unUpdate(); for (const un of subs.values()) un(); subs.clear(); });
+  ws.on("close", () => { unUpdate(); unBuild(); for (const un of subs.values()) un(); subs.clear(); });
   ws.on("error", () => {});
   const ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.ping(); }, 20_000);
   ws.on("close", () => clearInterval(ping));

@@ -14,7 +14,7 @@
  */
 import {
   DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadReviewing, type Lod,
-  type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
+  type AppBuildRun, type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
 import { idleChoices, idleValueLabel, keepTagged, liveChoices, liveValueLabel, projectPool, timelineRows, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
@@ -32,6 +32,8 @@ export interface MachineSlot {
   primary: boolean;
   /** The update in flight on that machine, or the last one it reported. */
   update: MachineUpdate | null;
+  /** The app build in flight on that machine, or the last one it reported (#185). */
+  appBuild: AppBuildRun | null;
   /**
    * The token this machine's addresses need, when they need one. The socket
    * takes it at the dial; `/file` and `/media` take it on the URL, because an
@@ -141,7 +143,7 @@ export function emptyState(): State {
 }
 
 export function addMachine(s: State, key: string, name: string, primary = false, token?: string): MachineSlot {
-  const slot: MachineSlot = { key, name, conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), primary, update: null, token };
+  const slot: MachineSlot = { key, name, conn: "connecting", connError: null, info: null, projects: new Map(), threads: new Map(), primary, update: null, appBuild: null, token };
   s.machines.set(key, slot);
   return slot;
 }
@@ -373,6 +375,28 @@ export function updateLabel(u: MachineUpdate | null): string {
   if (u.state === "restarting") return "restarting…";
   const step = u.steps.find((s) => s.status === "running");
   return step ? `${step.label}…` : `update: ${u.state}`;
+}
+
+/**
+ * One line for an app build's progress: the step that runs, or how it ended.
+ *
+ * `updateLabel`'s sibling, and it says the version at the end because that is
+ * the whole question the reader has — a build that succeeded and left the same
+ * version is one they need not install.
+ */
+export function appBuildLabel(r: AppBuildRun | null): string {
+  if (!r) return "";
+  if (r.state === "failed") return `the build failed: ${r.error ?? "see the daemon log"}`;
+  if (r.state === "succeeded") return `built covey ${r.built?.version ?? "the app"}`;
+  const step = r.steps.find((s) => s.status === "running");
+  // The steps are named for what they run, and gradle is the long one: a
+  // reader who sees `apk…` for forty minutes has to be told that is the job.
+  switch (step?.name) {
+    case "install": return "installing the app's dependencies…";
+    case "prebuild": return "writing the native project…";
+    case "apk": return "compiling the app — this takes tens of minutes…";
+    default: return "building…";
+  }
 }
 
 /** The words for a bind mode, the same ones the TUI's panel uses. */

@@ -272,7 +272,7 @@ function hashFile(path: string): string | null {
  * npm prefix), which is not always on the daemon's inherited PATH — it was
  * started by a launcher, not a login shell.
  */
-function childEnv(): NodeJS.ProcessEnv {
+export function childEnv(): NodeJS.ProcessEnv {
   const nodeBin = dirname(process.execPath);
   const path = process.env.PATH ?? "";
   return { ...process.env, PATH: path.split(delimiter).includes(nodeBin) ? path : `${nodeBin}${delimiter}${path}` };

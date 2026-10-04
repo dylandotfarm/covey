@@ -2,7 +2,7 @@ import {
   PROTOCOL_VERSION, USER_CLIENT, isPush, type RpcMethods, type RpcMethodName, type WireFromDaemon, type PushMessage,
   type MachineInfo, type ShellSnapshot, type ShellEvent, type ThreadEvent, type SavedMachine, type CommandEnvelope, type Command,
   type TerminalEvent, type TerminalId,
-  type MachineUpdate,
+  type AppBuildRun, type MachineUpdate,
 } from "@covey/protocol";
 import { uuid } from "./uuid.js";
 
@@ -53,11 +53,20 @@ export interface ClientEvents {
    * `terminal.open` answers with the scrollback, which is the whole of what a
    * stream can give back.
    *
-   * Optional, and the one optional member here, because a client that never
-   * calls `terminal.open` can never be sent one: the page and the phone have
-   * no shell panel, and a stub each would say they might.
+   * Optional, because a client that never calls `terminal.open` can never be
+   * sent one: the page and the phone have no shell panel, and a stub each
+   * would say they might.
    */
   terminalEvent?(terminalId: TerminalId, ev: TerminalEvent): void;
+  /**
+   * Progress of an Android app build on that machine (#185).
+   *
+   * Optional for a different reason from the one above: this push is a
+   * broadcast and arrives whether a client asked or not, so a client with
+   * nowhere to paint it simply has no member. The app is the only client with
+   * the row — it is the only one that can install what comes out.
+   */
+  machineAppBuild?(run: AppBuildRun): void;
 }
 
 const BACKOFF = [500, 1000, 2000, 4000, 8000];
@@ -348,6 +357,9 @@ export class MachineClient {
         return;
       case "machine.update":
         this.ev.machineUpdate(m.update);
+        return;
+      case "machine.appBuild":
+        this.ev.machineAppBuild?.(m.run);
         return;
     }
   }

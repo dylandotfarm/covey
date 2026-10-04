@@ -270,6 +270,38 @@ otherwise.
 
 On a machine with little memory add `--max-workers=2`.
 
+#### Asking the machine to build it, from the app
+
+The settings screen's **Install** section lists every machine that holds an APK
+or could build one, and each row carries a **Build the app** button. It runs
+those same three commands on that machine — `pnpm install --frozen-lockfile`,
+`pnpm run prebuild`, `pnpm run apk` — and sends every step back as it goes, so
+the row says which one is running and how it ended. When it succeeds the
+machine's `appBuild` moves to the new version and the row above the button
+becomes the app to install.
+
+It exists because the version a machine serves and the code a machine runs are
+two different things. A machine update is `git pull`, `pnpm install` and
+`pnpm run build`; none of those reach `mobile/`, so a machine that took a
+native change goes on offering the binary it built weeks earlier. That is the
+right answer about the file on disk and the wrong one for the reader who wants
+the current app, and before this the only way to move it was a terminal on that
+machine.
+
+Three rules hold it:
+
+- **One build per machine.** A second call while one is running answers with
+  the run in flight. Two gradles in one output directory is a corrupt build and
+  an hour lost.
+- **It is not the over-the-air route.** `pnpm run export` is not one of the
+  steps. An APK is installed by a person who chose to; a bundle lands in every
+  installed app of that runtime version without being asked, and covey does not
+  do the second on the way to the first. Exporting stays a second act.
+- **It promises nothing about the toolchain.** `canBuildApp` is true when the
+  daemon runs from a checkout that holds `mobile/`, and nothing more. A machine
+  with no Android SDK and no JDK fails the gradle step, with gradle's own words
+  in the step's output.
+
 #### What the APK is, and is not
 
 Verified: it builds. 37 MB, `arm64-v8a`, 21 native libraries, a 1.88 MB embedded

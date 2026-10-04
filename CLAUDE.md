@@ -250,7 +250,14 @@
   it (#185, `MachineInfo.appBuild`) — gated like `/updates`, with the token on
   the URL because a download carries no header. That is *not* the update channel
   and never becomes it: `/updates` ships JavaScript into an installed app,
-  `/apk` hands a whole binary to somebody who chose to install it.
+  `/apk` hands a whole binary to somebody who chose to install it. The same row
+  *asks* for a new one (`machine.buildApp`, `AppBuilder` in the daemon): the
+  three commands of the build on that machine, one run at a time, with every
+  step broadcast as a `machine.appBuild` push — because a machine update never
+  touches `mobile/`, so the binary a machine offers can be weeks older than the
+  code it runs. `pnpm run export` is never one of those steps: a bundle lands
+  in every installed app of that runtime version unasked, and an APK is
+  installed by a person who chose to.
   `docs/DEVICE.md` holds the reasoning and the rules.
 - `desktop/` is the experimental Rust client (#142), a cargo workspace of its own, outside
   the pnpm one: `tsc -b` never sees it and `cargo` never needs node. It is a *second* client
