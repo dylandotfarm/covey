@@ -314,7 +314,7 @@ export class DeviceBridge {
     const pcm = pcmFromAdpcm(utterance.audio, utterance.blockBytes, utterance.samples);
     const loud = loudness(pcm);
     const { text, error, backend } = await transcribeUtterance(
-      store.client(row.machine), utterance, pcm,
+      store.client(row.machine), store.machineInfo(row.machine), utterance, pcm,
     );
 
     if (!text) {

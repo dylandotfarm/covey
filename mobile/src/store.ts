@@ -28,7 +28,8 @@
 import { AppState } from "react-native";
 import { applyDrop, coveyCommand, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
 import {
-  APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type GitHubAction, type Lod, type PeerMachine, type QuestionItem,
+  APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type GitHubAction, type Lod, type MachineInfo,
+  type PeerMachine, type QuestionItem,
 } from "@covey/protocol";
 import {
   addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState,
@@ -253,6 +254,9 @@ class Store {
   };
 
   client = (machine: string): MachineClient | undefined => this.clients.get(machine);
+
+  /** What a machine said about itself, for a caller that needs a capability. */
+  machineInfo = (machine: string): MachineInfo | undefined => this.state.machines.get(machine)?.info ?? undefined;
 
   // ---- the thread on screen ----------------------------------------------
 

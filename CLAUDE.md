@@ -233,7 +233,25 @@
   because a service can then change with no new app. `unavailable` is the one
   code that makes a client fall back to its own recogniser; every other failure
   carries the service's own sentence to the screen, because those sentences were
-  written for it.
+  written for it. **Every microphone covey has takes that route**, the device's
+  talk button and the one beside the composer both, and `mobile/src/transcribe.ts`
+  holds the decision for the two of them — node tests it, because both callers
+  sit behind hardware this loop cannot start. The composer still runs the phone's
+  own recogniser on the same held button and puts its words in the draft as they
+  are spoken, so it reports them as *provisional* and the machine's answer
+  replaces them about a second later; report either as final and the second one
+  would be added to the draft rather than correct it. It records with
+  `recordingOptions.persist`, which wants Android 13 and takes the start and stop
+  beep away, and sends `pcm16` rather than ADPCM — the protocol keeps that codec
+  for a caller that already holds samples, and better words are the whole reason
+  the machine is asked. `MachineCapabilities.transcribes` is read one way only:
+  `false` is a machine that turned the feature off by name, and `undefined` is a
+  daemon too old to say, but `true` is merely "a URL is set" — the default on a
+  machine that has never heard of this and will answer `unavailable` to the first
+  recording. So the phone remembers that answer against the client that gave it
+  (`quiet`, a `WeakSet`, which needs no key and goes when the machine does), or
+  it would upload every sentence it ever heard to a machine that refuses all of
+  them.
   Android stops a *background* app from receiving Bluetooth scan results while
   the screen is off and kills a swiped-away process, so the device is
   unreachable with a locked phone (#184): `mobile/modules/covey-link` is a

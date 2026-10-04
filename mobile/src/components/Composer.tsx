@@ -104,7 +104,7 @@ export function Composer(p: ComposerProps) {
    * would watch their sentence written three times over.
    */
   const spokenFrom = useRef<string | null>(null);
-  const dictation = useDictation((spoken, final) => {
+  const dictation = useDictation(p.machine, (spoken, final) => {
     const base = spokenFrom.current ?? text;
     if (spokenFrom.current === null) spokenFrom.current = base;
     const joined = base && !base.endsWith(" ") ? `${base} ${spoken}` : `${base}${spoken}`;
@@ -144,7 +144,18 @@ export function Composer(p: ComposerProps) {
       accessibilityLabel="Hold to dictate a message"
       accessibilityHint="Hold this button and speak. Let go when you have finished."
     >
-      <Icon name={dictation.listening ? "micOff" : "mic"} size={big ? 26 : 20} colour={dictation.listening ? "#ffffff" : T.muted} />
+      {/*
+        * Three states and not two. The machine writes out what was said
+        * (#180) and answers in about a second, with the phone's own words in
+        * the draft until it does — so a reader who let go watches the button,
+        * and a button that went back to rest there says the dictation is over
+        * when the sentence is still about to change under their eyes.
+        */}
+      {dictation.writing ? (
+        <Spinner />
+      ) : (
+        <Icon name={dictation.listening ? "micOff" : "mic"} size={big ? 26 : 20} colour={dictation.listening ? "#ffffff" : T.muted} />
+      )}
     </Pressable>
   );
 
@@ -314,7 +325,7 @@ export function Composer(p: ComposerProps) {
               value={text}
               onChangeText={change}
               onSelectionChange={(e) => { caret.current = e.nativeEvent.selection.end; }}
-              placeholder={dictation.listening ? "Listening…" : "Message"}
+              placeholder={dictation.listening ? "Listening…" : dictation.writing ? "Writing it out…" : "Message"}
               placeholderTextColor={T.faint}
               multiline
               returnKeyType="default"

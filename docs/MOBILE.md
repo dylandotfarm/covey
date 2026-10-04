@@ -44,6 +44,7 @@ never do is write a second copy of a decision:
 | What a sheet says | `sheetRows`, `sheetChoices` | Two lists of settings that disagree is two clients. |
 | What counts as a table | `tableAt` in `@covey/client` | A reply read as a table on one client and as prose on the other is a bug the reader cannot explain. |
 | The attachment caps and the four failure words | `readPicked` in `@covey/web/attach` | One word for four problems is what made a screenshot read as "unreadable" for weeks (#132). |
+| Where speech is written out | `askMachine` in `src/transcribe.ts` (#180) | A phone that asked the machine about the device's audio and not about its own has two answers to one question. |
 
 The one thing the app parses for itself is the markdown *layout*, because a
 `<Text>` is not HTML. `mobile/src/markdown.test.ts` holds that parser against
@@ -189,6 +190,50 @@ its back button are the stack's own. Two screens exist because of that:
 The transcript is an **inverted** `FlatList`, and that is this platform's answer
 to #114: row zero is the newest, so a reply that streams longer pushes nothing
 and a reader who scrolled up stays where they were.
+
+## Dictation
+
+The microphone beside the composer and the covey device's talk button are one
+feature with two buttons. Both hand the recording to the **machine**, which
+writes out the words with a service on its own loopback — see *Transcription*
+in `docs/DEVICE.md` for why that is the daemon's job and not a phone's.
+`src/transcribe.ts` holds the decision, which is pure and node-tested, because
+each caller sits behind hardware no agent in this loop can start.
+
+What is particular to the composer is that it has to answer in two stages.
+
+The machine answers in about a second, and a dictation that shows nothing for a
+second reads as a microphone that is not working. So the phone's own recogniser
+runs on the same held button and puts its words in the draft as they are
+spoken, and the machine's words replace them when they land. Those first words
+are therefore **provisional**: `useDictation` reports `final` once, by
+whichever recogniser had the last word. Report the phone's text as final and
+the machine's answer is added to the draft rather than put in its place.
+
+Three rules come out of that, and a reader meets each of them the first time
+something goes wrong:
+
+- **A late answer is dropped.** A reader who holds the button again has moved
+  the draft on from under the answer in flight, so every answer is matched
+  against the utterance it belongs to — the same guard the TUI's picture
+  preview keeps, for the same reason.
+- **A failure still leaves the reader their sentence.** The phone's words are
+  already in the draft, so a machine with no service, a recording Android would
+  not write, and a service that failed all settle on them. A failure says so as
+  well, because a reader whose words came from the worse of the two recognisers
+  should be able to tell which one wrote them.
+- **The button has three states.** Resting, listening, and the machine writing
+  it out. A button that went back to rest at the second one says the dictation
+  is over while the sentence is still about to change.
+
+It records with `recordingOptions.persist`, which is what gives the machine
+something to be asked about: the module writes the one shape covey carries
+(16 kHz, 16-bit, mono PCM in a WAV), `pcm16FromWav` reads it back, and the
+samples go up as `pcm16` — the codec the protocol keeps for a caller that
+already holds them. Two things follow. It needs Android 13, and below that
+there is no file at all, which the null `audioend.uri` already covers. And
+covey's own recorder feeds the recogniser from then on, which takes the start
+and stop beep away; on a held button that is a mercy rather than a loss.
 
 ## Working on it
 

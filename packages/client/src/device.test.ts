@@ -4,7 +4,7 @@ import {
   ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, DeviceState, Down, FRAME_HEADER, MAX_TITLE_BYTES,
   MIN_PAYLOAD, Reassembler, SAMPLE_RATE, TextKind, Up, adpcmFromPcm, fragments, loudness,
   pcmFromAdpcm, readAck, readAudio, readHello, readSelect, readState, readStatus, readText, readThreads,
-  usablePayload, wavFromPcm16, writeAck, writeState, writeText, writeThreads,
+  pcm16FromWav, usablePayload, wavFromPcm16, writeAck, writeState, writeText, writeThreads,
 } from "./device.js";
 
 /** Put a message through the wire and take it off again. */
@@ -293,6 +293,45 @@ describe("audio", () => {
     assert.equal(v.getUint32(40, true), 6);
     assert.equal(v.getUint32(4, true), wav.length - 8);
     assert.equal(v.getInt16(46, true), 1000);
+  });
+
+  it("reads its own WAV back, and one with a chunk in front of the audio", () => {
+    const pcm = tone(SAMPLE_RATE / 20, 300, 8000);
+    const back = pcm16FromWav(wavFromPcm16(pcm, SAMPLE_RATE));
+    assert.equal(back?.sampleRate, SAMPLE_RATE);
+    assert.deepEqual(back?.pcm, pcm, "a sample changed on the way out");
+
+    // The phone's recorder writes 44 bytes of header, but the format allows a
+    // chunk before `data` and reading from byte 44 would make that chunk the
+    // first fifth of a second of the sentence.
+    const plain = wavFromPcm16(pcm, SAMPLE_RATE);
+    const extra = new Uint8Array(plain.length + 12);
+    extra.set(plain.subarray(0, 36));
+    extra.set(new Uint8Array([0x4c, 0x49, 0x53, 0x54, 4, 0, 0, 0, 1, 2, 3, 4]), 36); // LIST
+    extra.set(plain.subarray(36), 48);
+    assert.deepEqual(pcm16FromWav(extra)?.pcm, pcm);
+  });
+
+  it("stops at the bytes a cut-short recording holds, not the size it claims", () => {
+    const pcm = tone(1000, 300, 8000);
+    const wav = wavFromPcm16(pcm, SAMPLE_RATE);
+    // A recording the phone was killed in the middle of: the header says a
+    // thousand samples and the file holds a hundred.
+    const cut = wav.subarray(0, 44 + 200);
+    assert.equal(pcm16FromWav(cut)?.pcm.length, 100);
+  });
+
+  it("answers nothing for audio that is not the one shape covey carries", () => {
+    const stereo = wavFromPcm16(new Int16Array([1, 2, 3, 4]), SAMPLE_RATE);
+    new DataView(stereo.buffer).setUint16(22, 2, true); // two channels
+    assert.equal(pcm16FromWav(stereo), null);
+
+    const compressed = wavFromPcm16(new Int16Array([1, 2, 3, 4]), SAMPLE_RATE);
+    new DataView(compressed.buffer).setUint16(20, 6, true); // A-law
+    assert.equal(pcm16FromWav(compressed), null);
+
+    assert.equal(pcm16FromWav(new Uint8Array(0)), null);
+    assert.equal(pcm16FromWav(new TextEncoder().encode("not a wav at all")), null);
   });
 
   it("measures silence as nothing and a loud tone as most of the way up", () => {

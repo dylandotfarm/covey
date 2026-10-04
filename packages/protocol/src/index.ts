@@ -248,6 +248,19 @@ export interface MachineCapabilities {
   claude: boolean;
   worktrees: boolean;
   moveThreads: boolean;
+  /**
+   * This machine can write out speech (#180): `COVEY_TRANSCRIBE_URL` names a
+   * service, or it is unset and the default one is assumed.
+   *
+   * Read it one way only. `false` means somebody turned the feature off by
+   * name, and a client may keep a recording at home rather than send it. Every
+   * other value means ask: `undefined` is a daemon built before this field,
+   * and `true` is only "a URL is set" — which is the default on a machine that
+   * has never heard of this feature and will answer `unavailable` to the first
+   * recording it gets. A client that minds the bytes remembers that answer
+   * rather than trusting this.
+   */
+  transcribes?: boolean;
   /** Future: "codex", "acp" ... */
   providers: ProviderName[];
 }

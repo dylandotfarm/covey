@@ -703,6 +703,58 @@ export function wavFromPcm16(pcm: Int16Array, sampleRate = SAMPLE_RATE): Uint8Ar
 }
 
 /**
+ * The samples back out of a RIFF WAV.
+ *
+ * The other half of `wavFromPcm16`, and here for the same reason: there is one
+ * definition of this format in covey and never a second copy. The phone's own
+ * microphone records dictation to a file, and the samples have to come out of
+ * that file before they can go on the wire to the daemon (#180).
+ *
+ * It walks the chunks rather than reading from byte 44. A 44-byte header is
+ * what a plain writer happens to produce, not what the format says, and a
+ * `LIST` chunk before `data` is legal — read it as audio and the reader hears
+ * their own file name at the start of the sentence.
+ *
+ * `null` for anything that is not uncompressed 16-bit mono PCM, because a
+ * wrong guess at the shape is a recording of noise and the caller has
+ * something better to do with it: its own recogniser already heard the words.
+ */
+export function pcm16FromWav(bytes: Uint8Array): { pcm: Int16Array; sampleRate: number } | null {
+  if (bytes.length < 12) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const tag = (at: number): string =>
+    String.fromCharCode(bytes[at]!, bytes[at + 1]!, bytes[at + 2]!, bytes[at + 3]!);
+  if (tag(0) !== "RIFF" || tag(8) !== "WAVE") return null;
+
+  let sampleRate = 0;
+  let data: { at: number; bytes: number } | null = null;
+  let at = 12;
+  while (at + 8 <= bytes.length) {
+    const id = tag(at);
+    const size = view.getUint32(at + 4, true);
+    const body = at + 8;
+    if (id === "fmt " && size >= 16) {
+      if (view.getUint16(body, true) !== 1) return null; // 1 is uncompressed PCM
+      if (view.getUint16(body + 2, true) !== 1) return null; // one channel
+      if (view.getUint16(body + 14, true) !== 16) return null; // bits per sample
+      sampleRate = view.getUint32(body + 4, true);
+    } else if (id === "data") {
+      // A file cut short — a recording the phone was killed in the middle of —
+      // declares more than it holds, so the bytes that are there decide.
+      data = { at: body, bytes: Math.min(size, bytes.length - body) };
+    }
+    // Every chunk is padded to an even length, and the pad byte is not its own.
+    at = body + size + (size % 2);
+  }
+  if (!data || !sampleRate) return null;
+
+  const count = Math.floor(data.bytes / 2);
+  const pcm = new Int16Array(count);
+  for (let i = 0; i < count; i++) pcm[i] = view.getInt16(data.at + i * 2, true);
+  return { pcm, sampleRate };
+}
+
+/**
  * How loud an utterance is, as a number between 0 and 1.
  *
  * The app shows it so a reader who gets no words back can tell a microphone
