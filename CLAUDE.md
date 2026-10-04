@@ -170,7 +170,14 @@
   and one ABI is four times less native compilation. Two screens are screens on
   purpose — a picture, which is #167's lesson, and the settings sheet, which fixes a bug
   the page still has — and the transcript is an inverted `FlatList`, this platform's
-  answer to #114. Relative imports carry no `.js`: Metro does not follow TypeScript's
+  answer to #114. A thread the app has just asked for does not exist on the daemon
+  yet — `thread.create` is awaited over a fetch and a `git worktree add` — and the
+  list opens the conversation the moment it has an id, because a tap must not wait
+  on a clone. So everything that names that thread to that daemon waits in
+  `store.whenMade` first: a subscription sent ahead of the worktree is answered
+  `thread not found`, and the view keeps that error until the reader leaves the
+  screen and comes back, which reads as a conversation the daemon lost.
+  Relative imports carry no `.js`: Metro does not follow TypeScript's
   convention. There is no device in this loop, so `pnpm run web` renders the app in a
   browser through `react-native-web` — not a platform covey ships, just a way to *look*:
   the components, the styles and the gestures are the real ones, the two packages are
