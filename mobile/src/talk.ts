@@ -98,3 +98,36 @@ export function talkNote(keys: boolean): string | null {
     ? null
     : "This app was built before covey could read the volume keys. The button stays until a newer one is installed.";
 }
+
+/**
+ * What one key press or release does to a hold.
+ *
+ * Covey takes both volume keys, so a reader squeezing the rocker sends two
+ * presses and two releases for one hold. The keys that are down are kept, and
+ * the hold runs from the first of them to the last release: a second press
+ * starts nothing and the first release of two stops nothing.
+ *
+ * `open` is whether a hold is actually running — `Dictation.held`. It is what
+ * makes a *lost* release recoverable. Android can take a key event away: a
+ * permission dialog has the focus, or the app goes to the background between
+ * the press and the release. The key would stay down for ever and every later
+ * press would read as the second of a squeeze. So a press that arrives while
+ * nothing is being held starts from an empty hand.
+ *
+ * A release of a key covey never saw pressed does nothing at all, or the
+ * release that dismissed a dialog would end a dictation the button started.
+ */
+export function keyHold(
+  down: readonly string[],
+  key: string,
+  pressed: boolean,
+  open: boolean,
+): { down: string[]; act: "start" | "stop" | null } {
+  if (pressed) {
+    const held = open ? down.filter((k) => k !== key) : [];
+    return { down: [...held, key], act: held.length === 0 ? "start" : null };
+  }
+  if (!down.includes(key)) return { down: [...down], act: null };
+  const rest = down.filter((k) => k !== key);
+  return { down: rest, act: rest.length === 0 ? "stop" : null };
+}

@@ -67,15 +67,21 @@ export type MachineAnswer =
   | { failed: string; code: string };
 
 /**
- * The longest recording this phone sends.
+ * The longest recording this phone sends, and the longest hold it records.
  *
  * Samples are 32 kB a second, so three minutes is 5.8 MB going up from a
  * device that may be on a mobile link. Past this the phone's own words stand:
- * a hold that long is a button in a pocket far more often than it is a
- * sentence, and a reader must not pay for the difference. It is also what ends
- * such a hold: nothing else does, now that the recogniser listens through a
- * pause rather than ending the utterance at one, so `useDictation` stops the
- * microphone here as well as refusing to send what it recorded.
+ * a hold that long is a button in a pocket — or a volume key against a table —
+ * far more often than it is a sentence, and a reader must not pay for the
+ * difference.
+ *
+ * It is enforced twice, in two places, and they are not the same guard.
+ * `useDictation` stops the microphone here, because nothing else ends a hold
+ * now that the recogniser listens through a pause, and it sends *nothing* from
+ * a hold it ended itself — that is the rule above, and the only one that keeps
+ * the pocket off the wire. The refusal below is the net under it: a timer that
+ * did not fire, or a caller with samples from elsewhere, must not be able to
+ * put three minutes on the wire by another route.
  */
 export const MAX_RECORDING_MS = 180_000;
 

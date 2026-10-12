@@ -58,16 +58,19 @@ export function holdVolumeKeys(onPress: (e: VolumeKeyPress) => void): () => void
    * open — the error boundary catches it and paints "covey stopped" over the
    * whole app. Dictation by the button is the worst this may cost.
    */
-  let sub: { remove: () => void };
+  let sub: { remove: () => void } | null = null;
   try {
     sub = native!.addListener("keypress", onPress);
     native!.setWatching(true);
   } catch {
+    // The listener may have been added before the throw. Take it off, or every
+    // composer that mounts leaves one more behind.
+    try { sub?.remove(); } catch { /* it was never added */ }
     return () => {};
   }
   return () => {
     try {
-      sub.remove();
+      sub!.remove();
       native!.setWatching(false);
     } catch {
       /* The module went with a reload, which released them already. */

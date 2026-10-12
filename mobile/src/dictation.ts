@@ -10,9 +10,23 @@
  * **A hold lasts until the reader lets go.** Not until they pause — a person
  * thinking a sentence out loud stops for longer than any endpointer waits, and
  * the recogniser's own two seconds of silence took the rest of the sentence
- * away. The silence it ends on is widened to the cap instead, and the cap is
- * the only thing that ends a hold nobody ended. The reader decides when the
- * thought is finished, which is what a held button is for.
+ * away. The silence it ends on is widened to the cap instead. The reader
+ * decides when the thought is finished, which is what a held button is for.
+ *
+ * Two rules follow from that and neither is optional, because the hold now
+ * runs for three minutes where it used to stop at a pause.
+ *
+ * **Nothing between the press and the recording may be awaited.** Android puts
+ * its permission dialog up inside such an await, the dialog takes the focus and
+ * the key events, and the release that was meant to end the hold never arrives
+ * — so the recording starts with nobody holding it. The permission is read at
+ * mount and a hold that still has to ask for it records nothing.
+ *
+ * **A hold covey ended is not sent.** The cap is reached by a key pressed
+ * against a table far more often than by a sentence, and uploading three
+ * minutes of a pocket over a mobile link is the thing `MAX_RECORDING_MS` was
+ * written to prevent. The reader keeps the words this phone made of it, which
+ * is what that constant has always promised.
  *
  * **The machine writes the words, and this phone shows them while it waits.**
  * All of covey's audio takes that route (`src/transcribe.ts`): the recogniser
@@ -52,7 +66,7 @@
  * correction from the recogniser reads as a correction and not as a second
  * sentence.
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { File } from "expo-file-system";
 import { ExpoSpeechRecognitionModule, useSpeechRecognitionEvent } from "expo-speech-recognition";
 import { pcm16FromWav } from "@covey/client";
@@ -69,6 +83,15 @@ export interface Dictation {
   error: string | null;
   start: () => Promise<void>;
   stop: () => void;
+  /**
+   * Whether a hold is open right now.
+   *
+   * A function and not a value, because it is read from inside a key handler
+   * that is registered once and must not be re-registered per render — the
+   * composer would give the volume keys back and take them again in the middle
+   * of the hold it is asking about.
+   */
+  held: () => boolean;
   clearError: () => void;
 }
 
@@ -80,6 +103,22 @@ export interface Dictation {
  * not have told apart.
  */
 let recordings = 0;
+
+/**
+ * Whether this app may use the microphone, as far as it last knew.
+ *
+ * Asked once per launch and kept here, because **a hold must not await
+ * anything**. Android puts its permission dialog up inside that await and the
+ * dialog takes the focus and the keys with it, so the release that ends the
+ * hold never reaches covey: the recording would start with nobody holding it
+ * and run until the cap. The first hold therefore buys the permission and
+ * records nothing, and the next one records.
+ *
+ * `null` is "not asked yet". A reader who takes the permission away in
+ * Android's settings makes this stale, and the `not-allowed` error is what puts
+ * it back.
+ */
+let permitted: boolean | null = null;
 
 /**
  * Whether this device can turn speech into text.
@@ -153,6 +192,19 @@ export function useDictation(
    * gathered can still be written out.
    */
   const capped = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Whether a hold is open: from the press to the release, or to the cap. */
+  const holding = useRef(false);
+  /**
+   * Whether covey ended this hold rather than the reader.
+   *
+   * It decides whether the machine is asked at all. A hold that ran the whole
+   * of `MAX_RECORDING_MS` is a key pressed against a table far more often than
+   * it is a sentence, and uploading three minutes of a pocket over a mobile
+   * link is what that cap was written to prevent. The reader keeps the words
+   * this phone made of it, which is what `MAX_RECORDING_MS` has always
+   * promised.
+   */
+  const abandoned = useRef(false);
 
   /** What this phone has made of the hold so far, settled parts and all. */
   const spoken = () => [...settled.current, partial.current].filter(Boolean).join(" ");
@@ -181,6 +233,12 @@ export function useDictation(
     };
 
     if (!uri) return settle(heard);
+    if (abandoned.current) {
+      // The file is still deleted below; it is the *upload* that is refused.
+      try { new File(uri).delete(); } catch { /* it was never written */ }
+      setError(`covey records ${Math.round(MAX_RECORDING_MS / 60_000)} minutes at a time. These words are this phone's own.`);
+      return settle(heard);
+    }
     const client = store.client(machine);
     const info = store.machineInfo(machine);
     setWriting(true);
@@ -218,8 +276,19 @@ export function useDictation(
     if (!text) return;
     // A segment the recogniser called final is kept; everything else is the
     // segment it is still revising and replaces the last guess at it.
-    if (e.isFinal) { settled.current.push(text); partial.current = ""; }
-    else partial.current = text;
+    if (e.isFinal) {
+      /*
+       * A recogniser that re-sends the whole utterance rather than the newest
+       * segment would be doubled by a join, and no test here can tell which one
+       * a given Android has: this runs behind a microphone. One whose words
+       * already contain everything settled stands in their place instead, so
+       * both kinds come out right.
+       */
+      const far = settled.current.join(" ");
+      if (far && text.startsWith(far)) settled.current = [text];
+      else settled.current.push(text);
+      partial.current = "";
+    } else partial.current = text;
     // Never final to the caller, whatever the recogniser called it: the machine
     // has the last word, and a caller told this one was settled would add that
     // word rather than put it in place.
@@ -232,15 +301,24 @@ export function useDictation(
 
   useSpeechRecognitionEvent("end", () => {
     if (capped.current) { clearTimeout(capped.current); capped.current = null; }
+    // The recogniser may end before the reader lets go — Android answers for
+    // the silence extras and some of them are advisory. The hold is over
+    // whatever ended it, or the next press would read as the second of a
+    // squeeze and start nothing.
+    holding.current = false;
     setListening(false);
     void writeOut();
   });
 
   useSpeechRecognitionEvent("error", (e) => {
     if (capped.current) { clearTimeout(capped.current); capped.current = null; }
+    holding.current = false;
     setListening(false);
     // `aborted` is the reader pressing stop, which is not a failure.
     if (e.error === "aborted") return;
+    // The reader took the permission away in Android's settings while the app
+    // ran, so what this module last knew is wrong. The next hold asks again.
+    if (e.error === "not-allowed") permitted = false;
     setError(
       e.error === "not-allowed"
         ? "covey may not use the microphone. Android's settings can allow it."
@@ -249,6 +327,20 @@ export function useDictation(
           : e.message || "The microphone would not start.",
     );
   });
+
+  /*
+   * Ask for the permission once, as the composer mounts.
+   *
+   * It is asked here so that `start` never has to: a hold that awaits anything
+   * is a hold whose release can go missing. This only *reads* the answer, so no
+   * dialog appears and nothing is asked of the reader until they press.
+   */
+  useEffect(() => {
+    if (permitted !== null) return;
+    ExpoSpeechRecognitionModule.getPermissionsAsync()
+      .then((r) => { permitted = r.granted; })
+      .catch(() => { /* the first hold asks for it */ });
+  }, []);
 
   /**
    * End the hold.
@@ -259,6 +351,7 @@ export function useDictation(
    */
   const stop = useCallback(() => {
     if (capped.current) { clearTimeout(capped.current); capped.current = null; }
+    holding.current = false;
     try { ExpoSpeechRecognitionModule.stop(); } catch { /* it had already stopped */ }
     setListening(false);
   }, []);
@@ -266,27 +359,47 @@ export function useDictation(
   const start = useCallback(async () => {
     setError(null);
     /*
-     * The hold begins here and not after the permission call.
+     * The hold begins here.
      *
      * The composer clears the base it writes dictation onto as the finger goes
-     * down, so an answer that lands while this `await` is out would be settled
-     * onto a draft that no longer holds the words it is meant to replace — and
-     * the reader would get both. Moving the count above the await makes the
-     * guard cover the whole of the hold rather than most of it. Counting an
-     * utterance that permission then refuses costs nothing: the reader pressed
-     * the button, so the last answer is stale either way.
+     * down, so a late answer that lands after this point would be settled onto
+     * a draft that no longer holds the words it is meant to replace, and the
+     * reader would get both. Counting the utterance first makes the guard cover
+     * the whole of the hold rather than most of it.
      */
     utterance.current++;
     settled.current = [];
     partial.current = "";
     recorded.current = null;
+    abandoned.current = false;
     setWriting(false);
+
+    /*
+     * The permission is bought by a hold that records nothing.
+     *
+     * **A hold that reaches the recogniser may not have awaited anything, and
+     * this one has** — so it ends here instead. Android puts its dialog up
+     * inside that await and the dialog takes the focus and the key events with
+     * it, so neither the release of the button nor the release of the key
+     * reaches covey; and `stop()` before the recogniser exists does nothing at
+     * all, because the module posts `stopListening` to a recogniser it has not
+     * built. The recording would start with nobody holding it and run to the
+     * cap. The reader holds again, and that hold records.
+     *
+     * Everything after this point is synchronous, which is the rule. Put an
+     * await back in and the race comes with it.
+     */
+    if (!permitted) {
+      const granted = await ExpoSpeechRecognitionModule.requestPermissionsAsync().catch(() => ({ granted: false }));
+      permitted = granted.granted;
+      setError(permitted
+        ? "covey may use the microphone now. Hold again to dictate."
+        : "covey may not use the microphone. Android's settings can allow it.");
+      return;
+    }
+
+    holding.current = true;
     try {
-      const granted = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-      if (!granted.granted) {
-        setError("covey may not use the microphone. Android's settings can allow it.");
-        return;
-      }
       ExpoSpeechRecognitionModule.start({
         lang: "en-US",
         // The words appear while they are spoken, which on a screen this small
@@ -325,12 +438,16 @@ export function useDictation(
       });
       setListening(true);
       if (capped.current) clearTimeout(capped.current);
-      capped.current = setTimeout(stop, MAX_RECORDING_MS);
+      // Covey ending the hold, not the reader — so the recording is not sent.
+      capped.current = setTimeout(() => { abandoned.current = true; stop(); }, MAX_RECORDING_MS);
     } catch (e) {
+      holding.current = false;
       setError((e as Error).message || "The microphone would not start.");
       setListening(false);
     }
   }, [stop]);
 
-  return { available, listening, writing, error, start, stop, clearError: () => setError(null) };
+  const held = useCallback(() => holding.current, []);
+
+  return { available, listening, writing, error, start, stop, held, clearError: () => setError(null) };
 }

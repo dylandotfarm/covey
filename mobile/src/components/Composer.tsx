@@ -18,7 +18,7 @@ import { SIZE, T } from "../theme";
 import { Spinner } from "../ui";
 import { pickCamera, pickDocument, pickMedia, type DeviceFile } from "../attach";
 import { useDictation } from "../dictation";
-import { talkButton, talkWithKeys, type TalkMode } from "../talk";
+import { keyHold, talkButton, talkWithKeys, type TalkMode } from "../talk";
 import { holdVolumeKeys, volumeKeysAvailable } from "../../modules/covey-keys";
 import { Icon } from "../Icon";
 
@@ -177,25 +177,28 @@ export function Composer(p: ComposerProps) {
    *
    * The keys are taken while this composer is on screen and given back as it
    * goes, so the rocker changes the volume on every other screen of the app.
-   * `held` is what makes a press and a release a pair: both keys are offered,
-   * so a reader squeezing the rocker sends two of each, and a release with no
-   * hold behind it must not stop a dictation the button started.
+   * What a press and a release each mean is `keyHold`, which is pure and
+   * node-tested: covey offers both keys, so a squeeze of the rocker is two
+   * presses and two releases for one hold, and a release Android ate must not
+   * leave a key down for ever. `dictation.held` is what it reads for that, and
+   * it is a function for a reason — a value would belong to this render, and
+   * the effect must not re-arm while a hold is running.
    */
   useEffect(() => {
     if (!keys) return;
-    let held = false;
-    const give = holdVolumeKeys(({ pressed }) => {
-      if (pressed === held) return;
-      held = pressed;
-      if (pressed) { spokenFrom.current = null; void dictation.start(); }
-      else dictation.stop();
+    let down: string[] = [];
+    const give = holdVolumeKeys(({ key, pressed }) => {
+      const next = keyHold(down, key, pressed, dictation.held());
+      down = next.down;
+      if (next.act === "start") { spokenFrom.current = null; void dictation.start(); }
+      else if (next.act === "stop") dictation.stop();
     });
     return () => {
       give();
       // A screen that went while a key was down leaves a microphone running.
-      if (held) dictation.stop();
+      if (down.length) dictation.stop();
     };
-  }, [keys, dictation.start, dictation.stop]);
+  }, [keys, dictation.start, dictation.stop, dictation.held]);
 
   /**
    * The microphone as a reading rather than a control.

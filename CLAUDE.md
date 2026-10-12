@@ -196,15 +196,29 @@
   handler is built with the activity and the module is replaced on every reload,
   and it fails open — no listener is no consumption, because a key covey ate
   with nothing behind it is a phone whose volume stopped working.
+  What a press and a release mean is `keyHold`, pure and node-tested: a squeeze
+  of the rocker is one hold, a release of a key covey never saw pressed does
+  nothing, and a press that arrives while nothing is held starts from an empty
+  hand — Android can take a release away, and a key left down costs every later
+  hold.
   **A hold ends when the reader lets go, never at a pause.** Persisting a
   recording puts Android in segmented session mode, whose silence
   `expo-speech-recognition` sets to two seconds — a breath, and a person
   thinking out loud pauses for longer. `useDictation` widens both
   `COMPLETE_SILENCE` and `POSSIBLY_COMPLETE_SILENCE` to `MAX_RECORDING_MS`
-  through `androidIntentOptions`, which the module applies after its own. Three
-  things follow: the cap is now the only thing that ends a hold nobody ended, so
-  the hook stops the microphone at it; a hold may arrive as several segments,
-  each carrying its own words, so they are joined rather than replaced; and
+  through `androidIntentOptions`, which the module applies after its own. Four
+  things follow, and the first two are what three minutes costs that two seconds
+  did not. **Nothing between the press and the recording may be awaited**: Android
+  puts its permission dialog up inside the await, the dialog takes the focus and
+  the keys, and the release never arrives — while `stop()` before the recogniser
+  exists posts `stopListening` to a recogniser the module has not built and does
+  nothing at all. So the permission is read at mount and a hold that still has to
+  ask records nothing. **A hold covey ended is not sent**: the cap is reached by a
+  key against a table far more often than by a sentence, and `phoneRecording`'s
+  refusal is the net under that rule rather than the rule. A hold may arrive as
+  several segments, each carrying its own words, so they are joined rather than
+  replaced — and a final result that already contains them stands in their place,
+  because nothing behind a microphone can test which kind a given Android is. And
   `continuous: true` is *not* the way to do this however much it reads like it,
   because with a recording it keys the session on the audio source, whose only
   end is the recorder closing — which `stop()` does not do.

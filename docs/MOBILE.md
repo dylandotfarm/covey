@@ -250,6 +250,16 @@ Three things about that module are load-bearing:
   sentence said twice; a press covey eats with nothing behind it is a phone whose
   volume keys have stopped working.
 
+What a press and a release *mean* is `keyHold` in `src/talk.ts`, pure and
+node-tested, because every case it holds needs a hand on a phone to make. Covey
+offers both keys, so a squeeze of the rocker is two presses and two releases for
+one hold. A release of a key covey never saw pressed does nothing, or the key
+that dismissed a dialog would end a dictation the button started. And a press
+that arrives while nothing is being held starts from an empty hand, because
+Android can take a release away — a dialog with the focus, or the app going to
+the background — and a key left down for ever would cost the reader every later
+hold.
+
 ### A hold lasts until the reader lets go
 
 Not until they pause. A person thinking a sentence out loud stops for longer
@@ -264,20 +274,39 @@ after its own — `COMPLETE_SILENCE` is the one the session ends on, and
 `POSSIBLY_COMPLETE_SILENCE` goes with it because that is the endpointer cutting
 a pause off mid-sentence. Both are `MAX_RECORDING_MS`.
 
-Three things follow:
+Four things follow, and the first two are what a three-minute hold costs that a
+two-second one did not:
 
-- **The cap is now the only thing that ends a hold nobody ended.** A key pressed
-  against a table is a microphone nobody turned off, so the hook stops at
-  `MAX_RECORDING_MS` itself — the same length `phoneRecording` refuses to send,
-  so the words a hold gathered can still be written out.
+- **Nothing between the press and the recording may be awaited.** Android puts
+  its permission dialog up inside such an await, the dialog takes the focus and
+  the key events, and the release that was meant to end the hold never arrives —
+  so the recording starts with nobody holding it. `stop()` cannot save it either:
+  before the recogniser exists the module posts `stopListening` to a recogniser
+  it has not built, which does nothing and emits no event. So the permission is
+  read once at mount, and a hold that still has to ask for it records nothing and
+  says *hold again*.
+- **A hold covey ended is not sent.** The cap is reached by a key against a table
+  far more often than by a sentence, and uploading three minutes of a pocket over
+  a mobile link is exactly what `MAX_RECORDING_MS` was written to prevent. The
+  reader keeps the words this phone made of it, which is what that constant has
+  always promised. The refusal in `phoneRecording` is the net under that rule and
+  not the rule itself: it catches a timer that did not fire, or samples from
+  another caller.
 - **A hold may be several segments.** Android reports a segment as final and goes
   on listening, and each one carries its own words rather than the sentence so
   far. They are kept and joined. Replace the last instead and a reader who paused
-  for breath watches their first sentence vanish when the second arrives.
+  for breath watches their first sentence vanish when the second arrives — and a
+  recogniser that re-sends the whole utterance instead stands in their place,
+  because no test behind a microphone can tell which kind a given Android is.
 - **`continuous: true` is not the way to do this, and it looks like it.** With a
   recording it keys the segmented session on the audio *source*, whose only end
   is the recorder closing — which `stop()` does not do. The hold would never
   settle.
+
+A recogniser may ignore the silence extras; Android says so. The floor is the
+behaviour before this change — the hold ends at that recogniser's own silence —
+so nothing breaks, it just stops listening early. That is one of the two things
+on this page a browser cannot show.
 
 ### Two stages, and the words are provisional until the second
 
