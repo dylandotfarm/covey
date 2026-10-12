@@ -104,6 +104,23 @@ export async function saveShowHidden(on: boolean): Promise<void> {
   await AsyncStorage.setItem(SHOW_HIDDEN_KEY, on ? "1" : "0").catch(() => {});
 }
 
+/**
+ * Which push-to-talk button this device holds: `src/talk.ts` has the modes.
+ *
+ * A preference of the device, beside the two above and under the same rule. It
+ * is stored as the mode's own word rather than a flag, because there are three
+ * of them and a second flag would make a fourth state that means nothing.
+ */
+const TALK_KEY = "covey.talk";
+
+export async function readTalk(): Promise<string | null> {
+  try { return await AsyncStorage.getItem(TALK_KEY); } catch { return null; }
+}
+
+export async function saveTalk(mode: string): Promise<void> {
+  await AsyncStorage.setItem(TALK_KEY, mode).catch(() => {});
+}
+
 /** Whether the reader asked covey to look for a device (#178). */
 const DEVICE_KEY = "covey.device";
 

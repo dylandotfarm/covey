@@ -72,9 +72,10 @@ export type MachineAnswer =
  * Samples are 32 kB a second, so three minutes is 5.8 MB going up from a
  * device that may be on a mobile link. Past this the phone's own words stand:
  * a hold that long is a button in a pocket far more often than it is a
- * sentence, and a reader must not pay for the difference. The recogniser ends
- * an utterance at a pause of its own accord, so an ordinary dictation is
- * nowhere near it.
+ * sentence, and a reader must not pay for the difference. It is also what ends
+ * such a hold: nothing else does, now that the recogniser listens through a
+ * pause rather than ending the utterance at one, so `useDictation` stops the
+ * microphone here as well as refusing to send what it recorded.
  */
 export const MAX_RECORDING_MS = 180_000;
 

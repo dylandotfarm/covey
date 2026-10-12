@@ -177,6 +177,37 @@
   `store.whenMade` first: a subscription sent ahead of the worktree is answered
   `thread not found`, and the view keeps that error until the reader leaves the
   screen and comes back, which reads as a conversation the daemon lost.
+  A reader may hold a **volume key** to talk instead of the button on the glass,
+  because a thumb held still on glass does not stay still and the press ends
+  mid-word. `src/talk.ts` is the choice — the button, the keys, or both — a
+  preference of the device like the level of detail, node-tested, and
+  `button` unless the reader says otherwise: while covey holds the keys they do
+  not change the volume, which is not a thing to hand somebody who never asked.
+  So the composer takes them as it mounts and gives them back as it goes, and
+  `talkButton` keeps the microphone whatever is stored when the build cannot read
+  them — a bundle lands in whatever app is installed, and an app older than
+  `modules/covey-keys` would otherwise paint nothing and listen to nothing.
+  That module is the second native one, so the runtime version moved to `0.5.0`
+  and every install needs one more sideload. An Expo module cannot see a key
+  press, so the reading is a `ReactActivityHandler` (`onKeyDown` / `onKeyUp`,
+  which consume the event so `PhoneWindow` never sees it); autolinking finds it
+  by the file's name ending `Package.kt` *and* its import of
+  `expo.modules.core.interfaces.Package`, the state is an `object` because the
+  handler is built with the activity and the module is replaced on every reload,
+  and it fails open — no listener is no consumption, because a key covey ate
+  with nothing behind it is a phone whose volume stopped working.
+  **A hold ends when the reader lets go, never at a pause.** Persisting a
+  recording puts Android in segmented session mode, whose silence
+  `expo-speech-recognition` sets to two seconds — a breath, and a person
+  thinking out loud pauses for longer. `useDictation` widens both
+  `COMPLETE_SILENCE` and `POSSIBLY_COMPLETE_SILENCE` to `MAX_RECORDING_MS`
+  through `androidIntentOptions`, which the module applies after its own. Three
+  things follow: the cap is now the only thing that ends a hold nobody ended, so
+  the hook stops the microphone at it; a hold may arrive as several segments,
+  each carrying its own words, so they are joined rather than replaced; and
+  `continuous: true` is *not* the way to do this however much it reads like it,
+  because with a recording it keys the session on the audio source, whose only
+  end is the recorder closing — which `stop()` does not do.
   Relative imports carry no `.js`: Metro does not follow TypeScript's
   convention. There is no device in this loop, so `pnpm run web` renders the app in a
   browser through `react-native-web` — not a platform covey ships, just a way to *look*:

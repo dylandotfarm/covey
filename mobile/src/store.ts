@@ -37,7 +37,8 @@ import {
   syncAttachments, type MachineSlot, type SheetTarget, type State,
 } from "@covey/web";
 import { attachingLabel, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
-import { forgetMachine, readLod, readMachines, readShowHidden, readToken, saveLod, saveMachine, saveShowHidden, type SavedMachine } from "./machines";
+import { forgetMachine, readLod, readMachines, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
+import { asTalk, DEFAULT_TALK, type TalkMode } from "./talk";
 import { shrinkOnDevice } from "./attach";
 import { primeUpdateToken } from "./ota";
 import { sheetCommand } from "./sheet";
@@ -78,6 +79,15 @@ class Store {
   private noticeTimer: ReturnType<typeof setTimeout> | null = null;
   /** True once the saved machines have been read, so a first launch can say so. */
   loaded = false;
+  /**
+   * Which push-to-talk button this device holds, from the button to the volume
+   * keys (`src/talk.ts`).
+   *
+   * Here and not on `State`: the page has no hardware keys and no composer
+   * button, so this is the app's own preference and nothing in `@covey/web`
+   * would ever read it.
+   */
+  talk: TalkMode = DEFAULT_TALK;
 
   // ---- what React subscribes to ------------------------------------------
 
@@ -131,6 +141,7 @@ class Store {
     // view is decided by the screen and is no longer a preference.
     this.state.lod = asLod(await readLod()) ?? DEFAULT_LOD;
     this.state.showHidden = await readShowHidden();
+    this.talk = asTalk(await readTalk()) ?? DEFAULT_TALK;
     this.saved = await readMachines();
     for (const [i, m] of this.saved.entries()) {
       const token = await readToken(m.url);
@@ -541,6 +552,19 @@ class Store {
   setShowHidden = (on: boolean): void => {
     this.state.showHidden = on;
     void saveShowHidden(on);
+    this.schedule();
+  };
+
+  /**
+   * Which push-to-talk button this device holds.
+   *
+   * A preference of the device, like the two above. The composer reads it, and
+   * takes the volume keys only while it is on screen — so the rocker changes
+   * the volume everywhere else in the app whatever this says.
+   */
+  setTalk = (mode: TalkMode): void => {
+    this.talk = mode;
+    void saveTalk(mode);
     this.schedule();
   };
 
