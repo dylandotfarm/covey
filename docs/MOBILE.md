@@ -249,6 +249,19 @@ Three things about that module are load-bearing:
 - **It fails open.** No listener means no consumption. A press covey misses is a
   sentence said twice; a press covey eats with nothing behind it is a phone whose
   volume keys have stopped working.
+- **Its `build.gradle` applies `expo-module-gradle-plugin`,** and a hand-rolled
+  `kotlin-android` setup is not a substitute. The plugin pins Kotlin to the
+  version `expo-modules-core` was compiled with, and the module DSL carries its
+  argument and return types through *reified* type parameters, which exist only
+  while the compiler inlines them. Build against a different Kotlin and the
+  reification marker survives into the bytecode, so the first thing the app does
+  with the module is throw `UnsupportedOperationException: This function has a
+  reified type parameter and thus can only be inlined at compilation time`. That
+  happens while the module registry is built — before any JavaScript, so before
+  the error boundary exists — and the app closes on launch with nothing on
+  screen. It cost one release. A `Function` that takes **no argument** survives
+  the mistake, which is why `modules/covey-link`, which is still hand-rolled, has
+  never shown it: give it one that takes an argument and it will.
 
 What a press and a release *mean* is `keyHold` in `src/talk.ts`, pure and
 node-tested, because every case it holds needs a hand on a phone to make. Covey
