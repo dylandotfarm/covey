@@ -310,7 +310,6 @@ on this page a browser cannot show.
 
 ### Two stages, and the words are provisional until the second
 
-
 The machine answers in about a second, and a dictation that shows nothing for a
 second reads as a microphone that is not working. So the phone's own recogniser
 runs on the same held button and puts its words in the draft as they are

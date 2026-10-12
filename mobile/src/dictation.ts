@@ -236,7 +236,13 @@ export function useDictation(
     if (abandoned.current) {
       // The file is still deleted below; it is the *upload* that is refused.
       try { new File(uri).delete(); } catch { /* it was never written */ }
-      setError(`covey records ${Math.round(MAX_RECORDING_MS / 60_000)} minutes at a time. These words are this phone's own.`);
+      // Three minutes of a pocket is the case this was written for, and it has
+      // no words at the end of it. Promising the reader some would send them
+      // looking in the draft for a sentence nobody said.
+      const minutes = Math.round(MAX_RECORDING_MS / 60_000);
+      setError(heard
+        ? `covey records ${minutes} minutes at a time. These words are this phone's own.`
+        : `covey records ${minutes} minutes at a time. Nothing was heard in this one.`);
       return settle(heard);
     }
     const client = store.client(machine);
@@ -283,6 +289,12 @@ export function useDictation(
        * a given Android has: this runs behind a microphone. One whose words
        * already contain everything settled stands in their place instead, so
        * both kinds come out right.
+       *
+       * It costs one case, knowingly: two segments where the second happens to
+       * begin with the first — "yes", then "yes indeed" — read as a re-send and
+       * the first is dropped. That is the cheaper of the two mistakes. A reader
+       * loses one short word they can see is missing; the other way they get
+       * their whole sentence twice and have to find the seam.
        */
       const far = settled.current.join(" ");
       if (far && text.startsWith(far)) settled.current = [text];
