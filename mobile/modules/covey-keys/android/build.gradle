@@ -28,8 +28,10 @@ version = '0.1.0'
 
 android {
   namespace "farm.dylan.covey.keys"
-  // The plugin asks for both by name. It publishes the module as a library,
-  // and a library with no version is one it refuses to configure.
+  // `versionName` is the one the plugin asks for by name: it publishes the
+  // module as a library unless told otherwise, and `PublicationInfo` requires
+  // it. `versionCode` is not required — it is the house style of expo's own
+  // modules, and this file is one the next person copies.
   defaultConfig {
     versionCode 1
     versionName "0.1.0"
