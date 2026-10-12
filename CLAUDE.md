@@ -195,7 +195,16 @@
   `expo.modules.core.interfaces.Package`, the state is an `object` because the
   handler is built with the activity and the module is replaced on every reload,
   and it fails open — no listener is no consumption, because a key covey ate
-  with nothing behind it is a phone whose volume stopped working.
+  with nothing behind it is a phone whose volume stopped working. **A local
+  module's `build.gradle` applies `expo-module-gradle-plugin`**, never a
+  hand-rolled `kotlin-android`: the plugin pins Kotlin to the version
+  `expo-modules-core` was built with, and the module DSL passes its argument and
+  return types as *reified* parameters that exist only while the compiler
+  inlines them. Build it any other way and the marker survives into the
+  bytecode, the module throws while the registry is built — before any
+  JavaScript, so before the error boundary — and the app closes on launch with
+  nothing on screen. A `Function` taking no argument survives the mistake, which
+  is why `covey-link` has not shown it and will the day it takes one.
   What a press and a release mean is `keyHold`, pure and node-tested: a squeeze
   of the rocker is one hold, a release of a key covey never saw pressed does
   nothing, and a press that arrives while nothing is held starts from an empty
