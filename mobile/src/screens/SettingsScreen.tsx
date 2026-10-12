@@ -24,6 +24,8 @@ import { useStore } from "../useStore";
 import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
 import { applyUpdate, fetchUpdate, updateInconsistency, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
+import { talkNote, TALK_LABEL, TALK_ORDER, type TalkMode } from "../talk";
+import { volumeKeysAvailable } from "../../modules/covey-keys";
 import type { Routes } from "../nav";
 import { DeviceSection } from "../device/DeviceSection";
 import { AppBuildRow } from "../device/AppBuildRow";
@@ -152,6 +154,38 @@ export function SettingsScreen({ navigation }: Props) {
               thumbColor={T.bg}
             />
           </Row>
+        </View>
+
+        {/*
+          Which push-to-talk button this device holds.
+
+          A preference of the device, like the two above it, and the only one
+          whose cost is outside covey: while the keys are held the volume rocker
+          does not change the volume. That is why `button` is the default and
+          why the hint says so on both rows that take them.
+
+          The rows are offered even when this build cannot read the keys — a
+          bundle arrives over the air and a binary does not, so the app running
+          this screen may be older than it is. `talkNote` says what fixes that,
+          and `talkButton` keeps the microphone whatever is stored, so the
+          choice can be made now and answered by the next install.
+        */}
+        <SectionTitle text="Dictation" />
+        <View style={S.card}>
+          {TALK_ORDER.map((mode: TalkMode, i: number) => (
+            <Row key={mode} first={i === 0} onPress={() => store.setTalk(mode)}>
+              <View style={S.grow}>
+                <Text style={S.title}>{TALK_LABEL[mode].label}</Text>
+                <Text style={S.subtle}>{TALK_LABEL[mode].hint}</Text>
+              </View>
+              {store.talk === mode ? <Icon name="tick" size={20} colour={T.accent} /> : null}
+            </Row>
+          ))}
+          {talkNote(volumeKeysAvailable) ? (
+            <Row>
+              <Text style={[S.subtle, S.grow]}>{talkNote(volumeKeysAvailable)}</Text>
+            </Row>
+          ) : null}
         </View>
 
         <DeviceSection />

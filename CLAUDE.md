@@ -177,6 +177,51 @@
   `store.whenMade` first: a subscription sent ahead of the worktree is answered
   `thread not found`, and the view keeps that error until the reader leaves the
   screen and comes back, which reads as a conversation the daemon lost.
+  A reader may hold a **volume key** to talk instead of the button on the glass,
+  because a thumb held still on glass does not stay still and the press ends
+  mid-word. `src/talk.ts` is the choice — the button, the keys, or both — a
+  preference of the device like the level of detail, node-tested, and
+  `button` unless the reader says otherwise: while covey holds the keys they do
+  not change the volume, which is not a thing to hand somebody who never asked.
+  So the composer takes them as it mounts and gives them back as it goes, and
+  `talkButton` keeps the microphone whatever is stored when the build cannot read
+  them — a bundle lands in whatever app is installed, and an app older than
+  `modules/covey-keys` would otherwise paint nothing and listen to nothing.
+  That module is the second native one, so the runtime version moved to `0.5.0`
+  and every install needs one more sideload. An Expo module cannot see a key
+  press, so the reading is a `ReactActivityHandler` (`onKeyDown` / `onKeyUp`,
+  which consume the event so `PhoneWindow` never sees it); autolinking finds it
+  by the file's name ending `Package.kt` *and* its import of
+  `expo.modules.core.interfaces.Package`, the state is an `object` because the
+  handler is built with the activity and the module is replaced on every reload,
+  and it fails open — no listener is no consumption, because a key covey ate
+  with nothing behind it is a phone whose volume stopped working.
+  What a press and a release mean is `keyHold`, pure and node-tested: a squeeze
+  of the rocker is one hold, a release of a key covey never saw pressed does
+  nothing, and a press that arrives while nothing is held starts from an empty
+  hand — Android can take a release away, and a key left down costs every later
+  hold.
+  **A hold ends when the reader lets go, never at a pause.** Persisting a
+  recording puts Android in segmented session mode, whose silence
+  `expo-speech-recognition` sets to two seconds — a breath, and a person
+  thinking out loud pauses for longer. `useDictation` widens both
+  `COMPLETE_SILENCE` and `POSSIBLY_COMPLETE_SILENCE` to `MAX_RECORDING_MS`
+  through `androidIntentOptions`, which the module applies after its own. Four
+  things follow, and the first two are what three minutes costs that two seconds
+  did not. **Nothing between the press and the recording may be awaited**: Android
+  puts its permission dialog up inside the await, the dialog takes the focus and
+  the keys, and the release never arrives — while `stop()` before the recogniser
+  exists posts `stopListening` to a recogniser the module has not built and does
+  nothing at all. So the permission is read at mount and a hold that still has to
+  ask records nothing. **A hold covey ended is not sent**: the cap is reached by a
+  key against a table far more often than by a sentence, and `phoneRecording`'s
+  refusal is the net under that rule rather than the rule. A hold may arrive as
+  several segments, each carrying its own words, so they are joined rather than
+  replaced — and a final result that already contains them stands in their place,
+  because nothing behind a microphone can test which kind a given Android is. And
+  `continuous: true` is *not* the way to do this however much it reads like it,
+  because with a recording it keys the session on the audio source, whose only
+  end is the recorder closing — which `stop()` does not do.
   Relative imports carry no `.js`: Metro does not follow TypeScript's
   convention. There is no device in this loop, so `pnpm run web` renders the app in a
   browser through `react-native-web` — not a platform covey ships, just a way to *look*:

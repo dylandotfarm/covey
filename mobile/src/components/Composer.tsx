@@ -18,6 +18,8 @@ import { SIZE, T } from "../theme";
 import { Spinner } from "../ui";
 import { pickCamera, pickDocument, pickMedia, type DeviceFile } from "../attach";
 import { useDictation } from "../dictation";
+import { keyHold, talkButton, talkWithKeys, type TalkMode } from "../talk";
+import { holdVolumeKeys, volumeKeysAvailable } from "../../modules/covey-keys";
 import { Icon } from "../Icon";
 
 const st = StyleSheet.create({
@@ -53,6 +55,8 @@ export interface ComposerProps {
   /** What the composer says while it reads or sends files. */
   attaching: string | null;
   busy: boolean;
+  /** Which push-to-talk button this device holds (`src/talk.ts`). */
+  talk: TalkMode;
   onDraft: (text: string) => void;
   onSend: (text: string) => void;
   onInterrupt: () => void;
@@ -159,6 +163,70 @@ export function Composer(p: ComposerProps) {
     </Pressable>
   );
 
+  /**
+   * Whether the volume keys are this composer's push-to-talk button.
+   *
+   * Three things have to be true, and the third is not about the keys: a phone
+   * with no recogniser installed can dictate by no route at all, so taking its
+   * volume rocker would cost the reader their volume and give them nothing.
+   */
+  const keys = talkWithKeys(p.talk, volumeKeysAvailable) && dictation.available;
+
+  /**
+   * Hold a volume key to talk.
+   *
+   * The keys are taken while this composer is on screen and given back as it
+   * goes, so the rocker changes the volume on every other screen of the app.
+   * What a press and a release each mean is `keyHold`, which is pure and
+   * node-tested: covey offers both keys, so a squeeze of the rocker is two
+   * presses and two releases for one hold, and a release Android ate must not
+   * leave a key down for ever. `dictation.held` is what it reads for that, and
+   * it is a function for a reason — a value would belong to this render, and
+   * the effect must not re-arm while a hold is running.
+   */
+  useEffect(() => {
+    if (!keys) return;
+    let down: string[] = [];
+    const give = holdVolumeKeys(({ key, pressed }) => {
+      const next = keyHold(down, key, pressed, dictation.held());
+      down = next.down;
+      if (next.act === "start") { spokenFrom.current = null; void dictation.start(); }
+      else if (next.act === "stop") dictation.stop();
+    });
+    return () => {
+      give();
+      // A screen that went while a key was down leaves a microphone running.
+      if (down.length) dictation.stop();
+    };
+  }, [keys, dictation.start, dictation.stop, dictation.held]);
+
+  /**
+   * The microphone as a reading rather than a control.
+   *
+   * With the keys holding the gesture there is no button to turn red, and a
+   * composer that says nothing while it listens is the microphone-that-is-not-
+   * working problem again. So the same three states are painted in the same
+   * place — and only while there is something to say, because a shape that
+   * looks like a button and is not one is worse than a gap.
+   */
+  const cue = dictation.listening || dictation.writing ? (
+    <View style={[st.icon, control, dictation.listening ? { backgroundColor: T.danger } : null]}>
+      {dictation.writing ? <Spinner /> : <Icon name="micOff" size={big ? 26 : 20} colour="#ffffff" />}
+    </View>
+  ) : null;
+
+  /** What stands in the microphone's place: the button, or the reading of one. */
+  const speak = !dictation.available ? null : talkButton(p.talk, volumeKeysAvailable) ? mic : cue;
+
+  /**
+   * What the empty message box says.
+   *
+   * One expression for both layouts. It was the cover screen's alone, where the
+   * microphone used to be the only control beside the box; a reader holding a
+   * volume key on the open screen needs the same words.
+   */
+  const placeholder = dictation.listening ? "Listening…" : dictation.writing ? "Writing it out…" : "Message";
+
   // A different thread is a different draft. Without this, opening a second
   // conversation would show the first one's half-written message.
   const key = `${p.machine}\n${p.threadId}`;
@@ -250,7 +318,7 @@ export function Composer(p: ComposerProps) {
    * and a reader who learns the gesture on the cover screen should find it on
    * the other one rather than discover it was a small-screen affordance.
    */
-  const buttons = <>{dictation.available ? mic : null}{stopButton}{sendButton}</>;
+  const buttons = <>{speak}{stopButton}{sendButton}</>;
 
   return (
     <View style={st.wrap}>
@@ -325,7 +393,7 @@ export function Composer(p: ComposerProps) {
               value={text}
               onChangeText={change}
               onSelectionChange={(e) => { caret.current = e.nativeEvent.selection.end; }}
-              placeholder={dictation.listening ? "Listening…" : dictation.writing ? "Writing it out…" : "Message"}
+              placeholder={placeholder}
               placeholderTextColor={T.faint}
               multiline
               returnKeyType="default"
@@ -335,7 +403,7 @@ export function Composer(p: ComposerProps) {
               things a reader reaches for having written something, so they sit
               together and at the end of the writing rather than under it.
             */}
-            {dictation.available ? mic : null}
+            {speak}
             {sendButton}
           </View>
           <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -382,7 +450,7 @@ export function Composer(p: ComposerProps) {
           value={text}
           onChangeText={change}
           onSelectionChange={(e) => { caret.current = e.nativeEvent.selection.end; }}
-          placeholder="Message"
+          placeholder={placeholder}
           placeholderTextColor={T.faint}
           multiline
           // Never `blurOnSubmit`: a newline inside a message is a newline, and

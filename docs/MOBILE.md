@@ -200,7 +200,115 @@ in `docs/DEVICE.md` for why that is the daemon's job and not a phone's.
 `src/transcribe.ts` holds the decision, which is pure and node-tested, because
 each caller sits behind hardware no agent in this loop can start.
 
-What is particular to the composer is that it has to answer in two stages.
+### Which button is held
+
+There are two push-to-talk buttons on a phone and they are not equally good.
+
+The microphone beside the message box is where the feature started, and it has
+one fault no layout can fix: a thumb held still on glass does not stay still.
+The hand moves while the sentence is being thought out, the press ends somewhere
+outside the button, and the recording stops mid-word. A volume key has an edge a
+finger can feel, and a hold on one survives the hand moving.
+
+So `src/talk.ts` is the choice — the button, the volume keys, or both — and it is
+a preference of the **device**, like the level of detail and the hidden threads.
+It travels in no command and no daemon hears it. The settings screen offers the
+three rows and nothing else reads the mode.
+
+`button` is the default and that is deliberate. While covey holds the keys they
+do not change the volume, and a volume rocker that has stopped working is not a
+thing to hand somebody who never asked for it. Two rules keep the cost bounded:
+
+- **The keys are taken only while a composer is on screen.** The composer arms
+  them as it mounts and gives them back as it goes, so the rocker works on the
+  thread list, in the settings and over a picture.
+- **A build that cannot read them keeps the button.** `talkButton` says so for
+  every mode, because a bundle arrives over the air and a binary does not: today's
+  JavaScript runs in whatever app is installed, and an app built before
+  `modules/covey-keys` existed would otherwise paint nothing and listen to
+  nothing. The settings screen says which install fixes it.
+
+Covey takes *either* key. Nothing else on this phone wants a hardware button
+yet, so there is no second gesture to tell them apart for.
+
+`modules/covey-keys` is how a key press reaches JavaScript at all. An Expo
+module has no activity and cannot see one; a `ReactActivityHandler` can, and
+`expo-modules-core` offers `onKeyDown` and `onKeyUp` on it for exactly this —
+every handler is asked, and the first that answers true consumes the event, so
+`PhoneWindow` never sees the key and neither the volume nor its slider moves.
+Three things about that module are load-bearing:
+
+- **Autolinking finds the handler by the file's name and its import.** A file
+  ending `Package.kt` that imports `expo.modules.core.interfaces.Package` is
+  added to `ExpoModulesPackageList`. Rename either and the keys go quiet with
+  nothing to say why.
+- **The state is an `object`, not the module.** The handler is built with the
+  activity, long before JavaScript runs, and the module is replaced on every
+  reload. `CoveyKeys` is the one thing that outlives both, and it releases the
+  keys when the module goes.
+- **It fails open.** No listener means no consumption. A press covey misses is a
+  sentence said twice; a press covey eats with nothing behind it is a phone whose
+  volume keys have stopped working.
+
+What a press and a release *mean* is `keyHold` in `src/talk.ts`, pure and
+node-tested, because every case it holds needs a hand on a phone to make. Covey
+offers both keys, so a squeeze of the rocker is two presses and two releases for
+one hold. A release of a key covey never saw pressed does nothing, or the key
+that dismissed a dialog would end a dictation the button started. And a press
+that arrives while nothing is being held starts from an empty hand, because
+Android can take a release away — a dialog with the focus, or the app going to
+the background — and a key left down for ever would cost the reader every later
+hold.
+
+### A hold lasts until the reader lets go
+
+Not until they pause. A person thinking a sentence out loud stops for longer
+than any endpointer waits, and Android ended the utterance two seconds into the
+pause and dropped the rest of the sentence.
+
+Two seconds is not a number covey chose: `expo-speech-recognition` writes it
+whenever a recording is persisted, because persisting one puts the recogniser in
+Android's **segmented session** mode and that mode needs a silence to end on. So
+`useDictation` widens it, with the `androidIntentOptions` the module applies
+after its own — `COMPLETE_SILENCE` is the one the session ends on, and
+`POSSIBLY_COMPLETE_SILENCE` goes with it because that is the endpointer cutting
+a pause off mid-sentence. Both are `MAX_RECORDING_MS`.
+
+Four things follow, and the first two are what a three-minute hold costs that a
+two-second one did not:
+
+- **Nothing between the press and the recording may be awaited.** Android puts
+  its permission dialog up inside such an await, the dialog takes the focus and
+  the key events, and the release that was meant to end the hold never arrives —
+  so the recording starts with nobody holding it. `stop()` cannot save it either:
+  before the recogniser exists the module posts `stopListening` to a recogniser
+  it has not built, which does nothing and emits no event. So the permission is
+  read once at mount, and a hold that still has to ask for it records nothing and
+  says *hold again*.
+- **A hold covey ended is not sent.** The cap is reached by a key against a table
+  far more often than by a sentence, and uploading three minutes of a pocket over
+  a mobile link is exactly what `MAX_RECORDING_MS` was written to prevent. The
+  reader keeps the words this phone made of it, which is what that constant has
+  always promised. The refusal in `phoneRecording` is the net under that rule and
+  not the rule itself: it catches a timer that did not fire, or samples from
+  another caller.
+- **A hold may be several segments.** Android reports a segment as final and goes
+  on listening, and each one carries its own words rather than the sentence so
+  far. They are kept and joined. Replace the last instead and a reader who paused
+  for breath watches their first sentence vanish when the second arrives — and a
+  recogniser that re-sends the whole utterance instead stands in their place,
+  because no test behind a microphone can tell which kind a given Android is.
+- **`continuous: true` is not the way to do this, and it looks like it.** With a
+  recording it keys the segmented session on the audio *source*, whose only end
+  is the recorder closing — which `stop()` does not do. The hold would never
+  settle.
+
+A recogniser may ignore the silence extras; Android says so. The floor is the
+behaviour before this change — the hold ends at that recogniser's own silence —
+so nothing breaks, it just stops listening early. That is one of the two things
+on this page a browser cannot show.
+
+### Two stages, and the words are provisional until the second
 
 The machine answers in about a second, and a dictation that shows nothing for a
 second reads as a microphone that is not working. So the phone's own recogniser
@@ -222,9 +330,13 @@ something goes wrong:
   not write, and a service that failed all settle on them. A failure says so as
   well, because a reader whose words came from the worse of the two recognisers
   should be able to tell which one wrote them.
-- **The button has three states.** Resting, listening, and the machine writing
-  it out. A button that went back to rest at the second one says the dictation
-  is over while the sentence is still about to change.
+- **There are three states and not two.** Resting, listening, and the machine
+  writing it out. Anything that went back to rest at the second one says the
+  dictation is over while the sentence is still about to change. The button
+  paints all three; with the keys holding the gesture there is no button to turn
+  red, so the composer paints the same three in the same place as a reading
+  instead — and only while there is something to say, because a shape that looks
+  like a button and is not one is worse than a gap.
 
 It records with `recordingOptions.persist`, which is what gives the machine
 something to be asked about: the module writes the one shape covey carries

@@ -206,6 +206,7 @@ export function ThreadScreen({ route, navigation }: Props) {
         tags={tags}
         attaching={s.attaching}
         busy={busy}
+        talk={store.talk}
         onDraft={(t) => store.setDraft(machine, threadId, t)}
         onSend={store.send}
         onInterrupt={store.interrupt}

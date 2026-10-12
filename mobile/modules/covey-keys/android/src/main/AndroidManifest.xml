@@ -1,0 +1,11 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    Nothing to declare, and that is the point.
+
+    To read a key the app's own activity already received needs no permission
+    and no component: the volume keys reach `ReactActivity.onKeyDown` like any
+    other key, and this module only answers whether covey took one. The
+    manifest is here because an Android library wants one, not because this
+    module asks Android for anything.
+  -->
+</manifest>
