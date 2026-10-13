@@ -3,19 +3,35 @@
     What a foreground service costs, declared.
 
     Android stops a background app from receiving Bluetooth scan results while
-    the screen is off. That is the restriction that makes the device unreachable
-    with a locked phone, and a foreground service is the mechanism Android
-    offers for lifting it: the app keeps running, scanning works, and the link
-    is held.
+    the screen is off, suspends a cached app's network in Doze, and kills the
+    process when the app is swiped away. Those are what make the device
+    unreachable and a notification undeliverable with a locked phone, and a
+    foreground service is the mechanism Android offers for lifting them.
 
-    `connectedDevice` is the type, and from Android 14 both the type and its own
-    permission must be declared or `startForeground` throws. POST_NOTIFICATIONS
-    is asked for at run time on Android 13 and later; without it the service
-    still runs, but its notification is invisible, and a reader should be able
-    to see what is holding their radio open.
+    The type is `specialUse`, and the reason it is not `connectedDevice` is
+    worth keeping. From Android 14 a type also requires the app to *hold* one of
+    that type's prerequisite permissions, and `connectedDevice` asks for one of
+    the Bluetooth, Wi-Fi, NFC or USB permissions. The reader grants the
+    Bluetooth ones when they turn the *device* on — so a reader who turns
+    notifications on and owns no device holds none of them, and `startForeground`
+    threw `SecurityException` out of `onStartCommand` and closed the app. That
+    is the common case for notifications, and it was reproduced on an API 35
+    emulator.
+
+    `specialUse` is also the more honest word. This service holds no Bluetooth
+    and no socket: it keeps covey's own process alive, which is a use Android's
+    list does not have a name for, and `specialUse` is the category it offers
+    for exactly that. Its permission is a normal one, granted at install, so the
+    throw cannot come back. The types with no such prerequisite that do have a
+    name — `dataSync` — are the two Android 15 caps at six hours a day, which
+    would be a feature that stops working in the evening.
+
+    POST_NOTIFICATIONS is asked for at run time on Android 13 and later; without
+    it the service still runs, but its notification is invisible, and a reader
+    should be able to see what is holding their phone awake.
   -->
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
   <application>
@@ -23,6 +39,15 @@
       android:name="farm.dylan.covey.link.CoveyLinkService"
       android:enabled="true"
       android:exported="false"
-      android:foregroundServiceType="connectedDevice" />
+      android:foregroundServiceType="specialUse">
+      <!--
+        Android 14 and later want the use spelled out in words as well as in a
+        type. This string is read by a person reviewing the app, and it is the
+        whole of what the service does.
+      -->
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Keeps covey connected to the machines you added, so your device stays reachable and a thread that needs you can say so while the screen is off." />
+    </service>
   </application>
 </manifest>

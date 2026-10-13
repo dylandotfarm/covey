@@ -29,19 +29,22 @@ import { AppState } from "react-native";
 import { applyDrop, coveyCommand, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
 import {
   APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type GitHubAction, type Lod, type MachineInfo,
-  type PeerMachine, type QuestionItem,
+  type PeerMachine, type QuestionItem, type Thread,
 } from "@covey/protocol";
 import {
   addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState,
   openView, pendingAttachments, pendingBytes, primaryMachine, sendableAttachments, setPendingAttachments,
-  syncAttachments, type MachineSlot, type SheetTarget, type State,
+  syncAttachments, type MachineSlot, type SheetTarget, type State, type View,
 } from "@covey/web";
 import { attachingLabel, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
-import { forgetMachine, readLod, readMachines, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
+import { forgetMachine, readLod, readMachines, readNotifyWanted, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveNotifyWanted, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
 import { asTalk, DEFAULT_TALK, type TalkMode } from "./talk";
 import { shrinkOnDevice } from "./attach";
 import { primeUpdateToken } from "./ota";
 import { sheetCommand } from "./sheet";
+import { noteFor, noteId } from "./notes";
+import { askNotes, dismissNote, notesAvailable, notesGranted, postNote, startNotes } from "./notify";
+import { holdLinkService, releaseLinkService } from "../modules/covey-link";
 
 /** How long a notice stays on screen before it goes, in milliseconds. */
 const NOTICE_MS = 4000;
@@ -88,6 +91,39 @@ class Store {
    * would ever read it.
    */
   talk: TalkMode = DEFAULT_TALK;
+  /**
+   * Whether this device asked to be told when a thread needs the reader.
+   *
+   * Here and not on `State` for the same reason `talk` is: the page cannot
+   * notify anybody, so nothing in `@covey/web` would ever read it.
+   */
+  notify = false;
+  /** False when Android is refusing to show them, which the switch must say. */
+  notesAllowed = notesAvailable;
+  /**
+   * True while the app is the screen in front of the reader.
+   *
+   * A notification about the conversation they are reading is noise, and a
+   * conversation left open behind a locked screen is one nobody is reading —
+   * so this is half of that decision and `notes.ts` holds the rest.
+   */
+  private active = true;
+  /**
+   * The thread each conversation was in when covey last read it for news.
+   *
+   * Its own map, rather than `slot.threads`, because that one is written by two
+   * streams: a thread's own subscription applies `thread.updated` to it as well
+   * (`applyThreadEvent`). For the conversation the reader has open — the one
+   * case where both streams carry the same change — whichever arrived first
+   * would leave the two sides of the comparison identical, and the news would
+   * be lost. That is the case that matters most, too: a thread left open behind
+   * a locked screen is exactly the one a reader wants to hear about.
+   */
+  private readonly seen = new Map<string, Thread>();
+  /**
+   * The view a snapshot is in flight for, so the retry below cannot ask twice.
+   */
+  private watching: View | null = null;
 
   // ---- what React subscribes to ------------------------------------------
 
@@ -142,6 +178,11 @@ class Store {
     this.state.lod = asLod(await readLod()) ?? DEFAULT_LOD;
     this.state.showHidden = await readShowHidden();
     this.talk = asTalk(await readTalk()) ?? DEFAULT_TALK;
+    this.notify = await readNotifyWanted();
+    // The channel and the handler are made whatever the switch says, because
+    // the reader may turn it on later and a channel cannot be made in the
+    // moment there is something to say. The permission is only read.
+    this.settleNotes(await startNotes());
     this.saved = await readMachines();
     for (const [i, m] of this.saved.entries()) {
       const token = await readToken(m.url);
@@ -152,10 +193,21 @@ class Store {
     }
     this.loaded = true;
     this.schedule();
+    // Every machine this device has is now dialled, so a conversation opened
+    // before any of them were can be told that its own is not among them.
+    this.watchView();
     // A phone that slept dropped its sockets, and each client has a budget of
     // dials it may have spent. The reader coming back is the reason to spend
     // more — the page watches `visibilitychange` for the same thing.
-    AppState.addEventListener("change", (s) => { if (s === "active") this.retry(); });
+    AppState.addEventListener("change", (s) => {
+      this.active = s === "active";
+      if (s !== "active") return;
+      this.retry();
+      // Read again rather than once at launch: the permission can be taken
+      // away in Android's own settings while covey is in the background, and a
+      // switch that still read as on would promise something nothing shows.
+      if (this.notify) void notesGranted().then(this.settleNotes);
+    });
   };
 
   /** Dial one machine and bind its events to its slot. */
@@ -174,9 +226,33 @@ class Store {
         // A fleet member is not asked: it came from a fleet list already, and
         // the machines it would name are the ones this daemon just named.
         if (s === "connected" && this.saved.some((x) => x.url === slot.key)) this.askAccess(client, slot.primary);
+        // A conversation opened before this machine answered — the tap that
+        // launched the app, or the device's pick — is still waiting for it.
+        if (s === "connected") this.watchView();
+        // And a machine that has stopped trying owes it a sentence. `watchView`
+        // waits for `connected`, so without this the view keeps the spinner it
+        // opened with and says nothing at all: a client that runs out of its
+        // dial budget settles on `offline` and nothing comes back. A tap on a
+        // notification is exactly how a reader gets there — the phone slept,
+        // the socket went, and the machine that posted the row is a laptop that
+        // is now shut.
+        if (s === "offline" || s === "error") this.failView(slot);
       },
-      shellSnapshot: (snap) => { applyShellSnapshot(slot, snap); this.schedule(); },
-      shellEvent: (ev) => { applyShellEvent(this.state, slot, ev); this.schedule(); },
+      shellSnapshot: (snap) => {
+        applyShellSnapshot(slot, snap);
+        // Nothing in a snapshot is news. It is every thread the machine has, so
+        // a first connection or a reconnect after a sleep would otherwise
+        // announce an hour of history the list already shows. Seeding the
+        // record is what makes that silence a rule rather than an accident.
+        for (const t of snap.threads) this.seen.set(composerKey(slot.key, t.id), t);
+        this.schedule();
+      },
+      shellEvent: (ev) => {
+        applyShellEvent(this.state, slot, ev);
+        if (ev.kind === "thread.upserted") this.tell(slot, ev.thread);
+        if (ev.kind === "thread.removed") this.seen.delete(composerKey(slot.key, ev.threadId));
+        this.schedule();
+      },
       shellSynchronized: () => this.schedule(),
       threadEvent: (threadId, ev) => { if (applyThreadEvent(this.state, slot.key, threadId, ev)) this.schedule(); },
       threadSynchronized: () => this.schedule(),
@@ -252,6 +328,9 @@ class Store {
     client?.stop();
     this.clients.delete(url);
     this.state.machines.delete(url);
+    // The news this machine's threads were measured against goes with it, or a
+    // machine added again would have an old thread to compare its first event to.
+    for (const key of [...this.seen.keys()]) if (key.startsWith(`${url}:`)) this.seen.delete(key);
     if (this.state.view?.machine === url) this.state.view = null;
     if (this.state.item?.machine === url) this.state.item = null;
     await forgetMachine(url);
@@ -296,24 +375,76 @@ class Store {
     return made ? made.then(run) : Promise.resolve(run());
   };
 
-  /** Put a thread on screen. A screen calls this when it is focused. */
+  /**
+   * Put a thread on screen. A screen calls this when it is focused.
+   *
+   * **The machine does not have to be there yet.** The view opens either way
+   * and `watchView` subscribes it when its daemon can answer, because the
+   * caller is not always a reader tapping a row that is already on screen: a
+   * notification that *launched* the app navigates before `start()` has dialled
+   * anything, and the device's own pick (`device/bridge.ts`) comes through the
+   * same door. This used to return here with no view at all, and the screen
+   * that opened then painted "Nothing here yet. Send the first message." over a
+   * conversation the daemon held every word of, with no way back but to leave
+   * and tap the row again.
+   */
   showThread = (machine: string, threadId: string): void => {
-    const client = this.clients.get(machine);
-    if (!client) return;
+    // Opening the conversation answers whatever covey put in the shade about
+    // it, so the row goes. Before the early return below, because the reader
+    // may be coming back to the thread they already had open.
+    void dismissNote(noteId(machine, threadId));
     if (this.state.view?.machine === machine && this.state.view.threadId === threadId) return;
     if (this.state.view) void this.clients.get(this.state.view.machine)?.unwatchThread();
-    const v = openView(this.state, machine, threadId);
+    openView(this.state, machine, threadId);
     this.schedule();
-    this.whenMade(machine, threadId, () => {
+    this.watchView();
+  };
+
+  /**
+   * Ask for the open conversation's transcript, if its machine can answer.
+   *
+   * Called when a view opens, when any machine connects, and once the saved
+   * machines have been read — the three moments at which the answer can change.
+   * Everything it needs is on the view, so there is no "wanted thread" to keep
+   * anywhere: what the reader is looking at *is* the record.
+   *
+   * A view that already has its transcript asks for nothing. A reconnect
+   * re-opens the subscription inside the client (`resubscribe`), so only a view
+   * that was never answered — still loading, or holding the error of a machine
+   * that was not there — has anything to gain here.
+   */
+  private watchView = (): void => {
+    const v = this.state.view;
+    if (!v || this.watching === v) return;
+    if (!v.loading && !v.error) return;
+    const client = this.clients.get(v.machine);
+    if (!client) {
+      // Before the saved machines are read, this is a conversation opened ahead
+      // of its own dial. After, it is a machine this device does not have, and
+      // the reader is owed that sentence rather than a view that spins.
+      if (this.loaded) { v.loading = false; v.error = `no machine at ${v.machine} on this device`; this.schedule(); }
+      return;
+    }
+    // A client with no socket rejects an rpc at once with "not connected", so
+    // asking now would paint that as the conversation's error. The `connected`
+    // callback in `dial` comes back here instead.
+    if (client.state !== "connected") return;
+    this.watching = v;
+    v.loading = true;
+    v.error = null;
+    this.schedule();
+    this.whenMade(v.machine, v.threadId, () => {
       // The reader may have left while the worktree was being made, and a
       // subscription nobody is reading is a transcript sent for nothing.
       if (this.state.view !== v) return null;
-      return client.watchThread(threadId);
+      return client.watchThread(v.threadId);
     }).then((snap) => {
+      if (this.watching === v) this.watching = null;
       if (!snap || this.state.view !== v) return; // the reader moved on
       applyThreadSnapshot(v, snap);
       this.schedule();
     }).catch((e: Error) => {
+      if (this.watching === v) this.watching = null;
       if (this.state.view === v) { v.loading = false; v.error = e.message; this.schedule(); }
     });
   };
@@ -322,6 +453,7 @@ class Store {
   leaveThread = (): void => {
     if (!this.state.view) return;
     void this.clients.get(this.state.view.machine)?.unwatchThread();
+    if (this.watching === this.state.view) this.watching = null;
     this.state.view = null;
     this.schedule();
   };
@@ -567,6 +699,79 @@ class Store {
     void saveTalk(mode);
     this.schedule();
   };
+
+  /**
+   * Whether this device is told when a thread needs the reader.
+   *
+   * A preference of the device, beside the three above, and the only one with a
+   * cost outside the app: turning it on asks Android for the permission — with
+   * the question in front of the reader who just asked for the feature — and
+   * holds the process alive, because a socket frozen in Doze hears nothing to
+   * tell anybody about.
+   */
+  setNotify = async (on: boolean): Promise<void> => {
+    this.notify = on;
+    void saveNotifyWanted(on);
+    this.schedule();
+    this.settleNotes(on ? await askNotes() : this.notesAllowed);
+  };
+
+  /**
+   * Hold the process for the watch, or let it go, after anything that could
+   * have changed either half of the answer.
+   *
+   * Nothing is held for notifications Android will not show: a reader who
+   * refused the permission would otherwise pay a row in the shade and a process
+   * that never sleeps for news that is never delivered.
+   */
+  private settleNotes = (allowed: boolean): void => {
+    this.notesAllowed = allowed;
+    if (this.notify && allowed) holdLinkService("watch");
+    else releaseLinkService("watch");
+    this.schedule();
+  };
+
+  /**
+   * Say that the conversation on screen is waiting for a machine that has given
+   * up, in that machine's own words.
+   *
+   * Only a view that is still unanswered: one with its transcript keeps it, and
+   * the client re-opens the subscription itself when the machine comes back.
+   * The thread screen paints no connection state of its own, so this line is
+   * the only place the reader can read what happened.
+   */
+  private failView = (slot: MachineSlot): void => {
+    const v = this.state.view;
+    if (!v || v.machine !== slot.key || !v.loading) return;
+    if (this.watching === v) this.watching = null;
+    v.loading = false;
+    v.error = slot.connError ? `${slot.name}: ${slot.connError}` : `${slot.name} is not answering`;
+    this.schedule();
+  };
+
+  /**
+   * Tell the reader, when this one change is worth telling them.
+   *
+   * `noteFor` decides and this only carries it out, against the thread covey
+   * last read rather than against the one in the machine's own map — see
+   * `seen` for why those are not the same thing.
+   */
+  private tell(slot: MachineSlot, next: Thread): void {
+    const key = composerKey(slot.key, next.id);
+    const prev = this.seen.get(key);
+    this.seen.set(key, next);
+    // A thread covey has never read is a thread with no change to report. The
+    // record is kept whatever the switch says, so turning notifications on does
+    // not make the next event read as the first.
+    if (!prev || !this.notify || !this.notesAllowed) return;
+    const act = noteFor({
+      machine: slot.key, machineName: slot.name, prev, next,
+      foreground: this.active, open: this.state.view,
+    });
+    if (!act) return;
+    if (act.act === "post") void postNote(act.note);
+    else void dismissNote(act.id);
+  }
 
   /** The level of detail this device reads a transcript at (#149). */
   setLod = (lod: Lod): void => {

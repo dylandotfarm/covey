@@ -45,8 +45,11 @@ import type { ExpoConfig } from "expo/config";
  * the device (#178); `0.4.0` is `modules/covey-link`, the foreground service
  * that keeps that radio alive while the screen is off (#184); `0.5.0` is
  * `modules/covey-keys`, which reads the volume keys so a reader can hold one to
- * talk. Every one of them is native code, and a bundle that calls one cannot
- * run in an app built without it. Moving this moves the runtime version, so a
+ * talk; `0.6.0` is `expo-notifications`, so covey can tell a reader that a
+ * thread needs them — and the same bump carries `covey-link`'s own change,
+ * since that service is now held for a reason and its `hold` takes one. Every
+ * one of them is native code, and a bundle that calls one cannot run in an app
+ * built without it. Moving this moves the runtime version, so a
  * `0.2.0` install is offered nothing further — `updates.ts` in the daemon
  * answers it `noUpdateAvailable` rather than a manifest it could not use. That
  * is the protection working, and the cost is one sideload.
@@ -55,7 +58,7 @@ import type { ExpoConfig } from "expo/config";
  * time.** A JavaScript change ships over the air and wants no bump; a bump
  * strands every installed app until somebody installs the new one by hand.
  */
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 
 const updatesUrl = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL?.trim();
 /** The certificate is committed; the private key that matches it is not. */
@@ -69,8 +72,23 @@ export default (): ExpoConfig => ({
   orientation: "default",
   scheme: "covey",
   userInterfaceStyle: "dark",
+  /*
+   * covey's own mark, which the page has installed with since it was
+   * installable: `packages/web/static/icon.svg`. These PNGs are rendered *from*
+   * that file by `scripts/icons.mjs` rather than drawn again, so there is one
+   * covey mark and not two that drift. Run that script when the mark changes;
+   * the output is committed, because prebuild and gradle both want it on disk.
+   */
+  icon: "./assets/icon.png",
   android: {
     package: "io.github.dylandotfarm.covey",
+    // Android masks the foreground to a shape of the device's choosing and
+    // promises only its middle two thirds, so the birds are drawn inside that
+    // and the ground is this colour rather than part of the image.
+    adaptiveIcon: {
+      foregroundImage: "./assets/adaptive-icon.png",
+      backgroundColor: "#121212",
+    },
   },
   // `appVersion` keys an update to the binary's own version, so a bundle built
   // against newer native modules can never land in an older app. Change
@@ -114,6 +132,22 @@ export default (): ExpoConfig => ({
     // and wants `neverForLocation` on the scan, which is true here — covey
     // looks for one service and reads no advertisement it did not come for.
     ["react-native-ble-plx", { isBackgroundEnabled: false, neverForLocation: true }],
+    /*
+      Notifications, which is the reason an app is worth having over the page.
+      They are *local*: covey hears a thread change on the socket it already
+      holds and posts the row itself, so there is no push service, no Firebase
+      project and no token — `src/notify.ts` never asks for one, and nothing
+      about a reader's threads leaves their tailnet. The plugin is here for what
+      it writes into the manifest, including the Android 13 POST_NOTIFICATIONS
+      permission that `askNotes` then asks for at run time.
+    */
+    ["expo-notifications", {
+      // Android throws a notification icon's colour away and tints what the
+      // alpha leaves, so this one is the mark in white — a coloured image
+      // arrives as a featureless blob, which is what the first build shipped.
+      icon: "./assets/notification-icon.png",
+      color: "#7c87ff",
+    }],
     "expo-system-ui",
     "expo-image",
     "expo-video",

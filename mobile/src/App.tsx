@@ -4,14 +4,15 @@
  * Providers, the stack, and the one call that starts the store. Everything else
  * is a screen.
  */
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { StatusBar } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
-import { DarkTheme, NavigationContainer } from "@react-navigation/native";
+import { DarkTheme, NavigationContainer, createNavigationContainerRef } from "@react-navigation/native";
 import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { store } from "./store";
 import { primeUpdateToken } from "./ota";
+import { onNoteTap } from "./notify";
 import { loadIconFont } from "./Icon";
 import { T } from "./theme";
 import type { Routes } from "./nav";
@@ -25,6 +26,15 @@ import { AddMachineScreen } from "./screens/AddMachineScreen";
 import { SheetScreen } from "./screens/SheetScreen";
 
 const Stack = createNativeStackNavigator<Routes>();
+
+/**
+ * The stack, reachable from outside React.
+ *
+ * One caller: a tap on a notification, which arrives from Android rather than
+ * from a component — and may arrive before there is a component at all, when
+ * the tap is what started the app.
+ */
+const navigation = createNavigationContainerRef<Routes>();
 
 /** covey's own palette over React Navigation's dark theme. */
 const theme = {
@@ -41,6 +51,8 @@ const theme = {
 };
 
 export function App() {
+  const untap = useRef<(() => void) | null>(null);
+
   useEffect(() => {
     // Dial what this device remembers, then tell `expo-updates` the token for
     // the machine that serves bundles. In that order: the token comes from the
@@ -49,6 +61,7 @@ export function App() {
     // that asks for it on mount draws nothing until it lands.
     loadIconFont();
     void store.start().then(primeUpdateToken);
+    return () => { untap.current?.(); untap.current = null; };
   }, []);
 
   return (
@@ -61,7 +74,22 @@ export function App() {
         */}
         <ErrorBoundary>
         <StatusBar barStyle="light-content" backgroundColor={T.surface} />
-        <NavigationContainer theme={theme}>
+        <NavigationContainer
+          ref={navigation}
+          theme={theme}
+          /*
+            The tap is registered here rather than in an effect, because the
+            first one covey hears about may be the tap that *launched* the app:
+            Android hands it over at startup and `onNoteTap` reports it at once.
+            `onReady` is the moment there is a stack to navigate; an effect runs
+            in the same commit as the navigator and has no such promise.
+          */
+          onReady={() => {
+            untap.current ??= onNoteTap((to) => {
+              if (navigation.isReady()) navigation.navigate("Thread", to);
+            });
+          }}
+        >
           <Stack.Navigator
             screenOptions={{
               headerStyle: { backgroundColor: T.surface },

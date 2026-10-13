@@ -121,6 +121,24 @@ export async function saveTalk(mode: string): Promise<void> {
   await AsyncStorage.setItem(TALK_KEY, mode).catch(() => {});
 }
 
+/**
+ * Whether the reader asked to be told when a thread needs them.
+ *
+ * A preference of the device, beside the others, and the only one that costs
+ * something while the app is closed: it holds the process alive so the socket
+ * is there to hear the news. Off until somebody asks, like the device switch
+ * above it and for the same reason.
+ */
+const NOTIFY_KEY = "covey.notify";
+
+export async function readNotifyWanted(): Promise<boolean> {
+  try { return (await AsyncStorage.getItem(NOTIFY_KEY)) === "1"; } catch { return false; }
+}
+
+export async function saveNotifyWanted(on: boolean): Promise<void> {
+  await AsyncStorage.setItem(NOTIFY_KEY, on ? "1" : "0").catch(() => {});
+}
+
 /** Whether the reader asked covey to look for a device (#178). */
 const DEVICE_KEY = "covey.device";
 

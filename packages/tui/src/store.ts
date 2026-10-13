@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import type { RpcMethodName, RpcMethods, BuildInfo, PeerMachine, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals, TerminalEvent } from "@covey/protocol";
-import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsFinished, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
+import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
-import { DEFAULT_FLEET, MachineClient, cleanFleet, coveyCommand, fleetKey, fleetOf, fleetScope, isDefaultFleet, projectPool, sortFleets, type ClientOptions, type ConnState } from "@covey/client";
+import { DEFAULT_FLEET, MachineClient, cleanFleet, coveyCommand, fleetKey, fleetOf, fleetScope, isDefaultFleet, projectPool, sortFleets, threadNews, type ClientOptions, type ConnState } from "@covey/client";
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
@@ -777,25 +777,25 @@ export class Store {
     this.touchFromMachine();
   }
 
-  /** Bell + notice when a background thread needs you or finishes. */
+  /**
+   * Bell + notice when a background thread needs you or finishes.
+   *
+   * What counts as news is `threadNews` in `@covey/client`, which the phone
+   * reads as well — a thread this client calls done and the phone says nothing
+   * about is one reader with two answers. What is left here is what a terminal
+   * does with the answer: the mark on the row, the bell, and the one line.
+   */
   private noticeTransition(ms: MachineState, prev: Thread, next: Thread) {
-    const key = `${ms.key}:${next.id}`;
-    const nowWaiting = (next.pendingApprovals > 0 || next.status === "waiting") && !(prev.pendingApprovals > 0 || prev.status === "waiting");
-    const turnEnded = prev.latestTurn?.state === "running" && next.latestTurn?.state === "completed";
-    const nowDone = turnEnded && threadIsFinished(next);
-    const nowError = prev.latestTurn?.state === "running" && next.latestTurn?.state === "error";
-    const who = () => `${next.title.slice(0, 40)} @${ms.info?.name ?? ms.saved.name}`;
-    // A turn that ended into a review did not finish the thread. Covey's own
-    // reviewers are still reading the change and the next turn comes from
-    // them, so the `✓` waits — it says "this is yours again" — and the bell
-    // waits with it, because there is nothing here for the reader to do. Say
-    // what is happening instead: a background thread that falls silent with
-    // no word reads as stalled, which is what the mark on the row is for.
-    if (turnEnded && !nowDone && !nowWaiting && !nowError) { this.notify(`under review: ${who()}`); return; }
-    if (!nowWaiting && !nowDone && !nowError) return;
-    this.state.attention.set(key, nowWaiting ? "approval" : nowError ? "error" : "done");
+    const news = threadNews(prev, next);
+    if (!news) return;
+    const who = `${next.title.slice(0, 40)} @${ms.info?.name ?? ms.saved.name}`;
+    // News that marks nothing is news the reader cannot act on — a turn that
+    // ended into a review. It gets the line and not the bell, because silence
+    // would read as a thread that stalled.
+    if (!news.mark) { this.notify(`${news.lead}: ${who}`); return; }
+    this.state.attention.set(`${ms.key}:${next.id}`, news.mark);
     if (!this.config.prefs.quiet) process.stdout.write("\x07");
-    this.notify(nowWaiting ? `needs approval: ${who()}` : nowError ? `failed: ${who()}` : `done: ${who()}`, nowWaiting ? "info" : nowError ? "error" : "success");
+    this.notify(`${news.lead}: ${who}`, news.mark === "error" ? "error" : news.mark === "done" ? "success" : "info");
   }
 
   /** A running update is worth a line even when its panel is closed. */

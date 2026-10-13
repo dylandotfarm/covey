@@ -239,8 +239,60 @@
   with or without them. Every layout bug this client has had is one a look would have
   caught. `pnpm run export` is the integration test that matters and CI runs it,
   because it is the only thing that proves Metro still resolves the three shared packages
-  from outside the workspace. `docs/MOBILE.md` holds the reasoning and the rules; no APK
-  has been built yet.
+  from outside the workspace.
+  The app **tells the reader when a thread needs them**, which is the one thing a
+  page cannot do and the best reason this client exists. The notifications are
+  *local*: the phone already holds a socket to every machine and a thread's whole
+  state arrives on it as `thread.upserted`, so covey hears the change and posts
+  the row itself — no push service, no Firebase, no token to leak, and a fleet
+  with no route to the internet notifies as well as one with it. **What counts as
+  news is `threadNews` in `@covey/client` and is read by the TUI too**, which
+  rings its bell and marks its row from the same answer; a thread the terminal
+  calls done and the phone says nothing about is one reader with two answers, and
+  that is what the rule living inline in `tui/src/store.ts` had already produced.
+  It reads a *change* and never a state — two threads in, and a client with
+  nothing to compare against says nothing, which is what keeps a reconnect from
+  announcing an hour of history. The phone's own four rules are `src/notes.ts`:
+  the conversation on screen is silent but only while the app is in front,
+  covey's reviewers are silent through `threadIsHidden` (whose third term still
+  lets a blocked one through), a row whose reason has gone comes down, and one
+  row per conversation because the notification id is Android's tag. The socket
+  has to be awake to hear any of it, so `modules/covey-link` is now **held for
+  reasons and stopped when the last is released** — the device and the watch are
+  separate switches and neither may take the other's service down, so the set and
+  the words both live in `CoveyLinkService`. Its type is **`specialUse`** and must
+  not go back to `connectedDevice`: from Android 14 a type is checked against the
+  permissions the app *holds*, and that one wants Bluetooth or Wi-Fi — which the
+  reader grants for the device and not for notifications, so the ordinary case
+  threw `SecurityException` out of `onStartCommand` and closed the app (seen on an
+  API 35 emulator; Android 11 has no such check, which is why the test phone could
+  not). `specialUse` needs a normal permission and a subtype property, and names
+  what the service actually does: it holds covey's process. `dataSync` is the
+  other way out and is what Android 15 caps at six hours a day. `startForeground`
+  is wrapped whatever the type, because a refusal must cost the background and
+  never the launch.
+  A tap on a notification navigates **before `store.start()` has dialled
+  anything** — `onReady` is inside the navigator's own mount effect and React
+  runs a child's effects first — so two rules hold and each is one line from
+  being undone. `showThread` never refuses: it opened no view when the machine
+  was not in `clients` and the screen painted "Nothing here yet" over a
+  conversation the daemon held whole. And *subscribing* is a separate decision
+  `watchView` makes again at each moment the answer can change — a view opening,
+  a machine connecting, a machine giving up, and the saved machines being read —
+  because a client with no socket rejects an rpc at once with `not connected`, a
+  client out of dials settles on `offline` and calls nobody back, and a machine
+  this device does not have must be told from one still being dialled
+  (`store.loaded`). The client's own half is `openThreadSub`, which opens **one
+  subscription per thread per socket**: `setState("connected")` is raised before
+  `resubscribe` is awaited, so a caller that watches a thread from the state
+  callback races `resubscribe`'s own re-open, and the loser was orphaned for the
+  life of the socket — every item of that conversation pushed and painted twice. The channel is made at `HIGH`, and
+  that is a decision with one chance — a channel's settings are fixed when it
+  first exists on a device. `expo-notifications` is native, so the runtime version
+  moved to `0.6.0` and every install needs one more sideload; `covey-link`'s
+  `hold` now takes an argument, which is exactly what `covey-keys`' `build.gradle`
+  warns about, so that module moved to `expo-module-gradle-plugin` in the same
+  change. `docs/MOBILE.md` holds the reasoning and the rules.
 - `firmware/` is the covey device (#178), a Waveshare ESP32-S3 1.54inch e-Paper
   board: 200x200, two buttons, an ES8311 microphone, ESP-IDF 5.5 and its own
   toolchain outside both the pnpm and the cargo workspace. It is a *peripheral

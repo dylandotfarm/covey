@@ -25,6 +25,8 @@ import { SIZE, T } from "../theme";
 import { Button, Dot, Notice, Pill, Row, S, SectionTitle, useContentInsets } from "../ui";
 import { applyUpdate, fetchUpdate, updateInconsistency, updateMachineName, updateStatus, updatesEnabled, type UpdateStatus } from "../ota";
 import { talkNote, TALK_LABEL, TALK_ORDER, type TalkMode } from "../talk";
+import { notifyPanel } from "../notes";
+import { notesAvailable } from "../notify";
 import { volumeKeysAvailable } from "../../modules/covey-keys";
 import type { Routes } from "../nav";
 import { DeviceSection } from "../device/DeviceSection";
@@ -49,6 +51,7 @@ export function SettingsScreen({ navigation }: Props) {
   const [ready, setReady] = useState(false);
   const [otaWord, setOtaWord] = useState<string | null>(null);
   const hidden = hiddenPanel(allThreads(s), s.showHidden);
+  const notes = notifyPanel(store.notify, store.notesAllowed, notesAvailable);
 
   useEffect(() => {
     void updateMachineName().then((name) => setOta(updateStatus(name)));
@@ -186,6 +189,37 @@ export function SettingsScreen({ navigation }: Props) {
               <Text style={[S.subtle, S.grow]}>{talkNote(volumeKeysAvailable)}</Text>
             </Row>
           ) : null}
+        </View>
+
+        {/*
+          The one switch that makes this an app rather than a page: a page
+          cannot wake anybody. The words are `notifyPanel`, which is tested, and
+          the hint names the cost — covey keeps running to hear the news, which
+          Android shows as a row in the shade that cannot be hidden.
+
+          It sits beside the device because the two hold the same service, and
+          the reader can see here that either one of them is what put that row
+          there. The `Switch` owns the tap and the `Row` carries no `onPress`,
+          as the two switches above and below it do: two handlers over one
+          control fire twice under `react-native-web`.
+        */}
+        <SectionTitle text="Notifications" />
+        <View style={S.card}>
+          <Row first>
+            <View style={S.grow}>
+              <Text style={[S.title, { fontWeight: "600" }]}>{notes.label}</Text>
+              <Text style={S.subtle}>{notes.hint}</Text>
+              {notes.warn ? (
+                <Text style={{ color: T.warning, fontSize: SIZE.small }}>{notes.warn}</Text>
+              ) : null}
+            </View>
+            <Switch
+              value={store.notify}
+              onValueChange={(on) => void store.setNotify(on)}
+              trackColor={{ false: T.border, true: T.accent }}
+              thumbColor={T.bg}
+            />
+          </Row>
         </View>
 
         <DeviceSection />

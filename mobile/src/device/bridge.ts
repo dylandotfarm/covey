@@ -35,7 +35,7 @@ import { projectRows } from "@covey/web";
 import { threadIsBusy, type AssistantMessageItem, type TimelineItem } from "@covey/protocol";
 import { store } from "../store";
 import { DeviceLink, type LinkState } from "./ble";
-import { startLinkService, stopLinkService } from "../../modules/covey-link";
+import { holdLinkService, releaseLinkService } from "../../modules/covey-link";
 import { transcribeUtterance } from "./transcribe";
 
 /** One row of the device's menu, and where it actually lives. */
@@ -153,7 +153,7 @@ export class DeviceBridge {
      * it after the scan would mean the first scan runs under the restriction
      * the service exists to lift.
      */
-    this.info.held = startLinkService();
+    this.info.held = holdLinkService("device");
     this.changed();
     await this.link.start();
   }
@@ -162,7 +162,7 @@ export class DeviceBridge {
     this.unsubscribe?.();
     this.unsubscribe = null;
     await this.link.stop();
-    stopLinkService();
+    releaseLinkService("device");
     this.info.held = false;
     this.changed();
   }

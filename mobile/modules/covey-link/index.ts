@@ -1,26 +1,36 @@
 /**
- * The service that keeps the device reachable while the phone is locked (#184).
+ * The service that keeps covey reachable while nobody is looking (#184).
  *
  * Android stops a background app from receiving Bluetooth scan results while
- * the screen is off, and kills the process when the app is swiped away. Either
- * one makes the device unreachable, and the reader sees a button that does
- * nothing. A foreground service is the mechanism Android offers for both.
+ * the screen is off, suspends a cached app's network in Doze, and kills the
+ * process when the app is swiped away. Each of those makes covey unreachable
+ * with a locked phone — the device's talk button does nothing, and a thread
+ * that needs the reader cannot tell them. A foreground service is the mechanism
+ * Android offers for all of it.
  *
- * It holds no Bluetooth of its own. `device/ble.ts` still owns the scan and the
- * connection; this keeps the process they run in alive. The cost is a
- * notification Android will not let covey hide, which is the right trade: a
- * reader should be able to see what is holding their radio open.
+ * It holds no Bluetooth and no socket of its own. `device/ble.ts` owns the scan
+ * and the connection and `store.ts` owns the machines; this keeps the process
+ * they run in alive.
  *
- * Android only. On any other platform these are three calls that answer false,
- * so nothing above has to ask which platform it is on.
+ * **It is held for reasons and released by reason.** Two switches want it — the
+ * device, and notifications — and either may be on without the other, so
+ * neither may turn the service off. The service keeps the set and composes what
+ * its notification says from it; the words are in `CoveyLinkService.text`,
+ * beside the notification they go in.
+ *
+ * Android only. On any other platform these are calls that answer false, so
+ * nothing above has to ask which platform it is on.
  */
 import { requireOptionalNativeModule } from "expo";
 import { Platform } from "react-native";
 
+/** Why covey is holding the process alive. The service knows these words. */
+export type LinkHold = "device" | "watch";
+
 interface CoveyLinkNative {
   isRunning: () => boolean;
-  start: () => boolean;
-  stop: () => boolean;
+  hold: (reason: LinkHold) => boolean;
+  release: (reason: LinkHold) => boolean;
 }
 
 /*
@@ -31,7 +41,7 @@ interface CoveyLinkNative {
  */
 const native = requireOptionalNativeModule<CoveyLinkNative>("CoveyLink");
 
-/** Whether this build can hold the link while the screen is off at all. */
+/** Whether this build can hold the process while the screen is off at all. */
 export const linkServiceAvailable = Platform.OS === "android" && native !== null;
 
 export function linkServiceRunning(): boolean {
@@ -43,19 +53,34 @@ export function linkServiceRunning(): boolean {
   }
 }
 
-export function startLinkService(): boolean {
+/**
+ * Keep the process alive for one reason, and say so in the shade.
+ *
+ * Asking twice for the same reason is one hold: the switch that wants it may be
+ * read again at launch, and Android may restart the service with nothing held.
+ */
+export function holdLinkService(reason: LinkHold): boolean {
   if (!linkServiceAvailable) return false;
   try {
-    return native!.start();
+    return native!.hold(reason);
   } catch {
+    /*
+     * An app built before the service took a reason has `start` and `stop` and
+     * no `hold`, and an Expo module refuses a call it does not define. It
+     * cannot happen through the update channel — a native module moves the
+     * runtime version, so that bundle is never offered to that app — and it
+     * answers the way an older build answers everything here: false, which
+     * reads as "this build cannot hold it", which is true.
+     */
     return false;
   }
 }
 
-export function stopLinkService(): boolean {
+/** Let one reason go. The service stops when it was the last. */
+export function releaseLinkService(reason: LinkHold): boolean {
   if (!linkServiceAvailable) return false;
   try {
-    return native!.stop();
+    return native!.release(reason);
   } catch {
     return false;
   }
