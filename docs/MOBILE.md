@@ -236,11 +236,28 @@ set of reasons lives in `CoveyLinkService`, which is also where the words of its
 notification are: a reader looking at the shade is asking why covey is running,
 and the answer is a list of length one or two.
 
-The type is `connectedDevice` for both reasons. Android's own definition is an
-external device reached over Bluetooth, NFC, IR, USB *or a network connection*,
-and a daemon on the reader's tailnet is the second of those; the two types
-Android 15 caps at six hours a day — `dataSync` and `mediaProcessing` — would
-make this a feature that stops working in the evening.
+The type is `specialUse`, and that is the second thing this change got wrong
+before an emulator said so. `connectedDevice` is the obvious word — Android's
+own definition is an external device reached over Bluetooth, NFC, IR, USB *or a
+network connection* — but from Android 14 a type is checked against the
+permissions the app actually **holds**, and that one wants one of the Bluetooth,
+Wi-Fi, NFC or USB permissions. The reader grants the Bluetooth ones when they
+turn the *device* on, so a reader who turns notifications on and owns no device
+holds none of them: `startForeground` threw `SecurityException` out of
+`onStartCommand`, which is not a feature that fails but an app that closes. On
+the most ordinary path this feature has. Android 11, which the test phone runs,
+has no such check and could not see it.
+
+So the type is the one that describes what this service really does. It holds no
+Bluetooth and no socket — it keeps covey's own process alive, which Android's
+list has no name for, and `specialUse` is the category it offers for exactly
+that. Its permission is a normal one, granted at install, so the check cannot
+come back; the named types that need no permission are `dataSync` and
+`mediaProcessing`, which Android 15 caps at six hours a day and which would make
+this a feature that stops working in the evening. **And `startForeground` is
+wrapped all the same**: a refusal now releases the hold and leaves the app
+standing, because the next version of Android will have a rule covey has not
+read yet, and that must cost the background rather than the launch.
 
 The ongoing row that service puts in the shade is the whole cost of the feature
 and the switch's hint names it rather than leaving a reader to find it. That is

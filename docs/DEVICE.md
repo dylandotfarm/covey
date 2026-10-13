@@ -321,8 +321,15 @@ The channel is `IMPORTANCE_LOW`, so it sits in the shade without making a sound.
 
 From Android 14 the service type must be declared **twice** — in the manifest
 and again in the `startForeground` call — and a mismatch throws rather than
-degrades. `connectedDevice` is the type, with
-`FOREGROUND_SERVICE_CONNECTED_DEVICE` beside it.
+degrades. The type is `specialUse`. It was `connectedDevice`, which reads like
+the right word for a Bluetooth device and is a trap: from Android 14 a type is
+also checked against the permissions the app *holds*, and `connectedDevice`
+wants one of the Bluetooth, Wi-Fi, NFC or USB permissions. The device grants the
+Bluetooth ones — but the same service now holds the process for the phone's
+notifications too, and a reader who turns those on and owns no device holds
+none of them. `startForeground` threw `SecurityException` out of
+`onStartCommand` and closed the app, reproduced on an API 35 emulator. See
+*Hearing it with the screen off* in `docs/MOBILE.md`.
 
 The module is loaded with `requireOptionalNativeModule`, not
 `requireNativeModule`. A bundle delivered over the air can land in an app built

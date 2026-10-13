@@ -10,6 +10,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 
 /**
  * A service that does nothing, on purpose (#184).
@@ -133,7 +134,15 @@ class CoveyLinkService : Service() {
       return START_NOT_STICKY
     }
 
-    startForeground(notification())
+    if (!startForeground(notification())) {
+      // Android refused. Whatever covey was holding the process for, it is not
+      // holding it now, so say so rather than carry on as a service that is not
+      // one — and never let the refusal out, because a throw here is thrown on
+      // the main thread out of `onStartCommand` and closes the app. A feature
+      // that quietly does not work is a bad day; a crash on launch is worse.
+      stop()
+      return START_NOT_STICKY
+    }
     running = true
     // START_STICKY: if Android reclaims the process under memory pressure, it
     // brings the service back. The JavaScript side asks again when it does.
@@ -175,28 +184,36 @@ class CoveyLinkService : Service() {
    *
    * `startForeground` is also the update: called again while the service runs,
    * it replaces the notification, which is how the text follows the reasons.
+   *
+   * It answers whether Android allowed it, and **never throws**. From Android
+   * 14 a foreground service type is checked against the permissions the app
+   * actually holds, and a refusal arrives as a `SecurityException` on the main
+   * thread inside `onStartCommand` — which is an app that closes rather than a
+   * feature that fails. The type is `specialUse` so that check should pass
+   * whatever else the reader has allowed (see the manifest), and this is the
+   * net under that: an Android with a rule covey has not met yet must cost the
+   * background and not the app.
    */
-  private fun startForeground(notification: Notification) {
-    /*
-     * From Android 14 the type must be given here as well as in the manifest,
-     * and a mismatch throws rather than degrades. Below 14 the two-argument
-     * call is the only one there is.
-     *
-     * `connectedDevice` covers both reasons. Android's own definition is
-     * interaction with an external device over Bluetooth, NFC, IR, USB *or a
-     * network connection*, and a daemon on the reader's tailnet is the second
-     * of those. The types Android 15 caps at six hours a day — `dataSync` and
-     * `mediaProcessing` — would make this a feature that stops working in the
-     * evening, which is worse than a word.
-     */
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-      startForeground(
-        NOTIFICATION_ID,
-        notification,
-        ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
-      )
-    } else {
-      startForeground(NOTIFICATION_ID, notification)
+  private fun startForeground(notification: Notification): Boolean {
+    try {
+      /*
+       * From Android 14 the type must be given here as well as in the manifest,
+       * and a mismatch throws rather than degrades. Below 14 the two-argument
+       * call is the only one there is.
+       */
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        startForeground(
+          NOTIFICATION_ID,
+          notification,
+          ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+        )
+      } else {
+        startForeground(NOTIFICATION_ID, notification)
+      }
+      return true
+    } catch (e: Exception) {
+      Log.w("CoveyLink", "Android refused the foreground service: covey will not hear a thread with the screen off", e)
+      return false
     }
   }
 

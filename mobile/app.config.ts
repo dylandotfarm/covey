@@ -72,8 +72,23 @@ export default (): ExpoConfig => ({
   orientation: "default",
   scheme: "covey",
   userInterfaceStyle: "dark",
+  /*
+   * covey's own mark, which the page has installed with since it was
+   * installable: `packages/web/static/icon.svg`. These PNGs are rendered *from*
+   * that file by `scripts/icons.mjs` rather than drawn again, so there is one
+   * covey mark and not two that drift. Run that script when the mark changes;
+   * the output is committed, because prebuild and gradle both want it on disk.
+   */
+  icon: "./assets/icon.png",
   android: {
     package: "io.github.dylandotfarm.covey",
+    // Android masks the foreground to a shape of the device's choosing and
+    // promises only its middle two thirds, so the birds are drawn inside that
+    // and the ground is this colour rather than part of the image.
+    adaptiveIcon: {
+      foregroundImage: "./assets/adaptive-icon.png",
+      backgroundColor: "#121212",
+    },
   },
   // `appVersion` keys an update to the binary's own version, so a bundle built
   // against newer native modules can never land in an older app. Change
@@ -126,7 +141,13 @@ export default (): ExpoConfig => ({
       it writes into the manifest, including the Android 13 POST_NOTIFICATIONS
       permission that `askNotes` then asks for at run time.
     */
-    "expo-notifications",
+    ["expo-notifications", {
+      // Android throws a notification icon's colour away and tints what the
+      // alpha leaves, so this one is the mark in white — a coloured image
+      // arrives as a featureless blob, which is what the first build shipped.
+      icon: "./assets/notification-icon.png",
+      color: "#7c87ff",
+    }],
     "expo-system-ui",
     "expo-image",
     "expo-video",

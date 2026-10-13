@@ -90,6 +90,17 @@ test("a review that is over leaves the turn to finish the thread", () => {
   }
 });
 
+test("a thread that was archived in the same breath says nothing", () => {
+  // The merge archives a thread as its last turn ends, so without this the end
+  // of covey's own loop rings a bell about a row the sidebar no longer paints.
+  // The rule is `threadNews`'s, and this is the terminal's record of it: the
+  // bell and the `✓` go together, and both are silent here.
+  const { store, becomes } = storeWith(running());
+  const { mark } = becomes(ended({ archivedAt: "2026-10-13T00:00:00.000Z" }));
+  assert.equal(mark, undefined);
+  assert.equal(store.state.notice, null, "and no line either: there is nothing to go back to");
+});
+
 test("a thread under review that needs the reader still says so", () => {
   // The review is covey's work. An approval and a failure are the reader's, and
   // nothing covey is doing may bury one.

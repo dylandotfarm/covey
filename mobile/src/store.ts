@@ -34,7 +34,7 @@ import {
 import {
   addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState,
   openView, pendingAttachments, pendingBytes, primaryMachine, sendableAttachments, setPendingAttachments,
-  syncAttachments, type MachineSlot, type SheetTarget, type State,
+  syncAttachments, type MachineSlot, type SheetTarget, type State, type View,
 } from "@covey/web";
 import { attachingLabel, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
 import { forgetMachine, readLod, readMachines, readNotifyWanted, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveNotifyWanted, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
@@ -120,6 +120,10 @@ class Store {
    * a locked screen is exactly the one a reader wants to hear about.
    */
   private readonly seen = new Map<string, Thread>();
+  /**
+   * The view a snapshot is in flight for, so the retry below cannot ask twice.
+   */
+  private watching: View | null = null;
 
   // ---- what React subscribes to ------------------------------------------
 
@@ -189,6 +193,9 @@ class Store {
     }
     this.loaded = true;
     this.schedule();
+    // Every machine this device has is now dialled, so a conversation opened
+    // before any of them were can be told that its own is not among them.
+    this.watchView();
     // A phone that slept dropped its sockets, and each client has a budget of
     // dials it may have spent. The reader coming back is the reason to spend
     // more — the page watches `visibilitychange` for the same thing.
@@ -219,6 +226,9 @@ class Store {
         // A fleet member is not asked: it came from a fleet list already, and
         // the machines it would name are the ones this daemon just named.
         if (s === "connected" && this.saved.some((x) => x.url === slot.key)) this.askAccess(client, slot.primary);
+        // A conversation opened before this machine answered — the tap that
+        // launched the app, or the device's pick — is still waiting for it.
+        if (s === "connected") this.watchView();
       },
       shellSnapshot: (snap) => {
         applyShellSnapshot(slot, snap);
@@ -357,28 +367,76 @@ class Store {
     return made ? made.then(run) : Promise.resolve(run());
   };
 
-  /** Put a thread on screen. A screen calls this when it is focused. */
+  /**
+   * Put a thread on screen. A screen calls this when it is focused.
+   *
+   * **The machine does not have to be there yet.** The view opens either way
+   * and `watchView` subscribes it when its daemon can answer, because the
+   * caller is not always a reader tapping a row that is already on screen: a
+   * notification that *launched* the app navigates before `start()` has dialled
+   * anything, and the device's own pick (`device/bridge.ts`) comes through the
+   * same door. This used to return here with no view at all, and the screen
+   * that opened then painted "Nothing here yet. Send the first message." over a
+   * conversation the daemon held every word of, with no way back but to leave
+   * and tap the row again.
+   */
   showThread = (machine: string, threadId: string): void => {
-    const client = this.clients.get(machine);
-    if (!client) return;
     // Opening the conversation answers whatever covey put in the shade about
     // it, so the row goes. Before the early return below, because the reader
     // may be coming back to the thread they already had open.
     void dismissNote(noteId(machine, threadId));
     if (this.state.view?.machine === machine && this.state.view.threadId === threadId) return;
     if (this.state.view) void this.clients.get(this.state.view.machine)?.unwatchThread();
-    const v = openView(this.state, machine, threadId);
+    openView(this.state, machine, threadId);
     this.schedule();
-    this.whenMade(machine, threadId, () => {
+    this.watchView();
+  };
+
+  /**
+   * Ask for the open conversation's transcript, if its machine can answer.
+   *
+   * Called when a view opens, when any machine connects, and once the saved
+   * machines have been read — the three moments at which the answer can change.
+   * Everything it needs is on the view, so there is no "wanted thread" to keep
+   * anywhere: what the reader is looking at *is* the record.
+   *
+   * A view that already has its transcript asks for nothing. A reconnect
+   * re-opens the subscription inside the client (`resubscribe`), so only a view
+   * that was never answered — still loading, or holding the error of a machine
+   * that was not there — has anything to gain here.
+   */
+  private watchView = (): void => {
+    const v = this.state.view;
+    if (!v || this.watching === v) return;
+    if (!v.loading && !v.error) return;
+    const client = this.clients.get(v.machine);
+    if (!client) {
+      // Before the saved machines are read, this is a conversation opened ahead
+      // of its own dial. After, it is a machine this device does not have, and
+      // the reader is owed that sentence rather than a view that spins.
+      if (this.loaded) { v.loading = false; v.error = `no machine at ${v.machine} on this device`; this.schedule(); }
+      return;
+    }
+    // A client with no socket rejects an rpc at once with "not connected", so
+    // asking now would paint that as the conversation's error. The `connected`
+    // callback in `dial` comes back here instead.
+    if (client.state !== "connected") return;
+    this.watching = v;
+    v.loading = true;
+    v.error = null;
+    this.schedule();
+    this.whenMade(v.machine, v.threadId, () => {
       // The reader may have left while the worktree was being made, and a
       // subscription nobody is reading is a transcript sent for nothing.
       if (this.state.view !== v) return null;
-      return client.watchThread(threadId);
+      return client.watchThread(v.threadId);
     }).then((snap) => {
+      if (this.watching === v) this.watching = null;
       if (!snap || this.state.view !== v) return; // the reader moved on
       applyThreadSnapshot(v, snap);
       this.schedule();
     }).catch((e: Error) => {
+      if (this.watching === v) this.watching = null;
       if (this.state.view === v) { v.loading = false; v.error = e.message; this.schedule(); }
     });
   };
@@ -387,6 +445,7 @@ class Store {
   leaveThread = (): void => {
     if (!this.state.view) return;
     void this.clients.get(this.state.view.machine)?.unwatchThread();
+    if (this.watching === this.state.view) this.watching = null;
     this.state.view = null;
     this.schedule();
   };

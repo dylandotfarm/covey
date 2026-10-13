@@ -260,9 +260,17 @@
   has to be awake to hear any of it, so `modules/covey-link` is now **held for
   reasons and stopped when the last is released** — the device and the watch are
   separate switches and neither may take the other's service down, so the set and
-  the words both live in `CoveyLinkService`. Its type stays `connectedDevice` for
-  both: `dataSync` is what Android 15 caps at six hours a day, which would be a
-  feature that stops working in the evening. The channel is made at `HIGH`, and
+  the words both live in `CoveyLinkService`. Its type is **`specialUse`** and must
+  not go back to `connectedDevice`: from Android 14 a type is checked against the
+  permissions the app *holds*, and that one wants Bluetooth or Wi-Fi — which the
+  reader grants for the device and not for notifications, so the ordinary case
+  threw `SecurityException` out of `onStartCommand` and closed the app (seen on an
+  API 35 emulator; Android 11 has no such check, which is why the test phone could
+  not). `specialUse` needs a normal permission and a subtype property, and names
+  what the service actually does: it holds covey's process. `dataSync` is the
+  other way out and is what Android 15 caps at six hours a day. `startForeground`
+  is wrapped whatever the type, because a refusal must cost the background and
+  never the launch. The channel is made at `HIGH`, and
   that is a decision with one chance — a channel's settings are fixed when it
   first exists on a device. `expo-notifications` is native, so the runtime version
   moved to `0.6.0` and every install needs one more sideload; `covey-link`'s
