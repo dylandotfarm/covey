@@ -10,11 +10,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppBuildRun } from "@covey/protocol";
-import { AppBuilder, updatesUrl } from "../src/appBuild.js";
+import { AppBuilder, androidSdk, defaultSdkPaths, gradleReason, updatesUrl } from "../src/appBuild.js";
 
 /** The run this builder ends at, however it ends. */
 function ended(b: AppBuilder): Promise<AppBuildRun> {
@@ -39,6 +39,30 @@ async function checkout(env?: string): Promise<string> {
   await writeFile(join(dir, "package.json"), '{"name":"covey-mobile"}');
   if (env !== undefined) await writeFile(join(dir, ".env"), env);
   return dir;
+}
+
+/** A directory an SDK lookup accepts: one of the three the build reads. */
+async function sdk(): Promise<string> {
+  const dir = await empty();
+  await mkdir(join(dir, "platform-tools"));
+  return dir;
+}
+
+/** `local.properties`, as the SDK tools write it, inside a checkout. */
+async function withProperties(dir: string, value: string): Promise<string> {
+  await mkdir(join(dir, "android"), { recursive: true });
+  await writeFile(join(dir, "android", "local.properties"), `## generated\nsdk.dir=${value}\n`);
+  return dir;
+}
+
+/** No SDK named in this process, so a machine that exports one cannot pass a test for us. */
+function noSdkHere(t: { after: (f: () => void) => void }) {
+  const was = { ANDROID_HOME: process.env.ANDROID_HOME, ANDROID_SDK_ROOT: process.env.ANDROID_SDK_ROOT };
+  delete process.env.ANDROID_HOME;
+  delete process.env.ANDROID_SDK_ROOT;
+  t.after(() => {
+    for (const [k, v] of Object.entries(was)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+  });
 }
 
 test("a machine with no mobile/ refuses the build by name", async () => {
@@ -128,4 +152,149 @@ test("the update URL is read from the two places Expo reads it", async (t) => {
   process.env.EXPO_PUBLIC_COVEY_UPDATES_URL = "http://exported:3790/updates";
   assert.equal(await updatesUrl(await checkout(`EXPO_PUBLIC_COVEY_UPDATES_URL=${URL}\n`)), "http://exported:3790/updates");
   assert.equal(await updatesUrl(await checkout()), "http://exported:3790/updates");
+});
+
+test("a build with no Android SDK anywhere is refused before it starts", async (t) => {
+  noSdkHere(t);
+  const was = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL;
+  process.env.EXPO_PUBLIC_COVEY_UPDATES_URL = "http://box:3790/updates";
+  t.after(() => { if (was === undefined) delete process.env.EXPO_PUBLIC_COVEY_UPDATES_URL; else process.env.EXPO_PUBLIC_COVEY_UPDATES_URL = was; });
+
+  // The third step is the one that needs the SDK, and it is forty minutes in —
+  // except that gradle refuses while it configures, so what the reader saw was
+  // a button that failed in two seconds and a sentence about gradle that named
+  // nothing. The refusal belongs at the top, with the one for the update URL,
+  // and it names the variable to export.
+  const b = new AppBuilder("m1", () => {}, await checkout("EXPO_PUBLIC_COVEY_UPDATES_URL=http://box:3790/updates\n"), () => []);
+  b.start();
+  const run = await ended(b);
+  assert.equal(run.state, "failed");
+  assert.match(run.error ?? "", /ANDROID_HOME/);
+  assert.deepEqual(run.steps.map((s) => s.status), ["skipped", "skipped", "skipped"], "nothing ran");
+});
+
+test("the SDK is looked for in the three places it is recorded", async (t) => {
+  noSdkHere(t);
+  const here = await sdk();
+
+  assert.deepEqual(await androidSdk(await empty(), []), { path: null, rejected: null }, "a checkout that names none, on a machine with none");
+
+  // `local.properties` is what the SDK tools write and what a person who built
+  // by hand has. It is read before `prebuild` deletes it with the rest of
+  // `android/`, which is the whole reason this lookup exists.
+  assert.equal((await androidSdk(await withProperties(await empty(), here), [])).path, here);
+  // A Windows path comes out of a properties file escaped.
+  assert.equal((await androidSdk(await withProperties(await empty(), here.replace(/\//g, "\\/")), [])).path, here);
+
+  // A path somebody named has to be a directory and no more. Covey reading its
+  // contents would refuse a `cmdline-tools` install that the terminal builds
+  // from, because the Android plugin fetches `platforms` itself — and gradle
+  // says what is wrong with a directory in words a client now paints.
+  const bare = await empty();
+  assert.equal((await androidSdk(await withProperties(await empty(), bare), [])).path, bare);
+
+  // The environment wins, because that is where gradle looks first.
+  process.env.ANDROID_HOME = here;
+  assert.equal((await androidSdk(await withProperties(await empty(), bare), [])).path, here);
+  delete process.env.ANDROID_HOME;
+  // And the name Android deprecated is still read, because its own tools set it.
+  process.env.ANDROID_SDK_ROOT = here;
+  assert.equal((await androidSdk(await empty(), [])).path, here);
+  delete process.env.ANDROID_SDK_ROOT;
+  // An exported name pointing nowhere falls through rather than standing — and
+  // is remembered, because a reader told to export a variable they did export
+  // is told nothing. The first name read is the one quoted.
+  process.env.ANDROID_HOME = join(here, "gone");
+  assert.equal((await androidSdk(await withProperties(await empty(), here), [])).path, here);
+  const missed = await androidSdk(await empty(), []);
+  assert.equal(missed.path, null);
+  assert.deepEqual(missed.rejected, { source: "ANDROID_HOME", path: join(here, "gone") });
+  process.env.ANDROID_SDK_ROOT = join(here, "also-gone");
+  assert.deepEqual((await androidSdk(await empty(), [])).rejected, { source: "ANDROID_HOME", path: join(here, "gone") }, "the first name read is the one to mend first");
+  delete process.env.ANDROID_HOME;
+  delete process.env.ANDROID_SDK_ROOT;
+  // A file names it, and that file is the one covey could not use.
+  const fromFile = await androidSdk(await withProperties(await empty(), join(here, "nowhere")), []);
+  assert.equal(fromFile.path, null);
+  assert.match(fromFile.rejected?.source ?? "", /local\.properties/);
+
+  // A guess is held to a higher mark, because nobody named it. An empty
+  // directory an uninstall left behind is not an answer.
+  assert.equal((await androidSdk(await empty(), [await empty()])).path, null);
+  assert.equal((await androidSdk(await empty(), [here])).path, here);
+  // An SDK put there by `sdkmanager` holds `cmdline-tools` and no `platforms`
+  // until the Android plugin fetches one.
+  const tools = await empty();
+  await mkdir(join(tools, "cmdline-tools"));
+  assert.equal((await androidSdk(await empty(), [tools])).path, tools);
+});
+
+test("a name covey could not use is quoted rather than folded into \"no SDK here\"", async (t) => {
+  noSdkHere(t);
+  const was = process.env.EXPO_PUBLIC_COVEY_UPDATES_URL;
+  process.env.EXPO_PUBLIC_COVEY_UPDATES_URL = "http://box:3790/updates";
+  t.after(() => { if (was === undefined) delete process.env.EXPO_PUBLIC_COVEY_UPDATES_URL; else process.env.EXPO_PUBLIC_COVEY_UPDATES_URL = was; });
+  process.env.ANDROID_HOME = "/no/such/sdk";
+
+  // "Export ANDROID_HOME", said to a reader who exported it, is #132 again:
+  // one sentence for two problems, and the one the reader has is the typo.
+  const b = new AppBuilder("m1", () => {}, await checkout("EXPO_PUBLIC_COVEY_UPDATES_URL=http://box:3790/updates\n"), () => []);
+  b.start();
+  const run = await ended(b);
+  assert.equal(run.state, "failed");
+  assert.match(run.error ?? "", /ANDROID_HOME names \/no\/such\/sdk/);
+  assert.deepEqual(run.steps.map((s) => s.status), ["skipped", "skipped", "skipped"]);
+});
+
+test("a failed step carries the reason gradle gave", () => {
+  // Nothing paints the step output, so the sentence in `error` is all a reader
+  // on a phone gets. Gradle nests its causes and the last one is the fault:
+  // "SDK location not found", not "A problem occurred evaluating root project".
+  const out = [
+    "> Configure project :",
+    "FAILURE: Build failed with an exception.",
+    "",
+    "* Where:",
+    "Build file '/home/dylan/covey/mobile/android/build.gradle' line: 24",
+    "",
+    "* What went wrong:",
+    "A problem occurred evaluating root project 'covey'.",
+    "> Failed to apply plugin 'com.facebook.react.rootproject'.",
+    "   > A problem occurred configuring project ':app'.",
+    "      > SDK location not found. Define a valid SDK location with an ANDROID_HOME environment variable.",
+    "",
+    "* Try:",
+    "> Run with --stacktrace option to get the stack trace.",
+  ].join("\n");
+  assert.match(gradleReason(out) ?? "", /^SDK location not found\./);
+  assert.doesNotMatch(gradleReason(out) ?? "", /stacktrace/, "the block ends at the next `* `");
+
+  // And it ends there under `org.gradle.console=rich` too. A header wearing an
+  // escape is one the boundary misses, which runs the block to the end of the
+  // output and answers with one of gradle's own hints instead of the fault.
+  const rich = out.replace(/^(\* .*)$/gm, "\u001b[33m$1\u001b[0m");
+  assert.equal(gradleReason(rich), gradleReason(out));
+
+  // Gradle paints its output, and an escape left in would be printed.
+  assert.equal(gradleReason("* What went wrong:\n\u001b[31mOut of memory\u001b[0m\n"), "Out of memory");
+  // A cause with no nesting is the first line of the block.
+  assert.equal(gradleReason("* What went wrong:\nExecution failed for task ':app:x'.\n"), "Execution failed for task ':app:x'.");
+  // A step that failed some other way — pnpm, expo — has no reason here.
+  assert.equal(gradleReason("npm ERR! something\n"), null);
+  assert.equal(gradleReason(""), null);
+  // The row is one line on a phone, so a reason longer than that is cut.
+  const long = `* What went wrong:\n> ${"x".repeat(400)}\n`;
+  assert.ok((gradleReason(long) ?? "").length <= 160);
+  assert.match(gradleReason(long) ?? "", /…$/);
+});
+
+test("the places looked in last are the ones expo checks, and the lowercase spelling", () => {
+  // A machine where `pnpm run apk` works at a terminal has to work from the
+  // button. Two lists that disagree is one machine with two answers. It is not
+  // expo's list exactly: expo names one path per platform, and covey names the
+  // lowercase spelling beside it, which a Linux filesystem tells apart.
+  const paths = defaultSdkPaths();
+  assert.ok(paths.length > 0);
+  assert.ok(paths.every((p) => p.startsWith("/")), "absolute, so the daemon's cwd decides nothing");
+  assert.ok(paths.some((p) => /Android/.test(p)));
 });
