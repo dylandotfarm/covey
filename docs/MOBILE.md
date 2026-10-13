@@ -286,6 +286,33 @@ a route. Three things there are decided rather than inherited:
   the app: Android hands that response over at startup, and an effect runs in
   the same commit as the navigator with no promise that there is a stack yet.
 
+### A conversation opens whatever its machine is doing
+
+That tap arrives **before anything has been dialled**, because `onReady` fires
+inside the navigator's own mount effect and React runs a child's effects before
+its parent's — so the navigate happens before `App`'s effect has called
+`store.start()`. Two rules come out of that and both are one line from being
+undone:
+
+**`showThread` never refuses.** It opened no view at all when
+`this.clients.get(machine)` came back empty, and the screen that opened then
+painted *"Nothing here yet. Send the first message."* over a conversation the
+daemon held every word of, with no way back but to leave and tap the row again.
+Putting `if (!client) return` back at the top of it is all it would take to have
+that again.
+
+**Subscribing is a separate decision, made again every time the answer can
+change.** `watchView` is that decision and it is called at four moments: when a
+view opens, when a machine connects, when a machine gives up, and once the saved
+machines have been read. Nothing remembers a "wanted thread" anywhere, because
+the view the reader is looking at *is* the record. The four moments are the
+whole of it — a client with no socket rejects an rpc at once with `not
+connected`, so asking early is not merely useless but paints that string as the
+conversation's error; a machine that runs out of its dial budget settles on
+`offline` and never calls back, so the view would spin for ever with no words;
+and a machine this device does not have at all has to be told apart from one
+that is still being dialled, which is what `store.loaded` is for.
+
 Adding `expo-notifications` is native code, so the runtime version moved to
 `0.6.0` and every install needs one more sideload. `covey-link`'s own change
 rides on that bump, and it needed to: its `hold` now takes an argument, and a

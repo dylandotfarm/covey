@@ -125,7 +125,15 @@ export class MachineClient {
   private lastError: string | null = null;
   private shellSeq = -1;
   private shellSubId: string | null = null;
-  private threadSub: { threadId: string; subId: string | null; seq: number } | null = null;
+  /**
+   * The thread this client streams, and what it holds for it on *this* socket.
+   *
+   * `subId` is null until the subscription is open and again the moment the
+   * socket drops (`onClose`), so it reads as "open on the connection we have
+   * now". `opening` covers the gap while the call is in flight — see
+   * `openThreadSub`, which is the one place either is set.
+   */
+  private threadSub: { threadId: string; subId: string | null; opening: boolean; seq: number } | null = null;
   /** Bumped per watchThread, so a slow snapshot cannot take back the stream. */
   private watchGen = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -224,7 +232,10 @@ export class MachineClient {
     for (const w of this.waits.values()) { clearTimeout(w.timer); w.rej(new Error("disconnected")); }
     this.waits.clear();
     this.shellSubId = null;
-    if (this.threadSub) this.threadSub.subId = null;
+    // The subscription belonged to the socket that has just gone, so a
+    // reconnect opens a new one. `opening` goes with it: the call in flight has
+    // just been rejected with "disconnected" along with every other wait.
+    if (this.threadSub) { this.threadSub.subId = null; this.threadSub.opening = false; }
     if (this.closed) { if (this.state !== "error") this.setState("disconnected"); return; }
     // The budget depends on what kind of silence this is. A daemon we asked to
     // restart gets the long one; a machine that has answered before gets more
@@ -272,10 +283,38 @@ export class MachineClient {
     if (this.threadSub) await this.openThreadSub(this.threadSub.threadId, this.threadSub.seq);
   }
 
+  /**
+   * Open the thread subscription, **once per socket**.
+   *
+   * Two callers want it at the same moment, and that is not a rare case but the
+   * ordinary one for a client that opens a conversation as its machine answers:
+   * `setState("connected")` is raised *before* `resubscribe` is awaited, so a
+   * caller watching a thread from the state callback has `watchThread` in
+   * flight when `resubscribe` reaches its own `if (this.threadSub)`. Both then
+   * asked, and the second answer overwrote `subId` — which left the first
+   * subscription open for the life of the socket, because `unwatchThread` only
+   * knows the last id. The daemon pushed every item of that conversation twice,
+   * and `item.upserted` is exempt from the seq filter in `onPush`, so both
+   * copies arrived: two pushes and two paints per item of a streaming reply, on
+   * a phone with one thread for the paint and the keyboard.
+   *
+   * Nothing above has to know the order it happened in. A subscription this
+   * socket already holds, or is in the middle of asking for, is not asked for
+   * again.
+   */
   private async openThreadSub(threadId: string, afterSeq: number) {
-    const { subscriptionId } = await this.rpc("thread.subscribe", { threadId, afterSeq });
-    if (this.threadSub?.threadId === threadId) this.threadSub.subId = subscriptionId;
-    else await this.rpc("unsubscribe", { subscriptionId }).catch(() => {});
+    const sub = this.threadSub;
+    if (!sub || sub.threadId !== threadId || sub.subId !== null || sub.opening) return;
+    sub.opening = true;
+    try {
+      const { subscriptionId } = await this.rpc("thread.subscribe", { threadId, afterSeq });
+      // A later watch may own the stream by now. Give the subscription back
+      // rather than stealing it from under them.
+      if (this.threadSub?.threadId === threadId) this.threadSub.subId = subscriptionId;
+      else await this.rpc("unsubscribe", { subscriptionId }).catch(() => {});
+    } finally {
+      if (this.threadSub === sub) sub.opening = false;
+    }
   }
 
   /**
@@ -296,7 +335,7 @@ export class MachineClient {
     // snapshot back anyway — the store decides whether it is still wanted — but
     // do not steal the stream from under it.
     if (gen !== this.watchGen) return snap;
-    this.threadSub = { threadId, subId: null, seq: snap.seq };
+    this.threadSub = { threadId, subId: null, opening: false, seq: snap.seq };
     if (this.state === "connected") void this.openThreadSub(threadId, snap.seq).catch(() => {});
     return snap;
   }
@@ -311,7 +350,7 @@ export class MachineClient {
   resumeThread(threadId: string, afterSeq: number) {
     this.watchGen++; // a snapshot still in flight must not take the stream back
     void this.unwatchThread();
-    this.threadSub = { threadId, subId: null, seq: afterSeq };
+    this.threadSub = { threadId, subId: null, opening: false, seq: afterSeq };
     if (this.state === "connected") void this.openThreadSub(threadId, afterSeq).catch(() => {});
   }
 

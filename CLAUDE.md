@@ -270,7 +270,23 @@
   what the service actually does: it holds covey's process. `dataSync` is the
   other way out and is what Android 15 caps at six hours a day. `startForeground`
   is wrapped whatever the type, because a refusal must cost the background and
-  never the launch. The channel is made at `HIGH`, and
+  never the launch.
+  A tap on a notification navigates **before `store.start()` has dialled
+  anything** — `onReady` is inside the navigator's own mount effect and React
+  runs a child's effects first — so two rules hold and each is one line from
+  being undone. `showThread` never refuses: it opened no view when the machine
+  was not in `clients` and the screen painted "Nothing here yet" over a
+  conversation the daemon held whole. And *subscribing* is a separate decision
+  `watchView` makes again at each moment the answer can change — a view opening,
+  a machine connecting, a machine giving up, and the saved machines being read —
+  because a client with no socket rejects an rpc at once with `not connected`, a
+  client out of dials settles on `offline` and calls nobody back, and a machine
+  this device does not have must be told from one still being dialled
+  (`store.loaded`). The client's own half is `openThreadSub`, which opens **one
+  subscription per thread per socket**: `setState("connected")` is raised before
+  `resubscribe` is awaited, so a caller that watches a thread from the state
+  callback races `resubscribe`'s own re-open, and the loser was orphaned for the
+  life of the socket — every item of that conversation pushed and painted twice. The channel is made at `HIGH`, and
   that is a decision with one chance — a channel's settings are fixed when it
   first exists on a device. `expo-notifications` is native, so the runtime version
   moved to `0.6.0` and every install needs one more sideload; `covey-link`'s

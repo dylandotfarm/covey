@@ -229,6 +229,14 @@ class Store {
         // A conversation opened before this machine answered — the tap that
         // launched the app, or the device's pick — is still waiting for it.
         if (s === "connected") this.watchView();
+        // And a machine that has stopped trying owes it a sentence. `watchView`
+        // waits for `connected`, so without this the view keeps the spinner it
+        // opened with and says nothing at all: a client that runs out of its
+        // dial budget settles on `offline` and nothing comes back. A tap on a
+        // notification is exactly how a reader gets there — the phone slept,
+        // the socket went, and the machine that posted the row is a laptop that
+        // is now shut.
+        if (s === "offline" || s === "error") this.failView(slot);
       },
       shellSnapshot: (snap) => {
         applyShellSnapshot(slot, snap);
@@ -720,6 +728,24 @@ class Store {
     this.notesAllowed = allowed;
     if (this.notify && allowed) holdLinkService("watch");
     else releaseLinkService("watch");
+    this.schedule();
+  };
+
+  /**
+   * Say that the conversation on screen is waiting for a machine that has given
+   * up, in that machine's own words.
+   *
+   * Only a view that is still unanswered: one with its transcript keeps it, and
+   * the client re-opens the subscription itself when the machine comes back.
+   * The thread screen paints no connection state of its own, so this line is
+   * the only place the reader can read what happened.
+   */
+  private failView = (slot: MachineSlot): void => {
+    const v = this.state.view;
+    if (!v || v.machine !== slot.key || !v.loading) return;
+    if (this.watching === v) this.watching = null;
+    v.loading = false;
+    v.error = slot.connError ? `${slot.name}: ${slot.connError}` : `${slot.name} is not answering`;
     this.schedule();
   };
 
