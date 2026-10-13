@@ -16,7 +16,8 @@
  * That is thrown while the module registry is built, before any JavaScript
  * runs, so the app closes on launch with no error screen. It cost one release.
  * `Function` with no argument happens to survive the mistake, which is why
- * `modules/covey-link` has never shown it — it has no function that takes one.
+ * `modules/covey-link` ran for a release built the wrong way — until its
+ * service took a reason to be held for, and that file moved to this plugin too.
  */
 plugins {
   id 'com.android.library'

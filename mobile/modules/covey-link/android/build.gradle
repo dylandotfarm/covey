@@ -1,24 +1,38 @@
-apply plugin: 'com.android.library'
-apply plugin: 'kotlin-android'
-apply plugin: 'maven-publish'
+/*
+ * The *supported* way to build a local Expo module, and not a hand-rolled
+ * `kotlin-android` setup.
+ *
+ * This file was the hand-rolled kind until the service grew a function that
+ * takes an argument, which is the exact mistake `modules/covey-keys` records:
+ * `expo-module-gradle-plugin` pins Kotlin to the version `expo-modules-core`
+ * was compiled with, and the module DSL passes its argument and return types as
+ * *reified* type parameters that exist only while the compiler inlines them.
+ * Compile against another Kotlin and the marker survives into the bytecode, so
+ * the first thing the app does with this module at launch is throw:
+ *
+ *   java.lang.UnsupportedOperationException: This function has a reified type
+ *   parameter and thus can only be inlined at compilation time
+ *
+ * It is thrown while the module registry is built, before any JavaScript runs,
+ * so the app closes on launch with no error screen. `Function` with no argument
+ * happens to survive the mistake, which is why this module ran for a release
+ * built the wrong way — see the comment in `covey-keys`, which paid for it.
+ */
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
 
 group = 'farm.dylan.covey.link'
 version = '0.1.0'
 
 android {
   namespace "farm.dylan.covey.link"
-  compileSdk rootProject.ext.has('compileSdkVersion') ? rootProject.ext.get('compileSdkVersion') : 36
+  // `versionName` is the one the plugin asks for by name: it publishes the
+  // module as a library unless told otherwise, and `PublicationInfo` requires
+  // it. `versionCode` is the house style of expo's own modules.
   defaultConfig {
-    minSdk rootProject.ext.has('minSdkVersion') ? rootProject.ext.get('minSdkVersion') : 24
+    versionCode 1
+    versionName "0.1.0"
   }
-  compileOptions {
-    sourceCompatibility JavaVersion.VERSION_17
-    targetCompatibility JavaVersion.VERSION_17
-  }
-  kotlinOptions { jvmTarget = "17" }
-}
-
-dependencies {
-  implementation project(':expo-modules-core')
-  implementation "org.jetbrains.kotlin:kotlin-stdlib:${kotlinVersion}"
 }

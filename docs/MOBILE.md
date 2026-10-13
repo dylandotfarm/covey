@@ -11,7 +11,8 @@ installs from the browser, and it is a good client. What it cannot do is be an
 app.
 
 - **It has no icon it did not borrow, and no notification.** A page cannot wake
-  you when an agent asks a question.
+  you when an agent asks a question. That is the one the app has since answered
+  — see *Notifications* — and it is still the best reason for it to exist.
 - **It has no camera and no photo roll of its own** — only what a file input
   gives it.
 - **Its socket dies with the tab**, and its storage lives under the browser's
@@ -45,6 +46,7 @@ never do is write a second copy of a decision:
 | What counts as a table | `tableAt` in `@covey/client` | A reply read as a table on one client and as prose on the other is a bug the reader cannot explain. |
 | The attachment caps and the four failure words | `readPicked` in `@covey/web/attach` | One word for four problems is what made a screenshot read as "unreadable" for weeks (#132). |
 | Where speech is written out | `askMachine` in `src/transcribe.ts` (#180) | A phone that asked the machine about the device's audio and not about its own has two answers to one question. |
+| What a thread's change says to a reader who is elsewhere | `threadNews` in `@covey/client` | A thread the terminal rings a bell for and the phone says nothing about is one reader with two answers. |
 
 The one thing the app parses for itself is the markdown *layout*, because a
 `<Text>` is not HTML. `mobile/src/markdown.test.ts` holds that parser against
@@ -173,6 +175,106 @@ reason `/file` and `/media` already do: the fetch is native code inside
 
 Nothing decides on its own to restart the app. A reload throws away what the
 reader was typing, so covey says an update is ready and the reader taps.
+
+## Notifications
+
+This is the reason an app is worth having. A page cannot wake anybody, so the
+page's answer to "is it finished yet" is to go and look — and an agent works for
+minutes at a time, so the reader looks far more often than there is anything to
+see. The app says it the other way round: nothing, and then one line when the
+thread is theirs again.
+
+**They are local, and there is no push service.** The phone is already connected
+to every machine of the fleet over the tailnet, and a thread's whole state
+arrives on that socket as `thread.upserted` whether or not the conversation is
+open. So covey hears the change itself and posts the row itself. Nothing is
+registered with Expo, Firebase or anybody else, no token exists to leak, and a
+fleet with no route to the internet notifies exactly as well as one with it.
+That is what makes this *not* the design `docs/MOBILE.md` used to say was
+needed: a daemon that can reach a push service would be a daemon that tells a
+third party which of your threads just failed.
+
+### What counts as news is not the phone's decision
+
+`threadNews` in `@covey/client` is the rule, and the TUI reads the same one: it
+rings a bell, raises a notice and marks the row from this function, and the
+phone posts a notification from it. A thread the terminal calls done and the
+phone says nothing about is one reader with two answers, which is exactly what
+happened while that rule lived inline in `packages/tui/src/store.ts`.
+
+It is a rule about a **change** and never about a state, because a running turn
+re-sends its thread every few tens of milliseconds and a thread that has wanted
+an approval for a minute must ring once. So it takes two threads, the one the
+client held and the one that just arrived, and a client with nothing to compare
+against says nothing at all. That is what makes a reconnect silent: a snapshot
+carries every thread the machine has, and a phone coming back from a sleep must
+not announce an hour of history the list already shows.
+
+Four rules are the phone's own, in `src/notes.ts` and node-tested beside it:
+
+- **The conversation on screen is never announced** — but only while the app is
+  in front. A thread left open behind a locked screen is one nobody is reading.
+- **Covey's own reviewers are silent**, through `threadIsHidden`, whose third
+  term is the whole safety of it: a hidden thread that needs a person is never
+  hidden, so a reviewer blocked on an approval still reaches the reader.
+- **A row that has stopped being true comes down.** An approval answered in the
+  terminal, or a thread set working again from anywhere, takes its own
+  notification with it — and so does opening the conversation.
+- **One row per conversation.** The notification's identifier is the Android
+  tag, so the second thing a thread says replaces the first rather than queueing
+  behind it.
+
+### Hearing it with the screen off
+
+A notification is worth nothing if the socket that carries the news is frozen,
+and Android freezes a cached app's network in Doze and kills the process when
+the app is swiped away. `modules/covey-link` already existed for exactly this
+reason, for the Bluetooth device (#184), so it is what holds the process here
+too — **held for reasons, and stopped when the last one is released**. Either
+switch may be on without the other and neither may take the service down, so the
+set of reasons lives in `CoveyLinkService`, which is also where the words of its
+notification are: a reader looking at the shade is asking why covey is running,
+and the answer is a list of length one or two.
+
+The type is `connectedDevice` for both reasons. Android's own definition is an
+external device reached over Bluetooth, NFC, IR, USB *or a network connection*,
+and a daemon on the reader's tailnet is the second of those; the two types
+Android 15 caps at six hours a day — `dataSync` and `mediaProcessing` — would
+make this a feature that stops working in the evening.
+
+The ongoing row that service puts in the shade is the whole cost of the feature
+and the switch's hint names it rather than leaving a reader to find it. That is
+also why the switch is **off until somebody asks**, like the device's.
+
+### What Android decides, and what covey asks
+
+`expo-notifications` is the native half, so `src/notify.ts` writes no Kotlin: it
+makes the channel, reads the permission, posts, dismisses, and turns a tap into
+a route. Three things there are decided rather than inherited:
+
+- **The channel is created at `HIGH` importance**, which is what puts the
+  notification *on the screen* rather than only in the shade. A channel's
+  settings are fixed the moment it first exists on a device and only its name
+  and description can change after, so this is a decision with one chance; a
+  later change of mind would need a second channel id and would leave the
+  reader's own choices on the first.
+- **The permission is asked for at the switch**, not at launch. Android 13 and
+  later show that dialog once in the life of an install, and a dialog about a
+  feature nobody has switched on is one nobody reads. It is read again every
+  time the app comes back, because it can be taken away in Android's settings
+  while covey is away — a switch that still said "on" would be promising
+  something nothing shows.
+- **A tap is registered in `NavigationContainer`'s `onReady`**, not in an
+  effect, because the first tap covey hears about may be the one that *launched*
+  the app: Android hands that response over at startup, and an effect runs in
+  the same commit as the navigator with no promise that there is a stack yet.
+
+Adding `expo-notifications` is native code, so the runtime version moved to
+`0.6.0` and every install needs one more sideload. `covey-link`'s own change
+rides on that bump, and it needed to: its `hold` now takes an argument, and a
+module DSL function that takes one is exactly what `modules/covey-keys`'
+`build.gradle` warns about — so that module moved to `expo-module-gradle-plugin`
+in the same change, before the reified type parameter could reach an app.
 
 ## The stack is the route
 
@@ -545,9 +647,11 @@ hand. It catches the layout mistakes, which were most of them.
 - **iOS.** Nothing in the design excludes it and `expo export --platform ios`
   would very likely work, but the export, the manifest and the app config are
   written and tested for Android alone.
-- **Push notifications**, which is the reason an app is worth having and is not
-  parity with the page. It wants a daemon that can reach a push service, and
-  that is a design of its own.
+- **Push notifications**, in the sense of a server that pushes. The app is told
+  about a thread over the socket it already holds and posts the row itself — see
+  *Notifications* above — which covers everything covey has to say about a
+  thread and costs an ongoing row in the shade. A real push service would be
+  what buys that row back, and it would need a daemon that can reach one.
 - **A theme picker.** The TUI has eight themes; `mobile/src/theme.ts` is a copy
   of the web client's one palette. Move a colour in one and move it in the
   other.
