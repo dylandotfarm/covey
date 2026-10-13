@@ -627,8 +627,19 @@ Five rules hold it:
 - **No Android SDK, no build.** Found in the three places the SDK is recorded —
   `ANDROID_HOME`, then the deprecated `ANDROID_SDK_ROOT`, then `sdk.dir` in
   `android/local.properties`, then the default install locations
-  `expo run:android` itself checks — and handed to every step as `ANDROID_HOME`.
-  A machine with none is refused before the first step, by name.
+  `expo run:android` checks and the lowercase spelling beside them — and handed
+  to every step as `ANDROID_HOME`. A machine with none is refused before the
+  first step, by name.
+
+  A path somebody named has to be a directory and no more: gradle is the
+  authority on what is inside it, and covey judging that would refuse a
+  `cmdline-tools` install the terminal builds from, since the Android plugin
+  fetches `platforms` and `build-tools` itself. A path covey *guessed* has to
+  look like an SDK, because handing gradle a directory nobody named is covey
+  inventing an answer. A name covey could not use is quoted in the refusal —
+  "`ANDROID_HOME` names …, which is not a directory on this machine" — because
+  telling a reader to export a variable they did export is one sentence for two
+  problems.
 
   This is the bug the button had. The daemon starts from a login shell, which
   carries a terminal's `PATH` and not a variable exported for an interactive

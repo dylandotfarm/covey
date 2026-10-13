@@ -45,10 +45,14 @@ const gradlePath = (dir: string) => join(dir, "android", "app", "build.gradle");
  * Whether this machine holds the app's source at all, for
  * `MachineInfo.canBuildApp`.
  *
- * `mobile/package.json` and nothing more: the Android SDK and a JDK are a
- * person's business, and a machine without one fails the gradle step with the
- * output that says so. A daemon installed some other way than from a checkout
- * has no `mobile/` and is never offered the row.
+ * `mobile/package.json` and nothing more. A daemon installed some other way
+ * than from a checkout has no `mobile/` and is never offered the row.
+ *
+ * The toolchain is not read here and the two halves of it now differ.
+ * `AppBuilder` looks for the Android SDK itself and refuses before the first
+ * step when it finds none, because `prebuild` deletes the one record most
+ * machines keep. A JDK is still a person's business: a machine without one
+ * fails the gradle step, with gradle's own words in the run's error.
  */
 export async function canBuildApp(dir = MOBILE_DIR): Promise<boolean> {
   try {

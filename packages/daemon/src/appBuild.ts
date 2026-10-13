@@ -147,10 +147,13 @@ export class AppBuilder {
     // takes `local.properties` with it: a machine whose only record of the SDK
     // is that file has it until the second step and not after. And refused here
     // rather than at the third step, which is the one that needs it.
-    const sdk = await androidSdk(this.dir, this.sdkPaths());
+    const found = await androidSdk(this.dir, this.sdkPaths());
+    const sdk = found.path;
     this.sdk = sdk;
     if (!sdk) {
-      return this.fail("this machine names no Android SDK, so the gradle step would fail. Export ANDROID_HOME for the daemon — the path the SDK is installed at, such as ~/Android/sdk — and build again. docs/MOBILE.md says why a line in android/local.properties is not enough.");
+      return this.fail(found.rejected
+        ? `${found.rejected.source} names ${found.rejected.path}, which is not a directory on this machine, and nothing else here names an Android SDK. Mend it and build again, or the gradle step would fail.`
+        : "this machine names no Android SDK, so the gradle step would fail. Export ANDROID_HOME for the daemon — the path the SDK is installed at, such as ~/Android/sdk — and build again. docs/MOBILE.md says why a line in android/local.properties is not enough.");
     }
 
     if (!(await this.exec(this.stepByName("install"), "pnpm", ["install", "--frozen-lockfile"]))) {
@@ -256,8 +259,20 @@ function step(name: AppBuildStep, label: string, command: string): UpdateStep {
   return { name, label, command, status: "pending", output: "", exitCode: null };
 }
 
+/** What the search for an SDK found, and what it had to refuse to get there. */
+export type SdkSearch = {
+  /** The SDK the build runs against, or null when nothing on this machine holds one. */
+  path: string | null;
+  /**
+   * A path somebody named that covey could not use, for the refusal to quote.
+   * Null when nothing named one at all — which is a different sentence, and
+   * telling a reader to export a variable they did export is #132 again.
+   */
+  rejected: { source: string; path: string } | null;
+};
+
 /**
- * Where this machine keeps the Android SDK, or null for nowhere.
+ * Where this machine keeps the Android SDK.
  *
  * Gradle reads `ANDROID_HOME` from its environment, or `sdk.dir` out of
  * `android/local.properties`. The SDK tools write the second and almost nobody
@@ -271,30 +286,51 @@ function step(name: AppBuildStep, label: string, command: string): UpdateStep {
  * file is read before `prebuild` runs, because after it the file is gone.
  * `ANDROID_SDK_ROOT` is read as well and never written: Android deprecated the
  * name years ago and the tools still set it.
+ *
+ * **A path somebody named is trusted; a path covey guessed has to prove
+ * itself.** A directory is all a name has to be, because gradle is the
+ * authority on what is in it and gradle now says so in words a client paints —
+ * covey judging the contents would refuse a `cmdline-tools` install that the
+ * terminal builds from, since the Android plugin fetches the rest itself. A
+ * guess is held to `isSdk`, because handing gradle a directory nobody named is
+ * covey inventing an answer.
  */
-export async function androidSdk(dir: string, paths = defaultSdkPaths()): Promise<string | null> {
+export async function androidSdk(dir: string, paths = defaultSdkPaths()): Promise<SdkSearch> {
+  let rejected: SdkSearch["rejected"] = null;
+  const named = async (source: string, path: string | undefined): Promise<string | null> => {
+    if (!path) return null;
+    if (await isDir(path)) return path;
+    // The first one wins the sentence: `ANDROID_HOME` is read first because
+    // gradle reads it first, so it is the line the reader has to mend first.
+    rejected ??= { source, path };
+    return null;
+  };
+
   for (const name of ["ANDROID_HOME", "ANDROID_SDK_ROOT"]) {
-    const value = process.env[name]?.trim();
-    if (value && (await isSdk(value))) return value;
+    const found = await named(name, process.env[name]?.trim());
+    if (found) return { path: found, rejected: null };
   }
   const text = await readFile(join(dir, "android", "local.properties"), "utf8").catch(() => null);
   const line = text ? /^[^\S\n]*sdk\.dir[^\S\n]*=(.*)$/m.exec(text) : null;
   // A properties file escapes the separators of a Windows path; nothing else
   // here carries a backslash, so one is always an escape.
   const fromFile = line?.[1]?.trim().replace(/\\(.)/g, "$1");
-  if (fromFile && (await isSdk(fromFile))) return fromFile;
-  for (const path of paths) if (await isSdk(path)) return path;
-  return null;
+  const found = await named("sdk.dir in android/local.properties", fromFile);
+  if (found) return { path: found, rejected: null };
+
+  for (const path of paths) if (await isSdk(path)) return { path, rejected: null };
+  return { path: null, rejected };
 }
 
 /**
  * Where to look when nothing names one.
  *
- * This is the list `expo run:android` checks and deliberately the same one: a
- * machine where the app builds at a terminal has to build from the button, and
- * two lists that disagree is one machine with two answers. Android Studio
- * writes `Android/Sdk`, `sdkmanager` unpacked by hand goes where the reader put
- * it, and a Linux filesystem tells those two apart — so both are named.
+ * This is the list `expo run:android` checks, and the lowercase spelling
+ * beside it: a machine where the app builds at a terminal has to build from
+ * the button, and two lists that disagree is one machine with two answers.
+ * Android Studio writes `Android/Sdk`, `sdkmanager` unpacked by hand goes
+ * where the reader put it, and a Linux filesystem tells those two apart — so
+ * both are named. Expo also guesses on Windows, where no covey daemon runs.
  */
 export function defaultSdkPaths(): string[] {
   const home = homedir();
@@ -306,18 +342,22 @@ export function defaultSdkPaths(): string[] {
 /**
  * Whether a path holds an SDK rather than merely existing.
  *
- * A directory, and one of the three directories the build reads. An empty
- * `~/Android/sdk` left behind by an uninstall would otherwise be handed to
- * gradle as the answer, which is the failure this lookup exists to prevent,
- * one directory further on.
+ * One of the four directories an SDK root has. An empty `~/Android/sdk` left
+ * behind by an uninstall would otherwise be handed to gradle as the answer,
+ * which is the failure this lookup exists to prevent, one directory further
+ * on. `cmdline-tools` counts, because an SDK installed that way holds no
+ * `platforms` until the Android plugin fetches one.
+ *
+ * Only a guess is held to this. A path somebody named is theirs to get right.
  */
 async function isSdk(path: string): Promise<boolean> {
-  for (const part of ["platforms", "build-tools", "platform-tools"]) {
-    const ok = await stat(join(path, part)).then((st) => st.isDirectory(), () => false);
-    if (ok) return true;
+  for (const part of ["platforms", "build-tools", "platform-tools", "cmdline-tools"]) {
+    if (await isDir(join(path, part))) return true;
   }
   return false;
 }
+
+const isDir = (path: string) => stat(path).then((st) => st.isDirectory(), () => false);
 
 /**
  * What to add to a failed step's sentence, or nothing.
@@ -350,9 +390,13 @@ const REASON_MAX = 160;
 export function gradleReason(output: string): string | null {
   const start = output.lastIndexOf("* What went wrong:");
   if (start < 0) return null;
-  const lines = output.slice(start).split("\n").slice(1);
-  const end = lines.findIndex((l) => /^\* /.test(l));
-  const block = (end < 0 ? lines : lines.slice(0, end)).map(strip).filter((l) => l.length > 0);
+  // Stripped before the boundary is looked for, not after: gradle styles those
+  // headers under `org.gradle.console=rich`, and a `* Try:` wearing an escape
+  // ends no block — which runs the block to the end of the output and makes
+  // the deepest `>` one of gradle's own hints.
+  const lines = output.slice(start).split("\n").slice(1).map(strip);
+  const end = lines.findIndex((l) => l.startsWith("* "));
+  const block = (end < 0 ? lines : lines.slice(0, end)).filter((l) => l.length > 0);
   if (block.length === 0) return null;
   const deepest = block.filter((l) => l.startsWith(">"));
   const reason = (deepest.at(-1) ?? block[0]!).replace(/^>\s*/, "").trim();

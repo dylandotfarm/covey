@@ -391,8 +391,14 @@
   row said only that gradle had failed. `androidSdk` reads the file before
   `prebuild` runs because afterwards there is none, hands the answer to every
   step as `ANDROID_HOME`, writes the file back for the reader at a terminal,
-  and guesses last from the same list `expo run:android` checks — two lists
-  that disagree is one machine with two answers. And because nothing paints the
+  and guesses last from the list `expo run:android` checks and the lowercase
+  spelling beside it — two lists that disagree is one machine with two
+  answers. A path somebody named is trusted as far as being a directory and
+  gradle judges the rest, because covey reading the contents would refuse a
+  `cmdline-tools` install the terminal builds from; a path covey guessed has
+  to look like an SDK, because volunteering a directory nobody named is covey
+  inventing an answer. A name covey could not use is quoted in the refusal
+  rather than folded into "no SDK here", which is #132 again. And because nothing paints the
   step output, a failed step puts its reason in the one sentence a client
   shows: `gradleReason` takes the *last* `>` under gradle's
   `* What went wrong:`, which is the fault rather than the project that held
