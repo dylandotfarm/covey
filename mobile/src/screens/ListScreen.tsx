@@ -68,7 +68,19 @@ export function ListScreen({ navigation }: Props) {
           title="No machines yet."
           hint="Add the machine that runs covey. In the TUI, press enter on a machine row to see its address."
         />
-        <View style={{ padding: 16 }}>
+        {/* The insets, or the navigation bar sits over the one control this
+            screen has. `S.screen` fills the window and Android draws its bars
+            on top, so a flat padding leaves the label half covered and the
+            bottom of the button untappable — and a reader with no machine yet
+            has nothing else to press. The list below pads the same way. */}
+        <View
+          style={{
+            padding: 16,
+            paddingBottom: 16 + insets.bottom,
+            paddingLeft: 16 + insets.left,
+            paddingRight: 16 + insets.right,
+          }}
+        >
           <Pressable
             onPress={() => navigation.navigate("AddMachine")}
             style={{ backgroundColor: T.accent, borderRadius: 10, padding: 14, alignItems: "center" }}
