@@ -545,9 +545,11 @@ refuse.
 
 ### Building the app itself
 
-You need the Android SDK and a JDK. `ANDROID_HOME` has to be exported, not just
-written into `android/local.properties`: `prebuild` regenerates `android/` and
-takes any file you put there with it.
+You need the Android SDK and a JDK. Export `ANDROID_HOME` rather than relying on
+`android/local.properties`: `prebuild` regenerates `android/` and takes any file
+you put there with it. (The build button below reads the file before that step
+and writes it back after, so a machine that only ever had the file keeps
+working; a terminal is on its own.)
 
 ```sh
 export ANDROID_HOME=$HOME/Android/sdk        # wherever your SDK lives
@@ -604,7 +606,7 @@ right answer about the file on disk and the wrong one for the reader who wants
 the current app, and before this the only way to move it was a terminal on that
 machine.
 
-Four rules hold it:
+Five rules hold it:
 
 - **No `.env`, no build.** The run refuses before the first step when nothing
   names `EXPO_PUBLIC_COVEY_UPDATES_URL` — neither the daemon's environment nor
@@ -622,10 +624,29 @@ Four rules hold it:
   steps. An APK is installed by a person who chose to; a bundle lands in every
   installed app of that runtime version without being asked, and covey does not
   do the second on the way to the first. Exporting stays a second act.
-- **It promises nothing about the toolchain.** `canBuildApp` is true when the
-  daemon runs from a checkout that holds `mobile/`, and nothing more. A machine
-  with no Android SDK and no JDK fails the gradle step, with gradle's own words
-  in the step's output.
+- **No Android SDK, no build.** Found in the three places the SDK is recorded —
+  `ANDROID_HOME`, then the deprecated `ANDROID_SDK_ROOT`, then `sdk.dir` in
+  `android/local.properties`, then the default install locations
+  `expo run:android` itself checks — and handed to every step as `ANDROID_HOME`.
+  A machine with none is refused before the first step, by name.
+
+  This is the bug the button had. The daemon starts from a login shell, which
+  carries a terminal's `PATH` and not a variable exported for an interactive
+  one, so `ANDROID_HOME` is usually unset there. The SDK tools write
+  `local.properties` instead, and step two *deletes* it — so a machine that had
+  built the app by hand for months failed two seconds into gradle with `SDK
+  location not found`, every time, and the row said only that gradle had
+  failed. Covey reads the file before `prebuild` runs, because afterwards there
+  is no file, and writes it back afterwards, because the reader at a terminal
+  wants it too.
+- **It still promises nothing about the rest of the toolchain.**
+  `canBuildApp` is true when the daemon runs from a checkout that holds
+  `mobile/`, and nothing more. A machine with no JDK fails the gradle step.
+- **A failed step says why in one sentence.** Nothing paints the step output, so
+  the sentence in `error` is the whole of what a reader on a phone gets.
+  `gradleReason` lifts the line out of gradle's `* What went wrong:` block — the
+  *last* `>`, because gradle nests its causes and the deepest one is the fault —
+  and a step covey killed at its ceiling says that instead.
 
 The progress is pushed at a step's boundary and nowhere else. The updater
 streams its output and sends it every 150 ms, because an update takes a minute

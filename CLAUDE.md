@@ -383,7 +383,20 @@
   `EXPO_PUBLIC_COVEY_UPDATES_URL`, because `app.config.ts` then leaves the
   `updates` block out and the app that comes out is off the channel until
   somebody sideloads another one — a file is one line to write, a binary on a
-  phone is not. The progress goes at a step's boundary and never per chunk:
+  phone is not. It refuses there for a missing **Android SDK** as well, and
+  that one is the trap: the daemon starts from a login shell with no
+  `ANDROID_HOME`, the SDK tools record the path in `android/local.properties`
+  instead, and step two *deletes* that file with the rest of `android/` — so
+  gradle answered `SDK location not found` two seconds into step three and the
+  row said only that gradle had failed. `androidSdk` reads the file before
+  `prebuild` runs because afterwards there is none, hands the answer to every
+  step as `ANDROID_HOME`, writes the file back for the reader at a terminal,
+  and guesses last from the same list `expo run:android` checks — two lists
+  that disagree is one machine with two answers. And because nothing paints the
+  step output, a failed step puts its reason in the one sentence a client
+  shows: `gradleReason` takes the *last* `>` under gradle's
+  `* What went wrong:`, which is the fault rather than the project that held
+  it. The progress goes at a step's boundary and never per chunk:
   gradle is forty minutes of output nothing paints, and a client that arrives
   mid-build is sent the record once on connect instead. `pnpm run export` is
   never one of those steps: a bundle lands in every installed app of that
