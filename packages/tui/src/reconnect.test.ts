@@ -68,6 +68,21 @@ class FakeDaemon {
   refuseHello: string | null = null;
   /** Take the socket back as soon as it is open, before `hello` can be answered. */
   dropAfterOpen = false;
+  /**
+   * Answer nothing, and hold the socket open: the computer that went to sleep
+   * (#217).
+   *
+   * This is the half-open socket, and it is a flag rather than anything done to
+   * the socket because that is what makes it the bug. Nothing is closed,
+   * nothing is destroyed, no FIN goes anywhere — the connection is exactly as
+   * open as it was, and only the answers stop. A client that reads
+   * `readyState` learns nothing from it, which is the whole defect.
+   */
+  silent = false;
+  /** Refuse `ping`, the way a daemon too old to know the method does. */
+  refusePing = false;
+  /** How many times the client has probed. Read by the tests, nothing else. */
+  pings = 0;
   port = 0;
 
   constructor() {
@@ -111,13 +126,22 @@ class FakeDaemon {
     ws.on("close", () => this.sockets.delete(ws));
     ws.on("message", (raw) => {
       const { id, method } = JSON.parse(raw.toString());
+      // Counted before the silence, so a test can tell a probe that went out
+      // from an answer that came back.
+      if (method === "ping") this.pings++;
+      if (this.silent) return;
       if (method === "hello" && this.refuseHello) {
         ws.send(JSON.stringify({ id, ok: false, error: { code: "protocol", message: this.refuseHello } }));
+        return;
+      }
+      if (method === "ping" && this.refusePing) {
+        ws.send(JSON.stringify({ id, ok: false, error: { code: "unknown_method", message: `unknown method ${method}` } }));
         return;
       }
       const result =
         method === "hello" ? INFO
         : method === "shell.snapshot" ? { seq: 0, machine: INFO, projects: [], threads: [] }
+        : method === "ping" ? null
         : { subscriptionId: `sub-${id}` };
       ws.send(JSON.stringify({ id, ok: true, result }));
     });
@@ -125,7 +149,7 @@ class FakeDaemon {
 }
 
 /** A client that records every state it is told about. */
-function probe(url: string, backoff: number[]) {
+function probe(url: string, backoff: number[], heartbeatMs?: number) {
   const states: ConnState[] = [];
   const errors: (string | undefined)[] = [];
   const ev: ClientEvents = {
@@ -133,7 +157,7 @@ function probe(url: string, backoff: number[]) {
     shellSnapshot: () => {}, shellEvent: () => {}, shellSynchronized: () => {},
     threadEvent: () => {}, threadSynchronized: () => {}, machineUpdate: () => {},
   };
-  const client = new MachineClient({ name: "probe", url }, ev, { backoff });
+  const client = new MachineClient({ name: "probe", url }, ev, { backoff, ...(heartbeatMs ? { heartbeatMs } : {}) });
   return { client, states, errors, dials: () => states.filter((s) => s === "connecting").length };
 }
 
@@ -380,4 +404,103 @@ test("a daemon that drops the socket before it answers ends offline, not error",
   assert.equal(dials(), TRIES.first);
   assert.equal(client.state, "offline",
     "the row said a dial had failed and another was coming, and no other dial was coming");
+});
+
+// ---- 8. the socket that died while the computer slept --------------------------
+
+/**
+ * A computer that sleeps leaves its socket half open (#217). The daemon
+ * receives no FIN, both kernels keep the connection in `ESTABLISHED`, and the
+ * client's own `readyState` reads `OPEN` for as long as it cares to look. So
+ * the sidebar said connected, every call was handed to a connection that would
+ * never carry it, and the only thing that ever found out was TCP running out of
+ * retransmissions a minute or two later — which the reader met as a machine
+ * that took no message and a thread that could not be created.
+ *
+ * These four pin the heartbeat that replaced that: it asks, it concludes from
+ * silence and never from a refusal, it costs nothing on a connection with
+ * traffic of its own, and the call the reader was waiting on fails where covey
+ * decides rather than at the end of its own minute.
+ */
+
+test("a daemon that stops answering without closing the socket is noticed, and the client reconnects", async (t) => {
+  const daemon = new FakeDaemon();
+  const url = await daemon.listen();
+  t.after(() => daemon.close());
+
+  // The backoff is long enough to bring the daemon back inside it, so the
+  // reconnect this asserts is the client's own and not a second drop.
+  const { client, states } = probe(url, [200], 25);
+  t.after(() => client.stop());
+
+  client.start();
+  await waitFor(() => client.state === "connected", "the first connection");
+
+  daemon.silent = true;
+  await waitFor(() => daemon.pings > 0, "the client probed the quiet socket");
+  await waitFor(() => states.includes("disconnected"), "the client gave up on a socket nothing closed");
+
+  daemon.silent = false;
+  await waitFor(() => client.state === "connected", "the client reconnected");
+});
+
+test("a call waiting on a socket the heartbeat drops fails there, not at its own timeout", async (t) => {
+  const daemon = new FakeDaemon();
+  const url = await daemon.listen();
+  t.after(() => daemon.close());
+
+  // No redial inside this test: the drop is what is being measured.
+  const { client } = probe(url, [10_000], 25);
+  t.after(() => client.stop());
+
+  client.start();
+  await waitFor(() => client.state === "connected", "the first connection");
+
+  daemon.silent = true;
+  // What the reader's message is: a call handed to a socket that will never
+  // deliver it, with the minute the TUI gives every command.
+  const sent = client.rpc("thread.snapshot", { threadId: "t1" }, 60_000).then(() => null, (e: Error) => e);
+  const outcome = await Promise.race([sent, settle(2_000).then(() => null)]);
+
+  assert.ok(outcome instanceof Error, "the call was still waiting two seconds after the socket died");
+  assert.equal(outcome.message, "disconnected");
+});
+
+test("a daemon too old to know ping refuses it, and its socket still reads as alive", async (t) => {
+  const daemon = new FakeDaemon();
+  daemon.refusePing = true;
+  const url = await daemon.listen();
+  t.after(() => daemon.close());
+
+  const { client, states } = probe(url, [1], 25);
+  t.after(() => client.stop());
+
+  client.start();
+  await waitFor(() => client.state === "connected", "the first connection");
+  // Twice, so the beat that would have concluded death has run.
+  await waitFor(() => daemon.pings >= 2, "the client probed twice");
+  await settle(60);
+
+  assert.equal(client.state, "connected");
+  assert.ok(!states.includes("disconnected"), `a socket whose daemon answered was dropped: ${states.join(" ")}`);
+});
+
+test("a connection with traffic of its own is never probed", async (t) => {
+  const daemon = new FakeDaemon();
+  const url = await daemon.listen();
+  t.after(() => daemon.close());
+
+  const BEAT = 40;
+  const { client } = probe(url, [1], BEAT);
+  t.after(() => client.stop());
+
+  client.start();
+  await waitFor(() => client.state === "connected", "the first connection");
+
+  const pushing = setInterval(() => daemon.push({ push: "shell.synchronized", subscriptionId: "x" }), BEAT / 4);
+  t.after(() => clearInterval(pushing));
+  await settle(BEAT * 4);
+
+  assert.equal(daemon.pings, 0, `a connection the daemon was pushing to was probed ${daemon.pings} times`);
+  assert.equal(client.state, "connected");
 });

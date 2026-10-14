@@ -72,6 +72,40 @@ export interface ClientEvents {
 const BACKOFF = [500, 1000, 2000, 4000, 8000];
 
 /**
+ * How often the client asks a quiet socket whether it is still there (#217).
+ *
+ * A computer that sleeps leaves the socket half open, and nothing in the
+ * runtime will say so: `readyState` reads `OPEN`, every call is serialised
+ * into a connection that will never deliver it, and the only thing that ever
+ * discovers the truth is TCP running out of retransmissions minutes later.
+ * The reader meets that as a machine the sidebar calls connected and which
+ * takes no message.
+ *
+ * Ten seconds, so the worst case — a socket that dies the moment after a
+ * message arrives — is noticed in twenty. One small frame per machine per ten
+ * seconds is the whole cost, and only on a connection with no traffic of its
+ * own, which is what `beat` reads `lastHeard` for.
+ */
+const HEARTBEAT_MS = 10_000;
+
+/** Why `dropSocket` dropped a socket the heartbeat got no answer from. */
+const NO_ANSWER = "the machine stopped answering";
+
+/**
+ * Let the process end with `timer` still pending.
+ *
+ * This package compiles against `DOM` alone — nothing in `client` or
+ * `protocol` may import a node module, or the web client stops loading — so
+ * the type of a timer here is `number`, which has no `unref`. Node's timer
+ * does, and this cast is how one line reaches it without taking node's types
+ * on. Without it a client nobody stopped holds the test runner open, which is
+ * the defect behind issue #53.
+ */
+function unref(timer: unknown) {
+  (timer as { unref?: () => void } | null)?.unref?.();
+}
+
+/**
  * How many dials a machine gets before the client calls it offline and stops.
  *
  * Three numbers because the three cases are not the same problem:
@@ -81,16 +115,23 @@ const BACKOFF = [500, 1000, 2000, 4000, 8000];
  *   now, not in an hour.
  * - `again` — it answered before, so the address is right and something else
  *   went away: a laptop lid, a tailnet hiccup, a daemon that crashed. That
- *   earns more patience. Six dials walk the whole backoff and add up to about
- *   half a minute, or a little over a minute against a host that times its
- *   handshake out rather than refusing it.
+ *   earns more patience. Twelve dials walk the whole backoff and add up to
+ *   about a minute, or several against a host that times its handshake out
+ *   rather than refusing it.
+ *
+ *   The lid is the case the number is chosen for, and six dials were not
+ *   enough for one (#217). A computer that wakes has a network stack still
+ *   coming up and a tailnet still re-establishing, which takes longer than
+ *   the thirty seconds six dials bought; all six then failed against a
+ *   machine that was about to answer, and `giveUp` put the row away for good.
+ *   A dial is a socket and nothing more, so the extra ones are cheap.
  * - `restarting` — we asked the daemon to restart, so the drop is the request
  *   working. The reconnect is the only way `machine.update` can report success,
  *   so a cap that bit here would turn every update into a failure. Forty dials
  *   at the 8 s ceiling is about five minutes, which covers a pull, a rebuild
  *   and a restart on the slowest machine in the fleet, and still ends.
  */
-export const TRIES = { first: 3, again: 6, restarting: 40 } as const;
+export const TRIES = { first: 3, again: 12, restarting: 40 } as const;
 
 export interface ClientOptions {
   /** Delays between dials, in milliseconds. Only a test moves it. */
@@ -102,6 +143,8 @@ export interface ClientOptions {
   dial?: Dial;
   /** The name given at `hello`. `USER_CLIENT` unless the caller is another client. */
   clientName?: string;
+  /** How often to probe a quiet socket, in milliseconds. Only a test moves it. */
+  heartbeatMs?: number;
 }
 
 /**
@@ -137,14 +180,27 @@ export class MachineClient {
   /** Bumped per watchThread, so a slow snapshot cannot take back the stream. */
   private watchGen = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The heartbeat (#217), and the two facts it decides on.
+   *
+   * `lastHeard` is when the daemon last said anything at all — an answer, an
+   * error, a push — so a connection with traffic of its own is never probed.
+   * `probePending` says a probe went out and nothing has arrived since, which
+   * is the one state that means the socket is gone.
+   */
+  private beatTimer: ReturnType<typeof setInterval> | null = null;
+  private lastHeard = 0;
+  private probePending = false;
   private readonly backoff: readonly number[];
   private readonly dial: Dial;
   private readonly clientName: string;
+  private readonly heartbeatMs: number;
 
   constructor(readonly saved: SavedMachine, private ev: ClientEvents, opts: ClientOptions = {}) {
     this.backoff = opts.backoff ?? BACKOFF;
     this.dial = opts.dial ?? ((url) => new WebSocket(url));
     this.clientName = opts.clientName ?? USER_CLIENT;
+    this.heartbeatMs = opts.heartbeatMs ?? HEARTBEAT_MS;
   }
 
   get key() { return this.saved.url; }
@@ -186,6 +242,7 @@ export class MachineClient {
   stop() {
     this.closed = true;
     if (this.timer) clearTimeout(this.timer);
+    this.stopBeat();
     this.ws?.close();
   }
 
@@ -211,6 +268,7 @@ export class MachineClient {
         this.expectingRestart = false;
         this.lastError = null;
         this.setState("connected");
+        this.startBeat();
         await this.resubscribe();
       } catch (e: any) {
         // When the socket went first, `onClose` has already said what happens
@@ -225,10 +283,20 @@ export class MachineClient {
     ws.addEventListener("close", () => { if (ws === this.ws) this.onClose(); });
     // A browser's error event says nothing. The `ws` package names the status
     // the daemon refused with, and 401 is the one a reader can act on.
-    ws.addEventListener("error", (e) => { this.setState("error", refusal(e.message ?? "socket error")); });
+    //
+    // Guarded like `close`, and for a reason the heartbeat made real: a socket
+    // `dropSocket` gave up on is left for the runtime to tidy away, and the
+    // runtime tidies it away by failing it — minutes later, when TCP runs out
+    // of retransmissions. Ungated, that late error painted "error" over a
+    // connection that had been working again since.
+    ws.addEventListener("error", (e) => {
+      if (ws !== this.ws) return;
+      this.setState("error", refusal(e.message ?? "socket error"));
+    });
   }
 
   private onClose() {
+    this.stopBeat();
     for (const w of this.waits.values()) { clearTimeout(w.timer); w.rej(new Error("disconnected")); }
     this.waits.clear();
     this.shellSubId = null;
@@ -270,6 +338,75 @@ export class MachineClient {
     this.state = s;
     if (err) this.lastError = err;
     this.ev.state(s, err);
+  }
+
+  /**
+   * Start asking a connected socket whether it is still there (#217).
+   *
+   * This is not the heartbeat issue #68 declined, and the difference is the
+   * whole of why it may exist. That one was a background probe against a
+   * machine the client had *given up* on, which would have contradicted the
+   * honest "we have stopped trying" the offline row promises. This one runs
+   * only while the client calls itself connected, and it contradicts nothing:
+   * it turns a socket that has silently died into the `close` the reconnect
+   * already knows what to do with. Nothing here ever restarts a dial that
+   * `giveUp` ended.
+   */
+  private startBeat() {
+    if (this.beatTimer) return;
+    this.lastHeard = Date.now();
+    this.probePending = false;
+    this.beatTimer = setInterval(() => this.beat(), this.heartbeatMs);
+    unref(this.beatTimer);
+  }
+
+  private stopBeat() {
+    if (this.beatTimer) clearInterval(this.beatTimer);
+    this.beatTimer = null;
+    this.probePending = false;
+  }
+
+  /**
+   * One beat: ask, or conclude.
+   *
+   * The conclusion is drawn from `lastHeard` and never from what the probe's
+   * own promise did. A rejection is not death — a daemon too old to know the
+   * method rejects with `unknown_method`, and a reply of any kind means the
+   * bytes went there and came back. Only silence across two beats is death,
+   * which is why the answer is read on the beat after the asking rather than
+   * awaited here.
+   */
+  private beat() {
+    if (Date.now() - this.lastHeard < this.heartbeatMs) { this.probePending = false; return; }
+    if (this.probePending) { this.dropSocket(NO_ANSWER); return; }
+    this.probePending = true;
+    // The timeout matches the period so the wait is cleaned up by the time the
+    // next beat reads it. The result is thrown away on purpose: `onMessage` has
+    // already recorded the only part of it that matters.
+    void this.rpc("ping", {}, this.heartbeatMs).catch(() => {});
+  }
+
+  /**
+   * Treat the socket as gone, now, on the client's own say-so.
+   *
+   * A half-open socket cannot be closed in any way that is quick: `close()`
+   * starts a handshake the other end will never finish, and the runtime waits
+   * that out before it says the word. So the client stops waiting for
+   * permission — it drops its reference first, which is what makes every
+   * listener on the dead socket a no-op (both compare against `this.ws`), and
+   * then takes the ordinary reconnect path. `onClose` rejects the calls that
+   * were waiting on it, so a message the reader sent into the dead socket
+   * fails here rather than at the end of its own minute.
+   *
+   * `close()` is still called, because the runtime should release what it holds
+   * whenever it manages to.
+   */
+  private dropSocket(why: string) {
+    const dead = this.ws;
+    this.ws = null;
+    this.lastError = why;
+    try { dead?.close(); } catch { /* a socket already past closing */ }
+    this.onClose();
   }
 
   private async resubscribe() {
@@ -361,6 +498,12 @@ export class MachineClient {
   }
 
   private onMessage(m: WireFromDaemon) {
+    // Anything at all from the daemon is proof the socket carries bytes, so it
+    // answers the heartbeat's question whatever it says. An error counts, which
+    // is what lets a daemon too old to know `ping` refuse it and still read as
+    // alive (#217).
+    this.lastHeard = Date.now();
+    this.probePending = false;
     if (isPush(m)) return this.onPush(m);
     const w = this.waits.get(m.id);
     if (!w) return;
@@ -451,7 +594,9 @@ function refusal(message: string): string {
  */
 function isSilence(message: string): boolean {
   // A bare "disconnected" is the socket going away before `hello` was answered,
-  // which is silence with extra steps and says less than the count does.
-  if (message === "disconnected") return true;
+  // which is silence with extra steps and says less than the count does. The
+  // heartbeat's own reason is the same kind of thing: it says what covey noticed
+  // first, not why the dials that followed failed.
+  if (message === "disconnected" || message === NO_ANSWER) return true;
   return /ECONNREFUSED|EHOSTUNREACH|ENETUNREACH|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|handshake has timed out|socket hang up/i.test(message);
 }
