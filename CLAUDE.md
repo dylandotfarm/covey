@@ -529,6 +529,44 @@
   machine and never one fleet; the daemon still answers the old name for an older TUI
   and reads the old `fleet` key out of `daemon.json` once more, so an update does not
   leave a phone dialling one machine.
+- A **local project** is a project with no repository: one directory under
+  `<projectsDir>/local/<name>`, named by the reader, where *every* thread of the project
+  works. It is a place to chat, to automate and to keep files, so the second thread sees
+  what the first wrote — `newWorktree` tests `kind === "local"` and never `isGitRepo`, or a
+  reader who runs `git init` there would silently get a worktree per thread and a workspace
+  that is empty from every one of them. The name is the identity (`localProjectId` in
+  `@covey/protocol`, slugged once and never again) and `projectPool` keys on it, so the same
+  local project on two machines is one row the way one repository on two machines is; the
+  title is the reader's to rename and the identity never moves, or a rename on one machine
+  would split the pool. Everything else a project does comes free: the machines, the
+  secrets, the shell, the drops, a move. Four acts need a repository and are refused *by
+  name* — an issue, a pull request, a base branch and a **run** — and the pull request's
+  refusal comes before the branch test, because a thread there is on no branch *because*
+  there is no repository. The run is refused twice, in `startRun` and in
+  `Engine.assertRunnable` (`run.create`, `run.member.add`, and the `patch` that moves a
+  member), because it is the one whose damage is done before a refusal could arrive:
+  dispatch would put every member in the project's one directory with no branch and no
+  checkpoint between them. A session is told which it is in before its first turn: `preambleFor` sends
+  `COVEY_LOCAL_PREAMBLE`, not the loop's note, because every sentence of that note is false
+  there; change it with the skill's *A local project* section, as with the loop and
+  `covey env`.
+  **`project.makeGit` upgrades one** rather than making the reader rebuild: `publishDirectory`
+  ignores `.covey` first (the directory holds every thread's file store, and a dropped
+  screenshot must not be the first commit), commits — `--allow-empty`, because a project
+  nobody kept a file in still needs a branch to clone (#176) — pushes, and then the ordinary
+  clone runs. The repository must be **empty**, because reconciling the reader's directory
+  with somebody else's history is not covey's to decide, and `createRepo` grows `empty` for
+  exactly that one caller. The push sets **no upstream**: what is left behind is a checkout
+  of the base branch, and the thread still standing in it reads the loop's preamble from its
+  next turn, so a bare `git push` there would land on the base branch. Then every thread
+  moves to a worktree of its own, and **a busy thread keeps the directory it is in** — which
+  is the agent that ran `covey project git`, so that command needs no deferral and no
+  refusal — and **so does an archived one**, because a notes project chatted in for a month
+  would otherwise make thirty checkouts and thirty branches nobody will push. Both write the
+  path down rather than leave it `null`, or the thread would land inside `repo.git`.
+  A pooled project is upgraded a machine at a time: `push` to the one whose files go up,
+  `push: false` to the rest. Two faces, `g` on the project row and `covey project git <url>`;
+  the agent makes its own empty repository with `gh repo create`, and the skill says so.
 - A project needs a commit to exist (#176). A repository with no commits has no branch,
   so `git remote set-head origin --auto` fails after a fetch that worked, and nothing
   could branch a worktree from it anyway — so `cloneBare` refuses it by name rather than

@@ -1,21 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { basename, join, resolve, sep } from "node:path";
-import { existsSync, statSync, rmSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, statSync, rmSync, readdirSync, readFileSync, mkdirSync, cpSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, AppBuild, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
-import { isUserClient, KNOWN_MODELS, MIN_CHAIN, type AssistantMessageItem,} from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS, MIN_CHAIN, localProjectError, localProjectId, type AssistantMessageItem,} from "@covey/protocol";
 import { MAX_TERMINAL_INPUT, MAX_TERMINALS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
 import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js";
 import { makeSessionStore } from "./sessionStore.js";
-import { COVEY_PREAMBLE } from "./plugin.js";
+import { preambleFor } from "./plugin.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
 import { redactDeep, redactor } from "./redact.js";
-import { normaliseRemote, projectSlug, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
+import { normaliseRemote, projectSlug, publishDirectory, listRemoteBranches, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, fleetSetting, projectsDir, savePeers } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
@@ -27,7 +27,7 @@ import type { ClaudeModels } from "./models.js";
 import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, WatchRole, MergePolicy, MergeMethod, GitHubAction, GitHubItem, ReviewRequirement, ReviewerRecord, ReviewerState } from "@covey/protocol";
 import { reviewStanding } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
-import { cloneUrlsFor } from "./repos.js";
+import { cloneUrlsFor, GH_CWD } from "./repos.js";
 import { realGhHost, UploadRefused, type GhHost, type RealHostOptions } from "./integrate/gh.js";
 import { AttachError, describeUploadFailure, placeAttachments, planAttachments, type UploadedAttachment } from "./integrate/attach.js";
 import { gateMember } from "./integrate/gate.js";
@@ -643,6 +643,33 @@ export class Engine {
         return this.db.shellSeq();
       }
       case "project.create": {
+        // A project with no repository: one directory, named by the reader,
+        // that every thread of the project works in. There is nothing to
+        // clone, nothing to branch and nothing to open a pull request
+        // against, so this branch shares none of the clone's steps below.
+        if ("local" in cmd) {
+          const bad = localProjectError(cmd.local);
+          if (bad) throw new EngineError("bad_name", bad);
+          const localId = localProjectId(cmd.local);
+          // One local project of a name per machine, as one clone of a
+          // repository per base. The reader adding a machine to the pool
+          // sends the same name, and a machine that already holds it says so.
+          const dup = this.db.listProjects().find((q) => q.kind === "local" && q.localId === localId);
+          if (dup) throw new EngineError("exists", `this machine already has the local project ${dup.title}`);
+          const root = join(this.projectsDir, "local", localId);
+          try {
+            mkdirSync(root, { recursive: true });
+          } catch (e: any) {
+            throw new EngineError("io", `could not make ${root}: ${e?.message ?? e}`);
+          }
+          const made: Project = {
+            id: randomUUID(), title: cmd.title?.trim() || cmd.local.trim(), workspaceRoot: root,
+            repositoryIdentity: null, kind: "local", localId,
+            defaultModel: null, createdAt: now, updatedAt: now,
+          };
+          this.db.putProject(made);
+          return this.emitShell({ kind: "project.upserted", project: made });
+        }
         const url = cmd.url.trim();
         if (!url) throw new EngineError("bad_url", "a repository URL is needed");
         const baseBranch = cmd.baseBranch?.trim() || undefined;
@@ -692,6 +719,9 @@ export class Engine {
         if (cmd.defaultModel !== undefined) p.defaultModel = cmd.defaultModel;
         if (cmd.baseBranch !== undefined) {
           const base = cmd.baseBranch?.trim() || null;
+          // A local project has no remote, so it has no branch to work from.
+          // Refuse by name rather than record a base nothing reads.
+          if (p.kind === "local" && base !== null) throw new EngineError("unsupported", `${p.title} is a local project: it has no repository, so it has no base branch`);
           // Two projects of one repository on one base are one row in the
           // sidebar, and a new thread could land on either. Refuse the move
           // and name the project that already holds the base.
@@ -721,6 +751,55 @@ export class Engine {
         // Every thread of the project reads these, so every one of them has a
         // redactor to rebuild and perhaps a session to release.
         this.refreshSecrets(this.db.listThreads().filter((t) => t.projectId === p.id).map((t) => t.id));
+        return this.emitShell({ kind: "project.upserted", project: p });
+      }
+      case "project.makeGit": {
+        const p = this.db.getProject(cmd.projectId);
+        if (!p) throw new EngineError("not_found", "project not found");
+        if (p.kind !== "local") throw new EngineError("unsupported", `${p.title} is already a repository project`);
+        const url = cmd.url.trim();
+        if (!url) throw new EngineError("bad_url", "a repository URL is needed");
+        const identity = normaliseRemote(url);
+        // The project is about to become a clone of this repository on this
+        // base, and one of those is all a machine may hold.
+        const dup = this.db.listProjects().find((q) => q.id !== p.id && q.repositoryIdentity === identity && q.kind === "clone" && q.baseBranch === undefined);
+        if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}`);
+        // What is on the remote decides what this machine may do, and the two
+        // answers are the two halves of an upgrade: the machine that pushes
+        // needs an empty repository, and every other machine of the pool
+        // needs the branch the first one pushed.
+        // In the home directory, where `repos.branches` reads a remote too:
+        // the projects directory may not exist yet on a fresh machine, and a
+        // `git` whose cwd is not there fails before it reaches the network.
+        const remote = await listRemoteBranches(url, GH_CWD, await cloneUrlsFor(url));
+        if (remote.error) throw new EngineError("git", `could not read ${identity}: ${remote.error}`);
+        if (cmd.push === false) {
+          if (remote.branches.length === 0) throw new EngineError("no_branch", `${identity} has no commits yet; upgrade the machine whose files should become the repository first`);
+        } else {
+          // Reconciling the reader's directory with a history somebody else
+          // wrote is not a thing covey may decide for them. Refuse before
+          // anything is written, and name the one thing that fixes it.
+          if (remote.branches.length > 0) throw new EngineError("exists", `${identity} already has commits; a local project can only be upgraded into an empty repository`);
+          const published = await publishDirectory(p.workspaceRoot, url, `The files of ${p.title}, from covey's local project`);
+          // The commit stays in the directory, so a second attempt with
+          // another URL starts from it rather than from nothing.
+          if ("error" in published) throw new EngineError("git", `could not push ${p.workspaceRoot} to ${identity}: ${published.error}`);
+        }
+        const root = join(this.projectsDir, projectSlug(identity), "repo.git");
+        const cloned = await this.cloneOnce(url, root);
+        if ("error" in cloned) throw new EngineError("git", `could not clone ${identity}: ${cloned.error}`);
+        // The directory the project worked in until now. It stays on disk,
+        // as `project.delete` leaves a clone, and every thread's note names
+        // it: it holds whatever `.gitignore` kept out of the first commit.
+        const was = p.workspaceRoot;
+        p.kind = "clone";
+        p.repositoryIdentity = identity;
+        p.remoteUrl = cloned.url;
+        p.workspaceRoot = root;
+        delete p.localId;
+        p.updatedAt = now;
+        this.db.putProject(p);
+        await this.moveThreadsIntoWorktrees(p, was, cmd.push === false);
         return this.emitShell({ kind: "project.upserted", project: p });
       }
       case "project.delete": {
@@ -1044,6 +1123,7 @@ export class Engine {
         const existing = this.db.getRun(cmd.run.runId);
         // A retried create must not throw away a run that has been dispatched.
         if (existing) return this.emitShell({ kind: "run.upserted", run: existing });
+        for (const m of cmd.run.members) this.assertRunnable(m.projectId);
         // The run's parent, by the same rule a thread's parent follows: the
         // command wins, then the thread the connection speaks for.
         const parent = this.knownThread(cmd.run.parentThreadId ?? caller);
@@ -1076,6 +1156,7 @@ export class Engine {
         // another added on the day this issue came from. Adding is an ordinary
         // edit, so adding a member that is already here changes nothing.
         if (run.members.some((m) => m.id === cmd.member.id)) return this.emitShell({ kind: "run.upserted", run });
+        this.assertRunnable(cmd.member.projectId);
         run.members.push(newMember(cmd.member, now));
         return this.saveRun(run, now);
       }
@@ -1083,6 +1164,9 @@ export class Engine {
         const run = this.requireRun(cmd.runId);
         const at = run.members.findIndex((m) => m.id === cmd.memberId);
         if (at < 0) throw new EngineError("not_found", `run ${cmd.runId} has no member ${cmd.memberId}`);
+        // A move names the project the member lands in, so it is the third way
+        // a member could be put into a local project.
+        if (cmd.patch.projectId !== undefined) this.assertRunnable(cmd.patch.projectId);
         // `review` is issue #45's field. It is merged like any other and never
         // read here, which is what lets the two halves land separately.
         run.members[at] = { ...run.members[at]!, ...cmd.patch, updatedAt: now };
@@ -1222,11 +1306,33 @@ export class Engine {
    */
   private async takeIssue(t: Thread, issue: number | null, p: Project): Promise<void> {
     if (issue === null) { t.issue = null; this.db.putThread(t); return; }
+    if (p.kind === "local") throw new EngineError("unsupported", `${p.title} is a local project: it has no repository, so it has no issues`);
     this.assertIssueFree(t.projectId, issue, t.id);
     const facts = await this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot }).issue(issue);
     t.issue = { number: issue, title: facts?.title ?? null, url: facts?.url ?? null, takenAt: new Date().toISOString() };
     this.db.putThread(t);
     this.note(t.id, "info", `Took issue #${issue}${facts?.title ? ` (${facts.title})` : ""}.`);
+  }
+
+  /**
+   * Refuse a run member placed in a local project.
+   *
+   * A run is the fourth act that needs a repository, beside an issue, a pull
+   * request and a base branch — and the only one whose damage is done before
+   * any refusal could arrive. Dispatch makes one thread per task, each lands
+   * in the project's one directory, and several agents then edit the same
+   * files with no branch, no worktree and no checkpoint between them.
+   *
+   * Only a member whose project is on *this* machine can be read here, which
+   * is every member of a run a local project could have started: a pool is one
+   * repository or one local name, and `placementMachines` offers only machines
+   * that hold it. The client says the same sentence first (`startRun`), so a
+   * reader never reaches a placement.
+   */
+  private assertRunnable(projectId: string | null | undefined): void {
+    if (!projectId) return;
+    const p = this.db.getProject(projectId);
+    if (p?.kind === "local") throw new EngineError("unsupported", `${p.title} is a local project: a run needs a repository, because every member works on a branch of its own`);
   }
 
   /** Refuse an issue number that is not one, or that another live thread of the project holds. */
@@ -1245,6 +1351,10 @@ export class Engine {
     const t = this.db.getThread(params.threadId);
     if (!t) throw new EngineError("not_found", `thread ${params.threadId} not found`);
     if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
+    // Before the branch test, so the reason the reader reads is the real one:
+    // a local project has no repository, which is why it has no branch.
+    const local = this.db.getProject(t.projectId);
+    if (local?.kind === "local") throw new EngineError("unsupported", `${local.title} is a local project: it has no repository to open a pull request against`);
     if (!t.branch) throw new EngineError("no_branch", `thread ${params.threadId} is not on a branch`);
     if (t.pullRequest && t.watch?.state === "watching") throw new EngineError("exists", `this thread already has pull request #${t.pullRequest.number}; covey is watching it`);
     const title = params.title.trim();
@@ -2602,6 +2712,13 @@ export class Engine {
    */
   private async newWorktree(p: Project, name: string, carry: string | null, review: string | null = null): Promise<{ worktreePath: string | null; branch: string | null; cleanStart: CleanStart | null; carried: boolean }> {
     const inPlace = async () => ({ worktreePath: null, branch: isGitRepo(p.workspaceRoot) ? await currentBranch(p.workspaceRoot) : null, cleanStart: null, carried: false });
+    // A local project is one directory and every thread of it works there.
+    // That is the whole of what the reader asked for: a place to keep files
+    // and come back to them, not a change to land. The test is the kind and
+    // never `isGitRepo`, so a reader who runs `git init` in that directory
+    // keeps the project they made rather than silently getting a worktree
+    // per thread and a workspace that is empty from every one of them.
+    if (p.kind === "local") return inPlace();
     if (!isGitRepo(p.workspaceRoot)) {
       if (p.kind === "clone") throw new EngineError("git", `${p.workspaceRoot} is not a repository; the bare clone was deleted`);
       return inPlace();
@@ -2635,6 +2752,79 @@ export class Engine {
     const wt = await createWorktree(p.workspaceRoot, name, cleanStart.ref, path);
     if ("error" in wt) throw new EngineError("git", `could not create worktree from ${cleanStart.ref}: ${wt.error}`);
     return { worktreePath: wt.path, branch: wt.branch, cleanStart, carried: false };
+  }
+
+  /**
+   * Give every thread of a project that has just become a repository a
+   * worktree of its own, and say in each what happened (`project.makeGit`).
+   *
+   * Three rules, and each is one a reader would otherwise find with their
+   * fingers.
+   *
+   * **A busy thread keeps the directory it is in, and so does an archived
+   * one.** A running turn, an approval that waits, a background task: moving
+   * the files under any of them is the one thing an upgrade must not do. An
+   * archived thread is the other side of the same coin — a local project's
+   * threads are conversations rather than changes, so a notes project chatted
+   * in for a month has thirty of them, and thirty checkouts and thirty
+   * branches for conversations nobody will push is a cost with nothing behind
+   * it. Both keep the directory, and in both cases the path has to be written
+   * down: `worktreePath` was `null`, which reads as the project's root, and
+   * that root has just become the bare clone, so a thread left `null` would
+   * land *inside* `repo.git` the next time the reader wrote to it.
+   *
+   * **A thread takes its file store with it.** The pictures a reader was
+   * shown, and the files they dropped, live under the directory the thread
+   * worked in. The `/file` route reads them from the thread's cwd, so a store
+   * left behind is every picture of that project gone.
+   *
+   * **A worktree that cannot be made costs that thread and no other.** The
+   * project row is already written; a throw here would leave the project a
+   * clone with some of its threads unmoved and nothing to say which. So each
+   * thread falls back to the old directory with a warning naming the reason.
+   */
+  private async moveThreadsIntoWorktrees(p: Project, was: string, kept: boolean): Promise<void> {
+    // Where the files stayed, said once and the same way in every note.
+    const left = kept
+      ? `The files in ${was} stayed there: another machine's directory became the repository.`
+      : `What was in ${was} is the repository's first commit, and the directory itself is still there.`;
+    for (const t of this.db.listThreads().filter((x) => x.projectId === p.id && !x.movedTo && x.worktreePath === null)) {
+      // The pair `archiveWhenIdle` asks, for the same reason: the turn on the
+      // row, because a turn runs whether or not a session is live, and the
+      // live session, because a background task and an approval that waits
+      // outlive a turn.
+      const working = t.latestTurn?.state === "running" || this.sessionBusy(t.id);
+      if (working || t.archivedAt) {
+        this.mutateThread(t.id, (x) => { x.worktreePath = was; });
+        const why = working
+          ? `This thread was working, so it keeps ${was} as its directory and gets no branch of its own.`
+          : `This thread was archived, so it keeps ${was} as its directory and gets no branch of its own.`;
+        this.note(t.id, working ? "warning" : "info", `${p.title} is now a git repository (${p.repositoryIdentity}). ${why} ${left} Start a new thread in the project for a worktree on a branch, with the pull request loop.`);
+        continue;
+      }
+      const tree = await this.newWorktree(p, t.id.slice(0, 8), null).catch((e: any) => ({ error: e?.message ?? String(e) }) as const);
+      if ("error" in tree || !tree.worktreePath) {
+        this.mutateThread(t.id, (x) => { x.worktreePath = was; });
+        this.note(t.id, "warning", `${p.title} is now a git repository (${p.repositoryIdentity}), but this thread could not be given a worktree: ${"error" in tree ? tree.error : "no worktree was made"}. It keeps ${was} as its directory. ${left}`);
+        continue;
+      }
+      // The store moves before the thread does, so a `/file` request that
+      // arrives between the two reads the old cwd and still finds the file.
+      const from = threadFilesDir(was, t.id);
+      if (existsSync(from)) {
+        try {
+          mkdirSync(threadFilesDir(tree.worktreePath, t.id), { recursive: true });
+          cpSync(from, threadFilesDir(tree.worktreePath, t.id), { recursive: true });
+        } catch (e: any) {
+          this.note(t.id, "warning", `Could not bring this thread's files to its new worktree: ${e?.message ?? e}. They are still in ${from}.`);
+        }
+      }
+      this.mutateThread(t.id, (x) => { x.worktreePath = tree.worktreePath; x.branch = tree.branch; });
+      // The session's working directory is fixed when its process starts, so
+      // one that is still live would go on writing into the old directory.
+      this.dropSession(t.id);
+      this.note(t.id, "info", `${p.title} is now a git repository (${p.repositoryIdentity}). This thread works in ${tree.worktreePath}, on branch ${tree.branch}, so it can open a pull request. ${left}`);
+    }
   }
 
   /**
@@ -2771,7 +2961,7 @@ export class Engine {
         ...(Object.keys(secrets).length ? { secrets } : {}),
         // The skill and the note that points at it, together or not at all: a
         // note that names a skill the session cannot load is worse than none.
-        ...(this.opts.plugins?.length ? { plugins: this.opts.plugins, systemPromptAppend: COVEY_PREAMBLE } : {}),
+        ...(this.opts.plugins?.length ? { plugins: this.opts.plugins, systemPromptAppend: preambleFor(p) } : {}),
       },
       this.sinkFor(t.id),
       // `undefined` selects the SDK's own `query`, which is what a daemon uses.
@@ -3340,6 +3530,8 @@ export class Engine {
       sourceMachineId: this.machine.machineId, sourceMachineName: this.machine.name,
       project: {
         title: project.title, workspaceRoot: project.workspaceRoot, repositoryIdentity: project.repositoryIdentity,
+        ...(project.kind ? { kind: project.kind } : {}),
+        ...(project.localId ? { localId: project.localId } : {}),
         ...(project.baseBranch ? { baseBranch: project.baseBranch } : {}),
         remoteUrl: project.remoteUrl ?? (isGitRepo(project.workspaceRoot) ? await remoteUrl(project.workspaceRoot) : null),
       },
@@ -3351,6 +3543,17 @@ export class Engine {
     let project = opts.projectId ? this.db.getProject(opts.projectId) : null;
     if (!project && exp.project.repositoryIdentity) {
       project = this.db.listProjects().find((p) => p.repositoryIdentity === exp.project.repositoryIdentity) ?? null;
+    }
+    // A local thread moves to the machine's own copy of that local project,
+    // and covey makes the directory when there is none — the same step a
+    // repository gets, which is a clone.
+    if (!project && exp.project.kind === "local" && exp.project.localId) {
+      const localId = exp.project.localId;
+      project = this.db.listProjects().find((p) => p.kind === "local" && p.localId === localId) ?? null;
+      if (!project) {
+        await this.apply({ type: "project.create", local: localId, title: exp.project.title });
+        project = this.db.listProjects().find((p) => p.kind === "local" && p.localId === localId) ?? null;
+      }
     }
     if (!project) {
       const url = opts.url ?? exp.project.remoteUrl;

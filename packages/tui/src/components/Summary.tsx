@@ -77,6 +77,7 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
         <Counts t={tally} where={` on ${pool.length} machine${pool.length === 1 ? "" : "s"}`} />
         {past > 0 && <Text color={T.faint}>  ·  {past} archived or moved</Text>}
         {p.baseBranch && <Text color={T.subtle}>  ·  from {p.baseBranch}</Text>}
+        {p.kind === "local" && <Text color={T.subtle}>  ·  local · no repository</Text>}
         {p.defaultModel && <Text color={T.subtle}>  ·  {modelLabel(p.defaultModel, state.machines.get(pool[0]!.machine)?.info?.models)}</Text>}
       </Text>
       <Box height={1} />
@@ -86,7 +87,12 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
       {threads.length === 0 && <Text color={T.subtle} italic>no threads yet — press n to start one</Text>}
       {threads.length > shown.length && <Text color={T.faint}>  … {threads.length - shown.length} more</Text>}
       <Box flexGrow={1} />
-      <Text color={T.faint} wrap="truncate">enter fold · n new thread · b base branch · ctrl+k add a machine to this project · D remove project</Text>
+      {/* `b` is not offered on a local project and `g` is offered on nothing
+          else: a local project has no remote to take a base from, and a
+          repository project is already a repository. The row is the one place
+          the reader looks for the keys, so a key that only ever answers with
+          a refusal is worse than a row without it. */}
+      <Text color={T.faint} wrap="truncate">enter fold · n new thread{p.kind === "local" ? " · g make it a git repository" : " · b base branch"} · ctrl+k add a machine to this project · D remove project</Text>
     </>
   );
 }
@@ -104,7 +110,7 @@ function PoolLine({ state, x, tally, width }: { state: AppState; x: PoolMember; 
   const busy = (tally.running ? `${tally.running} running  ` : "") + (tally.waiting ? `${tally.waiting} waiting` : "");
   const busyW = busy ? 18 : 0;
   const rest = width - 2 - name.length - count.length - busyW;
-  const where = x.project.kind === "clone" ? x.project.workspaceRoot : `${x.project.workspaceRoot} (a checkout of your own)`;
+  const where = x.project.kind === "clone" || x.project.kind === "local" ? x.project.workspaceRoot : `${x.project.workspaceRoot} (a checkout of your own)`;
   return (
     <Text wrap="truncate">
       <Text color={connColor(m.conn)}>{connDot(m.conn)} </Text>

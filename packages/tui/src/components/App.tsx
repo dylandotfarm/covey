@@ -5,6 +5,7 @@ import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { DEFAULT_FLEET, budgetValue, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
+import { localProjectError, localProjectId } from "@covey/protocol";
 import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth, type Line } from "../lines.js";
 import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
@@ -520,14 +521,14 @@ export function App({ store }: { store: Store }) {
    * goes. Read from the store, not from this render's `state`: the pick
    * opens after a network wait, and a machine may have connected meanwhile.
    */
-  const machineOptions = (except: string[] = [], fleet?: string): PickOption[] => {
+  const machineOptions = (except: string[] = [], fleet?: string, owes = "clones when it answers"): PickOption[] => {
     const live = store.getState();
     // A clone goes to the machines of one fleet. Offering the rest would make
     // the reader the only thing keeping work off the machine at home.
     const inFleet = fleet === undefined ? null : new Set(fleetMachines(live, fleet));
     return live.order.filter((k) => !except.includes(k) && (!inFleet || inFleet.has(k))).map((k) => {
       const m = live.machines.get(k)!;
-      const hint = m.conn === "connected" ? (m.info?.projectsDir ?? m.info?.os ?? "") : m.conn === "offline" ? "offline · clones when it answers" : m.conn;
+      const hint = m.conn === "connected" ? (m.info?.projectsDir ?? m.info?.os ?? "") : m.conn === "offline" ? `offline · ${owes}` : m.conn;
       return { id: k, label: machineLabel(live, k), hint };
     });
   };
@@ -568,6 +569,34 @@ export function App({ store }: { store: Store }) {
     });
   };
 
+  /**
+   * A local project: a name, then the machines that make a directory for it.
+   *
+   * There is no repository to read, so this is the whole flow — two steps
+   * where a clone has three. The name is the project's identity as well as
+   * its title, which is why the same name on two machines is one row; the
+   * reader may rename the row afterwards with `r`, and the identity stays.
+   */
+  const localProject = (fleet: string) => openInput("Local project name", (v) => {
+    const title = v.trim();
+    if (!title) { store.setOverlay(null); return; }
+    // The same sentence the daemon would answer with, said before anything is
+    // sent, so nothing is made and the reader types again here rather than
+    // reading an error from a machine. The field is empty when they do:
+    // `handleInputKey` clears the filter after every submit, as it does for
+    // every other prompt, and re-seeding it from here loses to that setter.
+    const bad = localProjectError(title);
+    if (bad) { store.notify(bad, "error"); return; }
+    const live = store.getState();
+    const keys = fleetMachines(live, fleet);
+    const connected = keys.filter((k) => live.machines.get(k)?.conn === "connected");
+    openPickMany(`Make ${title} on which machines?`, machineOptions([], fleet, "makes it when it answers"), connected, (ids) => {
+      store.setOverlay(null);
+      if (ids.length === 0) { store.notify("no machine picked; nothing made", "error"); return; }
+      void store.createLocalProjectOn(ids, localProjectId(title), title);
+    });
+  }, "", "notes, errands, home automation…");
+
   /** A repository by URL, for one `gh` cannot list: another host, or no `gh`. */
   const askUrl = (fleet: string) => openInput("Repository to clone", (v) => {
     const url = v.trim();
@@ -597,11 +626,16 @@ export function App({ store }: { store: Store }) {
   }, "", "my-repo, or acme/my-repo");
 
   /**
-   * New project. The pick opens at once with its two fixed rows, and the
+   * New project. The pick opens at once with its three fixed rows, and the
    * repositories the user can reach join it when the first machine with a
    * logged-in `gh` answers, newest push first. The reader filters the list by
-   * what they type. The two fixed rows make a new repository, or take a URL
-   * for one `gh` cannot list. Without a `gh` to ask, the URL is the whole of it.
+   * what they type. The three fixed rows make a new repository, take a URL
+   * for one `gh` cannot list, or make a project with no repository at all.
+   *
+   * Without a `gh` to ask, the pick still opens: a local project is not read
+   * from any remote, so it is offered on a machine with no `gh` login and on
+   * one with no route to GitHub. Only the repository list and the row that
+   * makes a repository need one.
    *
    * The pick is open for the whole wait, so no key falls through to the
    * sidebar, and an answer that arrives after the reader left the pick is
@@ -610,22 +644,27 @@ export function App({ store }: { store: Store }) {
   const addProject = (fleet = contextFleet()) => {
     const keys = fleetMachines(state, fleet);
     if (keys.length === 0) { store.notify("add a machine first", "error"); return; }
-    // The repositories come from a machine *of this fleet*, never from the
-    // computer the client runs on and never from another fleet's machine. A
-    // `gh` logged in at work lists the work repositories, and that is the
-    // whole point of keeping the two apart.
-    if (store.ghMachines(fleet).length === 0) { askUrl(fleet); return; }
-    const fixed: PickOption[] = [
-      { id: "new", label: "New repository…", hint: "gh repo create" },
-      { id: "url", label: "A URL…", hint: "any host" },
-    ];
+    const local: PickOption = { id: "local", label: "Local project…", hint: "no repository · a place to chat and automate" };
     // A clone URL always has a `:` or a `/`, so it can never read as a fixed row's id.
     const onPick = (id: string, asker: string | null) => {
       if (id === "new") return asker ? newRepo(asker, fleet) : askUrl(fleet);
       if (id === "url") return askUrl(fleet);
+      if (id === "local") return localProject(fleet);
       chooseBranch(id, asker, fleet);
     };
-    const title = store.fleets().length > 1 ? `Repository for ${fleet}` : "Repository";
+    const title = store.fleets().length > 1 ? `Project for ${fleet}` : "New project";
+    // The repositories come from a machine *of this fleet*, never from the
+    // computer the client runs on and never from another fleet's machine. A
+    // `gh` logged in at work lists the work repositories, and that is the
+    // whole point of keeping the two apart.
+    if (store.ghMachines(fleet).length === 0) {
+      return openPick(title, [{ id: "url", label: "A URL…", hint: "any host" }, local], (id) => onPick(id, null));
+    }
+    const fixed: PickOption[] = [
+      { id: "new", label: "New repository…", hint: "gh repo create" },
+      { id: "url", label: "A URL…", hint: "any host" },
+      local,
+    ];
     openPick(title, [...fixed, { id: "wait", label: "reading your repositories…", hint: "" }], (id) => onPick(id === "wait" ? "url" : id, null));
     const opened = store.getState().overlay;
     void store.listRepos(fleet).then(({ repos, error, machine }) => {
@@ -644,6 +683,19 @@ export function App({ store }: { store: Store }) {
   const addToPool = () => {
     const at = currentRow?.kind === "project" ? rowCtx : { machine: contextMachine, projectId: contextProject };
     const g = at.machine && at.projectId ? groupOfProject(state, at.machine, at.projectId) : null;
+    // A local project goes to another machine as a directory of the same
+    // name: the name is the identity, so the row the reader is on stays one
+    // row with the new machine inside it.
+    const localId = g?.members.map((x) => x.project.localId).find(Boolean);
+    if (g && localId) {
+      const inPool = [...g.members.map((x) => x.machine), ...store.pendingLocalFor(localId)];
+      const options = machineOptions(inPool, g.fleet, "makes it when it answers");
+      if (options.length === 0) { store.notify(`every machine in ${g.fleet} already has this project`); return; }
+      return openPickMany(`Add ${g.title} to which machines?`, options, [], (ids) => {
+        store.setOverlay(null);
+        if (ids.length) void store.createLocalProjectOn(ids, localId, g.title);
+      });
+    }
     const url = g?.members.map((x) => x.project.remoteUrl).find(Boolean);
     if (!g || !url) { store.notify("select a project that covey cloned from a URL", "error"); return; }
     // The new clone works from the branch the pool does, so the pool agrees.
@@ -662,12 +714,90 @@ export function App({ store }: { store: Store }) {
   };
 
   /**
+   * Turn a local project into a repository project, so the loop applies to
+   * it: a worktree and a branch per thread, a pull request, the watch and the
+   * automated review (`project.makeGit`).
+   *
+   * Three steps, and the middle one is skipped in the ordinary case. Which
+   * machine's directory becomes the repository — asked only when the pool has
+   * more than one, because the machines hold different files and covey must
+   * not pick for the reader. Then the repository: a new one through `gh`, or
+   * a URL for an **empty** repository the reader made themselves. Then the
+   * daemons do the rest.
+   */
+  const makeGit = (row: SidebarRow) => {
+    const pool = (row.pool ?? []).filter((x) => x.project.kind === "local");
+    const title = row.project!.title;
+    if (pool.length === 0) { store.notify(`${title} is already a repository project`); return; }
+    // A machine that is away cannot push and cannot clone, and the upgrade
+    // moves the threads of every machine at once — so this is the one act on
+    // a project that wants the pool connected rather than owing the work.
+    const live = store.getState();
+    const away = pool.filter((x) => live.machines.get(x.machine)?.conn !== "connected");
+    if (away.length) { store.notify(`${machineLabel(state, away[0]!.machine)} is not connected; every machine of the project has to answer to upgrade it`, "error"); return; }
+
+    const go = (pusher: string, url: string) => void store.makeProjectGit(pool, pusher, url);
+    // The repository, once the machine is settled. `empty: true`: the
+    // project's own directory is the first commit, so a README would be a
+    // commit covey would have to reconcile the push with.
+    const chooseRepo = (pusher: string) => {
+      const askRepoUrl = () => openInput(`Empty repository for ${title}`, (v) => {
+        const url = v.trim();
+        store.setOverlay(null);
+        if (url) go(pusher, url);
+      }, "", "git@github.com:org/repo.git — with no commits yet");
+      if (store.ghMachines(contextFleet()).length === 0) return askRepoUrl();
+      openPick(`Repository for ${title}`, [
+        { id: "new", label: "New repository…", hint: "gh repo create, with no README" },
+        { id: "url", label: "An empty repository by URL…", hint: "any host" },
+      ], (id) => {
+        if (id === "url") return askRepoUrl();
+        openInput("New repository: name, or owner/name", (name) => {
+          const n = name.trim();
+          if (!n) { store.setOverlay(null); return; }
+          openPick(`Make ${n}`, [
+            { id: "private", label: "Private", hint: "only you and those you invite" },
+            { id: "public", label: "Public", hint: "anyone can read it" },
+          ], (vis) => {
+            store.setOverlay(null);
+            store.notify(`covey makes ${n} on GitHub…`);
+            void store.createRepo(pusher, { name: n, visibility: vis === "public" ? "public" : "private", empty: true }).then((made) => {
+              if (!made) return;
+              store.notify(`made ${made.nameWithOwner}`, "success");
+              go(pusher, made.cloneUrl);
+            });
+          });
+        }, title, "my-repo, or acme/my-repo");
+      });
+    };
+
+    // The warning before the step it applies to, and the machines each name
+    // what they hold, because this is the one choice the reader cannot undo:
+    // the directory that goes up becomes the history everybody else clones.
+    openPick(`Make ${title} a git repository?`, [
+      { id: "no", label: "Cancel" },
+      { id: "yes", label: "Yes — commit its files and push them to a repository", hint: pool.length > 1 ? "one machine's files become the first commit" : row.project!.workspaceRoot },
+    ], (id) => {
+      if (id === "no") { store.setOverlay(null); return; }
+      if (pool.length === 1) return chooseRepo(pool[0]!.machine);
+      openPick(`Whose ${title} becomes the repository?`, pool.map((x) => ({
+        id: x.machine,
+        label: machineLabel(state, x.machine),
+        hint: x.project.workspaceRoot,
+      })), (mk) => chooseRepo(mk));
+    });
+  };
+
+  /**
    * Change the branch a project works from. The branches come from the
    * remote, read on the first machine of the pool that is connected, and
    * the pick marks the base the project has now.
    */
   const changeBase = (row: SidebarRow) => {
     const pool = row.pool ?? [];
+    // Say which of the two it is. "Select a project covey cloned" about a
+    // project the reader just made reads as covey losing the row.
+    if (pool.some((x) => x.project.kind === "local")) { store.notify(`${row.project!.title} is a local project: it has no repository, so it has no base branch`); return; }
     const url = pool.map((x) => x.project.remoteUrl).find(Boolean);
     if (!url) { store.notify("select a project that covey cloned from a URL", "error"); return; }
     const current = pool.map((x) => x.project.baseBranch).find(Boolean) ?? null;
@@ -691,18 +821,20 @@ export function App({ store }: { store: Store }) {
 
   /**
    * New thread: its own worktree, branched from the remote's default branch,
-   * on a machine of the project's pool. One connected machine needs no
-   * question; more than one asks, with the machine that has the most room
-   * first, which is the rule a run places by.
+   * on a machine of the project's pool. A thread of a local project takes the
+   * same route and works in the project's own directory instead. One
+   * connected machine needs no question; more than one asks, with the machine
+   * that has the most room first, which is the rule a run places by.
    */
   const newThread = async (machine = contextMachine, projectId = contextProject) => {
     if (!machine || !projectId) { store.notify("select a project first", "error"); return; }
     const p = project(machine, projectId);
     const pool = p ? projectPool(p) : null;
-    // A project with no remote is on one machine only; a pooled one is ranked
-    // the way a run's tasks are placed, fastest with room first. A project of
-    // the same repository on another base branch is another pool: a thread
-    // must start from the base its own project names.
+    // A project with neither a remote nor a local name is on one machine
+    // only; a pooled one is ranked the way a run's tasks are placed, fastest
+    // with room first. A project of the same repository on another base
+    // branch is another pool: a thread must start from the base its own
+    // project names.
     if (!pool) {
       if (state.machines.get(machine)?.conn !== "connected") { store.notify("that machine is not connected", "error"); return; }
       await store.createThread(machine, projectId);
@@ -752,6 +884,10 @@ export function App({ store }: { store: Store }) {
         ...kin.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: `same repo · from ${p.baseBranch ?? "the default branch"}` })),
         ...projects.filter((p) => !same.includes(p) && !kin.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: p.workspaceRoot })),
         ...(same.length === 0 && srcProject?.repositoryIdentity ? [{ id: "clone", label: `Clone ${srcProject.repositoryIdentity} there`, hint: m.info?.projectsDir ?? "" }] : []),
+        // A local project has nothing to clone, so the destination makes the
+        // directory. The id is the same: the daemon reads the export and
+        // knows which of the two it is.
+        ...(same.length === 0 && srcProject?.kind === "local" ? [{ id: "clone", label: `Make ${srcProject.title} there`, hint: m.info?.projectsDir ?? "" }] : []),
       ];
       openPick(`Destination project on ${m.info!.name}`, opts, (pid) => {
         store.setOverlay(null);
@@ -1135,6 +1271,11 @@ export function App({ store }: { store: Store }) {
     const projectId = contextProject;
     const p = project(machine, projectId);
     if (!machine || !projectId || !p) { store.notify("select a project first — a run works in one repository", "error"); return; }
+    // The notice above was already the sentence; this is the test behind it.
+    // A run in a local project would put every member in the project's one
+    // directory, with no branch and no worktree between them, and the damage
+    // would be done before any refusal arrived. The daemon refuses it too.
+    if (p.kind === "local") { store.notify(`${p.title} is a local project: a run needs a repository, because every member works on a branch of its own`, "error"); return; }
     openInput(`Tasks for a run in ${p.title}`, (v) => {
       const tasks = parseTaskList(v);
       if (tasks.length === 0) { store.notify("no tasks — give issue numbers, or one task each separated by ;", "error"); return; }
@@ -2404,6 +2545,8 @@ export function App({ store }: { store: Store }) {
     if (input === "r" && row.kind === "project") return openInput("Rename project", (v) => { store.setOverlay(null); if (v.trim()) void store.renameProject(row.pool ?? [], v.trim()); }, row.project!.title);
     // The branch the project's threads start from and its pull requests target.
     if (input === "b" && row.kind === "project") return changeBase(row);
+    // A local project becomes a repository project, so the loop applies to it.
+    if (input === "g" && row.kind === "project") return makeGit(row);
     // The environment the threads of a project work in, or one thread's own.
     // The values go to the daemon and never come back (#126).
     if (input === "e" && (row.kind === "project" || row.kind === "thread")) return openSecrets(row);

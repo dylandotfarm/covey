@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { coveyPlugin } from "./plugin.js";
+import { COVEY_LOCAL_PREAMBLE, coveyPlugin } from "./plugin.js";
 import { sourceRoot } from "./update.js";
 
 test("this checkout ships the plugin, with the skill inside it", () => {
@@ -65,4 +65,40 @@ test("the skill holds both loops and the rule that picks one", () => {
   }
   assert.match(skill, /Never file an issue to hold work you are about to do/);
   assert.match(skill, /Do not file an issue for work the user did not ask you to file/);
+});
+
+/**
+ * A local project is neither loop, and the skill has to say so: a session
+ * there is told before its first turn that `covey issue` and `covey pr` are
+ * refused, and the one thing it may do instead is in the skill. The CLI and
+ * the skill are one change (`packages/cli/src/loop.ts`), so the words that
+ * would drift are held here.
+ */
+test("the skill names the local project, and the one command that gives it a repository", () => {
+  const root = sourceRoot(dirname(fileURLToPath(import.meta.url)))!;
+  const skill = readFileSync(join(root, "plugin", "skills", "covey", "SKILL.md"), "utf8");
+  const description = /^description: (.+)$/m.exec(skill)?.[1] ?? "";
+  // The description is the whole of what a plugin puts in a session's
+  // context, so a local project that is never named there is a skill the
+  // model never loads for the one request it covers.
+  assert.match(description, /local project/, "the description never names a local project");
+  assert.match(skill, /^## A local project$/m);
+  assert.match(skill, /covey project git <url>/);
+  assert.match(skill, /gh repo create <name> --private/);
+  assert.match(skill, /No `--add-readme`/, "the empty repository is the whole precondition");
+  assert.match(skill, /keeps the directory it is in and gets no branch/, "the running thread's own fate is what the reader has to be told");
+  assert.match(skill, /one machine at a time/, "a pooled project is upgraded machine by machine");
+});
+
+test("the local preamble and the skill agree on what is refused there", () => {
+  const root = sourceRoot(dirname(fileURLToPath(import.meta.url)))!;
+  const skill = readFileSync(join(root, "plugin", "skills", "covey", "SKILL.md"), "utf8");
+  // Both say the same two commands are refused, because the session reads the
+  // note before it decides whether to read the skill.
+  for (const text of [COVEY_LOCAL_PREAMBLE, skill]) {
+    assert.match(text, /covey issue/);
+    assert.match(text, /covey pr/);
+    assert.match(text, /covey show/);
+    assert.match(text, /covey env/);
+  }
 });

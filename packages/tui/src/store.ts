@@ -1168,11 +1168,66 @@ export class Store {
   }
 
   /**
+   * Make a local project on one machine: a directory, and no repository. The
+   * name is the project's identity, so the same name on two machines is one
+   * row in the sidebar; `title` is what the reader sees.
+   *
+   * A machine that is away owes it, as it owes a clone. There is nothing to
+   * fetch, so this is quick and the ordinary command timeout is enough.
+   */
+  async createLocalProject(machine: string, local: string, title?: string): Promise<void> {
+    const name = machineLabel(this.state, machine);
+    const extra = title ? { title } : {};
+    if (this.state.machines.get(machine)?.conn !== "connected") {
+      if (!this.pending.some((p) => p.machine === machine && p.local === local)) {
+        this.pending.push({ machine, local, ...extra });
+        this.persist();
+      }
+      this.notify(`${name} is not connected; it makes ${title ?? local} when it next answers`);
+      return;
+    }
+    const err = await this.threadCommand({ type: "project.create", local, ...extra }, machine);
+    if (err === null) this.notify(`${title ?? local} added on ${name}`, "success");
+  }
+
+  /** Make a local project on every machine given: the pool of a new project. */
+  async createLocalProjectOn(machines: string[], local: string, title?: string): Promise<void> {
+    await Promise.all(machines.map((mk) => this.createLocalProject(mk, local, title)));
+  }
+
+  /**
+   * Turn a local project into a repository project, on every machine of its
+   * pool, so the loop applies to it.
+   *
+   * `pusher` is the machine whose directory becomes the repository's first
+   * commit. It goes first and alone: the rest of the pool needs the branch it
+   * pushes, so a machine asked before the push would be refused for a
+   * repository with no commits. A machine that fails leaves its own row a
+   * local project and says so, and the pool then reads as it is — some
+   * machines on the repository and some not — which the reader fixes by
+   * pressing the key again.
+   */
+  async makeProjectGit(pool: { machine: string; projectId: string }[], pusher: string, url: string): Promise<void> {
+    const first = pool.find((x) => x.machine === pusher);
+    if (!first) { this.notify("that machine does not hold this project", "error"); return; }
+    this.notify(`${machineLabel(this.state, pusher)} pushes the project to ${url}…`);
+    const err = await this.threadCommand({ type: "project.makeGit", projectId: first.projectId, url }, pusher, CLONE_WAIT_MS);
+    if (err !== null) return;
+    this.notify(`${url} now holds the project`, "success");
+    const rest = pool.filter((x) => x.machine !== pusher);
+    if (rest.length === 0) return;
+    await Promise.all(rest.map(async (x) => {
+      const e = await this.threadCommand({ type: "project.makeGit", projectId: x.projectId, url, push: false }, x.machine, CLONE_WAIT_MS);
+      if (e === null) this.notify(`${machineLabel(this.state, x.machine)} cloned it`, "success");
+    }));
+  }
+
+  /**
    * What machines that were away still owe: clones they were asked for. The
    * list lives in the config, and nowhere else, so what `pendingFor` reports
    * and what `persist` writes are one thing.
    */
-  private get pending(): { machine: string; url: string; title?: string; baseBranch?: string }[] {
+  private get pending(): { machine: string; url?: string; local?: string; title?: string; baseBranch?: string }[] {
     return this.config.prefs.pendingProjects ??= [];
   }
 
@@ -1189,15 +1244,18 @@ export class Store {
     const name = machineLabel(this.state, machine);
     const done = new Set<typeof mine[number]>();
     await Promise.all(mine.map(async (p) => {
+      const what = p.local ? (p.title ?? p.local) : p.url!;
       try {
-        await client.command({ type: "project.create", url: p.url, ...(p.title ? { title: p.title } : {}), ...(p.baseBranch ? { baseBranch: p.baseBranch } : {}) }, CLONE_WAIT_MS);
-        this.notify(`${name} cloned ${p.url}`, "success");
+        const extra = { ...(p.title ? { title: p.title } : {}) };
+        if (p.local) await client.command({ type: "project.create", local: p.local, ...extra });
+        else await client.command({ type: "project.create", url: p.url!, ...extra, ...(p.baseBranch ? { baseBranch: p.baseBranch } : {}) }, CLONE_WAIT_MS);
+        this.notify(p.local ? `${name} made ${what}` : `${name} cloned ${what}`, "success");
         done.add(p);
       } catch (e: any) {
         // A project that is already there is the request done. Anything
         // else stays on the list, and the next connection tries again.
         if (e?.code === "exists") { done.add(p); return; }
-        this.notify(`${name} could not clone ${p.url}: ${e?.message ?? e}`, "error");
+        this.notify(`${name} could not add ${what}: ${e?.message ?? e}`, "error");
       }
     }));
     if (done.size === 0) return;
@@ -1208,6 +1266,11 @@ export class Store {
   /** The machines a repository is still to be cloned on for a base, by machine key. */
   pendingFor(url: string, baseBranch?: string): string[] {
     return this.pending.filter((p) => p.url === url && (p.baseBranch ?? null) === (baseBranch ?? null)).map((p) => p.machine);
+  }
+
+  /** The machines a local project is still to be made on, by machine key. */
+  pendingLocalFor(local: string): string[] {
+    return this.pending.filter((p) => p.local === local).map((p) => p.machine);
   }
 
   /**
@@ -2076,7 +2139,7 @@ export class Store {
   }
 
   /** Make a repository on GitHub through `gh` on `machine`; null, with a notice, when it could not. */
-  async createRepo(machine: string, o: { name: string; visibility: "private" | "public"; description?: string }): Promise<{ nameWithOwner: string; cloneUrl: string } | null> {
+  async createRepo(machine: string, o: { name: string; visibility: "private" | "public"; description?: string; empty?: boolean }): Promise<{ nameWithOwner: string; cloneUrl: string } | null> {
     this.repoCache.clear();
     return this.ask(machine, "repos.create", o, (message) => { this.notify(message, "error"); return null; });
   }

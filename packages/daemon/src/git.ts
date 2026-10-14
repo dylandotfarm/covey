@@ -258,6 +258,67 @@ export async function cloneBare(url: string | string[], dir: string): Promise<{ 
 /** How much of the clone budget a second URL needs to be worth trying. */
 const LAST_CHANCE_MS = 30_000;
 
+/**
+ * The branch the first commit of an upgraded local project goes on.
+ *
+ * Named here rather than left to the machine's `init.defaultBranch`, so the
+ * branch the repository ends up with is the same on every machine a reader
+ * upgrades from. GitHub's own default is `main`, and `remoteDefaultRef` reads
+ * `main` before `master` anyway.
+ */
+export const FIRST_BRANCH = "main";
+
+/**
+ * Make the directory at `dir` the first commit of the repository at `url`, so
+ * a local project can become a repository project (`project.makeGit`).
+ *
+ * The repository has to be **empty**. Every step here is one git refuses to
+ * repeat, so the caller checks that before it calls, and a push that is
+ * refused all the same leaves the commit in `dir` and the error in the
+ * reader's hands — nothing is lost either way, and a second attempt with
+ * another URL works from the commit this one made.
+ *
+ * `.covey` is ignored before anything is added: the directory holds the file
+ * store of every thread that has worked in it, and a screenshot somebody
+ * dropped must not become the repository's first commit.
+ */
+export async function publishDirectory(dir: string, url: string, message: string): Promise<{ ok: true; branch: string } | { error: string }> {
+  if (!existsSync(dir)) return { error: `${dir} is not there` };
+  try {
+    mkdirp(join(dir, ".covey"), { recursive: true });
+    const ignore = join(dir, ".covey", ".gitignore");
+    if (!existsSync(ignore)) writeFile(ignore, "*\n");
+  } catch (e: any) {
+    return { error: `could not keep .covey out of git: ${e?.message ?? e}` };
+  }
+  if (!isGitRepo(dir)) {
+    const init = await gitTry(dir, ["init", "--quiet", "-b", FIRST_BRANCH]);
+    if (!init.ok) return { error: init.err };
+  }
+  const branch = (await currentBranch(dir)) ?? FIRST_BRANCH;
+  const added = await gitTry(dir, ["add", "-A", "--", "."]);
+  if (!added.ok) return { error: added.err };
+  // `--allow-empty`, because a local project the reader has only chatted in
+  // holds no files, and a repository with no commit has no branch to clone
+  // (#176). The empty commit is the branch.
+  const committed = await gitTry(dir, ["-c", "user.name=covey", "-c", "user.email=covey@localhost", "commit", "--quiet", "--allow-empty", "-m", message]);
+  // A commit git refused because there was nothing to commit is the work
+  // already done by an earlier attempt, not a failure.
+  if (!committed.ok && !/nothing to commit/i.test(committed.err)) return { error: committed.err };
+  const has = await git(dir, ["remote", "get-url", "origin"]);
+  const remote = await gitTry(dir, has === null ? ["remote", "add", "origin", url] : ["remote", "set-url", "origin", url]);
+  if (!remote.ok) return { error: remote.err };
+  // No `-u`. What is left behind is a checkout of the base branch, and the one
+  // thread still standing in it is the busy one — whose next turn reads the
+  // loop's preamble, because the project is a repository now. An upstream
+  // would make a bare `git push` there land on the base branch, which is the
+  // one act that preamble says a person cannot take back. Without it git
+  // refuses and names what is missing.
+  const pushed = await gitTry(dir, ["push", "--quiet", "origin", `${branch}:${branch}`], CLONE_TIMEOUT_MS, remoteEnv());
+  if (!pushed.ok) return { error: pushed.err };
+  return { ok: true, branch };
+}
+
 /** Fetch one branch from `origin`, so it can be branched from. False when the
  *  remote has no such branch, or cannot be reached. */
 export async function fetchBranch(root: string, branch: string): Promise<boolean> {
@@ -534,8 +595,11 @@ export function parseLsRemote(out: string): RemoteBranches {
  * repository: `<projectsDir>/<owner>/<repo>/<name>`. A checkout keeps them
  * inside itself, under `.covey/worktrees`, next to a self-ignoring `.gitignore`
  * so they never show in the checkout's status or in a turn checkpoint.
+ *
+ * A `local` project never asks: it has one directory and every thread of it
+ * works there (`Engine.newWorktree`).
  */
-export function worktreePath(project: { workspaceRoot: string; kind?: "clone" | "checkout" }, name: string): string {
+export function worktreePath(project: { workspaceRoot: string; kind?: "clone" | "checkout" | "local" }, name: string): string {
   if (project.kind === "clone") return join(dirname(project.workspaceRoot), name);
   return join(project.workspaceRoot, ".covey", "worktrees", name);
 }

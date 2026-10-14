@@ -129,7 +129,7 @@ export interface CreateDeps {
  * 2026-09-21 a test of the name check reached GitHub with `../x`. GitHub read
  * it as `x` and made the repository. The check refuses that name now.
  */
-export async function createRepo(o: { name: string; visibility: "private" | "public"; description?: string }, deps: CreateDeps = {}): Promise<{ nameWithOwner: string; cloneUrl: string }> {
+export async function createRepo(o: { name: string; visibility: "private" | "public"; description?: string; empty?: boolean }, deps: CreateDeps = {}): Promise<{ nameWithOwner: string; cloneUrl: string }> {
   const name = o.name.trim();
   // A name, or owner/name, of the characters GitHub allows. A segment may
   // start with a dot (`.github`), but may not be only dots (`..` is a path),
@@ -144,7 +144,14 @@ export async function createRepo(o: { name: string; visibility: "private" | "pub
   // set-head`, and the repository the reader just asked for becomes no
   // project at all. The README is the first commit, and it is the same thing
   // GitHub's own form offers on the page that makes a repository.
-  const args = ["repo", "create", name, `--${o.visibility}`, "--add-readme", ...(description ? ["--description", description] : [])];
+  //
+  // `empty` is the one caller that wants no README, and it is not an
+  // exception to that reason: upgrading a local project pushes the project's
+  // own directory as the first commit (`publishDirectory`), so the branch is
+  // there before anything clones it. A README made here would be a commit
+  // that push has to be reconciled with, for a file the reader did not ask
+  // for.
+  const args = ["repo", "create", name, `--${o.visibility}`, ...(o.empty ? [] : ["--add-readme"]), ...(description ? ["--description", description] : [])];
   const exec = deps.exec ?? ((a) => run("gh", a, { cwd: GH_CWD, timeout: 30_000 }));
   let out: string;
   try {

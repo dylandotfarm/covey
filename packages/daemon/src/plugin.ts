@@ -16,6 +16,7 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { Project } from "@covey/protocol";
 
 /** `<root>/plugin`, when the checkout at `root` holds the plugin; else null. */
 export function coveyPlugin(root: string | null): string | null {
@@ -65,3 +66,35 @@ Two rules hold before you read the skill, because a person cannot take either ac
 
 - Never push to the base branch.
 - Never merge a pull request yourself, unless the user asked you to merge on their behalf.`;
+
+/**
+ * What a thread of a **local** project is told instead.
+ *
+ * A local project has no repository: one directory, named by the reader, that
+ * every thread of the project works in. So every sentence of
+ * `COVEY_PREAMBLE` above is false there — no worktree, no branch, no pull
+ * request to open and no base branch to keep off. A note that describes work
+ * the session cannot do is worse than no note: the loop reads as the default,
+ * and a session that believed it spent its first turn looking for a git
+ * repository that is not there.
+ *
+ * It still names the two commands of the skill that do work here, because
+ * they are the two a reader of a local thread actually wants: a picture in
+ * the conversation, and the project's secrets by name.
+ *
+ * Keep it a pointer, as the other one is. Change this and the skill's
+ * *A local project* section together.
+ */
+export const COVEY_LOCAL_PREAMBLE = `This session runs inside a covey thread of a **local project**: a directory on this machine that the reader named, with no git repository behind it. Every thread of the project works in that one directory, so files you write there are what the reader comes back to.
+
+There is no branch, no pull request and no issue here. Do not look for a git repository, do not run \`covey issue\` or \`covey pr\`, and do not offer to open one; covey refuses them for this project.
+
+Two commands of the \`covey\` skill (\`covey:covey\`) do work here, and you may load it for either: \`covey show <file>\` puts a picture or a video in this conversation, and \`covey env\` names the secrets this thread may use. Use a secret by writing \`$NAME\`, and never print its value.`;
+
+/**
+ * The note that goes with the plugin for one project: the loop for a
+ * repository, and the directory for a local project.
+ */
+export function preambleFor(project: Pick<Project, "kind">): string {
+  return project.kind === "local" ? COVEY_LOCAL_PREAMBLE : COVEY_PREAMBLE;
+}

@@ -95,7 +95,8 @@ async function main() {
     }
     case "issue":
     case "pr":
-    case "review": {
+    case "review":
+    case "project": {
       // The loop of #94, from an agent's shell. The daemon does the work; this
       // asks, prints the answer, and exits, so a tool call sees one result.
       const parsed = parseLoopArgs(argv);

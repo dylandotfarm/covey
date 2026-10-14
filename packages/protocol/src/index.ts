@@ -519,11 +519,23 @@ export interface Project {
    *  - `checkout`: a directory the user pointed covey at, from before projects
    *    were clones. No new project is made this way; the rows that exist keep
    *    working, with worktrees under `<root>/.covey/worktrees`.
+   *  - `local`: a project with no repository, named by the reader. The daemon
+   *    makes one directory for it and every thread of it works in that
+   *    directory, so the project is a place to chat, to automate and to keep
+   *    files rather than a change to land.
    * Absent on a row written before this field existed, which reads as `checkout`.
    */
-  kind?: "clone" | "checkout";
+  kind?: "clone" | "checkout" | "local";
   /** The URL covey cloned. Set on a `clone`; absent on a `checkout`. */
   remoteUrl?: string;
+  /**
+   * What makes the same local project on two machines one project in the
+   * sidebar: `localProjectId` of the name the reader gave it, set once and
+   * never changed. `title` is the reader's to rename; this is not, because a
+   * rename on one machine would otherwise split the pool.
+   * Set on a `local` project and on no other.
+   */
+  localId?: string;
   /**
    * The branch the project works from. Every new thread branches from
    * `origin/<baseBranch>`, and every pull request a thread opens targets it.
@@ -605,6 +617,45 @@ export function secretKeyError(key: string): string | null {
   }
   if (key.startsWith("COVEY_")) return `${key} belongs to covey: a name that starts with COVEY_ is covey's own`;
   if (RESERVED_SECRET_KEYS.includes(key)) return `${key} is what the session needs to run: pick another name`;
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// A project with no repository
+// ---------------------------------------------------------------------------
+
+/**
+ * The identity of a local project: a slug of the name the reader gave it.
+ *
+ * The name is the identity as well as the first title, because the identity is
+ * what folds the same local project on two machines into one row. So covey
+ * slugs it once, at creation, and never again. `My Notes` and `my notes` are
+ * one project, as `github.com/Acme/Api` and `github.com/acme/api` are one
+ * repository; the title keeps the case the reader typed, and a later rename
+ * moves the title alone.
+ *
+ * The answer is one path segment, because it names the project's directory.
+ */
+export function localProjectId(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^[.\-]+/, "")
+    .slice(0, 64)
+    .replace(/[.\-]+$/, "");
+}
+
+/**
+ * Why this name cannot be a local project, or `null` when it can. Pure, and
+ * shared the way `secretKeyError` is: the daemon refuses on it and the client
+ * says the same sentence before it sends anything.
+ */
+export function localProjectError(name: string): string | null {
+  if (!name.trim()) return "a local project needs a name";
+  if (!localProjectId(name)) {
+    return `${JSON.stringify(name.trim())} leaves covey no name to make a directory from: use letters, digits, spaces, and . _ or -`;
+  }
   return null;
 }
 
@@ -2120,6 +2171,17 @@ export type Command =
    * branch. Without it the remote's default branch is the base.
    */
   | { type: "project.create"; url: string; title?: string; baseBranch?: string }
+  /**
+   * Make a project with no repository: one directory under this machine's
+   * projects directory, where every thread of the project works. `local` is
+   * the name the reader gave it, which the daemon slugs into `Project.localId`
+   * — the same name on two machines is one project in the sidebar. `title` is
+   * what the reader sees, and defaults to the name.
+   *
+   * Refused with code `exists` when this machine already has that local
+   * project, and with code `bad_name` on a name `localProjectError` rejects.
+   */
+  | { type: "project.create"; local: string; title?: string }
   /** `baseBranch: null` returns the project to the remote's default branch.
    *  A thread that exists keeps its worktree; the next thread starts from the
    *  new base, and the next pull request targets it. */
@@ -2130,6 +2192,31 @@ export type Command =
       defaultModel?: string | null;
       baseBranch?: string | null;
     }
+  /**
+   * Turn a local project into a repository project, so the loop applies to it:
+   * a worktree and a branch per thread, a pull request, the watch and the
+   * automated review.
+   *
+   * `push` (the default) is for the machine whose directory becomes the
+   * repository: the daemon commits what is in the project's directory, pushes
+   * it to `url` as the first commit, clones it the way `project.create`
+   * does, and moves every thread of the project into a worktree of its own.
+   * The repository has to be **empty**; a remote that already has a branch is
+   * refused with code `exists`, because reconciling two histories is not a
+   * thing covey may decide for the reader.
+   *
+   * `push: false` is for every other machine of the pool, once one of them
+   * has pushed: covey clones and moves the threads, and that machine's own
+   * directory stays where it is, untouched and named in each thread's note.
+   *
+   * A thread that is busy keeps the directory it is working in — a running
+   * turn must not have its files moved under it — and is told so. The old
+   * directory is never deleted, exactly as `project.delete` never deletes a
+   * clone.
+   *
+   * Refused with code `unsupported` on a project that is not local.
+   */
+  | { type: "project.makeGit"; projectId: ProjectId; url: string; push?: boolean }
   | { type: "project.delete"; projectId: ProjectId }
   /**
    * Set or remove secrets of a project (#126). Every write is applied; a
@@ -2458,7 +2545,7 @@ export interface ThreadExport {
   exportedAt: string;
   sourceMachineId: MachineId;
   sourceMachineName: string;
-  project: Pick<Project, "title" | "workspaceRoot" | "repositoryIdentity" | "baseBranch"> & {
+  project: Pick<Project, "title" | "workspaceRoot" | "repositoryIdentity" | "baseBranch" | "kind" | "localId"> & {
     /** The `origin` URL of the source project, so the destination can clone it. */
     remoteUrl?: string | null;
   };
@@ -2736,7 +2823,15 @@ export interface RpcMethods {
    * is `name` or `owner/name`; without an owner it is the user's own.
    */
   "repos.create": {
-    params: { name: string; visibility: "private" | "public"; description?: string };
+    params: {
+      name: string;
+      visibility: "private" | "public";
+      description?: string;
+      /** Make it with no README, for `project.makeGit`: the project's own
+       *  directory is the first commit, and a README would be a commit the
+       *  push has to be reconciled with. */
+      empty?: boolean;
+    };
     result: { nameWithOwner: string; cloneUrl: string };
   };
   /**
