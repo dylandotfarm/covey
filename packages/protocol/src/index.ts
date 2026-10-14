@@ -2481,6 +2481,24 @@ export interface RpcMethods {
    * reader rather than a permission. The daemon ignores an id it does not know.
    */
   "hello": { params: { protocolVersion: number; client: string; threadId?: ThreadId }; result: MachineInfo };
+  /**
+   * Does this socket still carry bytes? (#217)
+   *
+   * A computer that goes to sleep leaves its socket half open: the daemon
+   * receives no FIN, both kernels keep the connection in `ESTABLISHED`, and a
+   * client reads its own `readyState` as `OPEN` for as long as it cares to
+   * look. So a client asks, and the answer is the whole of the result — there
+   * is nothing to report and nothing to carry back.
+   *
+   * It is a request and not a protocol ping on purpose. A browser and React
+   * Native can neither send a ping frame nor see one arrive, so a protocol
+   * ping can serve the terminal and neither of the other two clients.
+   *
+   * A caller reads *any* answer as proof of life, including the
+   * `unknown_method` a daemon too old to know this one gives back. See
+   * `MachineClient`'s heartbeat, which is the only caller.
+   */
+  "ping": { params: Record<string, never>; result: null };
   "shell.snapshot": { params: Record<string, never>; result: ShellSnapshot };
   "shell.subscribe": { params: { afterSeq?: number }; result: { subscriptionId: string } };
   "thread.snapshot": {

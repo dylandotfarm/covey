@@ -18,6 +18,16 @@ import { webAddresses } from "./addresses.js";
 
 const STARTED_AT = new Date().toISOString();
 
+/**
+ * How often the daemon pings a connection, and so how long a connection that
+ * stopped answering is kept.
+ *
+ * A missed pong terminates it, so the cost of a dead connection is bounded by
+ * two of these rather than by TCP. Twenty seconds is long enough that a client
+ * busy with a streaming turn is never mistaken for a dead one.
+ */
+const PING_MS = 20_000;
+
 export interface ServerOptions {
   config: DaemonConfig;
   engine: Engine;
@@ -27,6 +37,8 @@ export interface ServerOptions {
   builder: AppBuilder;
   host: string;
   log: (msg: string) => void;
+  /** How often to ping a connection, in milliseconds. Only a test moves it. */
+  pingMs?: number;
 }
 
 /**
@@ -205,6 +217,9 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         clientName = typeof p.client === "string" ? p.client : "";
         callerThread = typeof p.threadId === "string" ? p.threadId : "";
         return engine.machine;
+      case "ping":
+        // Nothing to report: the answer arriving is the whole of it (#217).
+        return null;
       case "shell.snapshot":
         return engine.shellSnapshot();
       case "shell.subscribe": {
@@ -444,7 +459,28 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
   });
   ws.on("close", () => { unUpdate(); unBuild(); for (const un of subs.values()) un(); subs.clear(); });
   ws.on("error", () => {});
-  const ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.ping(); }, 20_000);
+  // The ping needs a deadline, or it says nothing (#217). A client whose
+  // computer went to sleep leaves the connection half open: no FIN arrives, the
+  // kernel keeps it in `ESTABLISHED`, and `readyState` reads `OPEN` for as long
+  // as anybody cares to look. Without a pong to miss, the daemon only ever
+  // learned the truth from TCP running out of retransmissions — so it held the
+  // connection, its subscriptions and its thread stream for as long as that
+  // took, and serialised every push into it meanwhile.
+  //
+  // A protocol ping and not a `ping` request, which is the other way round from
+  // the client's own heartbeat, because here it is free: a browser and React
+  // Native both answer a ping frame in the runtime, with nothing to write and
+  // no version to agree on.
+  let pong = true;
+  ws.on("pong", () => { pong = true; });
+  const ping = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+    // `terminate` and not `close`: the point of being here is that the other
+    // end cannot answer, and a close handshake waits for an answer.
+    if (!pong) { ws.terminate(); return; }
+    pong = false;
+    ws.ping();
+  }, o.pingMs ?? PING_MS);
   ws.on("close", () => clearInterval(ping));
 }
 
