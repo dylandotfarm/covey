@@ -457,12 +457,33 @@ The client brokers the transfer, so daemons never need to authenticate to each o
 
 `packages/protocol/src/index.ts`. JSON over one WebSocket. Requests `{id, method, params}`,
 responses `{id, ok, result|error}`, pushes `{push, subscriptionId, event}`. Methods: `hello`,
-`shell.snapshot/subscribe`, `thread.snapshot/subscribe`, `unsubscribe`, `command`,
+`ping`, `shell.snapshot/subscribe`, `thread.snapshot/subscribe`, `unsubscribe`, `command`,
 `thread.export/import/markMoved`, `models.list`, `project.git`, `turn.diff`,
 `machine.source/update/restart`, `run.issues/pullRequest`,
 `run.gate/memberDiff/queue/merge/audit`, `thread.openPullRequest`,
 `thread.commentPullRequest`, `thread.showFiles`, `github.item/act`, `secrets.list/env`,
 `terminal.open/input/signal/resize/close`.
+
+### Both ends ask whether the socket is alive (#217)
+
+A computer that goes to sleep leaves its socket half open: neither end receives a FIN,
+both kernels keep the connection in `ESTABLISHED`, and `readyState` reads `OPEN` for as
+long as anybody cares to look. So each side asks, and each asks in the way that is free
+on its own side.
+
+The daemon pings every 20 s and terminates a connection that misses the next pong. A
+protocol ping fits here because every client runtime answers one with nothing written and
+no version to agree on. The client cannot use the same route — a browser and React Native
+can neither send a ping frame nor see one arrive — so `MachineClient` sends the `ping`
+**request** every 10 s, and only on a connection with no traffic of its own. Two beats of
+silence and it drops the socket itself rather than waiting out a close handshake the other
+end will never finish, which takes the ordinary reconnect path and rejects the calls that
+were waiting.
+
+The client reads *any* answer as proof of life, including the `unknown_method` a daemon too
+old to know the method gives back, so `ping` needed no protocol version bump. This is not
+the heartbeat #68 declined: that one was a background probe against a machine covey had
+given up on, and this one runs only while covey calls itself connected.
 
 ## A shell in the thread's directory (#10)
 
