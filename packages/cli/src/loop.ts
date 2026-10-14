@@ -306,10 +306,19 @@ export async function runLoop(request: LoopRequest, env: LoopEnv, connect: (url:
         // this file makes to read where it is.
         const snap = (await rpc.call("thread.snapshot", { threadId, limit: 1 })) as { thread: Thread };
         await rpc.call("command", { commandId: crypto.randomUUID(), threadId, type: "project.makeGit", projectId: snap.thread.projectId, url: request.url });
+        // Read the thread again rather than assume. The caller is the running
+        // turn in the ordinary case, and keeps its directory — but `--thread`
+        // can name an idle one, which did get a worktree, and a line that told
+        // the reader the opposite would be worse than no line.
+        const after = (await rpc.call("thread.snapshot", { threadId, limit: 1 })) as { thread: Thread };
+        const mine = after.thread.branch
+          ? `this thread now works in ${after.thread.worktreePath} on branch ${after.thread.branch}, so it can open a pull request`
+          : "this thread keeps the directory it was in and gets no branch: it was working, and a running turn must not have its files moved under it. Start a new thread in the project for a worktree on a branch, with the pull request loop";
         return { ok: true, lines: [
           `the project is now a git repository at ${request.url}, and its directory is its first commit`,
-          "this thread is running, so it keeps the directory it is in and gets no branch: a running turn must not have its files moved under it. Every idle thread of the project now has a worktree and a branch of its own",
-          "start a new thread in the project for a worktree on a branch, with the pull request loop. Tell the user that, and stop the turn",
+          "every idle thread of the project now has a worktree and a branch of its own; one that was archived keeps the directory it was archived from",
+          mine,
+          "tell the user what happened, and stop the turn",
           "if this project is on other machines too, each of those is still a local project: the user upgrades it from that machine's covey, with g on the project row",
         ] };
       }

@@ -1612,12 +1612,21 @@ project is on, and a new thread picks one of them. Everything else a project doe
 free — the machines, `project.setSecrets`, the rename, the model, the archive, `covey show`,
 the shell, the dropped files, moving a thread between machines.
 
-Three acts need a repository and are refused **by name**: `thread.takeIssue`,
-`thread.openPullRequest` and `project.update { baseBranch }`. The pull request refusal comes
+Four acts need a repository and are refused **by name**: `thread.takeIssue`,
+`thread.openPullRequest`, `project.update { baseBranch }` and a **run**. The pull request refusal comes
 *before* the branch test, so the reason the reader reads is the real one — a thread of a
 local project is on no branch because there is no repository, not the other way round. The
 TUI leaves `b` off the project panel's footer for the same reason: a key that can only ever
 answer with a refusal is worse than a row without it.
+
+The run is the one whose damage would be done *before* any refusal arrived, so it is refused
+twice. `startRun` says it before a placement is even computed — the notice there already read
+"a run works in one repository", and this is the test behind that sentence — and
+`Engine.assertRunnable` says it again on `run.create`, `run.member.add` and the
+`run.member.patch` that moves a member, which are the three ways a member could be put into a
+local project. Without it, dispatch makes one thread per task, every one of them lands in the
+project's single directory, and several agents edit the same files with no branch, no worktree
+and no checkpoint between them.
 
 A session there is told so before its first turn. `COVEY_PREAMBLE` describes the loop, and
 every sentence of it is false in a local project, so `preambleFor` sends `COVEY_LOCAL_PREAMBLE`
@@ -1641,13 +1650,24 @@ refused with `exists` before anything is written. `createRepo` grows one flag fo
 `empty`, which is the one caller that wants no `--add-readme`: the project's own directory is
 the first commit, and a README would be a commit the push has to be reconciled with.
 
+The push sets **no upstream**. What is left behind is a checkout of the base branch, and the
+one thread that may still be standing in it reads `COVEY_PREAMBLE` from its next turn, because
+the project is a repository now — so an upstream would make a bare `git push` there land on
+the base branch, which is the first of the two acts that preamble says a person cannot take
+back. Without one, git refuses and names what is missing.
+
 Then every thread of the project moves into a worktree of its own, and three rules hold:
 
-- **A busy thread keeps the directory it is in.** A running turn, an approval that waits, a
-  background task — moving the files under any of them is the one thing an upgrade must not
-  do. Its `worktreePath` was `null`, which reads as the project's root, and that root has just
-  moved, so the old path is written down explicitly. This is also the agent that ran
-  `covey project git`, which is why that command needs no deferral and no refusal.
+- **A busy thread keeps the directory it is in, and so does an archived one.** A running turn,
+  an approval that waits, a background task — moving the files under any of them is the one
+  thing an upgrade must not do, and that thread is also the agent that ran
+  `covey project git`, which is why that command needs no deferral and no refusal. An archived
+  thread is the other side of the same coin: a local project's threads are conversations
+  rather than changes, so a notes project chatted in for a month has thirty of them, and thirty
+  checkouts and thirty branches for work nobody will push is a cost with nothing behind it.
+  In both cases the path is written down rather than left `null`, because `null` reads as the
+  project's root and that root has just become the bare clone — a thread left `null` would
+  land *inside* `repo.git` the next time the reader wrote to it.
 - **A thread takes its file store with it.** The pictures a reader was shown live under the
   directory the thread worked in, and `/file` reads them from the thread's cwd.
 - **A worktree that cannot be made costs that thread and no other.** The project row is

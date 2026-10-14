@@ -308,7 +308,13 @@ export async function publishDirectory(dir: string, url: string, message: string
   const has = await git(dir, ["remote", "get-url", "origin"]);
   const remote = await gitTry(dir, has === null ? ["remote", "add", "origin", url] : ["remote", "set-url", "origin", url]);
   if (!remote.ok) return { error: remote.err };
-  const pushed = await gitTry(dir, ["push", "--quiet", "-u", "origin", `${branch}:${branch}`], CLONE_TIMEOUT_MS, remoteEnv());
+  // No `-u`. What is left behind is a checkout of the base branch, and the one
+  // thread still standing in it is the busy one — whose next turn reads the
+  // loop's preamble, because the project is a repository now. An upstream
+  // would make a bare `git push` there land on the base branch, which is the
+  // one act that preamble says a person cannot take back. Without it git
+  // refuses and names what is missing.
+  const pushed = await gitTry(dir, ["push", "--quiet", "origin", `${branch}:${branch}`], CLONE_TIMEOUT_MS, remoteEnv());
   if (!pushed.ok) return { error: pushed.err };
   return { ok: true, branch };
 }

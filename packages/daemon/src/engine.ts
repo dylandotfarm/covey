@@ -1123,6 +1123,7 @@ export class Engine {
         const existing = this.db.getRun(cmd.run.runId);
         // A retried create must not throw away a run that has been dispatched.
         if (existing) return this.emitShell({ kind: "run.upserted", run: existing });
+        for (const m of cmd.run.members) this.assertRunnable(m.projectId);
         // The run's parent, by the same rule a thread's parent follows: the
         // command wins, then the thread the connection speaks for.
         const parent = this.knownThread(cmd.run.parentThreadId ?? caller);
@@ -1155,6 +1156,7 @@ export class Engine {
         // another added on the day this issue came from. Adding is an ordinary
         // edit, so adding a member that is already here changes nothing.
         if (run.members.some((m) => m.id === cmd.member.id)) return this.emitShell({ kind: "run.upserted", run });
+        this.assertRunnable(cmd.member.projectId);
         run.members.push(newMember(cmd.member, now));
         return this.saveRun(run, now);
       }
@@ -1162,6 +1164,9 @@ export class Engine {
         const run = this.requireRun(cmd.runId);
         const at = run.members.findIndex((m) => m.id === cmd.memberId);
         if (at < 0) throw new EngineError("not_found", `run ${cmd.runId} has no member ${cmd.memberId}`);
+        // A move names the project the member lands in, so it is the third way
+        // a member could be put into a local project.
+        if (cmd.patch.projectId !== undefined) this.assertRunnable(cmd.patch.projectId);
         // `review` is issue #45's field. It is merged like any other and never
         // read here, which is what lets the two halves land separately.
         run.members[at] = { ...run.members[at]!, ...cmd.patch, updatedAt: now };
@@ -1307,6 +1312,27 @@ export class Engine {
     t.issue = { number: issue, title: facts?.title ?? null, url: facts?.url ?? null, takenAt: new Date().toISOString() };
     this.db.putThread(t);
     this.note(t.id, "info", `Took issue #${issue}${facts?.title ? ` (${facts.title})` : ""}.`);
+  }
+
+  /**
+   * Refuse a run member placed in a local project.
+   *
+   * A run is the fourth act that needs a repository, beside an issue, a pull
+   * request and a base branch — and the only one whose damage is done before
+   * any refusal could arrive. Dispatch makes one thread per task, each lands
+   * in the project's one directory, and several agents then edit the same
+   * files with no branch, no worktree and no checkpoint between them.
+   *
+   * Only a member whose project is on *this* machine can be read here, which
+   * is every member of a run a local project could have started: a pool is one
+   * repository or one local name, and `placementMachines` offers only machines
+   * that hold it. The client says the same sentence first (`startRun`), so a
+   * reader never reaches a placement.
+   */
+  private assertRunnable(projectId: string | null | undefined): void {
+    if (!projectId) return;
+    const p = this.db.getProject(projectId);
+    if (p?.kind === "local") throw new EngineError("unsupported", `${p.title} is a local project: a run needs a repository, because every member works on a branch of its own`);
   }
 
   /** Refuse an issue number that is not one, or that another live thread of the project holds. */
@@ -2735,12 +2761,17 @@ export class Engine {
    * Three rules, and each is one a reader would otherwise find with their
    * fingers.
    *
-   * **A busy thread keeps the directory it is in.** A running turn, an
-   * approval that waits, a background task: moving the files under any of
-   * them is the one thing an upgrade must not do. So the thread's own path is
-   * recorded — `worktreePath` was `null`, which reads as the project's root,
-   * and that root has just moved to the bare clone — and the thread goes on
-   * exactly where it was.
+   * **A busy thread keeps the directory it is in, and so does an archived
+   * one.** A running turn, an approval that waits, a background task: moving
+   * the files under any of them is the one thing an upgrade must not do. An
+   * archived thread is the other side of the same coin — a local project's
+   * threads are conversations rather than changes, so a notes project chatted
+   * in for a month has thirty of them, and thirty checkouts and thirty
+   * branches for conversations nobody will push is a cost with nothing behind
+   * it. Both keep the directory, and in both cases the path has to be written
+   * down: `worktreePath` was `null`, which reads as the project's root, and
+   * that root has just become the bare clone, so a thread left `null` would
+   * land *inside* `repo.git` the next time the reader wrote to it.
    *
    * **A thread takes its file store with it.** The pictures a reader was
    * shown, and the files they dropped, live under the directory the thread
@@ -2762,9 +2793,13 @@ export class Engine {
       // row, because a turn runs whether or not a session is live, and the
       // live session, because a background task and an approval that waits
       // outlive a turn.
-      if (t.latestTurn?.state === "running" || this.sessionBusy(t.id)) {
+      const working = t.latestTurn?.state === "running" || this.sessionBusy(t.id);
+      if (working || t.archivedAt) {
         this.mutateThread(t.id, (x) => { x.worktreePath = was; });
-        this.note(t.id, "warning", `${p.title} is now a git repository (${p.repositoryIdentity}). This thread was working, so it keeps ${was} as its directory and gets no branch of its own. ${left} Start a new thread in the project for a worktree on a branch, with the pull request loop.`);
+        const why = working
+          ? `This thread was working, so it keeps ${was} as its directory and gets no branch of its own.`
+          : `This thread was archived, so it keeps ${was} as its directory and gets no branch of its own.`;
+        this.note(t.id, working ? "warning" : "info", `${p.title} is now a git repository (${p.repositoryIdentity}). ${why} ${left} Start a new thread in the project for a worktree on a branch, with the pull request loop.`);
         continue;
       }
       const tree = await this.newWorktree(p, t.id.slice(0, 8), null).catch((e: any) => ({ error: e?.message ?? String(e) }) as const);

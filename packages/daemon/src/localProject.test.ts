@@ -369,3 +369,90 @@ test("a thread that is working keeps the directory it is in, and is told why", a
   assert.match(note.text, /was working, so it keeps/);
   assert.match(note.text, /Start a new thread in the project/);
 });
+
+test("a run is refused on a local project, by every route that could place a member there", async (t) => {
+  const e = engineOn();
+  t.after(e.drop);
+  await e.send({ type: "project.create", local: "Notes" });
+  const local = e.engine.shellSnapshot().projects[0]!;
+
+  // A run would make one thread per task, each landing in the project's one
+  // directory: several agents on the same files with no branch, no worktree
+  // and no checkpoint between them. The damage is done before any later
+  // refusal could arrive, so this one comes first.
+  const named = (err: EngineError) => err.code === "unsupported" && /Notes is a local project: a run needs a repository/.test(err.message);
+  const member = (projectId: string | null) => ({
+    id: "m1", task: { key: "44", title: "a task", issue: null, requires: {} },
+    machineId: "m1", projectId, resources: { port: 4400, tmpDir: "/tmp/x" },
+  });
+  const run = (members: any[]) => ({ runId: "run-1", name: "r", goal: "g", briefTemplate: "b", members });
+
+  await assert.rejects(e.send({ type: "run.create", run: run([member(local.id)]) }), named);
+  assert.equal(e.engine.shellSnapshot().runs?.length ?? 0, 0, "nothing is recorded");
+
+  // A member added to a run in flight, and a member moved into the project,
+  // are the other two ways in.
+  await e.send({ type: "run.create", run: run([member(null)]) });
+  await assert.rejects(e.send({ type: "run.member.add", runId: "run-1", member: { ...member(local.id), id: "m2" } }), named);
+  await assert.rejects(e.send({ type: "run.member.patch", runId: "run-1", memberId: "m1", patch: { projectId: local.id } }), named);
+  assert.equal(e.db.getRun("run-1")!.members.length, 1);
+  assert.equal(e.db.getRun("run-1")!.members[0]!.projectId, null, "a refused move changes nothing");
+
+  // A member with no project yet is placement's business, not this check's,
+  // and a repository project is what a run is for.
+  const remote = await emptyRemote();
+  t.after(remote.drop);
+  await e.send({ type: "project.makeGit", projectId: local.id, url: remote.url });
+  await e.send({ type: "run.member.patch", runId: "run-1", memberId: "m1", patch: { projectId: local.id } });
+  assert.equal(e.db.getRun("run-1")!.members[0]!.projectId, local.id, "the same project, once it is a repository");
+});
+
+test("an archived thread keeps the directory it was archived from, rather than a worktree nobody asked for", async (t) => {
+  const remote = await emptyRemote();
+  t.after(remote.drop);
+  const e = engineOn();
+  t.after(e.drop);
+  await e.send({ type: "project.create", local: "Notes" });
+  const p0 = e.engine.shellSnapshot().projects[0]!;
+  const was = p0.workspaceRoot;
+  const live = randomUUID();
+  const old = randomUUID();
+  await e.send({ type: "thread.create", projectId: p0.id, threadId: live, sessionId: randomUUID() });
+  await e.send({ type: "thread.create", projectId: p0.id, threadId: old, sessionId: randomUUID() });
+  await e.send({ type: "thread.archive", threadId: old, archived: true });
+
+  await e.send({ type: "project.makeGit", projectId: p0.id, url: remote.url });
+
+  // A local project's threads are conversations rather than changes, so a
+  // notes project chatted in for a month would otherwise make thirty
+  // checkouts and thirty branches for work nobody will ever push.
+  assert.equal(e.db.getThread(old)!.worktreePath, was);
+  assert.equal(e.db.getThread(old)!.branch, null);
+  // And the path is written down rather than left null: null reads as the
+  // project's root, and that root is now the bare clone — so a thread left
+  // null would land inside repo.git the next time the reader wrote to it.
+  assert.notEqual(e.db.getThread(old)!.worktreePath, e.db.getProject(p0.id)!.workspaceRoot);
+  const note = e.db.allItems(old).find((i) => i.kind === "note") as any;
+  assert.equal(note.tone, "info", "an archived thread is not a warning: nothing went wrong");
+  assert.match(note.text, /was archived, so it keeps/);
+
+  assert.notEqual(e.db.getThread(live)!.worktreePath, null, "the live thread still gets its worktree");
+});
+
+test("the directory left behind can push nothing: the first push sets no upstream", async (t) => {
+  const remote = await emptyRemote();
+  t.after(remote.drop);
+  const e = engineOn();
+  t.after(e.drop);
+  await e.send({ type: "project.create", local: "Notes" });
+  const p0 = e.engine.shellSnapshot().projects[0]!;
+  const was = p0.workspaceRoot;
+  await e.send({ type: "project.makeGit", projectId: p0.id, url: remote.url });
+
+  // What is left behind is a checkout of the base branch, and the thread that
+  // may still be standing in it reads the loop's preamble now — whose one
+  // rule is that a person cannot undo a push to the base branch. With no
+  // upstream, git refuses and says what is missing.
+  assert.equal(await git(was, "config", "--get", "branch.main.merge").catch(() => ""), "", "no upstream on the branch");
+  await assert.rejects(git(was, "push"), /upstream|no destination|set the remote/i);
+});

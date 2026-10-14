@@ -581,7 +581,10 @@ export function App({ store }: { store: Store }) {
     const title = v.trim();
     if (!title) { store.setOverlay(null); return; }
     // The same sentence the daemon would answer with, said before anything is
-    // sent, so the reader fixes the name with the input still in front of them.
+    // sent, so nothing is made and the reader types again here rather than
+    // reading an error from a machine. The field is empty when they do:
+    // `handleInputKey` clears the filter after every submit, as it does for
+    // every other prompt, and re-seeding it from here loses to that setter.
     const bad = localProjectError(title);
     if (bad) { store.notify(bad, "error"); return; }
     const live = store.getState();
@@ -1268,6 +1271,11 @@ export function App({ store }: { store: Store }) {
     const projectId = contextProject;
     const p = project(machine, projectId);
     if (!machine || !projectId || !p) { store.notify("select a project first — a run works in one repository", "error"); return; }
+    // The notice above was already the sentence; this is the test behind it.
+    // A run in a local project would put every member in the project's one
+    // directory, with no branch and no worktree between them, and the damage
+    // would be done before any refusal arrived. The daemon refuses it too.
+    if (p.kind === "local") { store.notify(`${p.title} is a local project: a run needs a repository, because every member works on a branch of its own`, "error"); return; }
     openInput(`Tasks for a run in ${p.title}`, (v) => {
       const tasks = parseTaskList(v);
       if (tasks.length === 0) { store.notify("no tasks — give issue numbers, or one task each separated by ;", "error"); return; }

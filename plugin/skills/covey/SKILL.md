@@ -346,8 +346,10 @@ wrote is already in front of you.
 Your session is told which kind of project it is in before its first turn. In
 a local project:
 
-- There is no branch, no pull request and no issue. `covey issue` and
-  `covey pr` are refused, by name, and you must not offer them.
+- There is no branch, no pull request, no issue and no run. `covey issue` and
+  `covey pr` are refused, by name, and you must not offer them. A run is
+  refused too: every member would work in this one directory, on the same
+  files, with no branch between them.
 - Do not look for a git repository and do not make one with `git init`. The
   project's own command below is the way, and it is the only one that moves
   the project covey holds.
@@ -377,7 +379,9 @@ repo", "I want pull requests on this". Two steps:
 
    Covey commits what is in the project's directory, pushes it as the first
    commit, clones it the way a new project is cloned, and gives every **idle**
-   thread of the project a worktree and a branch of its own.
+   thread of the project a worktree and a branch of its own. A thread that was
+   archived keeps the directory it was archived from. The command prints what
+   became of *this* thread; read that line rather than assume.
 
 Then **stop the turn** and tell the reader two things, because the command
 prints both and neither is yours to work around:
