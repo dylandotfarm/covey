@@ -25,7 +25,9 @@ export type LoopRequest =
   | { kind: "pr.status" }
   /** From a review thread: the verdict that ends or holds the review. */
   | { kind: "review.decide"; verdict: "approve" | "changes"; body: string; attachments: PullRequestAttachment[] }
-  | { kind: "review.status" };
+  | { kind: "review.status" }
+  /** Turn this thread's local project into a repository project. */
+  | { kind: "project.makeGit"; url: string };
 
 /** The name this command gives at `hello`. A program, so its threads are an agent's. */
 export const LOOP_CLIENT = "covey-cli";
@@ -63,6 +65,14 @@ Inside a review thread, which covey starts when a pull request is opened:
 Covey adds the tagline that says a machine wrote the comment, to every comment a
 review thread leaves. Do not write it yourself.
 
+In a thread of a local project — a directory with no repository behind it:
+
+  covey project git <url>    make the project a git repository: covey commits what is in the
+                             project's directory, pushes it to <url> as the first commit,
+                             clones it, and gives every idle thread of the project a worktree
+                             and a branch of its own. The repository has to be empty; make one
+                             with \`gh repo create <name> --private\` and no --add-readme
+
 These run inside a covey thread, where COVEY_THREAD_ID is set; --thread <id> names one.`;
 
 /**
@@ -92,6 +102,12 @@ export function parseLoopArgs(argv: string[]): { request: LoopRequest } | { erro
     }
     if (sub === "drop") return { request: { kind: "issue.take", issue: null } };
     return { error: "covey issue takes `take <n>` or `drop`" };
+  }
+  if (cmd === "project") {
+    if (sub !== "git") return { error: "covey project takes `git <url>`" };
+    const url = rest[0];
+    if (!url || url.startsWith("--")) return { error: "covey project git needs the URL of an empty repository, for example covey project git git@github.com:me/notes.git" };
+    return { request: { kind: "project.makeGit", url } };
   }
   if (cmd !== "pr" && cmd !== "review") return { error: `covey does not know ${cmd ?? ""} ${sub ?? ""}`.trim() };
 
@@ -284,6 +300,19 @@ export async function runLoop(request: LoopRequest, env: LoopEnv, connect: (url:
         return { ok: true, lines: policyLine(request.merge, request.mergeMethod ?? "merge") };
       case "pr.status":
         return { ok: true, lines: await status() };
+      case "project.makeGit": {
+        // The project comes from the thread rather than from a second
+        // environment variable: `thread.snapshot` is already the one call
+        // this file makes to read where it is.
+        const snap = (await rpc.call("thread.snapshot", { threadId, limit: 1 })) as { thread: Thread };
+        await rpc.call("command", { commandId: crypto.randomUUID(), threadId, type: "project.makeGit", projectId: snap.thread.projectId, url: request.url });
+        return { ok: true, lines: [
+          `the project is now a git repository at ${request.url}, and its directory is its first commit`,
+          "this thread is running, so it keeps the directory it is in and gets no branch: a running turn must not have its files moved under it. Every idle thread of the project now has a worktree and a branch of its own",
+          "start a new thread in the project for a worktree on a branch, with the pull request loop. Tell the user that, and stop the turn",
+          "if this project is on other machines too, each of those is still a local project: the user upgrades it from that machine's covey, with g on the project row",
+        ] };
+      }
     }
   } catch (e: any) {
     return { ok: false, lines: [String(e?.message ?? e)] };

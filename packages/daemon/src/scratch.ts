@@ -32,6 +32,18 @@ export interface ScratchRemote {
   drop: () => void;
 }
 
+/**
+ * A bare remote with **no commits**: what `gh repo create` with no README
+ * makes, and the only kind of repository a local project may be upgraded into
+ * (`project.makeGit`).
+ */
+export async function emptyRemote(prefix = "covey-empty-"): Promise<{ url: string; dir: string; drop: () => void }> {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const url = join(dir, "shared.git");
+  await execFile("git", ["init", "-q", "--bare", "-b", "main", url]);
+  return { url, dir, drop: () => rmSync(dir, { recursive: true, force: true }) };
+}
+
 /** A bare remote with one commit on `main`, and a seed checkout to add more. */
 export async function scratchRemote(prefix = "covey-remote-"): Promise<ScratchRemote> {
   const dir = mkdtempSync(join(tmpdir(), prefix));

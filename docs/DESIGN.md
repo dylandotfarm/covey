@@ -1513,7 +1513,8 @@ of the default branch would never move, and an agent that ran `git merge main` i
 worktree would merge the copy. `origin/main` is the ref every worktree can reach, and the
 one a thread is told to merge.
 
-`Project.kind` tells a `clone` from a `checkout`: a directory the user pointed covey at,
+`Project.kind` tells a `clone` from a `checkout` and from a `local` project (see *A project
+with no repository* below). A `checkout` is a directory the user pointed covey at,
 from before projects were clones. No new project is made that way. The rows that exist keep
 working. Their worktrees stay under `<root>/.covey/worktrees`, next to a self-ignoring
 `.gitignore`. A `checkout` with nothing to branch from is the one place a thread still works
@@ -1556,6 +1557,93 @@ disk and `cloneOnce` makes it once. The sidebar, the placement of a new thread a
 members, and the pending clones of a machine that is away are all keyed on the pool, not on
 the identity alone. The sidebar row and the web client's row name the base beside the title,
 because the two rows carry the same title otherwise.
+
+## A project with no repository
+
+Not all work is a change to land. A reader wants a place to chat, to automate and to keep
+files, with the machines, the secrets and the threads a project already gives them. A
+**local project** is that: one directory, named by the reader, with no git repository behind
+it.
+
+```
+~/.covey/projects/local/<name>          the directory, and the only one
+```
+
+`project.create` takes `local`, the name the reader typed, instead of `url`. The daemon
+slugs it once — `localProjectId` in `@covey/protocol`, lowercased, one path segment — and
+keeps the answer as `Project.localId`, with `kind: "local"`. `title` is what the reader
+sees and is theirs to rename; `localId` never moves, because it is the identity, and a
+rename on one machine would otherwise split the pool. A name covey can make no directory
+from is refused with code `bad_name`, quoting the name, and a second project of that name
+on one machine is refused with `exists`.
+
+**Every thread of a local project works in that one directory.** There is no worktree and
+no branch. That is the whole point: the second thread sees what the first wrote, and the
+reader comes back to the files next week. `Engine.newWorktree` tests the *kind* and never
+`isGitRepo`, so a reader who runs `git init` in that directory keeps the project they made
+rather than silently getting a worktree per thread and a workspace that is empty from
+every one of them.
+
+The same local project on two machines is **one row**: `projectPool` keys it on `localId`,
+the way it keys a repository on its identity. The two directories hold different files,
+exactly as two clones hold different uncommitted work; the row says which machines the
+project is on, and a new thread picks one of them. Everything else a project does comes
+free — the machines, `project.setSecrets`, the rename, the model, the archive, `covey show`,
+the shell, the dropped files, moving a thread between machines.
+
+Three acts need a repository and are refused **by name**: `thread.takeIssue`,
+`thread.openPullRequest` and `project.update { baseBranch }`. The pull request refusal comes
+*before* the branch test, so the reason the reader reads is the real one — a thread of a
+local project is on no branch because there is no repository, not the other way round. The
+TUI leaves `b` off the project panel's footer for the same reason: a key that can only ever
+answer with a refusal is worse than a row without it.
+
+A session there is told so before its first turn. `COVEY_PREAMBLE` describes the loop, and
+every sentence of it is false in a local project, so `preambleFor` sends `COVEY_LOCAL_PREAMBLE`
+instead: a directory, no repository, do not look for one, and the two commands that still
+work here (`covey show`, `covey env`). The `/covey` skill has *A local project* for the same
+reason, and `plugin.test.ts` holds the two against each other.
+
+### Upgrading one into a repository
+
+A local project that turns out to want the loop does not have to be rebuilt. `project.makeGit`
+takes a URL and does the rest: `publishDirectory` writes `.covey/.gitignore` first (the
+directory holds the file store of every thread that has worked in it, and a screenshot
+somebody dropped must not become the first commit), commits what is there — `--allow-empty`,
+because a project the reader has only chatted in holds no files and a repository with no
+commit has no branch (#176) — pushes it to `main`, and then the ordinary clone runs. The row
+becomes a `clone`, and the old directory stays on disk, as `project.delete` leaves a clone.
+
+The repository has to be **empty**. Reconciling the reader's directory with a history somebody
+else wrote is not a thing covey may decide for them, so a remote that already has a branch is
+refused with `exists` before anything is written. `createRepo` grows one flag for this,
+`empty`, which is the one caller that wants no `--add-readme`: the project's own directory is
+the first commit, and a README would be a commit the push has to be reconciled with.
+
+Then every thread of the project moves into a worktree of its own, and three rules hold:
+
+- **A busy thread keeps the directory it is in.** A running turn, an approval that waits, a
+  background task — moving the files under any of them is the one thing an upgrade must not
+  do. Its `worktreePath` was `null`, which reads as the project's root, and that root has just
+  moved, so the old path is written down explicitly. This is also the agent that ran
+  `covey project git`, which is why that command needs no deferral and no refusal.
+- **A thread takes its file store with it.** The pictures a reader was shown live under the
+  directory the thread worked in, and `/file` reads them from the thread's cwd.
+- **A worktree that cannot be made costs that thread and no other.** The project row is
+  already written, so a throw would leave a clone with some of its threads unmoved and nothing
+  to say which.
+
+A project on several machines is upgraded one machine at a time, and the client sends the two
+halves in order: `push` (the default) to the machine whose directory becomes the repository,
+then `push: false` to the rest, which clone what the first pushed and leave their own
+directories where they are. A machine asked out of order is refused by name — `no_branch` for
+a repository with no commits yet.
+
+Two faces, because the reader may be in either place: `g` on the project row in the TUI, which
+asks which machine's files go up when the pool has more than one and then makes the repository
+through `gh`; and `covey project git <url>` for an agent the user asked directly, which makes
+no repository itself — the agent runs `gh repo create <name> --private` with no
+`--add-readme`, which is what the skill says.
 
 ## Where a new thread works
 

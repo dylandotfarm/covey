@@ -361,7 +361,7 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return listRemoteBranches(url, GH_CWD, await cloneUrlsFor(url));
       }
       case "repos.create":
-        return createRepo({ name: String(p.name ?? ""), visibility: p.visibility === "public" ? "public" : "private", description: p.description ? String(p.description) : undefined });
+        return createRepo({ name: String(p.name ?? ""), visibility: p.visibility === "public" ? "public" : "private", description: p.description ? String(p.description) : undefined, ...(p.empty ? { empty: true } : {}) });
       case "run.pullRequest":
         return engine.runPullRequest(String(p.threadId));
       case "thread.openPullRequest":

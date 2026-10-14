@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocketServer } from "ws";
 import type { Thread } from "@covey/protocol";
-import { describeThread, parseLoopArgs, runLoop, LOOP_CLIENT } from "./loop.js";
+import { describeThread, parseLoopArgs, runLoop, LOOP_CLIENT, LOOP_USAGE } from "./loop.js";
 
 const parse = (line: string) => parseLoopArgs(line.split(" "));
 const requestOf = (argv: string[]) => { const r = parseLoopArgs(argv); assert.ok("request" in r, `${argv.join(" ")}: ${JSON.stringify(r)}`); return r.request; };
@@ -255,4 +255,23 @@ test("the review of a pull request reads as lines an agent can act on", async ()
     'say `covey review approve` or `covey review changes --body "…"` when you have read the change',
   ]);
   assert.match(describeReview(t(undefined))[0]!, /this thread reviews no pull request/);
+});
+
+test("covey project git names the repository the local project becomes, and refuses nothing for a URL", () => {
+  const ok = parseLoopArgs(["project", "git", "git@github.com:me/notes.git"]);
+  assert.deepEqual(ok, { request: { kind: "project.makeGit", url: "git@github.com:me/notes.git" } });
+
+  // A missing URL is a sentence and never a throw, as every other spelling is.
+  for (const argv of [["project", "git"], ["project", "git", "--auto"]]) {
+    const r = parseLoopArgs(argv);
+    assert.ok("error" in r && /needs the URL of an empty repository/.test(r.error), argv.join(" "));
+  }
+  const sub = parseLoopArgs(["project", "make"]);
+  assert.ok("error" in sub && /covey project takes `git <url>`/.test(sub.error));
+});
+
+test("the usage says how to make the empty repository, because the agent makes it itself", () => {
+  assert.match(LOOP_USAGE, /covey project git <url>/);
+  assert.match(LOOP_USAGE, /gh repo create <name> --private/);
+  assert.match(LOOP_USAGE, /has to be empty/);
 });

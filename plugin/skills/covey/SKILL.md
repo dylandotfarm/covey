@@ -1,6 +1,6 @@
 ---
 name: covey
-description: Take work to a merged pull request inside a covey thread, from a GitHub issue number or from the user's own words. Do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. File no issue unless the user asks for one. Use when the user types /covey, names an issue to take or finish, describes a bug or a change to make here, or asks for a pull request that covey should watch or merge.
+description: Take work to a merged pull request inside a covey thread, from a GitHub issue number or from the user's own words. Do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. File no issue unless the user asks for one. Use when the user types /covey, names an issue to take or finish, describes a bug or a change to make here, or asks for a pull request that covey should watch or merge. Also use in a thread of a local project — a directory with no repository, where there is no loop — when the user asks to make that project a git repository.
 ---
 
 # The covey loop
@@ -30,6 +30,9 @@ issue. Both end at a pull request covey watches. Pick by what the user said:
 - **The first message of the thread starts `covey review:`.** Neither loop:
   this thread reviews somebody else's change. Read *If you are the reviewer*
   below and nothing else here.
+- **The project is a local project.** Neither loop: there is no repository, so
+  there is nothing to branch, push or open. Read *A local project* below and
+  nothing else here.
 
 Never file an issue to hold work you are about to do. Most of what a user
 asks for in conversation is not issue-shaped, and an issue opened and closed
@@ -332,6 +335,65 @@ The rules:
 demo that belongs to the pull request, and `covey show` to let the person you
 are talking to look at something now.
 
+## A local project
+
+A **local project** is a directory on the machine, named by the reader, with
+no git repository behind it. It is a place to chat, to automate and to keep
+files. Every thread of the project works in that one directory, so what you
+write there is what the reader comes back to, and what the thread before you
+wrote is already in front of you.
+
+Your session is told which kind of project it is in before its first turn. In
+a local project:
+
+- There is no branch, no pull request and no issue. `covey issue` and
+  `covey pr` are refused, by name, and you must not offer them.
+- Do not look for a git repository and do not make one with `git init`. The
+  project's own command below is the way, and it is the only one that moves
+  the project covey holds.
+- `covey show` and `covey env` work exactly as they do anywhere else.
+
+### Making it a git repository
+
+The reader may ask for the loop in a project that has none — "make this a git
+repo", "I want pull requests on this". Two steps:
+
+1. **Make an empty repository.** Covey does not make this one for you, and it
+   must have **no commits**: the project's directory becomes the first commit,
+   and a README would be a commit the push has to be reconciled with.
+
+   ```
+   gh repo create <name> --private
+   ```
+
+   No `--add-readme`. Say the name you chose, or ask for one when the reader
+   has not said.
+
+2. **Hand it to covey.**
+
+   ```
+   covey project git <url>
+   ```
+
+   Covey commits what is in the project's directory, pushes it as the first
+   commit, clones it the way a new project is cloned, and gives every **idle**
+   thread of the project a worktree and a branch of its own.
+
+Then **stop the turn** and tell the reader two things, because the command
+prints both and neither is yours to work around:
+
+- This thread keeps the directory it is in and gets no branch. A running turn
+  must not have its files moved under it, and yours is running. A new thread
+  in the project gets a worktree, a branch and the loop.
+- A project on more than one machine is upgraded one machine at a time. You
+  upgraded this one; the reader upgrades each of the others from its own
+  covey, with `g` on the project row.
+
+Do not run `git push`, `git remote add` or `gh repo create --source` to do any
+of this yourself. Covey owns the project row, the clone and every thread's
+worktree, and a repository wired up by hand leaves all three saying something
+that is not true.
+
 ## Secrets: use them by name, never print one
 
 A project or a thread may hold credentials that covey keeps for you. They are
@@ -382,6 +444,9 @@ covey pr watch --stop         stop the watch
 covey pr policy auto|manual   change who merges
 covey pr status               the issue, the pull request, the watch and the review
                               of this thread
+covey project git <url>       make this thread's local project a git repository,
+                              from an *empty* repository you made with
+                              `gh repo create <name> --private`
 covey show <file>... [--text "…"]
                               put a picture or a video in this conversation
 covey env                     the secrets this thread can use, by name
