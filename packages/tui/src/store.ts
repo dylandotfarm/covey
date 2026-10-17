@@ -244,6 +244,17 @@ export interface PickOption {
    * palette they have not seen, and five blocks tell them most of it.
    */
   swatch?: string[];
+  /**
+   * Other words that find this row, which `filterOptions` searches and nothing
+   * paints.
+   *
+   * The command palette is long, so a reader reaches a row by typing a word
+   * for it rather than by reading the list. The word they type is their own:
+   * the secrets panel is the environment to one reader, the keys to another
+   * and the variables to a third, and a label that said all three would be a
+   * label nobody can read. So the label says one thing and this says the rest.
+   */
+  keywords?: string[];
 }
 
 export interface Notice { text: string; tone: "info" | "warning" | "error" | "success"; at: number; }

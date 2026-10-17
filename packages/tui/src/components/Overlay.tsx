@@ -260,10 +260,50 @@ function StepRow({ step, width, tick }: { step: UpdateStep; width: number; tick:
   );
 }
 
-export function filterOptions<O extends { label: string; hint?: string }>(options: O[], filter: string): O[] {
+/**
+ * Does what the reader typed begin a word of `hay`?
+ *
+ * `hay` is already lowercase, so a letter or a digit in front of the match is
+ * what makes it the middle of a word. Everything else counts as a boundary,
+ * which is what puts a match after an em dash or a bracket at the head of a
+ * word rather than inside one.
+ */
+function startsWord(hay: string, f: string): boolean {
+  for (let i = hay.indexOf(f); i !== -1; i = hay.indexOf(f, i + 1)) {
+    const before = hay[i - 1];
+    if (before === undefined || !/[a-z0-9]/.test(before)) return true;
+  }
+  return false;
+}
+
+/**
+ * The rows a typed word leaves, the ones it names first.
+ *
+ * It searches what the row paints and the words it also answers to
+ * (`PickOption.keywords`), so a reader finds a row by their own name for it.
+ * One substring of the whole, because the label of a long row is truncated to
+ * fit the terminal and a reader must still find it by a word at the end.
+ *
+ * A row whose *word* the reader has begun comes before a row that matched
+ * inside one. Two letters is where this is decided and where a reader presses
+ * enter: `ke` is the start of the environment row's `keys` and the middle of
+ * `make one` on the row that adds a project, and the cursor goes back to the
+ * top on every keystroke — so without the rank, enter at `ke` opened the
+ * repository picker. It changes the order and never the membership, so a row
+ * a reader could reach by typing on is a row they can still reach.
+ *
+ * The rest of the order is the order the caller gave, which is the one the
+ * list reads in when nothing is typed.
+ */
+export function filterOptions<O extends { label: string; hint?: string; keywords?: string[] }>(options: O[], filter: string): O[] {
   const f = filter.trim().toLowerCase();
   if (!f) return options;
-  return options.filter((o) => (o.label + " " + (o.hint ?? "")).toLowerCase().includes(f));
+  const hits: { o: O; at: number; word: boolean }[] = [];
+  for (const [at, o] of options.entries()) {
+    const hay = [o.label, o.hint ?? "", ...(o.keywords ?? [])].join(" ").toLowerCase();
+    if (hay.includes(f)) hits.push({ o, at, word: startsWord(hay, f) });
+  }
+  return hits.sort((a, b) => Number(b.word) - Number(a.word) || a.at - b.at).map((h) => h.o);
 }
 
 
@@ -376,7 +416,9 @@ const HELP: [string, string][] = [
   ["  g", "on a local project: make it a git repository"],
   ["  m", "move thread to another machine"],
   ["  r", "rename thread, or a project"],
-  ["  e", "secrets: the environment a project's threads work in, or one thread's"],
+  // Both faces of the panel on one row, because the list is already taller
+  // than a short terminal and ink drops rows out of the middle of it.
+  ["  e", "secrets: a project's environment, or a thread's (ctrl+k too)"],
   ["", "  the agent uses them by name ($NAME, covey env) and never reads a value"],
   ["  x", "archive / unarchive thread (sending a message unarchives)"],
   ["", "  archiving hands back the worktree, keeping its branch"],
