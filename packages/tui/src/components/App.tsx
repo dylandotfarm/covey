@@ -1581,11 +1581,15 @@ export function App({ store }: { store: Store }) {
     // The secrets panel has one other face, `e` on a project row, and a reader
     // has to remember the key to find it. The words a reader might type for it
     // are the row's `keywords`; the hint teaches the key for next time.
+    //
+    // Not `tokens`, though an API token is a secret: the usage row *paints*
+    // that word and this row would take the cursor off it, and a word a row
+    // shows losing to a word nothing shows is the one way this reads as a bug.
     opts.push({
       id: "env",
       label: "Environment — the secrets this project's threads read",
       hint: contextProject ? "e on a project row" : "select a project first",
-      keywords: ["environment", "variables", "env", "keys", "api keys", "tokens", "credentials", "dotenv"],
+      keywords: ["environment", "variables", "env", "keys", "api keys", "credentials", "dotenv"],
     });
     opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
