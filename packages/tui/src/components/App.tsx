@@ -451,6 +451,17 @@ export function App({ store }: { store: Store }) {
   const rowCtx = rowContext(currentRow);
   const contextMachine = state.selected?.machine || rowCtx.machine || state.order[0];
   const contextProject = state.view?.thread?.projectId ?? rowCtx.projectId;
+  /**
+   * The project an act on a project works in: the one under the cursor when
+   * the cursor is on one, because that is the project the summary beside it
+   * names; else the open thread's.
+   *
+   * Adding a machine to a pool and the environment panel both read it, so a
+   * reader who moved the cursor and one who opened a thread get the project
+   * they are looking at either way.
+   */
+  const projectCtx = (): { machine?: string; projectId?: string } =>
+    currentRow?.kind === "project" ? rowCtx : { machine: contextMachine, projectId: contextProject };
 
   /**
    * Moving the sidebar cursor shows what it is pointing at: a thread opens in
@@ -675,13 +686,9 @@ export function App({ store }: { store: Store }) {
     });
   };
 
-  /**
-   * Add a machine to a project's pool: clone the repository there. The
-   * project under the cursor when the cursor is on one, since that is the
-   * project the summary beside it names; else the open thread's.
-   */
+  /** Add a machine to a project's pool: clone the repository there. */
   const addToPool = () => {
-    const at = currentRow?.kind === "project" ? rowCtx : { machine: contextMachine, projectId: contextProject };
+    const at = projectCtx();
     const g = at.machine && at.projectId ? groupOfProject(state, at.machine, at.projectId) : null;
     // A local project goes to another machine as a directory of the same
     // name: the name is the identity, so the row the reader is on stays one
@@ -1306,22 +1313,33 @@ export function App({ store }: { store: Store }) {
   const backToSecrets = (ov: Extract<Overlay, { kind: "secrets" }>, at: number) => { store.setOverlay(ov); setOvFilter(""); setOvCursor(at); };
 
   /**
+   * The environment a project's threads work in — `e` on a project row, and
+   * the `Environment` row of the command palette (#126).
+   *
+   * The panel writes to every machine of the pool, so the same repository
+   * works the same wherever a thread of it runs. The pool comes from
+   * `groupOfProject`, which is where the sidebar row's own `pool` comes from,
+   * so the two faces write to the same machines. A project with no group is
+   * one the client has not got the record for.
+   */
+  const projectSecrets = (machine?: string, projectId?: string) => {
+    const g = machine && projectId ? groupOfProject(state, machine, projectId) : null;
+    if (!g) { store.notify("select a project first — an environment belongs to one", "error"); return; }
+    setOvCursor(0);
+    store.setOverlay({
+      kind: "secrets", scope: "project", title: `Secrets — ${g.title}`,
+      targets: g.members.map((x) => ({ machine: x.machine, ownerId: x.projectId })),
+    });
+  };
+
+  /**
    * The environment a project's threads work in, or one thread's own — `e` on
    * a sidebar row (#126).
-   *
-   * A project's panel writes to every machine of its pool, so the same
-   * repository works the same wherever a thread of it runs.
    */
   function openSecrets(row: SidebarRow) {
-    setOvCursor(0);
-    if (row.kind === "project" && row.project) {
-      const pool = row.pool?.length ? row.pool : [{ machine: row.machine, projectId: row.project.id }];
-      return store.setOverlay({
-        kind: "secrets", scope: "project", title: `Secrets — ${row.project.title}`,
-        targets: pool.map((x) => ({ machine: x.machine, ownerId: x.projectId })),
-      });
-    }
+    if (row.kind === "project" && row.project) return projectSecrets(row.machine, row.project.id);
     if (row.kind === "thread" && row.thread) {
+      setOvCursor(0);
       store.setOverlay({
         kind: "secrets", scope: "thread", title: `Secrets — ${row.thread.title}`,
         targets: [{ machine: row.machine, ownerId: row.thread.id }],
@@ -1560,6 +1578,15 @@ export function App({ store }: { store: Store }) {
     opts.push({ id: "new", label: "New thread — in its own worktree", hint: "n" });
     opts.push({ id: "addproject", label: "Add project — pick a repository, make one, or give a URL; then the machines", hint: "a" });
     if (contextProject) opts.push({ id: "pooladd", label: "Add a machine to this project — clone it there too" });
+    // The secrets panel has one other face, `e` on a project row, and a reader
+    // has to remember the key to find it. The words a reader might type for it
+    // are the row's `keywords`; the hint teaches the key for next time.
+    opts.push({
+      id: "env",
+      label: "Environment — the secrets this project's threads read",
+      hint: contextProject ? "e on a project row" : "select a project first",
+      keywords: ["environment", "variables", "env", "keys", "api keys", "tokens", "credentials", "dotenv"],
+    });
     opts.push({ id: "run", label: "Start a run — one task each, across machines", hint: contextProject ? "this project" : "select a project first" });
     opts.push({ id: "usage", label: "Usage — tokens and estimated cost, per period", hint: "every machine" });
     opts.push({ id: "machine", label: "Machine control panel — update, restart, defaults, session memory", hint: "enter on a machine" });
@@ -1603,6 +1630,7 @@ export function App({ store }: { store: Store }) {
         case "new": return void newThread();
         case "addproject": return addProject();
         case "pooladd": return addToPool();
+        case "env": { const at = projectCtx(); return projectSecrets(at.machine, at.projectId); }
         case "run": return startRun();
         case "usage": return void store.loadUsage(0, "thread");
         case "machine": return machinePanel();

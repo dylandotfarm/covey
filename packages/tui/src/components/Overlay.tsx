@@ -260,10 +260,18 @@ function StepRow({ step, width, tick }: { step: UpdateStep; width: number; tick:
   );
 }
 
-export function filterOptions<O extends { label: string; hint?: string }>(options: O[], filter: string): O[] {
+/**
+ * The rows a typed word leaves, in the order they were given.
+ *
+ * It searches what the row paints and the words it also answers to
+ * (`PickOption.keywords`), so a reader finds a row by their own name for it.
+ * One substring of the whole, because the label of a long row is truncated to
+ * fit the terminal and a reader must still find it by a word at the end.
+ */
+export function filterOptions<O extends { label: string; hint?: string; keywords?: string[] }>(options: O[], filter: string): O[] {
   const f = filter.trim().toLowerCase();
   if (!f) return options;
-  return options.filter((o) => (o.label + " " + (o.hint ?? "")).toLowerCase().includes(f));
+  return options.filter((o) => [o.label, o.hint ?? "", ...(o.keywords ?? [])].join(" ").toLowerCase().includes(f));
 }
 
 
@@ -376,7 +384,9 @@ const HELP: [string, string][] = [
   ["  g", "on a local project: make it a git repository"],
   ["  m", "move thread to another machine"],
   ["  r", "rename thread, or a project"],
-  ["  e", "secrets: the environment a project's threads work in, or one thread's"],
+  // Both faces of the panel on one row, because the list is already taller
+  // than a short terminal and ink drops rows out of the middle of it.
+  ["  e", "secrets: a project's environment, or a thread's (ctrl+k too)"],
   ["", "  the agent uses them by name ($NAME, covey env) and never reads a value"],
   ["  x", "archive / unarchive thread (sending a message unarchives)"],
   ["", "  archiving hands back the worktree, keeping its branch"],
