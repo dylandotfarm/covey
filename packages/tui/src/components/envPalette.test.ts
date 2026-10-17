@@ -125,6 +125,33 @@ for (const word of ["environment", "secrets", "keys", "variables", "env"]) {
 }
 
 /**
+ * Two letters is where a reader presses enter, so two letters is where the
+ * order has to be right.
+ *
+ * `ke` begins the row's `keys` and sits in the middle of `make one` on the row
+ * that adds a project, and that row comes first in the palette. The cursor goes
+ * back to the top on every keystroke, so with the rows in the order the palette
+ * gave them, enter here opened the repository picker — the reader typed toward
+ * one row and got another.
+ */
+for (const word of ["ke", "en"]) {
+  test(`"${word}" puts the environment panel under the cursor, not a row that matched mid-word`, async () => {
+    const { stdin, overlay, ink } = mount();
+    try {
+      stdin.type(CTRL_K);
+      await until(() => overlay()?.kind === "pick");
+      for (const ch of word) { stdin.type(ch); await settle(20); }
+      stdin.type("\r");
+      await until(() => overlay()?.kind === "secrets");
+      assert.equal(overlay()?.kind, "secrets",
+        `enter after "${word}" opened something else — the row under the cursor was not the one the reader was typing toward`);
+    } finally {
+      ink.unmount();
+    }
+  });
+}
+
+/**
  * The panel writes to every machine of the pool, as `e` on the project row
  * does. The two faces read the pool through one function, and this is what
  * says so: a second route that wrote to one machine would leave the same
