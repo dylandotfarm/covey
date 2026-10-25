@@ -1782,6 +1782,33 @@ nothing protects it: delete it and the file goes with it on send (`keepTagged`).
 delete take a whole chip in one key, because a chip is one thing on the screen and a chip half
 deleted is a file dropped with nothing said. Every file of one directory shares one chip.
 
+### The way back to the path
+
+A path is two things to a reader: the file to send, and the thing to write *about*. covey
+reads it as the file, which is what was meant nearly every time and leaves a chip and no path
+on the screen the rest. Two routes give the path back, and neither attaches anything.
+
+**Paste the same path again and the chip becomes the path**, where it stood (`revealDrop`) —
+the drop's half of the rule a pasted block already follows. A chip records the paths it stands
+for (`TaggedAttachment.paths`), so what is compared is the paths a chunk *names* and never the
+characters a terminal happened to send: a path written in two goes reveals from the join as
+readily as from the whole chunk, and the half standing in the draft goes with it. The chip goes
+and the file goes with it, because the chip is the only record of the file. Nothing is read off
+the disk to decide it — `droppedPaths` is a `stat` per path and no more, and reading a file
+covey is about to let go of is megabytes for nothing.
+
+**shift+ctrl+v, and shift+cmd+v where the terminal hands the key over**, reads the clipboard as
+text alone (`readClipboardText`): a copied file gives its path, text gives itself, and a
+picture says it has no text rather than attach itself behind the reader's back. No picture is
+ever *read* on this route — the readers take a `textOnly` flag for it — because the answer is
+that one sentence either way, every failure of such a read is the other key's sentence (a size
+limit the reader never asked about reads as the key having attached the thing), and on a Mac
+with no `pngpaste` the picture route writes the whole pasteboard to a temporary file and
+converts it. That modifier
+reaches covey only under the kitty keyboard protocol, because the terminal's own paste hands
+over characters and no modifier — which is why the paste-again rule is the one every terminal
+has, and why it is not a fallback for the key but the ordinary way.
+
 **Not yet:** the bytes live on exactly one machine. A thread that moves takes its timeline but
 not its files, and no client can ask for a file back. #85 has the shape of the content-addressed
 store that would fix both.
@@ -2089,7 +2116,9 @@ streaming, queueing, and diff capture.
   engine currently instantiates only `ClaudeSession`.
 - **Attachments**: drag-and-drop attaches a file of any type, and `ctrl+v` attaches what the
   clipboard holds — a copied file, image bytes of any type the model takes, or text, which
-  goes back through the drop parser so a copied path becomes the file it names. macOS reads
+  goes back through the drop parser so a copied path becomes the file it names. With shift it
+  pastes the clipboard as text alone, and pasting the same path again gives the path back.
+  macOS reads
   the pasteboard with its own `osascript` and `sips`, and with `pngpaste` when it is there;
   Linux needs `wl-paste` or `xclip`. There is still no reader for Windows.
 - **Rust client**: the protocol is the contract; a ratatui client can replace `packages/tui`

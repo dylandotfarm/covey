@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
-import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, isDrop, isDirectoryDrop, readClipboard, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, cutTag, tagSpanAt, type RunReader } from "./attachments.js";
+import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, splitDropJoin, droppedPathText, isDrop, isDirectoryDrop, readClipboard, readClipboardText, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, cutTag, revealDrop, tagSpanAt, type RunReader } from "./attachments.js";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -742,4 +742,148 @@ test("a directory drop is one chip and knows it", () => {
   const drop = readDroppedFiles(shots);
   assert.equal(isDirectoryDrop(drop), true);
   assert.equal(isDirectoryDrop(readDroppedFiles("/nope/missing.png")), false, "a failure is not a directory drop");
+});
+
+// --- the clipboard as text, and the way back from a chip -------------------
+
+/**
+ * shift+cmd+v, and the paste that reveals a path.
+ *
+ * A path is two different things to a reader: the file to send, and the thing
+ * to talk about. covey reads it as the file, which is right nearly every time
+ * and wrong the rest, so there are two ways back — the key that reads the
+ * clipboard as text alone, and pasting the same path again.
+ */
+
+test("a file on the clipboard pastes as its path, and reads nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
+  const png = join(dir, "Screenshot 2026-10-25 at 1.02.33 PM.png");
+  writeFileSync(png, PNG);
+  const { run, calls } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: MAC_FILE_INFO },
+    [FURL]: { stdout: `${png}\n` },
+  });
+  const r = readClipboardText(run, MAC);
+  assert.equal(r.error, undefined);
+  assert.equal(r.text, png, "the path is what the reader would have written");
+  assert.ok(!calls.some((c) => c.startsWith("sips")), "nothing is converted and nothing is read for text");
+});
+
+test("text on the clipboard pastes as itself", () => {
+  const { run } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: "«class utf8», 34, string, 34" },
+    "pbpaste": { stdout: "packages/tui/src/attachments.ts" },
+  });
+  assert.equal(readClipboardText(run, MAC).text, "packages/tui/src/attachments.ts");
+});
+
+test("a picture has no text, and says so rather than attach itself", () => {
+  // The two keys mean two things. shift+cmd+v that quietly attached an image
+  // would be the one bug this whole route exists to avoid.
+  const { run } = fakeClipboard({ "osascript -e clipboard info": { stdout: MAC_IMAGE_INFO } });
+  const r = readClipboardText(run, MAC);
+  assert.equal(r.text, undefined);
+  assert.match(r.error!, /image/);
+  assert.match(r.error!, /ctrl\+v/, "the line has to name the key that does attach it");
+});
+
+test("a picture is never read for a paste that wanted text", () => {
+  // Two things go wrong when it is. The answer is a fixed sentence either way,
+  // and on a Mac with no pngpaste the route writes the whole pasteboard to a
+  // temporary file and converts it: tens of megabytes of disk for that
+  // sentence. And a failure of that read is the *other* key's sentence — "the
+  // clipboard image is 7.2 MB (limit 5 MB)" answers a question this reader
+  // never asked, and reads as the key having attached the thing after all.
+  const big = Buffer.concat([PNG, Buffer.alloc(6 * 1024 * 1024)]);
+  const { run, calls } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: MAC_IMAGE_INFO },
+    "pngpaste -": { stdout: big },
+  });
+  const r = readClipboardText(run, MAC);
+  assert.match(r.error!, /ctrl\+v/, "a size limit is the attaching key's business, not this one's");
+  assert.doesNotMatch(r.error!, /limit|MB/);
+  assert.deepEqual(calls, ["osascript -e clipboard info", "pbpaste"], "no pngpaste, no sips, no temporary file");
+});
+
+test("the same holds on Linux, where the bytes are one command away", () => {
+  const { run, calls } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "image/png" },
+    "wl-paste --no-newline --type image/png": { stdout: PNG },
+  });
+  assert.match(readClipboardText(run, LINUX).error!, /ctrl\+v/);
+  assert.ok(!calls.includes("wl-paste --no-newline --type image/png"), "the bytes are never asked for");
+});
+
+test("a pasteboard holding a picture and text gives the text", () => {
+  // Copying out of a browser puts both there. The picture is what ctrl+v
+  // takes; this key is the reader saying they meant the words.
+  const { run } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: `${MAC_IMAGE_INFO}, «class utf8», 34` },
+    "pbpaste": { stdout: "/Users/me/shot.png" },
+  });
+  assert.equal(readClipboardText(run, MAC).text, "/Users/me/shot.png");
+});
+
+test("a file list on Linux pastes as its paths", () => {
+  const { run } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "text/uri-list\ntext/plain" },
+    "wl-paste --no-newline --type text/uri-list": { stdout: "file:///home/me/a.png\nfile:///home/me/b%201.png" },
+  });
+  assert.equal(readClipboardText(run, LINUX).text, "/home/me/a.png /home/me/b 1.png");
+});
+
+test("with no reader installed the text route asks for one, in its own words", () => {
+  const { run } = fakeClipboard({});
+  const r = readClipboardText(run, LINUX);
+  assert.match(r.error!, /^to read the clipboard: /, "`to paste an image` is the other key's sentence");
+  assert.match(r.error!, /wl-clipboard|xclip/);
+  assert.doesNotMatch(r.error!, /ENOENT|spawnSync|failed/);
+});
+
+test("a drop records the path its chip stands for", () => {
+  const drop = applyDrop("look at ", 8, [att("shot.png")], [], [], "/a/shot.png");
+  assert.equal(drop.attachments[0]!.paths, "/a/shot.png");
+  // A clipboard image is a chip no path made, and nothing can reveal it.
+  assert.equal(applyDrop("", 0, [att("clipboard-20261025.png")], []).attachments[0]!.paths, undefined);
+});
+
+test("the same path pasted again puts the path back where the chip stood", () => {
+  const drop = applyDrop("why is ", 7, [att("shot.png")], [], [], "/a/shot.png");
+  assert.equal(drop.value, "why is [shot.png] ");
+  const back = revealDrop(drop.value, "/a/shot.png", drop.attachments)!;
+  assert.equal(back.value, "why is /a/shot.png ", "in place, because the path is already in the sentence once");
+  assert.equal(back.caret, 18, "the caret lands at the end of the path, where a second paste would leave it");
+  assert.deepEqual(keepTagged(back.value, drop.attachments), [], "the chip went, so the file goes with it");
+});
+
+test("a path no chip holds reveals nothing", () => {
+  const drop = applyDrop("", 0, [att("shot.png")], [], [], "/a/shot.png");
+  assert.equal(revealDrop(drop.value, "/b/other.png", drop.attachments), null);
+  assert.equal(revealDrop(drop.value, "", drop.attachments), null, "a chunk that names no path is not a re-paste");
+  assert.equal(revealDrop("nothing here", "/a/shot.png", drop.attachments), null);
+});
+
+test("one drop of two files reveals as one path text, not two chips", () => {
+  const drop = applyDrop("", 0, [att("a.png"), att("b.png")], [], [], "/a/a.png /a/b.png");
+  assert.equal(drop.value, "[a.png] [b.png] ");
+  const back = revealDrop(drop.value, "/a/a.png /a/b.png", drop.attachments)!;
+  assert.equal(back.value, "/a/a.png /a/b.png ", "the text stands where the first chip stood and the rest are cut");
+  assert.deepEqual(keepTagged(back.value, drop.attachments), []);
+});
+
+test("a chip for a file that did not attach gives its path back too", () => {
+  // The chip says "not on this machine" and nothing else; the path it was
+  // about is only in the reader's clipboard. #132 is why that matters.
+  const drop = applyDrop("", 0, [], [], [{ name: "shot.png", chip: "not on this machine", message: "…" }], "/a/shot.png");
+  assert.match(drop.value, /^\[shot\.png — not on this machine\] $/);
+  const back = revealDrop(drop.value, "/a/shot.png", drop.attachments)!;
+  assert.equal(back.value, "/a/shot.png ");
+});
+
+test("the join of a split path is text anyone can ask for, with no read", () => {
+  // `readSplitDrop` reads the files; the composer asks this first, because a
+  // path it already holds is one it must not read again.
+  assert.deepEqual(splitDropJoin("see /var/T/", "shot.png"), { start: 4, text: "/var/T/shot.png" });
+  assert.equal(splitDropJoin("see what", "shot.png"), null);
+  assert.equal(droppedPathText("what do you make of this"), "", "prose names no path");
 });

@@ -444,7 +444,12 @@ const HELP: [string, string][] = [
   ["  cmd+⌫ / ⌦", "delete to start / end of line"],
   ["  alt+⌫ / ⌦", "delete word back / forward"],
   ["  ctrl+u / w", "delete to line start / word back"],
-  ["  ctrl+v", "attach the clipboard: a file, an image, or a path (cmd+v too, where the terminal sends it; Linux needs wl-paste / xclip)"],
+  // Three lines for the clipboard, and no more: every row of this overlay is a
+  // row of the reader's screen, and at 30 rows it is already longer than one.
+  // The install hint went with the second line — the key says it itself when
+  // there is no reader to run.
+  ["  ctrl+v", "attach the clipboard: a file, an image, or a path (cmd+v too)"],
+  ["  +shift", "paste it as text: a path stays a path — or paste it again"],
   ["", "  drag a file onto the window to attach it — any type"],
   ["  alt+← / →", "move the caret by word (esc b / esc f too)"],
   ["  cmd+← / →", "start / end of line"],

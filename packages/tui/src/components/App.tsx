@@ -43,8 +43,8 @@ import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboard, readDroppedFiles, readSplitDrop, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, type DropResult, type FailedDrop } from "../attachments.js";
-import { applyPaste, chipsPaste, keepTagged, pasteLines, pastedAlready, revealPaste } from "@covey/client";
+import { readClipboard, readClipboardText, readDroppedFiles, readSplitDrop, droppedPathText, splitDropJoin, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, type DropResult, type FailedDrop, type TaggedAttachment } from "../attachments.js";
+import { applyPaste, chipsPaste, keepTagged, pasteLines, pastedAlready, revealDrop, revealPaste } from "@covey/client";
 import { T, THEMES, themeFor, themeGeneration } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -2790,6 +2790,12 @@ export function App({ store }: { store: Store }) {
     // person reaches for. Taking it costs nothing where it never arrives, and
     // covey's own read is the better answer where it does: the terminal's
     // paste can only ever deliver text.
+    // With shift, the same key reads the clipboard as *text*: a path stays a
+    // path instead of becoming the file it names. The terminal's own paste
+    // cannot offer this — it hands covey the characters and no modifier — so
+    // the key is only here where the kitty protocol carries one. `paste the
+    // path again` is the route every terminal has (`revealDrop`).
+    if ((key.ctrl || key.super) && key.shift && input.toLowerCase() === "v") return pasteClipboard(true);
     if ((key.ctrl || key.super) && input === "v") return pasteClipboard();
     if (input && !key.ctrl && !key.meta && !key.super) insert(input);
   }
@@ -2827,13 +2833,25 @@ export function App({ store }: { store: Store }) {
     const id = state.view.threadId;
     return [...new Set([...store.attachments(id).map((a) => a.tag), ...store.pastes(id).map((p) => p.tag)])];
   }
-  function attach(attachments: Attachment[], failed: FailedDrop[] = [], base: Ed.EditState = { value: draft, caret }): boolean {
+  function attach(attachments: Attachment[], failed: FailedDrop[] = [], base: Ed.EditState = { value: draft, caret }, paths = ""): boolean {
     if ((attachments.length === 0 && failed.length === 0) || !state.view) return false;
-    const drop = applyDrop(base.value, base.caret, attachments, store.attachments(state.view.threadId), failed);
+    const drop = applyDrop(base.value, base.caret, attachments, store.attachments(state.view.threadId), failed, paths);
     store.setAttachments(state.view.threadId, drop.attachments);
     applyEdit({ value: drop.value, caret: drop.caret });
     pasteSeam.current = null;
     return true;
+  }
+  /**
+   * Put the path back where its chip stands, and let the file go with it.
+   *
+   * The chip is the only record of the file, so taking the chip out is what
+   * drops it: `keepTagged` reads the draft covey is about to paint and keeps
+   * the files whose tag is still in it.
+   */
+  function reveal(shown: { value: string; caret: number }, live: TaggedAttachment[]) {
+    store.setAttachments(state.view!.threadId, keepTagged(shown.value, live));
+    applyEdit(shown);
+    pasteSeam.current = null;
   }
   /**
    * Put a pasted chunk into the draft. A drag-and-drop arrives as a paste of
@@ -2847,10 +2865,40 @@ export function App({ store }: { store: Store }) {
    * draft (#130). The seam is open only for the moment after a paste that
    * nothing has edited since, so a path a person typed an hour ago cannot eat
    * the next paste.
+   *
+   * `textOnly` is the reader asking for the text and nothing else
+   * (shift+cmd+v): no path is read, no file is attached, and a path they mean
+   * to talk about stays a path. The chip for a long block still applies — that
+   * is about the length of the text and not about files.
    */
-  function pasteText(raw: string) {
-    const seam = openSeam();
-    if (state.view) {
+  function pasteText(raw: string, textOnly = false) {
+    // A key the reader pressed is not a terminal finishing a chunk, so a
+    // text-only paste neither joins the seam nor leaves one: the clipboard
+    // arrived whole, and joining it onto the chip of a paste a moment earlier
+    // would leave one chip where the reader made two.
+    const seam = textOnly ? null : openSeam();
+    if (state.view && !textOnly) {
+      const live = store.attachments(state.view.threadId);
+      // The paths this chunk names, read once: it is what decides a reveal and
+      // what a chip records, and the two must never disagree.
+      const paths = droppedPathText(raw);
+      // The same path pasted again gives the path back: the chip becomes the
+      // text it stood for, where it stands. It is the only way back from a
+      // file to the path that names it, and it is the rule a block of pasted
+      // text already follows below (`revealPaste`). Before the read, because
+      // the file is already attached and reading it again is megabytes for a
+      // chip covey is about to take out.
+      const back = revealDrop(draft, paths, live);
+      if (back) return reveal(back, live);
+      // A path the terminal wrote in two goes (#130) is one path the second
+      // time it is pasted as well, so the join reveals as readily as the whole
+      // chunk — and the half standing in the draft goes with it.
+      const join = seam ? splitDropJoin(seam.value.slice(0, seam.caret), raw) : null;
+      if (join) {
+        const cut = seam!.value.slice(0, join.start) + seam!.value.slice(seam!.caret);
+        const backJoin = revealDrop(cut, droppedPathText(join.text), live);
+        if (backJoin) return reveal(backJoin, live);
+      }
       const whole = readDroppedFiles(raw);
       const split = seam ? readSplitDrop(seam.value.slice(0, seam.caret), raw) : null;
       // A directory that exists is also what the front half of a cut path
@@ -2858,12 +2906,12 @@ export function App({ store }: { store: Store }) {
       // else the chunk reads as on its own is what the reader dropped.
       if (isDrop(whole) && !(split && isDirectoryDrop(whole))) {
         report(whole);
-        if (attach(whole.attachments, whole.failed)) return;
+        if (attach(whole.attachments, whole.failed, { value: draft, caret }, paths)) return;
       }
       if (split) {
         report(split.drop);
         const cut = { value: seam!.value.slice(0, split.start) + seam!.value.slice(seam!.caret), caret: split.start };
-        if (attach(split.drop.attachments, split.drop.failed, cut)) return;
+        if (attach(split.drop.attachments, split.drop.failed, cut, droppedPathText(split.text))) return;
       }
     }
     // Ordinary text. Normalise line endings and tabs first: what the draft
@@ -2897,12 +2945,12 @@ export function App({ store }: { store: Store }) {
       // does not fit is cut from the middle (`barNotice`). The chip itself is
       // on the screen, so what the line is for is the way back from it.
       store.notify(`held ${pasteLines(all)} lines — paste again to show the text`);
-      pasteSeam.current = { at: Date.now(), value: put.value, caret: put.caret, chip: { from: base, raw: more ? more.raw + raw : raw } };
+      pasteSeam.current = textOnly ? null : { at: Date.now(), value: put.value, caret: put.caret, chip: { from: base, raw: more ? more.raw + raw : raw } };
       return;
     }
     const next = Ed.insert(base, all);
     applyEdit(next);
-    pasteSeam.current = { at: Date.now(), ...next };
+    pasteSeam.current = textOnly ? null : { at: Date.now(), ...next };
   }
   /**
    * Say what a drop could not attach. The chip in the draft carries the reason
@@ -2927,9 +2975,20 @@ export function App({ store }: { store: Store }) {
    * ctrl+v: attach whatever the clipboard holds (#124). A file and an image
    * attach; text goes back through the paste path, so a copied path becomes
    * the file it names rather than a path in the sentence.
+   *
+   * `textOnly` is shift+ctrl+v, and shift+cmd+v where the terminal hands the
+   * key over: the clipboard as text alone. A copied file gives its path, text
+   * gives itself, and nothing is attached — which is the whole point, because
+   * sometimes the reader means to write *about* a file rather than send it.
    */
-  function pasteClipboard() {
+  function pasteClipboard(textOnly = false) {
     if (!state.view) { store.notify("open a thread first (tab → sidebar → enter)"); return; }
+    if (textOnly) {
+      const { text, error } = readClipboardText();
+      if (error) store.notify(error, "error");
+      else if (text) pasteText(text, true);
+      return;
+    }
     const { attachments, failed, warnings, errors, text } = readClipboard();
     for (const e of errors) store.notify(e, "error");
     for (const f of failed) store.notify(f.message, "error");
