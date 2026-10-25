@@ -2872,7 +2872,11 @@ export function App({ store }: { store: Store }) {
    * is about the length of the text and not about files.
    */
   function pasteText(raw: string, textOnly = false) {
-    const seam = openSeam();
+    // A key the reader pressed is not a terminal finishing a chunk, so a
+    // text-only paste neither joins the seam nor leaves one: the clipboard
+    // arrived whole, and joining it onto the chip of a paste a moment earlier
+    // would leave one chip where the reader made two.
+    const seam = textOnly ? null : openSeam();
     if (state.view && !textOnly) {
       const live = store.attachments(state.view.threadId);
       // The paths this chunk names, read once: it is what decides a reveal and
@@ -2941,12 +2945,12 @@ export function App({ store }: { store: Store }) {
       // does not fit is cut from the middle (`barNotice`). The chip itself is
       // on the screen, so what the line is for is the way back from it.
       store.notify(`held ${pasteLines(all)} lines — paste again to show the text`);
-      pasteSeam.current = { at: Date.now(), value: put.value, caret: put.caret, chip: { from: base, raw: more ? more.raw + raw : raw } };
+      pasteSeam.current = textOnly ? null : { at: Date.now(), value: put.value, caret: put.caret, chip: { from: base, raw: more ? more.raw + raw : raw } };
       return;
     }
     const next = Ed.insert(base, all);
     applyEdit(next);
-    pasteSeam.current = { at: Date.now(), ...next };
+    pasteSeam.current = textOnly ? null : { at: Date.now(), ...next };
   }
   /**
    * Say what a drop could not attach. The chip in the draft carries the reason

@@ -602,7 +602,14 @@ type ReaderResult =
 interface ClipboardReader {
   /** What to tell a user who has none of the readers for this platform. */
   install: string;
-  read(run: RunReader): ReaderResult;
+  /**
+   * `textOnly` is the reader asking for text and nothing else (shift+cmd+v).
+   * A picture is then never read — not its bytes, not through a temporary
+   * file — because the answer for one is a fixed sentence either way, and a
+   * retina screenshot is tens of megabytes of disk for it. What the clipboard
+   * holds still comes back in `holds`, which is what names the picture.
+   */
+  read(run: RunReader, textOnly?: boolean): ReaderResult;
 }
 
 /** Read image bytes from a command, and type them by their first bytes. */
@@ -638,7 +645,7 @@ const FILE_LIST_TYPES = ["text/uri-list", "x-special/gnome-copied-files"];
 function linuxReader(bin: string, install: string, list: string[], read: (type: string) => string[]): ClipboardReader {
   return {
     install,
-    read(run) {
+    read(run, textOnly) {
       const listing = run(bin, list);
       if (listing.error?.code === "ENOENT") return { absent: true };
       if (listing.error) return { error: `${bin} failed: ${listing.error.message}` };
@@ -650,7 +657,7 @@ function linuxReader(bin: string, install: string, list: string[], read: (type: 
         if (paths.length > 0) return { found: { paths } };
       }
       const imageType = types.find((t) => (IMAGE_MIME_TYPES as readonly string[]).includes(t));
-      if (imageType) {
+      if (imageType && !textOnly) {
         const r = readImageBytes(run, bin, read(imageType));
         if (!("empty" in r)) return r;
       }
@@ -672,7 +679,7 @@ function linuxReader(bin: string, install: string, list: string[], read: (type: 
 function macReader(): ClipboardReader {
   return {
     install: "brew install pngpaste",
-    read(run) {
+    read(run, textOnly) {
       const info = run("osascript", ["-e", "clipboard info"]);
       if (info.error?.code === "ENOENT") return { absent: true };
       if (info.error) return { error: `osascript failed: ${info.error.message}` };
@@ -686,7 +693,7 @@ function macReader(): ClipboardReader {
         const path = r.stdout?.toString().trim() ?? "";
         if (r.status === 0 && path) return { found: { paths: [path] } };
       }
-      if (holds.some((t) => /PNGf|TIFF|JPEG|GIF/i.test(t))) {
+      if (!textOnly && holds.some((t) => /PNGf|TIFF|JPEG|GIF/i.test(t))) {
         // pngpaste is one command and gives PNG; without it, the system's own
         // pair does the same job through a temporary file.
         const direct = readImageBytes(run, "pngpaste", ["-"]);
@@ -778,13 +785,13 @@ type ClipboardFind =
   /** Every reader answered and none of it was a file, an image or text. */
   | { empty: string[] };
 
-function findClipboard(run: RunReader, platform: NodeJS.Platform): ClipboardFind {
+function findClipboard(run: RunReader, platform: NodeJS.Platform, textOnly = false): ClipboardFind {
   const readers = clipboardReadersFor(platform);
   if (readers.length === 0) return { error: `covey cannot read the clipboard on ${platform}` };
   const absent: string[] = [];
   let holds: string[] = [];
   for (const reader of readers) {
-    const r = reader.read(run);
+    const r = reader.read(run, textOnly);
     if ("absent" in r) { absent.push(reader.install); holds = r.holds ?? holds; continue; }
     if ("error" in r) return { error: r.error };
     if ("empty" in r) { holds = r.holds ?? holds; continue; }
@@ -835,13 +842,22 @@ export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platf
  * than attach itself behind the reader's back: the two keys mean two different
  * things, and a key that quietly did the other one is the bug this answers.
  *
- * Nothing is read off the disk here, whatever the clipboard holds.
+ * So no picture is ever *read* here, and every failure of reading one belongs
+ * to the other key: "the clipboard image is 7.2 MB (limit 5 MB)" answers a
+ * question this reader did not ask, and reads as the key having attached the
+ * thing after all. `textOnly` is what keeps those reads from running at all —
+ * on a Mac with no `pngpaste` the picture route writes the whole pasteboard to
+ * a temporary file and converts it, which is tens of megabytes of disk for a
+ * sentence that is fixed either way.
  */
 export function readClipboardText(run: RunReader = runReader, platform: NodeJS.Platform = process.platform): { text?: string; error?: string } {
-  const r = findClipboard(run, platform);
+  const r = findClipboard(run, platform, true);
   if ("error" in r) return { error: r.error };
   if ("absent" in r) return { error: holdsImage(r.holds) ? IMAGE_NOT_TEXT : `to read the clipboard: ${r.absent.join(", or ")}` };
   if ("empty" in r) {
+    // A picture is the one thing covey can name here, and it is also what the
+    // reader most often has: the same sentence as the other two branches.
+    if (holdsImage(r.empty)) return { error: IMAGE_NOT_TEXT };
     return { error: r.empty.length > 0 ? `the clipboard holds ${r.empty.join(", ")}, which covey cannot read as text` : "the clipboard holds no text" };
   }
   if (r.found.text) return { text: r.found.text };

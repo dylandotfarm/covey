@@ -7,7 +7,7 @@ import { DEFAULT_FLEET, MachineClient, cleanFleet, coveyCommand, fleetKey, fleet
 import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks, rankMachines, renderBrief, withIssueTitles, type PlacementMachine } from "./run.js";
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
-import { expandPastes, type PastedText } from "@covey/client";
+import { expandPastes, sendableAttachments, type PastedText } from "@covey/client";
 import { ViewCache } from "./viewCache.js";
 import { Frames, type FrameOptions } from "./frames.js";
 import type { ScrollAnchor } from "./scroll.js";
@@ -1617,7 +1617,7 @@ export class Store {
     const kept = this.syncAttachments(v.threadId, text);
     // A chip for a file that did not attach is text in the draft and nothing
     // else: it has no bytes, so nothing of it goes over the wire.
-    const attachments = kept.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, paths: _paths, ...a }) => a);
+    const attachments = sendableAttachments(kept);
     // A held paste is text, so it goes into the text — the chip reads as the
     // lines it stood for. Measured against the draft the reader sees, before
     // the lines go in, so a chip inside a pasted block is never read as one.

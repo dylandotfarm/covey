@@ -74,8 +74,11 @@
   reveals from the join as readily as whole, and the reveal comes before any read because
   `droppedPaths` is a `stat` and `readDroppedFiles` is megabytes. And shift+cmd+v reads the
   clipboard as text alone (`readClipboardText`, which shares `findClipboard` with the
-  attaching read): a copied file gives its path, a picture says it has no text rather than
-  attach itself, and the key arrives only under the kitty protocol — the terminal's own
+  attaching read and asks it for `textOnly`): a copied file gives its path and a picture is
+  never *read*, because the answer is one sentence either way and every failure of that read
+  is the other key's — a size limit nobody asked about reads as the key having attached the
+  thing. A key the reader pressed is not a terminal finishing a chunk, so that paste neither
+  joins the seam nor leaves one. The key arrives only under the kitty protocol — the terminal's own
   paste carries characters and no modifier — which is why paste-again is the route every
   terminal has. Every row added to the keyboard help costs a row of the reader's screen,
   so the clipboard keeps the three lines it had.

@@ -19,8 +19,8 @@ export {
   type ChainRow, type FoldOpts, type ItemRow, type SaidRow, type TimelineRow,
 } from "./timeline.js";
 export {
-  applyDrop, chipLabel, cutTag, keepTagged, makeTag, megabytes, revealDrop, spliceTags, tagAttachments,
-  tagSpanAt,
+  applyDrop, chipLabel, cutTag, keepTagged, makeTag, megabytes, revealDrop, sendableAttachments,
+  spliceTags, tagAttachments, tagSpanAt,
   type FailedDrop, type TaggedAttachment,
 } from "./attach.js";
 export {

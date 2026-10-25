@@ -787,6 +787,43 @@ test("a picture has no text, and says so rather than attach itself", () => {
   assert.match(r.error!, /ctrl\+v/, "the line has to name the key that does attach it");
 });
 
+test("a picture is never read for a paste that wanted text", () => {
+  // Two things go wrong when it is. The answer is a fixed sentence either way,
+  // and on a Mac with no pngpaste the route writes the whole pasteboard to a
+  // temporary file and converts it: tens of megabytes of disk for that
+  // sentence. And a failure of that read is the *other* key's sentence — "the
+  // clipboard image is 7.2 MB (limit 5 MB)" answers a question this reader
+  // never asked, and reads as the key having attached the thing after all.
+  const big = Buffer.concat([PNG, Buffer.alloc(6 * 1024 * 1024)]);
+  const { run, calls } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: MAC_IMAGE_INFO },
+    "pngpaste -": { stdout: big },
+  });
+  const r = readClipboardText(run, MAC);
+  assert.match(r.error!, /ctrl\+v/, "a size limit is the attaching key's business, not this one's");
+  assert.doesNotMatch(r.error!, /limit|MB/);
+  assert.deepEqual(calls, ["osascript -e clipboard info", "pbpaste"], "no pngpaste, no sips, no temporary file");
+});
+
+test("the same holds on Linux, where the bytes are one command away", () => {
+  const { run, calls } = fakeClipboard({
+    "wl-paste --list-types": { stdout: "image/png" },
+    "wl-paste --no-newline --type image/png": { stdout: PNG },
+  });
+  assert.match(readClipboardText(run, LINUX).error!, /ctrl\+v/);
+  assert.ok(!calls.includes("wl-paste --no-newline --type image/png"), "the bytes are never asked for");
+});
+
+test("a pasteboard holding a picture and text gives the text", () => {
+  // Copying out of a browser puts both there. The picture is what ctrl+v
+  // takes; this key is the reader saying they meant the words.
+  const { run } = fakeClipboard({
+    "osascript -e clipboard info": { stdout: `${MAC_IMAGE_INFO}, «class utf8», 34` },
+    "pbpaste": { stdout: "/Users/me/shot.png" },
+  });
+  assert.equal(readClipboardText(run, MAC).text, "/Users/me/shot.png");
+});
+
 test("a file list on Linux pastes as its paths", () => {
   const { run } = fakeClipboard({
     "wl-paste --list-types": { stdout: "text/uri-list\ntext/plain" },

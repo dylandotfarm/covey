@@ -1799,7 +1799,12 @@ covey is about to let go of is megabytes for nothing.
 
 **shift+ctrl+v, and shift+cmd+v where the terminal hands the key over**, reads the clipboard as
 text alone (`readClipboardText`): a copied file gives its path, text gives itself, and a
-picture says it has no text rather than attach itself behind the reader's back. That modifier
+picture says it has no text rather than attach itself behind the reader's back. No picture is
+ever *read* on this route — the readers take a `textOnly` flag for it — because the answer is
+that one sentence either way, every failure of such a read is the other key's sentence (a size
+limit the reader never asked about reads as the key having attached the thing), and on a Mac
+with no `pngpaste` the picture route writes the whole pasteboard to a temporary file and
+converts it. That modifier
 reaches covey only under the kitty keyboard protocol, because the terminal's own paste hands
 over characters and no modifier — which is why the paste-again rule is the one every terminal
 has, and why it is not a fallback for the key but the ordinary way.

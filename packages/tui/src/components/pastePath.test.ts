@@ -26,6 +26,27 @@ import type { AppState, MachineState, Store, ThreadView } from "../store.js";
 import type { TaggedAttachment } from "../attachments.js";
 import { FakeStdin, FakeStdout, settle, until } from "./testTerminal.js";
 
+/**
+ * The other way back is a key, and a key needs a clipboard. This stubs the
+ * Linux reader covey asks first — two answers, the type list and the text — so
+ * the case drives the real `readClipboardText` through the real App. Linux
+ * only: a Mac runs `osascript`, which no stub on the PATH can stand in for.
+ */
+const SHIFT_CTRL_V = "\x1b[118;6u";
+const stub = process.platform === "linux" ? false : "this case stubs the Linux clipboard reader";
+
+function clipboardHolds(text: string) {
+  const dir = mkdtempSync(join(tmpdir(), "covey-clip-"));
+  writeFileSync(join(dir, "wl-paste"), [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  --list-types) echo "text/plain;charset=utf-8" ;;',
+    `  *) printf '%s' '${text}' ;;`,
+    "esac",
+  ].join("\n"), { mode: 0o755 });
+  process.env.PATH = `${dir}:${process.env.PATH}`;
+}
+
 /** A real file, because the drop rules read the disk and must keep doing so. */
 function shot(name = "shot 1.png"): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), "covey-paste-"));
@@ -175,5 +196,35 @@ test("prose that mentions no file is still prose", async () => {
     await until(() => c.draft().length > 0);
     assert.equal(c.draft(), "what do you make of this");
     assert.deepEqual(c.files(), []);
+  } finally { c.unmount(); }
+});
+
+test("shift+ctrl+v pastes a copied path as the path, not as the file", { skip: stub }, async () => {
+  const f = shot();
+  clipboardHolds(f.path);
+  const c = await composer();
+  try {
+    c.stdin.type("why is ");
+    await until(() => c.draft() === "why is ");
+    c.stdin.type(SHIFT_CTRL_V);
+    await until(() => c.draft().includes(".png"));
+    assert.equal(c.draft(), `why is ${f.path}`, "the path the reader meant to write about");
+    assert.deepEqual(c.files(), [], "ctrl+v is the key that attaches it");
+  } finally { c.unmount(); }
+});
+
+test("a text-only paste does not join the chip of the paste before it", { skip: stub }, async () => {
+  // A key the reader pressed is not a terminal finishing a chunk. The seam
+  // joins a block a terminal wrote in two goes; read here it would put the
+  // clipboard inside the chip of the paste a moment earlier, leaving one chip
+  // where the reader made two.
+  clipboardHolds("and this one");
+  const c = await composer();
+  try {
+    c.stdin.type("one\ntwo\nthree");
+    await until(() => c.draft() === "[pasted 3 lines] ");
+    c.stdin.type(SHIFT_CTRL_V);                     // well inside PASTE_SEAM_MS
+    await until(() => c.draft().includes("and this one"));
+    assert.equal(c.draft(), "[pasted 3 lines] and this one", "two pastes, and the chip still holds three lines");
   } finally { c.unmount(); }
 });

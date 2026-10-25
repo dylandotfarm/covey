@@ -126,6 +126,19 @@ export function keepTagged<T extends { tag: string }>(text: string, atts: T[]): 
   return atts.filter((a) => text.includes(a.tag));
 }
 
+/**
+ * What of a pending list goes over the wire: the files, without the fields the
+ * composer keeps for itself — the tag that named each in the draft, the path
+ * text its chip reveals — and without the chips that stand for a file that
+ * never attached, which have no bytes behind them.
+ *
+ * Here, beside the fields themselves, because all three clients send a draft
+ * and a field added above is a field one of them would otherwise leak.
+ */
+export function sendableAttachments(atts: TaggedAttachment[]): Attachment[] {
+  return atts.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, paths: _paths, ...a }) => a);
+}
+
 /** What a chip says about a file that did not attach: the name, then why. */
 export const chipLabel = (f: FailedDrop): string => `${f.name} — ${f.chip}`;
 

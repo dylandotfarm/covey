@@ -691,13 +691,12 @@ export function syncAttachments(s: State, machine: string, threadId: string, tex
 }
 
 /**
- * What of a pending list goes over the wire: the files, without the tag that
- * named them in the draft, and without the chips that stand for a file that
- * never attached — those have no bytes behind them.
+ * What of a pending list goes over the wire. The rule is `@covey/client`'s,
+ * beside the fields it strips, because the TUI sends the same draft and cannot
+ * import this package; the page and the phone reach it through here, which is
+ * the one door `mobile/` has into the state.
  */
-export function sendableAttachments(atts: TaggedAttachment[]): Attachment[] {
-  return atts.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, ...a }) => a);
-}
+export { sendableAttachments } from "@covey/client";
 
 /** How many bytes a list of attachments would send, base64 counted back to bytes. */
 export function pendingBytes(atts: Attachment[]): number {
