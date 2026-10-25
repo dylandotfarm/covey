@@ -43,10 +43,11 @@ test("deleting every tag sends a turn with no attachments at all", async () => {
 });
 
 test("the tag stays in the client and never reaches the wire", async () => {
-  const { store, sent } = harness([tagged("shot.png", "[shot.png]")]);
+  const { store, sent } = harness([{ ...tagged("shot.png", "[shot.png]"), paths: "/a/shot.png" }]);
   await store.sendTurn("look at [shot.png]");
   const a = sent[0]!.attachments![0]!;
   assert.ok(!("tag" in a), `the wire attachment must carry no tag, got ${JSON.stringify(a)}`);
+  assert.ok(!("paths" in a), "nor the path text the chip reveals, which is the composer's alone");
   assert.equal(a.path, "/a/shot.png", "the real path still goes, so the daemon can copy the file");
 });
 

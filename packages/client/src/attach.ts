@@ -28,6 +28,17 @@ export interface TaggedAttachment extends Attachment {
    * whole chip out in one key, and so that a later drop cannot take its tag.
    */
   failed?: true;
+  /**
+   * The paths this chip stands for, as the reader would write them: one
+   * absolute path, or several joined by a space. Paste them again and the chip
+   * becomes this text (`revealDrop`), which is the one way back from the file
+   * to the path that names it.
+   *
+   * Absent when no path made the chip — an image off the clipboard, a file a
+   * browser handed over as bytes. Client only: the wire carries no such field,
+   * and `Store.sendTurn` takes it out with the tag.
+   */
+  paths?: string;
 }
 
 /**
@@ -130,15 +141,19 @@ export const chipLabel = (f: FailedDrop): string => `${f.name} — ${f.chip}`;
  * gets a chip too, carrying the reason it failed, so the reader sees which file
  * did not attach and why (#132). The chip is text alone: no file stands behind
  * it.
+ *
+ * `paths` is the text the drop came from, when it came from one: a paste of
+ * that same text later shows the path again rather than attaching a second
+ * copy of the file (`revealDrop`).
  */
-export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[], unattached: FailedDrop[] = []): { value: string; caret: number; attachments: TaggedAttachment[] } {
+export function applyDrop(draft: string, caret: number, dropped: Attachment[], pending: TaggedAttachment[], unattached: FailedDrop[] = [], paths?: string): { value: string; caret: number; attachments: TaggedAttachment[] } {
   const live = keepTagged(draft, pending);
-  const tagged = tagAttachments(dropped, [draft, ...live.map((a) => a.tag)].join("\n"));
+  const tagged = tagAttachments(dropped, [draft, ...live.map((a) => a.tag)].join("\n")).map((a) => (paths ? { ...a, paths } : a));
   let taken = [draft, ...live.map((a) => a.tag), ...tagged.map((a) => a.tag)].join("\n");
   const failed: TaggedAttachment[] = unattached.map((f) => {
     const tag = makeTag(chipLabel(f), taken);
     taken += `\n${tag}`;
-    return { name: f.name, path: "", mimeType: "", tag, failed: true };
+    return { name: f.name, path: "", mimeType: "", tag, failed: true, ...(paths ? { paths } : {}) };
   });
   // One tag per chip: a directory gave every file under it the same one.
   const tags = [...new Set([...tagged, ...failed].map((a) => a.tag))];
@@ -176,4 +191,39 @@ export function cutTag(value: string, span: { start: number; end: number }): { v
   if (value[end] === " " && (start === 0 || /\s/.test(value[start - 1]!))) end++;
   else if (value[start - 1] === " " && (end === value.length || /\s/.test(value[end]!))) start--;
   return { value: value.slice(0, start) + value.slice(end), caret: start };
+}
+
+/**
+ * Show the path a chip stands for, when this is that same path pasted again.
+ *
+ * A reader who pastes a path twice is asking for the path, not for a second
+ * copy of the file: the first paste took the path off the screen and left a
+ * chip, and nothing else gives it back. It is the rule a block of pasted text
+ * already follows (`revealPaste` in `paste.ts`), and for the same reason — the
+ * chip is the only record of what it stands for, so the way back from it has to
+ * be the gesture that made it.
+ *
+ * In place, and not at the caret, because the path is already in the sentence
+ * once. One drop of several files has one tag per chip and all of them stand
+ * for the same text, so the text lands where the first chip stood and the rest
+ * are cut.
+ *
+ * @param paths the paths this chunk names, joined as `TaggedAttachment.paths`
+ * @returns the draft with the path back in it, or null when no chip holds it
+ */
+export function revealDrop<T extends { tag: string; paths?: string }>(draft: string, paths: string, pending: T[]): { value: string; caret: number } | null {
+  if (!paths) return null;
+  const tags = [...new Set(keepTagged(draft, pending).filter((a) => a.paths === paths).map((a) => a.tag))];
+  // Right to left: a cut must not move a chip covey has not reached yet.
+  const found = tags.map((tag) => ({ tag, at: draft.indexOf(tag) })).filter((t) => t.at >= 0).sort((x, y) => y.at - x.at);
+  if (found.length === 0) return null;
+  let value = draft;
+  let caret = 0;
+  for (const [i, t] of found.entries()) {
+    const span = { start: t.at, end: t.at + t.tag.length };
+    if (i < found.length - 1) { value = cutTag(value, span).value; continue; }
+    value = value.slice(0, span.start) + paths + value.slice(span.end);
+    caret = span.start + paths.length;
+  }
+  return { value, caret };
 }

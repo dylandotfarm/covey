@@ -416,11 +416,31 @@ export function shrinkImage(path: string, limit = MAX_IMAGE_BYTES): { path: stri
 }
 
 /**
+ * The paths a pasted chunk names, or null when the chunk is ordinary text.
+ *
+ * Nothing is read here — a `stat` per path and no more — so this is also what
+ * the composer asks before it decides whether a paste is a path it already
+ * holds (`revealDrop`). Reading the bytes of a file covey is about to let go
+ * of is megabytes for nothing.
+ */
+export function droppedPaths(raw: string): string[] | null {
+  return groupDroppedPaths(parseDroppedPaths(raw));
+}
+
+/**
+ * The paths of a chunk as one piece of text, for the chip to stand for: one
+ * absolute path, or several joined by a space. Empty when the chunk names none.
+ */
+export function droppedPathText(raw: string): string {
+  return droppedPaths(raw)?.join(" ") ?? "";
+}
+
+/**
  * Interpret a pasted chunk as dropped files. Returns nothing when the chunk is
  * ordinary text, so the caller can fall back to inserting it.
  */
 export function readDroppedFiles(raw: string): DropResult {
-  const paths = groupDroppedPaths(parseDroppedPaths(raw));
+  const paths = droppedPaths(raw);
   if (!paths) return { attachments: [], failed: [], warnings: [] };
   return readFiles(paths);
 }
@@ -472,13 +492,25 @@ function lastPathStart(head: string): number {
  *
  * @param head the draft in front of the caret
  * @param raw the chunk that just arrived
- * @returns where in `head` the path starts, and what the join reads as
+ * @returns where in `head` the path starts, the joined text, and what it reads as
  */
-export function readSplitDrop(head: string, raw: string): { start: number; drop: DropResult } | null {
+export function readSplitDrop(head: string, raw: string): { start: number; text: string; drop: DropResult } | null {
+  const join = splitDropJoin(head, raw);
+  if (!join) return null;
+  const drop = readDroppedFiles(join.text);
+  return isDrop(drop) ? { ...join, drop } : null;
+}
+
+/**
+ * The text a join would read, and where in `head` it starts.
+ *
+ * The pure half of `readSplitDrop`, so the composer can ask what the join
+ * *names* without reading a file: a path written in two goes is the same path
+ * the second time it is pasted, and the way back from its chip is the same.
+ */
+export function splitDropJoin(head: string, raw: string): { start: number; text: string } | null {
   const start = lastPathStart(head);
-  if (start < 0) return null;
-  const drop = readDroppedFiles(head.slice(start) + raw);
-  return isDrop(drop) ? { start, drop } : null;
+  return start < 0 ? null : { start, text: head.slice(start) + raw };
 }
 
 // ---------------------------------------------------------------------------
@@ -556,7 +588,14 @@ interface Found {
  */
 type ReaderResult =
   | { found: Found }
-  | { absent: true }
+  /**
+   * `holds` on an absent reader is the one case where covey saw the type and
+   * could not read it: a macOS pasteboard holding a picture that neither
+   * `pngpaste` nor `sips` would give up. The reader wants "install pngpaste"
+   * for a paste that attaches, and "there is no text here" for one that does
+   * not, so the answer carries both facts and each caller picks its words.
+   */
+  | { absent: true; holds?: string[] }
   | { empty: true; holds?: string[] }
   | { error: string };
 
@@ -657,7 +696,7 @@ function macReader(): ClipboardReader {
         // The pasteboard says it holds a picture and neither route got it.
         // `install` is the only line that helps, so ask for the reader rather
         // than report that there is no image, which is false.
-        return { absent: true };
+        return { absent: true, holds };
       }
       const text = run("pbpaste", []);
       if (!text.error && text.status === 0 && (text.stdout?.toString() ?? "").trim()) {
@@ -724,33 +763,91 @@ export interface ClipboardResult {
 }
 
 /**
+ * What the platform's readers made of the clipboard, in one answer.
+ *
+ * Shared by the two ways in — attach what is there (`readClipboard`) and take
+ * it as text (`readClipboardText`) — because the reading is one job and only
+ * the words of the failures differ between them. Each failure stays a fact
+ * here, and each caller turns it into its own sentence (#132).
+ */
+type ClipboardFind =
+  | { found: Found }
+  | { error: string }
+  /** No reader is installed: what to install, and what one of them could see. */
+  | { absent: string[]; holds: string[] }
+  /** Every reader answered and none of it was a file, an image or text. */
+  | { empty: string[] };
+
+function findClipboard(run: RunReader, platform: NodeJS.Platform): ClipboardFind {
+  const readers = clipboardReadersFor(platform);
+  if (readers.length === 0) return { error: `covey cannot read the clipboard on ${platform}` };
+  const absent: string[] = [];
+  let holds: string[] = [];
+  for (const reader of readers) {
+    const r = reader.read(run);
+    if ("absent" in r) { absent.push(reader.install); holds = r.holds ?? holds; continue; }
+    if ("error" in r) return { error: r.error };
+    if ("empty" in r) { holds = r.holds ?? holds; continue; }
+    return { found: r.found };
+  }
+  return absent.length === readers.length ? { absent, holds } : { empty: holds };
+}
+
+/** True when the pasteboard named a picture, in macOS words or in a media type. */
+function holdsImage(holds: string[]): boolean {
+  return holds.some((t) => /PNGf|TIFF|JPEG|GIF|image\//i.test(t));
+}
+
+/** The one line for a clipboard that holds a picture and no text. */
+const IMAGE_NOT_TEXT = "the clipboard holds an image, which has no text — ctrl+v attaches it";
+
+/**
  * Read whatever the clipboard holds: a file, an image, or text. Reports an
  * error string in every failure, including "no reader installed", so the
  * composer can say one line and carry on.
  */
 export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platform = process.platform): ClipboardResult {
   const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], failed: [], warnings: [], errors });
-  const readers = clipboardReadersFor(platform);
-  if (readers.length === 0) return nothing([`covey cannot read the clipboard on ${platform}`]);
-  const absent: string[] = [];
-  let holds: string[] = [];
-  for (const reader of readers) {
-    const r = reader.read(run);
-    if ("absent" in r) { absent.push(reader.install); continue; }
-    if ("error" in r) return nothing([r.error]);
-    if ("empty" in r) { holds = r.holds ?? holds; continue; }
-    if (r.found.paths) return { ...readFiles(r.found.paths), errors: [] };
-    if (r.found.image) {
-      try {
-        return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], failed: [], warnings: [], errors: [] };
-      } catch {
-        return nothing(["could not write the clipboard image to a temporary file"]);
-      }
-    }
-    return { attachments: [], failed: [], warnings: [], errors: [], text: r.found.text };
+  const r = findClipboard(run, platform);
+  if ("error" in r) return nothing([r.error]);
+  if ("absent" in r) return nothing([`to paste an image: ${r.absent.join(", or ")}`]);
+  if ("empty" in r) {
+    return nothing([r.empty.length > 0 ? `the clipboard holds ${r.empty.join(", ")}, which is not a file or an image` : "the clipboard has no file and no image"]);
   }
-  if (absent.length === readers.length) return nothing([`to paste an image: ${absent.join(", or ")}`]);
-  return nothing([holds.length > 0 ? `the clipboard holds ${holds.join(", ")}, which is not a file or an image` : "the clipboard has no file and no image"]);
+  if (r.found.paths) return { ...readFiles(r.found.paths), errors: [] };
+  if (r.found.image) {
+    try {
+      return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], failed: [], warnings: [], errors: [] };
+    } catch {
+      return nothing(["could not write the clipboard image to a temporary file"]);
+    }
+  }
+  return { attachments: [], failed: [], warnings: [], errors: [], text: r.found.text };
+}
+
+/**
+ * The clipboard as text alone, for the reader who wants the path and not the
+ * file (shift+cmd+v).
+ *
+ * A copied *file* gives its path, because the path is what the reader would
+ * have written. Text gives itself, and the composer inserts it without asking
+ * whether it names a file. A picture has no text at all, and says so rather
+ * than attach itself behind the reader's back: the two keys mean two different
+ * things, and a key that quietly did the other one is the bug this answers.
+ *
+ * Nothing is read off the disk here, whatever the clipboard holds.
+ */
+export function readClipboardText(run: RunReader = runReader, platform: NodeJS.Platform = process.platform): { text?: string; error?: string } {
+  const r = findClipboard(run, platform);
+  if ("error" in r) return { error: r.error };
+  if ("absent" in r) return { error: holdsImage(r.holds) ? IMAGE_NOT_TEXT : `to read the clipboard: ${r.absent.join(", or ")}` };
+  if ("empty" in r) {
+    return { error: r.empty.length > 0 ? `the clipboard holds ${r.empty.join(", ")}, which covey cannot read as text` : "the clipboard holds no text" };
+  }
+  if (r.found.text) return { text: r.found.text };
+  // A file on the clipboard is a path, and the path is the text.
+  if (r.found.paths) return { text: r.found.paths.join(" ") };
+  return { error: IMAGE_NOT_TEXT };
 }
 
 /**
@@ -774,6 +871,6 @@ function saveClipboardImage(buf: Buffer, mime: string): Attachment {
 export { SHRINK_LONG_EDGE } from "@covey/protocol";
 
 export {
-  applyDrop, chipLabel, cutTag, keepTagged, makeTag, spliceTags, tagAttachments, tagSpanAt,
+  applyDrop, chipLabel, cutTag, keepTagged, makeTag, revealDrop, spliceTags, tagAttachments, tagSpanAt,
   type FailedDrop, type TaggedAttachment,
 } from "@covey/client";

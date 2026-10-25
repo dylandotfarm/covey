@@ -66,6 +66,19 @@
   of a cut path looks like. Both routes end at the same `attach`, so a change to one wants the
   other. A chip is one key to delete, not one key per character (`tagSpanAt`, `cutTag`),
   and one arrow key to walk over.
+  A path is also the thing a reader writes *about*, so there are two ways back from the
+  file to the path and neither attaches anything. **Paste the same path again and the chip
+  becomes the path** (`revealDrop`), which is `revealPaste`'s rule for a drop; the chip
+  records the paths it stands for (`TaggedAttachment.paths`, client only — `sendTurn`
+  strips it with the tag), so the test is the paths a chunk *names* and a path cut in two
+  reveals from the join as readily as whole, and the reveal comes before any read because
+  `droppedPaths` is a `stat` and `readDroppedFiles` is megabytes. And shift+cmd+v reads the
+  clipboard as text alone (`readClipboardText`, which shares `findClipboard` with the
+  attaching read): a copied file gives its path, a picture says it has no text rather than
+  attach itself, and the key arrives only under the kitty protocol — the terminal's own
+  paste carries characters and no modifier — which is why paste-again is the route every
+  terminal has. Every row added to the keyboard help costs a row of the reader's screen,
+  so the clipboard keeps the three lines it had.
 - A paste of more than two lines is a chip as well: the draft gets `[pasted 200 lines]`
   and `AppState.pendingPastes` holds the lines, which `sendTurn` puts back where the chip
   stood (`expandPastes`). The rules are `packages/client/src/paste.ts`, beside the drop's

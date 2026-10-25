@@ -1617,7 +1617,7 @@ export class Store {
     const kept = this.syncAttachments(v.threadId, text);
     // A chip for a file that did not attach is text in the draft and nothing
     // else: it has no bytes, so nothing of it goes over the wire.
-    const attachments = kept.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, ...a }) => a);
+    const attachments = kept.filter((a) => !a.failed).map(({ tag: _tag, failed: _failed, paths: _paths, ...a }) => a);
     // A held paste is text, so it goes into the text — the chip reads as the
     // lines it stood for. Measured against the draft the reader sees, before
     // the lines go in, so a chip inside a pasted block is never read as one.
