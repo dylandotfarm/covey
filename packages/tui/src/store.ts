@@ -683,9 +683,9 @@ export class Store {
         // A restarting daemon cannot report its own success — it is gone by
         // then. Reconnecting is the success, so say so here.
         if (s === "connected") void this.drainPending(ms.key);
-        // The machine that serves the phone's page needs the list as this
-        // client knows it now, and it may have changed while it was away.
-        if (s === "connected" && client.info?.settings?.webEnabled) void this.syncPeers(ms.key);
+        // The machine needs the list as this client knows it now, and it may
+        // have changed while it was away.
+        if (s === "connected") void this.syncPeers(ms.key);
         if (s === "connected") this.settleFleet(ms);
         if (s === "connected" && ms.restarting) {
           ms.restarting = false;
@@ -1403,6 +1403,9 @@ export class Store {
       }
     }
     await this.setMachineDefaults(machine, { webEnabled: on });
+    // Redundant in the ordinary case — a connected machine already has the
+    // list — and kept because this is the one moment a reader is watching for
+    // the page to come up with every machine on it.
     if (on) await this.syncPeers(machine);
     const at = this.state.machines.get(machine)?.info?.webAddresses?.find((a) => a.reachable)?.url;
     this.notify(on ? `${name(machine)}: web server on${at ? ` at ${at}` : ""}` : `${name(machine)}: web server off`, on ? "success" : "info");
@@ -1508,8 +1511,13 @@ export class Store {
   }
 
   /**
-   * Hand `machine` the list of machines its page should dial, if it is
-   * connected. Quiet on failure: the page still works for that machine alone.
+   * Hand `machine` the list of the other machines this client holds, if it is
+   * connected. Quiet on failure: the machine still works on its own.
+   *
+   * Every connected machine gets it, not only the one serving the page. The
+   * page is one reader of the list and `covey threads` is the other:
+   * an agent asks its own daemon which other machines run its project, and a
+   * machine that serves no page is exactly where that question is asked.
    *
    * `machine.peers` was called `machine.fleet` before fleets took the word, so
    * a daemon that refuses the new name is asked again with the old one. Drop
@@ -1523,9 +1531,9 @@ export class Store {
     try { await client.command({ type: "machine.fleet", machines }); } catch { /* older still: the page dials one machine */ }
   }
 
-  /** The list changed: every machine that serves the page gets the new one. */
+  /** The list changed: every connected machine gets the new one. */
   private async syncPeerLists() {
-    for (const [key, ms] of this.state.machines) if (ms.conn === "connected" && ms.info?.settings?.webEnabled) await this.syncPeers(key);
+    for (const [key, ms] of this.state.machines) if (ms.conn === "connected") await this.syncPeers(key);
   }
 
   /** What the daemon is running (checkout, branch, commit). Null if unreachable. */

@@ -6,7 +6,7 @@ import type {
   ShellSnapshot, ThreadSnapshot, AppBuild, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
-import { isUserClient, KNOWN_MODELS, MIN_CHAIN, localProjectError, localProjectId, type AssistantMessageItem,} from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS, MAX_THREAD_FILE_BYTES, MIN_CHAIN, localProjectError, localProjectId, type AssistantMessageItem,} from "@covey/protocol";
 import { MAX_TERMINAL_INPUT, MAX_TERMINALS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
@@ -2451,22 +2451,67 @@ export class Engine {
    * a mention names the thread's own files.
    */
   listThreadDir(threadId: string, dir: string, limit = 500): { dir: string; entries: PathEntry[]; truncated: boolean } {
-    const t = this.db.getThread(threadId);
-    if (!t) throw new EngineError("not_found", "thread not found");
-    const p = this.db.getProject(t.projectId);
-    if (!p) throw new EngineError("not_found", "project not found");
-    const root = this.gitCwd(t, p);
+    const root = this.threadRoot(threadId);
     // An archived thread in a clone has no directory: its worktree is gone and
     // the project is a bare repository, whose insides are nobody's files.
-    if (existsSync(join(root, "HEAD")) && !existsSync(join(root, ".git"))) return { dir, entries: [], truncated: false };
-    const target = resolve(root, dir || ".");
-    if (target !== root && !target.startsWith(root + sep)) throw new EngineError("bad_path", `${dir} is outside the thread's directory`);
+    if (!root) return { dir, entries: [], truncated: false };
+    const target = this.underRoot(root, dir || ".", dir);
     // Half a directory name is not an error; it is what typing looks like.
     if (!existsSync(target) || !statSync(target).isDirectory()) return { dir, entries: [], truncated: false };
     const all = readdirSync(target, { withFileTypes: true })
       .map((d) => ({ name: d.name, isDir: d.isDirectory() }))
       .sort((a, b) => (a.isDir === b.isDir ? a.name.localeCompare(b.name) : a.isDir ? -1 : 1));
     return { dir, entries: all.slice(0, limit), truncated: all.length > limit };
+  }
+
+  /**
+   * One file under a thread's working directory, as base64.
+   *
+   * The twin of `listThreadDir`, and it holds the same boundary: a path that
+   * leaves the working directory is refused by name. What it adds is a cap,
+   * because these bytes cross the socket — a file over it comes back cut short
+   * and says so, rather than being refused, so the head of a long log still
+   * reaches the reader.
+   *
+   * Every failure is named apart, which is #132's rule: "not there", "that is
+   * a directory" and "outside the thread's directory" send a reader to three
+   * different places, and one word for the three sends them to none.
+   */
+  readThreadFile(threadId: string, path: string, maxBytes = MAX_THREAD_FILE_BYTES): { path: string; bytes: string; size: number; truncated: boolean } {
+    const root = this.threadRoot(threadId);
+    if (!root) throw new EngineError("not_found", "this thread has no working directory: it is archived, and its worktree is gone");
+    if (!path) throw new EngineError("bad_path", "name a file under the thread's directory, for example README.md");
+    const target = this.underRoot(root, path, path);
+    if (!existsSync(target)) throw new EngineError("not_found", `${path} is not in the thread's directory`);
+    const stat = statSync(target);
+    if (stat.isDirectory()) throw new EngineError("bad_path", `${path} is a directory, not a file`);
+    const cap = Math.max(1, Math.min(Math.floor(maxBytes) || MAX_THREAD_FILE_BYTES, MAX_THREAD_FILE_BYTES));
+    const whole = readFileSync(target);
+    const kept = whole.subarray(0, cap);
+    return { path, bytes: kept.toString("base64"), size: stat.size, truncated: whole.length > kept.length };
+  }
+
+  /**
+   * Where a thread's files are, or null when it has none.
+   *
+   * An archived thread in a clone is the null: its worktree has been removed
+   * and `gitCwd` falls back to the project, which is a bare repository whose
+   * insides are nobody's files.
+   */
+  private threadRoot(threadId: string): string | null {
+    const t = this.db.getThread(threadId);
+    if (!t) throw new EngineError("not_found", "thread not found");
+    const p = this.db.getProject(t.projectId);
+    if (!p) throw new EngineError("not_found", "project not found");
+    const root = this.gitCwd(t, p);
+    return existsSync(join(root, "HEAD")) && !existsSync(join(root, ".git")) ? null : root;
+  }
+
+  /** `rel` resolved under `root`, or a refusal naming what the caller asked for. */
+  private underRoot(root: string, rel: string, asked: string): string {
+    const target = resolve(root, rel);
+    if (target !== root && !target.startsWith(root + sep)) throw new EngineError("bad_path", `${asked} is outside the thread's directory`);
+    return target;
   }
 
   private mutateThread(threadId: string, fn: (t: Thread) => void): number {

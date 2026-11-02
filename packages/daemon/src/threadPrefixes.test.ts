@@ -211,3 +211,36 @@ test("a directory larger than the cap comes back short, and says so", (t) => {
   assert.equal(r.entries.length, 5);
   assert.equal(r.truncated, true);
 });
+
+// ---- reading one of those files ---------------------------------------------
+
+test("a file under the thread's directory comes back as bytes", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  writeFileSync(join(s.root, "birds.txt"), "A heron stood still.\n");
+  const r = s.engine.readThreadFile("t1", "birds.txt");
+  assert.equal(Buffer.from(r.bytes, "base64").toString("utf8"), "A heron stood still.\n");
+  assert.equal(r.size, 21);
+  assert.equal(r.truncated, false);
+});
+
+test("a file past the cap comes back short and says so, rather than being refused", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  writeFileSync(join(s.root, "big.log"), "x".repeat(100));
+  const r = s.engine.readThreadFile("t1", "big.log", 10);
+  assert.equal(Buffer.from(r.bytes, "base64").length, 10);
+  assert.equal(r.size, 100, "the whole weight is reported whatever came back");
+  assert.equal(r.truncated, true);
+});
+
+test("each way of naming the wrong thing is refused by its own name", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  // #132: "not there", "that is a directory" and "outside the thread's
+  // directory" send a reader to three different places.
+  assert.throws(() => s.engine.readThreadFile("t1", "nope.md"), /is not in the thread's directory/);
+  assert.throws(() => s.engine.readThreadFile("t1", "src"), /is a directory, not a file/);
+  assert.throws(() => s.engine.readThreadFile("t1", "../../etc/hostname"), /outside the thread's directory/);
+  assert.throws(() => s.engine.readThreadFile("t1", ""), /name a file under the thread's directory/);
+});

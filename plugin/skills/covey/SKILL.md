@@ -1,6 +1,6 @@
 ---
 name: covey
-description: Take work to a merged pull request inside a covey thread, from a GitHub issue number or from the user's own words. Do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. File no issue unless the user asks for one. Use when the user types /covey, names an issue to take or finish, describes a bug or a change to make here, or asks for a pull request that covey should watch or merge. Also use in a thread of a local project — a directory with no repository, where there is no loop — when the user asks to make that project a git repository.
+description: Take work to a merged pull request inside a covey thread, from a GitHub issue number or from the user's own words. Do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. File no issue unless the user asks for one. Use when the user types /covey, names an issue to take or finish, describes a bug or a change to make here, or asks for a pull request that covey should watch or merge. Also use in a thread of a local project — a directory with no repository, where there is no loop — when the user asks to make that project a git repository. And use when the user asks what another thread of this project is doing, or for a file one wrote, on this machine or on another machine of the fleet: `covey threads` reads them.
 ---
 
 # The covey loop
@@ -335,6 +335,43 @@ The rules:
 demo that belongs to the pull request, and `covey show` to let the person you
 are talking to look at something now.
 
+## The other threads of this project
+
+A project is one row for the reader and several machines underneath. The same
+repository cloned on two machines is one project, and so is the same local
+project; each machine holds its own threads and its own files. `covey threads`
+is how you see across that line.
+
+```
+covey threads                        every thread of this project, on every machine
+covey threads read <id>              what one of them said
+covey threads files <id> [<dir>]     what is in its working directory
+covey threads get <id> <path>        one of those files, on your screen
+covey threads get <id> <path> --out F   or written here, for a picture or an archive
+```
+
+Use it when the user asks what another thread is doing, when they point you at
+work "on the other machine", or when you need a file a thread of this project
+wrote somewhere else. Do not look for another machine's files on this one:
+they are not there, and `covey threads get` is the way to them.
+
+The rules:
+
+- **It reads and never writes.** Covey sends no message to another thread and
+  changes nothing on another machine. To ask another agent a question, tell
+  the user; they are the one who can type it.
+- An id is as much of it as names one thread, the way a short commit does.
+  `covey threads` prints each one.
+- One fleet. A machine the reader put in another fleet is not listed, on
+  purpose.
+- The list is live threads. `--all` adds the archived ones and covey's own
+  automated reviewers.
+- A machine that would not answer is a line saying which machine and why.
+  Read that line before you tell the user a thread is not there — a sleeping
+  laptop is not an empty project.
+- `covey threads read` gives you what was said: each tool call is one line and
+  the thoughts are left out. `--limit N` reads further back.
+
 ## A local project
 
 A **local project** is a directory on the machine, named by the reader, with
@@ -353,7 +390,10 @@ a local project:
 - Do not look for a git repository and do not make one with `git init`. The
   project's own command below is the way, and it is the only one that moves
   the project covey holds.
-- `covey show` and `covey env` work exactly as they do anywhere else.
+- `covey show`, `covey env` and `covey threads` work exactly as they do
+  anywhere else. The same local project may be on more than one machine, and
+  each one is a directory of its own: `covey threads` is the only way to what
+  a thread on another machine said and wrote.
 
 ### Making it a git repository
 
@@ -453,6 +493,13 @@ covey project git <url>       make this thread's local project a git repository,
                               `gh repo create <name> --private`
 covey show <file>... [--text "…"]
                               put a picture or a video in this conversation
+covey threads [--all]         every thread of this project, on every machine of its fleet
+covey threads read <id> [--limit N]
+                              what one of those threads said
+covey threads files <id> [<dir>]
+                              what is in its working directory
+covey threads get <id> <path> [--out F]
+                              one file out of it
 covey env                     the secrets this thread can use, by name
 covey env exec -- <cmd>       run one command with those secrets in its environment
 ```

@@ -364,15 +364,22 @@ export interface MachineAccess {
   token: string;
   addresses: WebAddress[];
   /**
-   * The other machines the page should dial, so one address on a phone shows
-   * every machine. The TUI hands the list to the machine that serves the page
-   * (`machine.peers`), with each URL as the phone can reach it: a tailnet name
-   * or address, never loopback. Absent on a daemon that has not been given
-   * one, which reads as an empty list.
+   * The other machines this one knows of, each with a URL that reaches it from
+   * somewhere else: a tailnet name or address, never loopback. The TUI hands
+   * the list to every machine it is connected to (`machine.peers`). Absent on
+   * a daemon that has not been given one, which reads as an empty list.
+   *
+   * Two readers, and the list is the same for both. The page a daemon serves
+   * dials every entry, so one address on a phone shows the whole fleet. And
+   * `covey threads` reads it to find the other machines a project runs on, so
+   * an agent on one machine can read the work of a thread on another.
+   * The list went only to the machine that served the page before that; a
+   * machine that serves no page is exactly where an agent asks the question.
    *
    * This is not a fleet. A fleet is what the reader groups machines into
-   * (`MachineSettings.fleet`); this list is every machine the page must dial,
-   * whatever fleet each one is in.
+   * (`MachineSettings.fleet`); this list is every machine, whatever fleet each
+   * one is in. A caller that wants one fleet asks each machine what fleet it
+   * is in, because the machine owns that setting.
    */
   peers?: PeerMachine[];
   /**
@@ -1683,6 +1690,20 @@ export const MAX_SHOWN_BYTES = 128 * 1024 * 1024;
 /** How many files one `covey show` may name. */
 export const MAX_SHOWN_FILES = 20;
 
+/**
+ * What one file read out of a thread's working directory may weigh.
+ *
+ * `thread.readFile` carries the bytes inline, as base64 in one rpc answer, so
+ * this bounds the frame: 8 MB of bytes is about 11 MB of base64, well under
+ * the 64 MB the daemon's socket accepts. It is the cap a caller gets when it
+ * names none; a caller that wants less says so with `maxBytes`.
+ *
+ * A file over the cap is not an error. The answer carries the first
+ * `maxBytes` of it and says `truncated`, because the head of a log is worth
+ * more to the reader than a refusal.
+ */
+export const MAX_THREAD_FILE_BYTES = 8 * 1024 * 1024;
+
 /** Image media types the model accepts. */
 export const IMAGE_MIME_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
 
@@ -2680,6 +2701,36 @@ export interface RpcMethods {
   "thread.listDir": {
     params: { threadId: ThreadId; dir: string };
     result: { dir: string; entries: PathEntry[]; truncated: boolean };
+  };
+  /**
+   * One file out of a thread's working directory, as base64.
+   *
+   * `path` is relative to that working directory and may not leave it, which
+   * is `thread.listDir`'s rule and the same one `safeSegments` holds for a
+   * drop. A directory is refused by name rather than read.
+   *
+   * The socket is the whole gate, as it is for `terminal.open`: a client that
+   * may open a shell in that directory may already read every file in it, and
+   * covey has nothing to gain by making the small act harder than the large
+   * one. This is *not* `secrets.env`, which answers over loopback alone,
+   * because a value covey keeps for the reader is not a file the reader wrote.
+   *
+   * It is what lets an agent read the work of a thread on another machine of
+   * the fleet: the daemon that holds the thread holds its files, and `covey
+   * threads get` is the one caller.
+   */
+  "thread.readFile": {
+    params: { threadId: ThreadId; path: string; maxBytes?: number };
+    result: {
+      /** The path as it was asked for. */
+      path: string;
+      /** The bytes, base64. Empty for an empty file. */
+      bytes: string;
+      /** What the whole file weighs, whatever came back. */
+      size: number;
+      /** True when the file is longer than what `bytes` carries. */
+      truncated: boolean;
+    };
   };
   /** Live branch state, asked for when offering where a new thread should run. */
   "project.git": { params: { projectId: ProjectId }; result: ProjectGit };
