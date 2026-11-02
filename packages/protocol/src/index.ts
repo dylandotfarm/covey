@@ -380,6 +380,14 @@ export interface MachineAccess {
    * (`MachineSettings.fleet`); this list is every machine, whatever fleet each
    * one is in. A caller that wants one fleet asks each machine what fleet it
    * is in, because the machine owns that setting.
+   *
+   * An entry carries the token of a machine the tailnet cannot authenticate,
+   * so the wider reach is a credential on more disks: it is written to
+   * `daemon.json`, mode `0600`, on every connected machine instead of on the
+   * one that serves the page. Every machine of the list is the same reader's
+   * and holds that reader's work already, which is what makes the trade sound
+   * — but it is the cost of the second reader, so weigh it before this list
+   * reaches anything that is not covey.
    */
   peers?: PeerMachine[];
   /**

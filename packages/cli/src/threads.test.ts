@@ -70,6 +70,8 @@ interface FakeMachine {
   down?: string;
   /** This machine runs a covey from before `thread.readFile`. */
   old?: boolean;
+  /** This machine answers `hello` and then nothing, as a sleeping one does. */
+  silent?: boolean;
 }
 
 function localProject(id: string): Project {
@@ -92,7 +94,10 @@ function fleet(machines: Record<string, FakeMachine>) {
       call: async (method: string, params: any) => {
         switch (method) {
           case "hello": return { machineId: m.machineId, name: m.name, settings: { fleet: m.fleet ?? null } };
-          case "shell.snapshot": return { projects: m.projects, threads: m.threads };
+          case "shell.snapshot":
+            // A machine that answered the handshake and then went quiet.
+            if (m.silent) return new Promise(() => {});
+            return { projects: m.projects, threads: m.threads };
           case "machine.access": return { peers: m.peers ?? [] };
           case "thread.snapshot": return { items: (m.items?.[params.threadId] ?? []).slice(-params.limit), hasMore: false };
           case "thread.listDir": return { dir: params.dir, entries: m.dirs?.[params.dir] ?? [], truncated: false };
@@ -115,7 +120,7 @@ const BOX = "ws://127.0.0.1:3790";
 const PI = "ws://pi.tail.ts.net:3790";
 
 /** box holds the thread this command speaks for; pi holds the same project. */
-function twoMachines(over: { piFleet?: string | null; piDown?: string; piOld?: boolean; peers?: PeerMachine[] } = {}) {
+function twoMachines(over: { piFleet?: string | null; piDown?: string; piOld?: boolean; piSilent?: boolean; peers?: PeerMachine[] } = {}) {
   const box: FakeMachine = {
     name: "box", machineId: "box-id",
     projects: [localProject("p-box")],
@@ -142,6 +147,7 @@ function twoMachines(over: { piFleet?: string | null; piDown?: string; piOld?: b
     files: { "notes.md": Buffer.from("nothing yet\n") },
     ...(over.piDown ? { down: over.piDown } : {}),
     ...(over.piOld ? { old: true } : {}),
+    ...(over.piSilent ? { silent: true } : {}),
   };
   return fleet({ [BOX]: box, [PI]: pi });
 }
@@ -150,7 +156,7 @@ const env = { threadId: "17f97b1b-aaaa", port: 3790 };
 
 test("the list holds the threads of both machines, newest first, with this one marked", async () => {
   const { connect, dialled } = twoMachines();
-  const out = await runThreads({ kind: "list", all: false }, env, connect);
+  const out = await runThreads({ kind: "list", all: false }, env, { connect });
   assert.equal(out.ok, true, out.lines.join("\n"));
   const text = out.lines.join("\n");
   assert.match(text, /testproject — a local project in fleet covey/);
@@ -163,7 +169,7 @@ test("the list holds the threads of both machines, newest first, with this one m
 
 test("a machine in another fleet is left out, and is not reported as a failure", async () => {
   const { connect } = twoMachines({ piFleet: "work" });
-  const out = await runThreads({ kind: "list", all: false }, env, connect);
+  const out = await runThreads({ kind: "list", all: false }, env, { connect });
   const text = out.lines.join("\n");
   assert.doesNotMatch(text, /a4c1dd02/, text);
   assert.doesNotMatch(text, /could not read/, text);
@@ -171,7 +177,7 @@ test("a machine in another fleet is left out, and is not reported as a failure",
 
 test("a machine that will not answer is one line saying which and why", async () => {
   const { connect } = twoMachines({ piDown: "connection refused" });
-  const out = await runThreads({ kind: "list", all: false }, env, connect);
+  const out = await runThreads({ kind: "list", all: false }, env, { connect });
   assert.equal(out.ok, true);
   const text = out.lines.join("\n");
   // The threads this machine does hold still come back. A fleet member that is
@@ -180,15 +186,35 @@ test("a machine that will not answer is one line saying which and why", async ()
   assert.match(text, /could not read pi: connection refused/, text);
 });
 
-test("a machine that knows of no other says so, rather than answering with itself alone", async () => {
+test("a machine that knows of no other says so, as a statement and not a failure", async () => {
+  // A project really can be on one machine, and that reader must not be told
+  // an error on every run. What they are owed is the reason the list is short.
   const { connect } = twoMachines({ peers: [] });
-  const out = await runThreads({ kind: "list", all: false }, env, connect);
-  assert.match(out.lines.join("\n"), /could not read the rest of the fleet: this machine has not been told of any other/);
+  const out = await runThreads({ kind: "list", all: false }, env, { connect });
+  const text = out.lines.join("\n");
+  assert.equal(out.ok, true);
+  assert.match(text, /this machine knows of no other, so this is its own threads alone/);
+  assert.doesNotMatch(text, /could not read/, "a machine alone on purpose is not a machine that failed");
+  assert.match(text, /17f97b1b/, "its own threads still print");
+});
+
+test("the budget covers the whole exchange, not the dial alone", async () => {
+  // The hazard: a machine that answers the handshake and then stops — a laptop
+  // that sleeps a second after the dial. Without a bound on the exchange this
+  // command hangs until TCP gives up, and holds back every machine that did
+  // answer.
+  const { connect } = twoMachines({ piSilent: true });
+  const started = Date.now();
+  const out = await runThreads({ kind: "list", all: false }, env, { connect, budgetMs: 60 });
+  const text = out.lines.join("\n");
+  assert.ok(Date.now() - started < 5_000, `the command must give up on pi inside the budget, not wait on it: ${Date.now() - started}ms`);
+  assert.match(text, /could not read pi: no answer in 0\.06s/, text);
+  assert.match(text, /17f97b1b/, "box's own threads still print");
 });
 
 test("a thread of this machine reads back as prose: what was said, each call on one line, no thoughts", async () => {
   const { connect, dialled } = twoMachines();
-  const out = await runThreads({ kind: "read", id: "17f97b1b", limit: 60 }, env, connect);
+  const out = await runThreads({ kind: "read", id: "17f97b1b", limit: 60 }, env, { connect });
   assert.equal(out.ok, true, out.lines.join("\n"));
   const text = out.lines.join("\n");
   assert.match(text, /user: this is a test: write a random sentence about birds/);
@@ -203,7 +229,7 @@ test("a thread on the other machine is read from that machine — the whole poin
   // Box's agent asks what pi's thread said. This is the test of 2026-11-02 that
   // failed: `covey threads read` is the answer it did not have.
   const { connect, dialled } = twoMachines();
-  const out = await runThreads({ kind: "read", id: "a4c1", limit: 60 }, env, connect);
+  const out = await runThreads({ kind: "read", id: "a4c1", limit: 60 }, env, { connect });
   assert.equal(out.ok, true, out.lines.join("\n"));
   const text = out.lines.join("\n");
   assert.match(text, /thread a4c1dd02 on pi — what does the other thread say about birds\?/);
@@ -211,9 +237,9 @@ test("a thread on the other machine is read from that machine — the whole poin
   assert.deepEqual(dialled, [BOX, PI, PI], "pi is dialled once to find the thread and once to read it");
 
   // And its files, from the same machine.
-  const files = await runThreads({ kind: "files", id: "a4c1", dir: "" }, env, connect);
+  const files = await runThreads({ kind: "files", id: "a4c1", dir: "" }, env, { connect });
   assert.match(files.lines.join("\n"), /notes\.md/);
-  const got = await runThreads({ kind: "get", id: "a4c1", path: "notes.md", out: null }, env, connect);
+  const got = await runThreads({ kind: "get", id: "a4c1", path: "notes.md", out: null }, env, { connect });
   assert.match(got.lines.join("\n"), /nothing yet/);
 });
 
@@ -232,26 +258,26 @@ test("an id is as much of it as names one thread", () => {
 
 test("the files of a thread, and one of them read back", async () => {
   const { connect } = twoMachines();
-  const listed = await runThreads({ kind: "files", id: "17f9", dir: "" }, env, connect);
+  const listed = await runThreads({ kind: "files", id: "17f9", dir: "" }, env, { connect });
   assert.match(listed.lines.join("\n"), /src\/\n {2}birds\.txt/);
 
-  const got = await runThreads({ kind: "get", id: "17f9", path: "birds.txt", out: null }, env, connect);
+  const got = await runThreads({ kind: "get", id: "17f9", path: "birds.txt", out: null }, env, { connect });
   assert.equal(got.ok, true, got.lines.join("\n"));
   assert.match(got.lines.join("\n"), /A heron stood still\./);
 
-  const missing = await runThreads({ kind: "get", id: "17f9", path: "nope.md", out: null }, env, connect);
+  const missing = await runThreads({ kind: "get", id: "17f9", path: "nope.md", out: null }, env, { connect });
   assert.equal(missing.ok, false);
   assert.match(missing.lines[0]!, /nope\.md is not in the thread's directory/);
 });
 
 test("bytes that are not text are never printed; --out writes them here", async () => {
   const { connect } = twoMachines();
-  const shown = await runThreads({ kind: "get", id: "17f9", path: "shot.png", out: null }, env, connect);
+  const shown = await runThreads({ kind: "get", id: "17f9", path: "shot.png", out: null }, env, { connect });
   assert.match(shown.lines.join("\n"), /is not text.*--out/s);
 
   const dir = mkdtempSync(join(tmpdir(), "covey-threads-"));
   const file = join(dir, "shot.png");
-  const saved = await runThreads({ kind: "get", id: "17f9", path: "shot.png", out: file }, env, connect);
+  const saved = await runThreads({ kind: "get", id: "17f9", path: "shot.png", out: file }, env, { connect });
   assert.match(saved.lines.join("\n"), new RegExp(`→ ${file} \\(6 bytes\\)`));
   assert.deepEqual([...readFileSync(file)], [0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
 });
@@ -264,7 +290,7 @@ test("a truncated file says how much of it came back", () => {
 
 test("a command with no thread never reaches a daemon", async () => {
   const { connect, dialled } = twoMachines();
-  const out = await runThreads({ kind: "list", all: false }, { threadId: undefined, port: 3790 }, connect);
+  const out = await runThreads({ kind: "list", all: false }, { threadId: undefined, port: 3790 }, { connect });
   assert.equal(out.ok, false);
   assert.match(out.lines[0]!, /COVEY_THREAD_ID/);
   assert.deepEqual(dialled, []);
@@ -281,7 +307,7 @@ test("how long ago, in the fewest words that say it", () => {
 
 test("a machine running an older covey is named as that, not as an unknown method", async () => {
   const { connect } = twoMachines({ piOld: true });
-  const out = await runThreads({ kind: "get", id: "a4c1", path: "notes.md", out: null }, env, connect);
+  const out = await runThreads({ kind: "get", id: "a4c1", path: "notes.md", out: null }, env, { connect });
   assert.equal(out.ok, false);
   assert.match(out.lines[0]!, /pi runs an older covey and does not know this yet/, out.lines.join("\n"));
 });

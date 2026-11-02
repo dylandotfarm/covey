@@ -101,7 +101,7 @@ test("an agent on one machine reads the threads and the files of the same projec
   // answering with its own thread as if that were the whole project.
   const alone = await covey(a, mine.threadId, "threads");
   assert.equal(alone.code, 0, alone.out);
-  assert.match(alone.out, /has not been told of any other/, alone.out);
+  assert.match(alone.out, /this machine knows of no other/, alone.out);
 
   // What the TUI hands every connected daemon (`machine.peers`).
   await talk(a.port, (call) => call("command", { commandId: randomUUID(), type: "machine.peers", machines: [{ name: "pi", url: `ws://127.0.0.1:${b.port}` }] }));

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { basename, join, resolve, sep } from "node:path";
-import { existsSync, statSync, rmSync, readdirSync, readFileSync, mkdirSync, cpSync } from "node:fs";
+import { existsSync, statSync, rmSync, readdirSync, readFileSync, mkdirSync, cpSync, openSync, readSync, closeSync } from "node:fs";
 import type {
   Command, CommandEnvelope, Project, Run, RunMember, Thread, TimelineItem, ToolCallItem, ShellEvent, ThreadEvent,
   ShellSnapshot, ThreadSnapshot, AppBuild, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
@@ -2476,6 +2476,15 @@ export class Engine {
    * Every failure is named apart, which is #132's rule: "not there", "that is
    * a directory" and "outside the thread's directory" send a reader to three
    * different places, and one word for the three sends them to none.
+   *
+   * **The cap bounds the read and not only the answer.** It reads the first
+   * `cap` bytes from the open file rather than the whole of it, which is the
+   * rule `readFileAttachment` holds from the other end. `readFileSync` cost
+   * the daemon the file's whole weight to send 8 MB of it — 1.5 GB of the
+   * process that holds every session on the machine, for one `covey threads
+   * get` against a pack file — and above 2 GiB node refuses outright with
+   * `ERR_FS_FILE_TOO_LARGE`, which is neither one of the failures named above
+   * nor the promise made here that a long file comes back cut short.
    */
   readThreadFile(threadId: string, path: string, maxBytes = MAX_THREAD_FILE_BYTES): { path: string; bytes: string; size: number; truncated: boolean } {
     const root = this.threadRoot(threadId);
@@ -2486,9 +2495,23 @@ export class Engine {
     const stat = statSync(target);
     if (stat.isDirectory()) throw new EngineError("bad_path", `${path} is a directory, not a file`);
     const cap = Math.max(1, Math.min(Math.floor(maxBytes) || MAX_THREAD_FILE_BYTES, MAX_THREAD_FILE_BYTES));
-    const whole = readFileSync(target);
-    const kept = whole.subarray(0, cap);
-    return { path, bytes: kept.toString("base64"), size: stat.size, truncated: whole.length > kept.length };
+    const want = Math.min(cap, stat.size);
+    const buf = Buffer.allocUnsafe(want);
+    const fd = openSync(target, "r");
+    let read = 0;
+    try {
+      // A read of a regular file usually answers in full, and `usually` is not
+      // a guarantee: a short read would otherwise cut the file at a byte
+      // nobody chose.
+      while (read < want) {
+        const n = readSync(fd, buf, read, want - read, read);
+        if (n <= 0) break;
+        read += n;
+      }
+    } finally {
+      closeSync(fd);
+    }
+    return { path, bytes: buf.subarray(0, read).toString("base64"), size: stat.size, truncated: stat.size > read };
   }
 
   /**

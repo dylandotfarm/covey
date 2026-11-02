@@ -164,8 +164,10 @@ export interface ThreadsOutcome {
 export async function runThreads(
   request: ThreadsRequest,
   env: { threadId: string | undefined; port: number },
-  connect: (url: string) => Promise<Rpc> = openRpc,
+  opts: { connect?: (url: string) => Promise<Rpc>; budgetMs?: number } = {},
 ): Promise<ThreadsOutcome> {
+  const connect = opts.connect ?? openRpc;
+  const budgetMs = opts.budgetMs ?? PEER_BUDGET_MS;
   if (!env.threadId) return { ok: false, lines: ["this command speaks for a covey thread: run it inside one (COVEY_THREAD_ID is set there), or pass --thread <id>"] };
   const threadId = env.threadId;
   let here: Rpc;
@@ -186,6 +188,10 @@ export async function runThreads(
     const fleet = fleetOf(info.settings?.fleet);
     const found: FleetThread[] = threadsOf(snap, project, info.name, "", threadId, undefined);
     const misses: FleetMiss[] = [];
+    // True when this machine knows of no other. Not a failure — a machine may
+    // be alone on purpose, and a reader with one machine must not be told one
+    // on every run — so it is a closing line of the list rather than a miss.
+    let alone = false;
 
     // A project with no pool key is on this machine and nowhere else: nothing
     // says it is the same as any other, so there is no fleet to ask.
@@ -193,27 +199,27 @@ export async function runThreads(
       const access = (await here.call("machine.access", {})) as { peers?: PeerMachine[]; fleet?: PeerMachine[] };
       const peers = access.peers ?? access.fleet ?? [];
       const seen = new Set([info.machineId]);
-      const answers = await Promise.all(peers.map((peer) => askPeer(peer, pool, fleet, connect)));
+      const answers = await Promise.all(peers.map((peer) => askPeer(peer, pool, fleet, connect, budgetMs)));
       for (const a of answers) {
         if ("why" in a) { misses.push(a); continue; }
         if (seen.has(a.machineId)) continue; // the same machine under a second address
         seen.add(a.machineId);
         found.push(...a.threads);
       }
-      // Not a failure of a machine, but the same kind of news: the answer is
-      // short for a reason the reader can act on, and silence here would read
-      // as a project that is on this machine alone.
-      if (peers.length === 0) misses.push({ machine: "the rest of the fleet", why: "this machine has not been told of any other. Open the covey TUI with both machines added; that is what hands each daemon the list" });
+      alone = peers.length === 0;
     }
 
-    if (request.kind === "list") return { ok: true, lines: renderList(project, fleet, found, misses, request.all) };
+    if (request.kind === "list") return { ok: true, lines: renderList(project, fleet, found, misses, request.all, alone) };
 
     // Every other spelling names one thread. The id is resolved against what
     // the whole fleet answered — including the archived and the hidden, which
     // the list leaves out: a reader who names an id means that thread.
     const picked = resolveThread(found, request.id);
-    if ("error" in picked) return { ok: false, lines: [picked.error, ...missLines(misses)] };
-    const on = <T>(work: (rpc: Rpc) => Promise<T>) => onThatMachine(picked.thread, here, connect, work);
+    // An id that names nothing is the one moment a reader needs to know the
+    // fleet was never asked: the thread they mean may be on a machine this one
+    // has not heard of.
+    if ("error" in picked) return { ok: false, lines: [picked.error, ...missLines(misses), ...aloneLines(alone)] };
+    const on = <T>(work: (rpc: Rpc) => Promise<T>) => onThatMachine(picked.thread, here, connect, budgetMs, work);
     const id = picked.thread.thread.id;
     switch (request.kind) {
       case "read": {
@@ -248,17 +254,14 @@ async function onThatMachine<T>(
   t: FleetThread,
   here: Rpc,
   connect: (url: string) => Promise<Rpc>,
+  budgetMs: number,
   work: (rpc: Rpc) => Promise<T>,
 ): Promise<T> {
   if (!t.url) return work(here);
-  const rpc = await dial(t.url, t.token, connect);
   try {
-    await rpc.call("hello", { protocolVersion: PROTOCOL_VERSION, client: LOOP_CLIENT });
-    return await work(rpc);
+    return await askMachine(t.url, t.token, connect, budgetMs, (rpc) => work(rpc));
   } catch (e: any) {
     throw new Error(olderDaemon(String(e?.message ?? e), t.machine));
-  } finally {
-    rpc.close();
   }
 }
 
@@ -280,30 +283,24 @@ async function askPeer(
   pool: string,
   fleet: string,
   connect: (url: string) => Promise<Rpc>,
+  budgetMs: number,
 ): Promise<{ machineId: string; threads: FleetThread[] } | FleetMiss> {
-  let rpc: Rpc;
   try {
-    rpc = await dial(peer.url, peer.token, connect);
+    return await askMachine(peer.url, peer.token, connect, budgetMs, async (rpc, info) => {
+      // The machine owns its fleet, so this is the only place the answer can
+      // come from. A machine on the other side of the line is not a failure
+      // and is not reported as one: the reader drew that line on purpose.
+      if (fleetKey(fleetOf(info.settings?.fleet)) !== fleetKey(fleet)) return { machineId: info.machineId, threads: [] };
+      const snap = (await rpc.call("shell.snapshot", {})) as { projects: Project[]; threads: Thread[] };
+      const threads: FleetThread[] = [];
+      for (const p of snap.projects) {
+        if (projectPool(p) !== pool) continue;
+        threads.push(...threadsOf(snap, p, info.name ?? peer.name, peer.url, null, peer.token));
+      }
+      return { machineId: info.machineId, threads };
+    });
   } catch (e: any) {
     return { machine: peer.name, why: String(e?.message ?? e) };
-  }
-  try {
-    const info = (await rpc.call("hello", { protocolVersion: PROTOCOL_VERSION, client: LOOP_CLIENT })) as MachineInfo;
-    // The machine owns its fleet, so this is the only place the answer can
-    // come from. A machine on the other side of the line is not a failure and
-    // is not reported as one: the reader drew that line on purpose.
-    if (fleetKey(fleetOf(info.settings?.fleet)) !== fleetKey(fleet)) return { machineId: info.machineId, threads: [] };
-    const snap = (await rpc.call("shell.snapshot", {})) as { projects: Project[]; threads: Thread[] };
-    const threads: FleetThread[] = [];
-    for (const p of snap.projects) {
-      if (projectPool(p) !== pool) continue;
-      threads.push(...threadsOf(snap, p, info.name ?? peer.name, peer.url, null, peer.token));
-    }
-    return { machineId: info.machineId, threads };
-  } catch (e: any) {
-    return { machine: peer.name, why: String(e?.message ?? e) };
-  } finally {
-    rpc.close();
   }
 }
 
@@ -329,27 +326,54 @@ function threadsOf(
 }
 
 /**
- * Dial one machine, and give up on it inside the budget.
+ * Dial one machine, say hello, run `work`, and give up on the whole of that
+ * inside the budget.
  *
- * A socket that is still opening when the budget runs out is closed as soon as
- * it opens, rather than left: this command dials every machine of the fleet at
- * once, and one asleep machine must not keep the process alive after the
- * answer has been printed.
+ * **The budget covers the exchange and not the dial alone.** A machine that
+ * answers the handshake and then stops answering — a laptop that sleeps a
+ * second after the dial, a daemon inside a long git call — would otherwise
+ * hang this command until TCP gives up, minutes later. The fleet is asked with
+ * one `Promise.all`, so that one machine would also hold back the threads
+ * every other machine had already sent.
+ *
+ * The socket is always closed, whichever side of the race wins: when the
+ * budget wins first the socket may not exist yet, so the exchange closes it
+ * itself as soon as it opens.
  */
-async function dial(url: string, token: string | undefined, connect: (url: string) => Promise<Rpc>): Promise<Rpc> {
-  const full = token ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : url;
-  let late = false;
-  const opening = connect(full);
-  opening.then((rpc) => { if (late) rpc.close(); }, () => { /* the race already reported it */ });
+async function askMachine<T>(
+  url: string,
+  token: string | undefined,
+  connect: (url: string) => Promise<Rpc>,
+  budgetMs: number,
+  work: (rpc: Rpc, info: MachineInfo) => Promise<T>,
+): Promise<T> {
+  const held: { rpc: Rpc | null; over: boolean } = { rpc: null, over: false };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const budget = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => { late = true; reject(new Error(`no answer in ${PEER_BUDGET_MS / 1000}s`)); }, PEER_BUDGET_MS);
+    timer = setTimeout(() => {
+      held.over = true;
+      held.rpc?.close();
+      reject(new Error(`no answer in ${budgetMs / 1000}s`));
+    }, budgetMs);
     timer.unref?.();
   });
+  const exchange = (async () => {
+    const full = token ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : url;
+    const rpc = await connect(full);
+    if (held.over) { rpc.close(); throw new Error("gave up"); }
+    held.rpc = rpc;
+    const info = (await rpc.call("hello", { protocolVersion: PROTOCOL_VERSION, client: LOOP_CLIENT })) as MachineInfo;
+    return work(rpc, info);
+  })();
+  // The loser of the race still settles, and a rejection nobody reads is a
+  // warning on the agent's screen.
+  exchange.catch(() => {});
   try {
-    return await Promise.race([opening, budget]);
+    return await Promise.race([exchange, budget]);
   } finally {
     clearTimeout(timer);
+    held.over = true;
+    held.rpc?.close();
   }
 }
 
@@ -372,14 +396,14 @@ export function resolveThread(threads: FleetThread[], id: string): { thread: Fle
 }
 
 /** The list, as the agent reads it. */
-export function renderList(project: Project, fleet: string, threads: FleetThread[], misses: FleetMiss[], all: boolean): string[] {
+export function renderList(project: Project, fleet: string, threads: FleetThread[], misses: FleetMiss[], all: boolean, alone = false): string[] {
   const shown = threads
     .filter((t) => all || (!t.thread.archivedAt && !threadIsHidden(t.thread)))
     .sort((a, b) => (b.thread.lastMessageAt ?? "").localeCompare(a.thread.lastMessageAt ?? ""));
   const kindWord = project.kind === "local" ? "a local project" : "a repository project";
   const head = `${project.title} — ${kindWord} in fleet ${fleet}`;
   if (shown.length === 0) {
-    return [head, all ? "no threads at all" : "no live threads. --all adds the archived ones and covey's own automated reviewers", ...missLines(misses)];
+    return [head, all ? "no threads at all" : "no live threads. --all adds the archived ones and covey's own automated reviewers", ...missLines(misses), ...aloneLines(alone)];
   }
   const rows = shown.map((t) => [
     short(t.thread.id),
@@ -394,6 +418,7 @@ export function renderList(project: Project, fleet: string, threads: FleetThread
     ...rows.map((r) => `  ${r.slice(0, 4).map((cell, c) => cell.padEnd(width[c]!)).join("  ")}  ${r[4]}`),
     `read one with \`covey threads read ${short(shown[0]!.thread.id)}\`, its files with \`covey threads files ${short(shown[0]!.thread.id)}\``,
     ...missLines(misses),
+    ...aloneLines(alone),
   ];
 }
 
@@ -469,6 +494,21 @@ export function renderGet(
 /** The machines that said nothing, and why. One line each, never swallowed. */
 function missLines(misses: FleetMiss[]): string[] {
   return misses.map((m) => `could not read ${m.machine}: ${m.why}`);
+}
+
+/**
+ * What a machine that knows of no other says, as a statement rather than a
+ * failure.
+ *
+ * A project really can be on one machine, and a reader who has one is not
+ * owed an error on every run. What they are owed is the reason the list is
+ * short, because the alternative reading — "this project has one thread" — is
+ * the very mistake this command exists to stop.
+ */
+function aloneLines(alone: boolean): string[] {
+  return alone
+    ? ["this machine knows of no other, so this is its own threads alone. The covey TUI hands each daemon that list when it is connected to both machines"]
+    : [];
 }
 
 /** One word for what a thread is doing. */
