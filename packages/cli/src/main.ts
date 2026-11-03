@@ -9,6 +9,7 @@ import { daemonArgs } from "./daemonArgs.js";
 import { parseLoopArgs, runLoop, LOOP_USAGE } from "./loop.js";
 import { parseEnvArgs, runEnv, ENV_USAGE } from "./env.js";
 import { parseShowArgs, runShow, SHOW_USAGE } from "./show.js";
+import { parseThreadsArgs, runThreads, THREADS_USAGE } from "./threads.js";
 import { childEnv, releaseNodeEnv } from "./nodeEnv.js";
 
 const argv = process.argv.slice(2);
@@ -105,6 +106,16 @@ async function main() {
       (out.ok ? console.log : console.error)(out.lines.join("\n"));
       process.exit(out.ok ? 0 : 1);
     }
+    case "threads": {
+      // The other threads of this thread's project, wherever in the fleet they
+      // run. This one dials the other machines itself, which is what a
+      // client does; the local daemon only says which machines there are.
+      const parsed = parseThreadsArgs(argv);
+      if ("error" in parsed) { console.error(`covey: ${parsed.error}\n\n${THREADS_USAGE}`); process.exit(2); }
+      const out = await runThreads(parsed.request, { threadId: flag("--thread") ?? process.env.COVEY_THREAD_ID, port: flag("--port") ? portFlag() : localPort() });
+      (out.ok ? console.log : console.error)(out.lines.join("\n"));
+      process.exit(out.ok ? 0 : 1);
+    }
     case "show": {
       // A picture or a video into the conversation (#160). The daemon copies
       // the file into the thread's own files and writes one note that carries
@@ -162,6 +173,7 @@ function usage(code = 0) {
 Inside a covey thread (the /covey skill runs these):
 ${LOOP_USAGE}
 ${SHOW_USAGE}
+${THREADS_USAGE}
 ${ENV_USAGE}
 
 One machine, from a fresh clone: \`pnpm run setup\` builds covey and puts this

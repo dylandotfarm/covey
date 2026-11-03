@@ -583,6 +583,37 @@
   A pooled project is upgraded a machine at a time: `push` to the one whose files go up,
   `push: false` to the rest. Two faces, `g` on the project row and `covey project git <url>`;
   the agent makes its own empty repository with `gh repo create`, and the skill says so.
+- A project is one row and several machines, and `covey threads` is how an agent reads
+  across that line. Until it, a thread could see only the threads of the daemon it
+  runs on: two machines held the same local project, each agent found one thread, and each
+  reported the project empty. The CLI does the dialling, because **the CLI is a client**
+  like the terminal and the page — `packages/cli/src/threads.ts` asks the local daemon for
+  `machine.access`, dials every machine in `peers`, and keeps the projects whose
+  `projectPool` key matches. No daemon ever dials a daemon, so there is no loop to get
+  wrong. Three rules. The machine owns its fleet, so the line is drawn from what each
+  machine says at `hello` and never from the list, and a machine on the other side is left
+  out rather than reported as a failure — the reader drew that line on purpose. A machine
+  that will not answer is one line naming it and why, #132 again, because a fleet member
+  asleep must never read as a project with nothing in it — and the **whole exchange** is
+  bounded (`askMachine`, `PEER_BUDGET_MS`) and never the dial alone, because a machine
+  that answers the handshake and then sleeps would hang the command until TCP gave up and
+  hold back every machine that did answer. A machine that is alone is not one that failed:
+  that line closes the list rather than joining the misses, or a reader with one machine
+  reads an error for ever. And it
+  **reads and never writes**: no turn goes to another thread, because an agent that could
+  type into another agent's conversation is a different feature with a different blast
+  radius. `machine.peers` therefore now goes to *every* connected machine and not only the
+  one serving the page — a machine that serves no page is exactly where an agent asks the
+  question — so `syncPeerLists` is the one-line change that makes the list mean something.
+  `thread.readFile` is the other half, the twin of `thread.listDir` and bounded by the same
+  root; the socket is its whole gate, as it is for `terminal.open`, because a client that
+  may open a shell in that directory may already read every file in it. Its cap bounds the
+  **read** and not only the answer — a positional read of `cap` bytes, the rule
+  `readFileAttachment` holds from the other end — because `readFileSync` cost the daemon a
+  1.5 GB pack file to send 8 MB of it, and above 2 GiB node refuses with
+  `ERR_FS_FILE_TOO_LARGE` rather than cutting the file short as this promises. Change
+  `packages/cli/src/threads.ts`, the `/covey` skill and both preambles together, as with
+  the loop and `covey env`.
 - A project needs a commit to exist (#176). A repository with no commits has no branch,
   so `git remote set-head origin --auto` fails after a fetch that worked, and nothing
   could branch a worktree from it anyway — so `cloneBare` refuses it by name rather than

@@ -12,6 +12,9 @@
       "path": "../protocol"
     },
     {
+      "path": "../client"
+    },
+    {
       "path": "../daemon"
     },
     {

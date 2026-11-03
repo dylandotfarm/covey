@@ -102,3 +102,23 @@ test("the local preamble and the skill agree on what is refused there", () => {
     assert.match(text, /covey env/);
   }
 });
+
+/**
+ * A project is pooled across machines, and until `covey threads` an agent had no way to
+ * see across that line: it asked what the thread on the other machine had
+ * said, found nothing, and reported the project empty. The command exists
+ * now, so the two texts that decide whether a model ever reaches for it have
+ * to name it — the description, which is the whole of what a plugin puts in a
+ * session's context, and the note a local thread reads before its first turn.
+ */
+test("the skill and the local note both name the command that reaches another machine", () => {
+  const root = sourceRoot(dirname(fileURLToPath(import.meta.url)))!;
+  const skill = readFileSync(join(root, "plugin", "skills", "covey", "SKILL.md"), "utf8");
+  const description = /^description: (.+)$/m.exec(skill)?.[1] ?? "";
+  assert.match(description, /covey threads/, "the description never names the command");
+  assert.match(skill, /^## The other threads of this project$/m);
+  assert.match(skill, /covey threads read <id>/);
+  assert.match(skill, /covey threads get <id> <path>/);
+  assert.match(skill, /It reads and never writes/, "a reader has to be told it sends nothing");
+  assert.match(COVEY_LOCAL_PREAMBLE, /covey threads/, "a local project is where this matters most");
+});

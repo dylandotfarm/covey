@@ -97,3 +97,16 @@ test("a loopback machine without a tailnet is left out of the list, not sent as 
   ]);
   assert.deepEqual(store.peersFor("ws://pi.tail.ts.net:3790"), []);
 });
+
+test("every connected machine is handed the list, not only the one that serves the page", async () => {
+  // `covey threads` reads this list to find the other machines a project
+  // runs on, and an agent asks the daemon it runs on — which is almost never
+  // the one serving the page.
+  const { store, sent } = harness([
+    { key: "a", conn: "connected", web: true },
+    { key: "b", conn: "connected", web: false },
+    { key: "c", conn: "offline", web: false },
+  ]);
+  await (store as any).syncPeerLists();
+  assert.deepEqual(sent, [{ machine: "a", type: "machine.peers" }, { machine: "b", type: "machine.peers" }]);
+});

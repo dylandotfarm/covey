@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, ftruncateSync, mkdirSync, mkdtempSync, openSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { MachineInfo, Project, SlashCommandInfo, Thread, ThreadEvent } from "@covey/protocol";
@@ -210,4 +210,62 @@ test("a directory larger than the cap comes back short, and says so", (t) => {
   const r = s.engine.listThreadDir("t1", "", 5);
   assert.equal(r.entries.length, 5);
   assert.equal(r.truncated, true);
+});
+
+// ---- reading one of those files ---------------------------------------------
+
+test("a file under the thread's directory comes back as bytes", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  writeFileSync(join(s.root, "birds.txt"), "A heron stood still.\n");
+  const r = s.engine.readThreadFile("t1", "birds.txt");
+  assert.equal(Buffer.from(r.bytes, "base64").toString("utf8"), "A heron stood still.\n");
+  assert.equal(r.size, 21);
+  assert.equal(r.truncated, false);
+});
+
+test("a file past the cap comes back short and says so, rather than being refused", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  writeFileSync(join(s.root, "big.log"), "x".repeat(100));
+  const r = s.engine.readThreadFile("t1", "big.log", 10);
+  assert.equal(Buffer.from(r.bytes, "base64").length, 10);
+  assert.equal(r.size, 100, "the whole weight is reported whatever came back");
+  assert.equal(r.truncated, true);
+});
+
+test("each way of naming the wrong thing is refused by its own name", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  // #132: "not there", "that is a directory" and "outside the thread's
+  // directory" send a reader to three different places.
+  assert.throws(() => s.engine.readThreadFile("t1", "nope.md"), /is not in the thread's directory/);
+  assert.throws(() => s.engine.readThreadFile("t1", "src"), /is a directory, not a file/);
+  assert.throws(() => s.engine.readThreadFile("t1", "../../etc/hostname"), /outside the thread's directory/);
+  assert.throws(() => s.engine.readThreadFile("t1", ""), /name a file under the thread's directory/);
+});
+
+test("a file far past the cap costs the daemon the cap and not the file", (t) => {
+  const s = withFiles();
+  t.after(s.cleanup);
+  // A sparse 3 GiB file: a worktree really does hold files of this weight — a
+  // pack file, a database, a recording. `readFileSync` threw node's own
+  // ERR_FS_FILE_TOO_LARGE above 2 GiB, which is neither one of the failures
+  // named apart nor the promise that a long file comes back cut short.
+  const file = join(s.root, "huge.bin");
+  const fd = openSync(file, "w");
+  try {
+    writeSync(fd, Buffer.from("head of it"), 0, 10, 0);
+    ftruncateSync(fd, 3 * 1024 * 1024 * 1024);
+  } finally {
+    closeSync(fd);
+  }
+  const before = process.memoryUsage().arrayBuffers;
+  const r = s.engine.readThreadFile("t1", "huge.bin", 64);
+  assert.equal(Buffer.from(r.bytes, "base64").toString("utf8"), "head of it" + "\0".repeat(54));
+  assert.equal(r.size, 3 * 1024 * 1024 * 1024);
+  assert.equal(r.truncated, true);
+  // The whole file never reached memory: the read asked for 64 bytes.
+  assert.ok(process.memoryUsage().arrayBuffers - before < 1024 * 1024,
+    "reading 64 bytes of a 3 GiB file must not allocate the file");
 });

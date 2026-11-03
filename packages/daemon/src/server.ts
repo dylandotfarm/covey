@@ -311,6 +311,13 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return engine.models();
       case "thread.listDir":
         return engine.listThreadDir(p.threadId, String(p.dir ?? ""));
+      case "thread.readFile":
+        // One file out of a thread's working directory. The socket is
+        // the whole gate, as it is for `terminal.open` above: a client that
+        // may open a shell in that directory may already read every file in
+        // it. That is what lets an agent on one machine of a fleet read the
+        // work of a thread on another.
+        return engine.readThreadFile(p.threadId, String(p.path ?? ""), p.maxBytes === undefined ? undefined : Number(p.maxBytes));
       case "project.git":
         return engine.projectGit(p.projectId);
       case "secrets.list":

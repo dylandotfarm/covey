@@ -184,6 +184,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@covey/client':
+        specifier: workspace:*
+        version: link:../client
       '@covey/daemon':
         specifier: workspace:*
         version: link:../daemon
