@@ -655,7 +655,7 @@ export class Engine {
           // repository per base. The reader adding a machine to the pool
           // sends the same name, and a machine that already holds it says so.
           const dup = this.db.listProjects().find((q) => q.kind === "local" && q.localId === localId);
-          if (dup) throw new EngineError("exists", `this machine already has the local project ${dup.title}`);
+          if (dup) throw new EngineError("exists", `this machine already has the local project ${dup.title}${andWhere(dup)}`);
           const root = join(this.projectsDir, "local", localId);
           try {
             mkdirSync(root, { recursive: true });
@@ -687,7 +687,7 @@ export class Engine {
         // old row keeps its threads until the reader removes it.
         const samePool = (p: Project) => p.repositoryIdentity === identity && p.kind === "clone" && (p.baseBranch ?? null) === (baseBranch ?? null);
         const dup = this.db.listProjects().find(samePool);
-        if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}${dup.baseBranch ? ` on ${dup.baseBranch}` : ""}`);
+        if (dup) throw new EngineError("exists", `this machine already has ${dup.title} for ${identity}${dup.baseBranch ? ` on ${dup.baseBranch}` : ""}${andWhere(dup)}`);
         const root = join(this.projectsDir, projectSlug(identity), "repo.git");
         const cloned = await this.cloneOnce(url, root);
         // The repository is named, not the URL: the URL that failed is in the
@@ -738,6 +738,21 @@ export class Engine {
             delete p.baseBranch;
           }
         }
+        p.updatedAt = now;
+        this.db.putProject(p);
+        return this.emitShell({ kind: "project.upserted", project: p });
+      }
+      case "project.archive": {
+        const p = this.db.getProject(cmd.projectId);
+        if (!p) throw new EngineError("not_found", "project not found");
+        // A fold and nothing else. The threads keep their worktrees, a session
+        // that runs goes on running, and a watch goes on watching: covey must
+        // never make the reader choose between a tidy sidebar and work it is
+        // in the middle of.
+        // The stamp is when the reader put it away, so archiving a project
+        // that is already archived moves nothing — a client that sends the
+        // whole pool must not reorder the archive under a reader.
+        if (cmd.archived) p.archivedAt ??= now; else delete p.archivedAt;
         p.updatedAt = now;
         this.db.putProject(p);
         return this.emitShell({ kind: "project.upserted", project: p });
@@ -3725,6 +3740,17 @@ export class Engine {
  * pipes — so without this every refusal it writes reached the client as
  * `internal`, which is the one code a client cannot act on.
  */
+/**
+ * What to add to a refusal that names a project this machine already holds.
+ *
+ * An archived project is painted inside a fold, so a reader told only that it
+ * exists goes looking in the list it is not in. Name the archive and the key
+ * that brings it back, rather than one word for two states (#132).
+ */
+function andWhere(q: Project): string {
+  return q.archivedAt ? " — it is archived; press x on it in the sidebar to bring it back" : "";
+}
+
 function shellCall<T>(fn: () => T): T {
   try { return fn(); } catch (e) {
     if (e instanceof TerminalError) throw new EngineError(e.code, e.message);

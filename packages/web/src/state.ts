@@ -292,6 +292,11 @@ export function projectRows(s: State): ProjectRow[] {
   };
   for (const m of s.machines.values()) {
     for (const p of m.projects.values()) {
+      // A project the reader put away is not a row here. The page has no
+      // archived section and no way to add or remove a project — both are the
+      // TUI's — so what it owes a reader is the list the TUI shows them, and
+      // not a row they already took off that list.
+      if (p.archivedAt) continue;
       const r = row(projectKey(m.key, p), p.title, p.baseBranch ?? null);
       r.homes.push({ machine: m.key, machineName: m.name, conn: m.conn, project: p });
     }
@@ -302,6 +307,9 @@ export function projectRows(s: State): ProjectRow[] {
       // waiting on an approval is never invisible.
       if (t.archivedAt || t.movedTo || threadIsHidden(t, s.showHidden)) continue;
       const p = m.projects.get(t.projectId);
+      // The threads of an archived project go with it, or the row would come
+      // back with no machine under it and no way to make a thread in it.
+      if (p?.archivedAt) continue;
       const r = p ? row(projectKey(m.key, p), p.title, p.baseBranch ?? null) : row(`orphan:${m.key}:${t.projectId}`, "(project not listed)");
       r.threads.push({ machine: m.key, machineName: m.name, thread: t });
     }

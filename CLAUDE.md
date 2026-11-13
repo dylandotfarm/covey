@@ -505,6 +505,33 @@
 - Screen rows are not row indices: the sidebar puts a blank line above each top-level
   row after the first and windows a long tree. `sidebar.ts` builds the painted line list and `App.tsx` gives
   the same array to the renderer and to the mouse hit test — change both or neither.
+  **The window is the reader's, and the cursor pulls it only when the cursor moves**
+  (#204). It was the other way for a year — `sidebarCells` centred the list on the
+  cursor — and that one line cost both of a reader's ways to move: a click re-laid
+  the tree under the hand that made it, and the wheel could not touch the sidebar at
+  all, because the only window there was *was* the cursor and the cursor opens the
+  thread it lands on. So `sidebarTop` takes the line the reader left and moves it as
+  little as it can, the `useEffect` that asks for that pull is keyed on `cursorKey`
+  and never on the index — the index changes whenever a turn re-sorts the tree, and
+  a window that followed it would drag the screen away from the reader, which is
+  #114 in the other pane — and a notch passes `follow: false`, so the cursor may sit
+  off screen. A sidebar that fits the screen still hands the notch to the
+  conversation, because that is what a notch does everywhere else.
+- A project may be **archived** rather than deleted (#204): `x` on the row, a
+  confirmation, and it moves into one furled `ARCHIVED` section at the foot of its
+  fleet, above the machines. `Project.archivedAt` is the whole of it — the clone,
+  the threads, the branches, the secrets, a session that runs and a watch that
+  watches are all untouched, which is exactly what `project.delete` is not. Three
+  rules. The row is the pool, so `archiveProject` writes to every machine of it and
+  `ProjectGroup.archived` is true only when *every* member says so: showing the
+  project is the safe direction, because nothing is then hidden by a write that did
+  not land. The fold may not hide that something inside is working or waits on a
+  person — the rule the fleet row and the project row already keep — because
+  archiving stops nothing. And covey never puts new work inside a fold the reader is
+  not in: `n` on an archived project brings it back first. The page and the phone
+  paint no archived project at all (`projectRows`, and its threads go with it): they
+  cannot add or remove a project either, so what they owe a reader is the list the
+  TUI shows them.
 - The daemon can be exercised without the TUI: run `node packages/daemon/dist/main.js
   --bind loopback --port 3799` with `COVEY_HOME=/tmp/x`, then speak JSON over ws (see
   `docs/DESIGN.md` → Protocol).

@@ -429,8 +429,8 @@ const HELP: [string, string][] = [
   // than a short terminal and ink drops rows out of the middle of it.
   ["  e", "secrets: a project's environment, or a thread's (ctrl+k too)"],
   ["", "  the agent uses them by name ($NAME, covey env) and never reads a value"],
-  ["  x", "archive / unarchive thread (sending a message unarchives)"],
-  ["", "  archiving hands back the worktree, keeping its branch"],
+  ["  x", "archive / unarchive a thread, or a whole project"],
+  ["", "  a thread gives back its worktree; a project keeps all of its own"],
   ["  D", "delete thread"],
   ["ctrl+k", "…also: revert to before a turn (esc esc too), model, mode"],
   ["ctrl+k", "…and: usage — tokens and estimated cost, per period"],
@@ -478,5 +478,5 @@ const HELP: [string, string][] = [
   ["  click", "sidebar: open that row, as enter would"],
   ["  drag", "conversation/diff: select and copy (shift+drag = terminal's own)"],
   [`  ${OPEN_GESTURE}`, "open a link: a URL, a #N, or reveal a file (alt+click too)"],
-  ["  wheel", "scroll the conversation · +alt a page · over a list, move in it"],
+  ["  wheel", "scroll what is under it: the conversation, a list, the tree · +alt a page"],
 ];

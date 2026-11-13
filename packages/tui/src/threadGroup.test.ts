@@ -856,7 +856,7 @@ test("a marked row is still one line, so the hit test and the renderer agree", a
   (store as any).select = async (sel: { threadId: string }) => { opened.push(sel.threadId); };
 
   const rows = sidebarRows(store.state as AppState);
-  const cells = sidebarCells(rows, 0, 28);
+  const cells = sidebarCells(rows);
   const { rowOf, click, unmount } = await paint(store);
   try {
     // What the hit test believes, against what the terminal was actually sent.

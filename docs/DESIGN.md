@@ -1090,6 +1090,22 @@ section of their own below the projects, furled by default: they are where the w
 not what it is. The machine row still opens the control panel, and an offline one still says
 what to press.
 
+**The window over the tree is the reader's own.** `sidebarCells` gives every row one line and
+puts a blank above each heading; `sidebarTop` says which line the pane starts at, and
+`App.tsx` hands the slice to the painter and to the mouse hit test together, for the reason
+the transcript's lines are built in one place. The cursor pulls that window only as far as it
+must to be seen, and only when the cursor itself moves — the effect that asks for the pull is
+keyed on the cursor's *key*, not on its index, because the index changes whenever a turn
+re-sorts the tree and a window that followed it would drag the screen away from a reader who
+had scrolled elsewhere. A wheel notch over the sidebar moves the window and leaves the cursor
+where it is, so a scroll never changes which conversation is open; a sidebar short enough to
+fit the screen hands the notch to the conversation, as every other notch in the terminal is.
+
+Both of those are #204, and both were one line before it: the list used to be *centred* on
+the cursor, which made the cursor the only window there was. So a click re-laid the tree under
+the hand that made it, and the wheel could not touch the sidebar at all — moving the cursor
+opens the thread it lands on, and a scroll must never do that.
+
 A new thread goes to a machine of the pool. One connected machine needs no question. More
 than one asks, and the pick lists the machines the way `rankMachines` orders them for a run:
 the fastest with room first. The project's name starts as the repository's, and `r` on the
@@ -2094,6 +2110,38 @@ out where to run, so a thread picked up months later runs where every earlier tu
 diffs survive the gap either way: checkpoints are trees in the repo, which outlives the
 worktree they were taken in, so `turn.diff` reads them from the project checkout when the
 worktree is gone.
+
+## Archiving projects (#204)
+
+`Project.archivedAt` is the only state, and the sidebar does the rest — the shape *Archiving
+threads* has one level up. An archived project leaves the list for one **ARCHIVED** section at
+the foot of its fleet, above the machines, furled unless the reader opens it (`prefs.expanded`
+under `projects:archived`, scoped by fleet for every fleet but the default, the way
+`machinesKey` is). `x` on the project row asks first, because the act takes a whole subtree off
+the screen; `x` on a row inside the section brings it back and asks nothing, because that puts
+a row on the screen the reader is already looking at.
+
+Nothing else moves. The clone stays, the threads stay with their worktrees and their branches,
+the secrets stay, a session that is running goes on running, and a pull request covey watches
+is still watched. That is the whole point of it beside `project.delete`, which takes the rows
+and the threads away for good.
+
+Three rules come out of that:
+
+- **The row is the pool, so the archive is the pool's.** `archiveProject` sends
+  `project.archive` to every machine of the group, and `ProjectGroup.archived` is true only
+  when every member's record says so. A machine that was away has not been told, and showing
+  the project is the safe direction: nothing is then hidden by a write that did not land.
+- **The fold still says what needs a person.** Archiving stops no work, so the section carries
+  the attention dot a furled project row and a furled fleet row carry, summed over what is
+  inside it. Without that a reader could put a running turn somewhere they cannot see it.
+- **Covey never puts new work inside a fold the reader is not in.** `n` on an archived project
+  brings the project back before it makes the thread.
+
+The page and the phone paint no archived project, and no thread of one (`projectRows` in
+`packages/web/src/state.ts`). Neither client can add or remove a project either — both are the
+TUI's — so what they owe the reader is the list the TUI shows them, and not a row they have
+already taken off it.
 
 ## Notifications
 

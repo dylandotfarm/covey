@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Project, Thread } from "@covey/protocol";
 import { sidebarRows, archiveKey, tallyThreads, byRecency, type AppState, type MachineState, type SidebarRow } from "./store.js";
-import { sidebarCells, rowAtScreenRow, cursorIndex } from "./sidebar.js";
+import { sidebarCells, sidebarTop, sidebarWindow, rowAtScreenRow, cursorIndex } from "./sidebar.js";
 
 const project = (id: string, title = id): Project => ({
   id, title, workspaceRoot: `/repos/${id}`, repositoryIdentity: null, defaultModel: null,
@@ -86,6 +86,60 @@ test("moved threads are tombstones, not archive — they stay out of both lists"
   assert.deepEqual(rows.map((r) => r.kind), ["project", "machines"]);
 });
 
+// ---- archived projects (#204) ----------------------------------------------
+
+const archivedProject = (id: string, title = id): Project => ({ ...project(id, title), archivedAt: "2026-05-01T00:00:00Z" });
+
+test("an archived project leaves the list for a furled section at the foot of the tree", () => {
+  const s = appState([project("a"), archivedProject("b")], [thread("t-a", "a"), thread("t-b", "b")]);
+  const rows = sidebarRows(s);
+  assert.deepEqual(rows.map((r) => r.kind), ["project", "thread", "archivedProjects", "machines"]);
+  // Furled is the default: the section exists to take rows off the screen.
+  const section = rows[2]!;
+  assert.equal(section.count, 1);
+  assert.equal(section.machine, "", "the section is nobody's machine, as the machines header is");
+  // The archived project's threads go with it. A row with no project above it
+  // would be work the reader cannot see and cannot fold away either.
+  assert.ok(!rows.some((r) => r.thread?.id === "t-b"));
+});
+
+test("unfurling the section paints the archived projects, a level in, and marked as archived", () => {
+  const s = appState(
+    [project("a"), archivedProject("b")],
+    [thread("t-a", "a"), thread("t-b", "b")],
+    { "projects:archived": true },
+  );
+  const rows = sidebarRows(s);
+  assert.deepEqual(rows.map((r) => r.kind), ["project", "thread", "archivedProjects", "project", "thread", "machines"]);
+  assert.equal(rows[3]!.projectId, "b");
+  assert.ok(rows[3]!.archived, "the row says it is inside the archive, so ← and x know where they are");
+  assert.equal(rows[3]!.depth, rows[0]!.depth + 1, "a level under the section, the way a project sits under a fleet");
+  assert.equal(rows[4]!.thread!.id, "t-b", "and its threads come with it");
+});
+
+test("a section that holds something working says so while it is furled", () => {
+  // Archiving a project stops nothing, so the fold may not hide that a turn
+  // is running or that something waits on a person.
+  const s = appState([archivedProject("b")], [thread("busy", "b", { status: "running" })]);
+  const section = sidebarRows(s).find((r) => r.kind === "archivedProjects")!;
+  assert.equal(section.busy, true);
+  assert.equal(section.waiting, false);
+
+  const asking = appState([archivedProject("b")], [thread("asking", "b", { pendingApprovals: 1 })]);
+  assert.equal(sidebarRows(asking).find((r) => r.kind === "archivedProjects")!.waiting, true);
+});
+
+test("no archived project means no section at all", () => {
+  assert.ok(!sidebarRows(appState([project("a")], [thread("t", "a")])).some((r) => r.kind === "archivedProjects"));
+});
+
+test("a fleet whose every project is archived still says what to press", () => {
+  // Nothing to work in is nothing to work in: the row that says `a` adds one
+  // is painted, and the archived section sits below it.
+  const rows = sidebarRows(appState([archivedProject("b")], []));
+  assert.deepEqual(rows.map((r) => r.kind), ["empty", "archivedProjects", "machines"]);
+});
+
 const row = (kind: SidebarRow["kind"], key: string, depth = 1): SidebarRow => ({ key, kind, machine: "ws://m", depth });
 
 /** One project with three threads, then the machines section: the shape the sidebar always has. */
@@ -98,7 +152,7 @@ const tree = (): SidebarRow[] => [
 ];
 
 test("a top-level row after the first is preceded by a blank line, so rows and lines differ", () => {
-  const cells = sidebarCells(tree(), 0, 20);
+  const cells = sidebarCells(tree());
   assert.deepEqual(cells, [
     { kind: "row", index: 0 },
     { kind: "row", index: 1 },
@@ -110,29 +164,58 @@ test("a top-level row after the first is preceded by a blank line, so rows and l
 });
 
 test("the whole list is painted when it fits", () => {
-  assert.equal(sidebarCells(tree(), 4, 6).length, 6);
-  assert.equal(sidebarCells(tree(), 0, 0).length, 0);
+  assert.equal(sidebarWindow(sidebarCells(tree()), 0, 6).length, 6);
+  assert.equal(sidebarWindow(sidebarCells(tree()), 0, 0).length, 0);
 });
 
-test("a list taller than the pane scrolls to keep the cursor on screen", () => {
-  const rows = [row("project", "p", 0), ...Array.from({ length: 40 }, (_, i) => row("thread", `t${i}`))];
-  const cells = sidebarCells(rows, 30, 10);
-  assert.equal(cells.length, 10);
-  assert.ok(cells.some((c) => c.kind === "row" && c.index === 30), "cursor row is visible");
+/** A project, forty threads, and the machines section: taller than any pane. */
+const longTree = () => [row("project", "p", 0), ...Array.from({ length: 40 }, (_, i) => row("thread", `t${i}`)), row("machines", "machines", 0)];
+
+test("the window follows the cursor only as far as it must, and never past an end", () => {
+  const cells = sidebarCells(longTree());
+  // A cursor already on screen moves nothing. This is the whole of what a
+  // click costs: the tree used to re-centre under the hand that clicked it.
+  assert.equal(sidebarTop(cells, 5, 10, 0, true), 0);
+  assert.equal(sidebarTop(cells, 5, 10, 3, true), 3, "the reader's window stands when the cursor is in it");
+  // One row past the bottom edge is one line of scroll, not a new centre.
+  assert.equal(sidebarTop(cells, 10, 10, 0, true), 1);
+  // And above the top edge the window goes to the row itself.
+  assert.equal(sidebarTop(cells, 2, 10, 8, true), 2);
+  // The ends hold.
+  assert.equal(sidebarTop(cells, 0, 10, -5, true), 0);
+  assert.equal(sidebarTop(cells, 41, 10, 999, true), cells.length - 10);
 });
 
-test("scrolling stops at the ends rather than running past them", () => {
-  const rows = [row("project", "p", 0), ...Array.from({ length: 40 }, (_, i) => row("thread", `t${i}`)), row("machines", "machines", 0)];
-  const top = sidebarCells(rows, 0, 10);
-  assert.deepEqual(top[0], { kind: "row", index: 0 });
-  const bottom = sidebarCells(rows, 41, 10);
-  assert.deepEqual(bottom[bottom.length - 1], { kind: "row", index: 41 });
-  assert.deepEqual(bottom[bottom.length - 2], { kind: "blank" }, "the blank above the machines section is painted with it");
+test("a heading takes the blank line above it into the window", () => {
+  // Two projects, so the second has a blank line above it saying it is a
+  // heading. A window pulled to the row alone would cut that line off.
+  const rows = [row("project", "a", 0), row("thread", "t0"), row("project", "b", 0), row("thread", "t1")];
+  const cells = sidebarCells(rows);
+  // The blank sits at line 2 and the second project at line 3.
+  assert.deepEqual(cells[2], { kind: "blank" });
+  assert.equal(sidebarTop(cells, 2, 2, 3, true), 2, "the blank comes with the heading");
+});
+
+test("the wheel moves the window and leaves the cursor where it is", () => {
+  const cells = sidebarCells(longTree());
+  // `follow` false is what a notch passes: the cursor on row 0 does not drag
+  // the window back, or the sidebar could never be scrolled at all.
+  assert.equal(sidebarTop(cells, 0, 10, 12, false), 12);
+  assert.ok(!sidebarWindow(cells, 12, 10).some((c) => c.kind === "row" && c.index === 0));
+  // It still stops at the ends.
+  assert.equal(sidebarTop(cells, 0, 10, -3, false), 0);
+  assert.equal(sidebarTop(cells, 0, 10, 999, false), cells.length - 10);
+});
+
+test("a window past the end of a list that shrank is clamped back, not painted empty", () => {
+  const cells = sidebarCells(tree());
+  const top = sidebarTop(cells, 0, 4, 40, false);
+  assert.equal(sidebarWindow(cells, top, 4).length, 4);
 });
 
 test("a click lands on the row that is painted there, not on the nth row", () => {
   // The project is on line 2, its threads on 3 to 5, a blank on 6, the machines on 7.
-  const cells = sidebarCells(tree(), 0, 20);
+  const cells = sidebarCells(tree());
   assert.equal(rowAtScreenRow(cells, 2, 2), 0);
   assert.equal(rowAtScreenRow(cells, 3, 2), 1);
   assert.equal(rowAtScreenRow(cells, 6, 2), null, "a blank line reaches nothing");

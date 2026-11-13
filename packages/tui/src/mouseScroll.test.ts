@@ -135,6 +135,10 @@ function machineWithThreads(n: number): MachineState {
 // notch". That behaviour was deliberate and is now reversed: the sidebar
 // cursor opens the thread it lands on, so moving it from the wheel opened a
 // conversation nobody asked for.
+// A sidebar that fits the screen has nothing to scroll, so it does not
+// swallow the notch: the conversation gets it, as it does from anywhere else
+// in the terminal. The tree fits for most readers, and a notch that did
+// nothing would be worse than the one they have always had.
 test("a wheel notch over the sidebar does not move the cursor and opens nothing", async () => {
   const picked: string[] = [];
   const { store, stdin, unmount } = await mount({
@@ -147,6 +151,63 @@ test("a wheel notch over the sidebar does not move the cursor and opens nothing"
     await tick(300); // past PREVIEW_MS, so a preview would have fired by now
     assert.deepEqual(picked, [], "a scroll must never change which conversation is open");
     assert.equal(store.getState().focus, "composer", "scrolling is not a click, so it takes no focus");
+  } finally { unmount(); }
+});
+
+/**
+ * The sidebar has a window of its own, and the wheel is what moves it (#204).
+ *
+ * The two defects this answers are both a reader's: a tree too tall for the
+ * screen could not be scrolled at all, because the cursor was the only window
+ * there was and moving the cursor opens the thread it lands on. So the notch
+ * moves the window and never the cursor, and nothing opens.
+ */
+test("a wheel notch over a sidebar taller than the screen scrolls the sidebar", async () => {
+  const picked: string[] = [];
+  const { store, stdin, written, unmount } = await mount({
+    machines: new Map([["m", machineWithThreads(60)]]), order: ["m"],
+  } as Partial<Store["state"]>);
+  (store as any).select = async (sel: { threadId: string }) => { picked.push(sel.threadId); };
+  /** The newest frame, without escapes: the screen as it stands now. */
+  const frame = () => (written.filter((c) => c.includes("covey")).at(-1) ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  try {
+    await tick(200);
+    assert.ok(frame().includes("thread 5"), "the top of the tree is on screen to begin with");
+    assert.ok(!frame().includes("thread 45"), "and the foot of it is not");
+    stdin.write(notch(65, 10).repeat(20)); // twenty down notches, inside the sidebar
+    await tick(300); // past PREVIEW_MS, so a preview would have fired by now
+    assert.ok(frame().includes("thread 45"), "twenty notches moved the window twenty lines");
+    assert.ok(!frame().includes("thread 5"), "and the rows it started on have gone off the top");
+    assert.equal(store.getState().scrollFromBottom, 0, "the conversation did not move");
+    assert.deepEqual(picked, [], "and a scroll must never change which conversation is open");
+    assert.equal(store.getState().focus, "composer", "scrolling is not a click, so it takes no focus");
+  } finally { unmount(); }
+});
+
+/**
+ * The second half of #204: the tree used to centre itself on the cursor, so
+ * every click re-laid the list under the hand that made it. A click lands on
+ * a row that is already on screen, and a row on screen moves nothing.
+ */
+test("a click on a sidebar row does not scroll the sidebar under the hand that clicked it", async () => {
+  const picked: string[] = [];
+  const { store, stdin, written, unmount } = await mount({
+    machines: new Map([["m", machineWithThreads(60)]]), order: ["m"],
+  } as Partial<Store["state"]>);
+  (store as any).select = async (sel: { threadId: string }) => { picked.push(sel.threadId); };
+  const frame = () => (written.filter((c) => c.includes("covey")).at(-1) ?? "").replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  try {
+    await tick(200);
+    const before = frame();
+    assert.ok(before.includes("thread 1 "), "the first thread is on screen");
+    assert.ok(!before.includes("thread 30"), "and the thirtieth is not");
+    // `SIDEBAR_TOP` is 2, so the last line of the pane is the deepest row a
+    // reader can reach without scrolling: the worst case for a re-centre.
+    stdin.write(press(10, 29) + release(10, 29));
+    await tick(300);
+    assert.equal(picked.length, 1, "the click opened the conversation it landed on");
+    assert.ok(frame().includes("thread 1 "), "and the tree did not move");
+    assert.ok(!frame().includes("thread 30"));
   } finally { unmount(); }
 });
 

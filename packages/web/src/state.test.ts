@@ -49,6 +49,22 @@ test("the list groups live threads by project, newest first, pinned on top, arch
   assert.deepEqual(rows[1]!.threads, []);
 });
 
+test("an archived project is no row here, and its threads go with it (#204)", () => {
+  // The page has no archived section and no way to add or remove a project —
+  // both are the TUI's — so what it owes the reader is the list the TUI shows
+  // them. A thread left behind would be a row with no machine under it and no
+  // way to make another thread in it.
+  const s = emptyState();
+  const box = addMachine(s, "ws://box:3790", "box", true);
+  applyShellSnapshot(box, snap("box", [
+    project("a", "alpha"),
+    { ...project("b", "beta"), archivedAt: "2026-10-01T00:00:00Z" },
+  ], [thread("live", "a"), thread("away", "b")]));
+  const rows = projectRows(s);
+  assert.deepEqual(rows.map((r) => r.title), ["alpha"]);
+  assert.deepEqual(rows[0]!.threads.map((t) => t.thread.id), ["live"]);
+});
+
 test("one repository on two machines is one row, with a home per machine and the threads of both", () => {
   const s = emptyState();
   const pi = addMachine(s, "ws://pi:3790", "pi", true);

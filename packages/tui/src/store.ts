@@ -1363,6 +1363,20 @@ export class Store {
   }
 
   /** Take a machine out of a project's pool: the project and its threads go from that machine. */
+  /**
+   * Put a project away, or bring it back, on every machine of its pool.
+   *
+   * The whole pool, because the row is the pool: a project archived on one
+   * machine and not on another is one project with two answers, and the
+   * sidebar would paint it live until the last machine agreed. A machine that
+   * refuses — one that is away — is named, so the reader knows the row will
+   * come back when it answers.
+   */
+  async archiveProject(pool: { machine: string; projectId: string }[], archived: boolean): Promise<void> {
+    const errors = await Promise.all(pool.map((x) => this.threadCommand({ type: "project.archive", projectId: x.projectId, archived }, x.machine)));
+    if (errors.every((e) => e === null)) this.notify(archived ? "archived — press x on it under ARCHIVED to bring it back" : "back in the project list", "success");
+  }
+
   async removeFromPool(machine: string, projectId: string): Promise<void> {
     await this.threadCommand({ type: "project.delete", projectId }, machine);
   }
@@ -2717,6 +2731,17 @@ export interface ProjectGroup {
   /** The fleet every machine of this pool is in. */
   fleet: string;
   members: PoolMember[];
+  /**
+   * The reader put this project away, so it is painted inside the archived
+   * section rather than in the list above it.
+   *
+   * True only when *every* machine of the pool says so. A row is what its
+   * records say, and one machine that was away when the reader pressed `x`
+   * has not been told yet; showing the project is the safe direction, because
+   * nothing is then hidden by a write that did not land. `archiveProject`
+   * reports the machine that refused.
+   */
+  archived: boolean;
 }
 
 /**
@@ -2737,8 +2762,9 @@ export function projectGroups(s: AppState, fleet?: string): ProjectGroup[] {
     if (fleet !== undefined && fleetKey(f) !== fleetKey(fleet)) continue;
     for (const p of m.projects.values()) {
       const gk = fleetScope(f) + (projectPool(p) ?? `${key}:${p.id}`);
-      const g = groups.get(gk) ?? { key: gk, title: p.title, base: p.baseBranch ?? null, fleet: f, members: [] };
+      const g = groups.get(gk) ?? { key: gk, title: p.title, base: p.baseBranch ?? null, fleet: f, members: [], archived: true };
       g.members.push({ machine: key, projectId: p.id, project: p });
+      g.archived &&= !!p.archivedAt;
       groups.set(gk, g);
     }
   }
@@ -2755,13 +2781,13 @@ export function groupOfProject(s: AppState, machine: string, projectId: string):
   const pool = projectPool(p);
   const base = p.baseBranch ?? null;
   const fleet = machineFleet(s, machine);
-  if (!pool) return { key: `${fleetScope(fleet)}${machine}:${projectId}`, title: p.title, base, fleet, members: [{ machine, projectId, project: p }] };
+  if (!pool) return { key: `${fleetScope(fleet)}${machine}:${projectId}`, title: p.title, base, fleet, members: [{ machine, projectId, project: p }], archived: !!p.archivedAt };
   const members: PoolMember[] = [];
   for (const key of s.order) {
     if (fleetKey(machineFleet(s, key)) !== fleetKey(fleet)) continue;
     for (const q of s.machines.get(key)?.projects.values() ?? []) if (projectPool(q) === pool) members.push({ machine: key, projectId: q.id, project: q });
   }
-  return { key: fleetScope(fleet) + pool, title: members[0]!.project.title, base, fleet, members };
+  return { key: fleetScope(fleet) + pool, title: members[0]!.project.title, base, fleet, members, archived: members.every((x) => !!x.project.archivedAt) };
 }
 
 /** Add `value` to the list at `key`, making the list on the first add. */
@@ -2826,11 +2852,12 @@ export interface SidebarRow {
   /**
    * `fleet` heads a group of machines and everything they hold, and is painted
    * only when the reader has more than one; `project` heads a repository,
-   * pooled across every machine of one fleet that has it; `machines` heads the
-   * machines of a fleet, below its projects; `machine` is one row of that
-   * section. The rest sit under a project.
+   * pooled across every machine of one fleet that has it; `archivedProjects`
+   * heads the projects of a fleet the reader has put away, below the rest of
+   * its work; `machines` heads the machines of a fleet, at the foot of it;
+   * `machine` is one row of that section. The rest sit under a project.
    */
-  kind: "fleet" | "project" | "thread" | "empty" | "archived" | "run" | "member" | "machines" | "machine";
+  kind: "fleet" | "project" | "thread" | "empty" | "archived" | "archivedProjects" | "run" | "member" | "machines" | "machine";
   /**
    * The machine a row acts on. For a project row, the first machine of its
    * pool; a thread, run or member names the machine it lives on. Empty on the
@@ -2852,11 +2879,12 @@ export interface SidebarRow {
    * row can say which one the thread is on.
    */
   tag?: string;
-  /** Set on the archived folder and on every thread row inside it. */
+  /** Set on the archived folder and on every thread row inside it, and on a
+   *  project row painted inside the archived-projects section. */
   archived?: boolean;
   /** How many threads the archived folder holds; on a project row, its
    *  threads and the run tasks that are not threads yet, over the pool; on a
-   *  fleet row, its projects. */
+   *  fleet row, its projects; on the archived-projects row, its projects. */
   count?: number;
   /** Set on a fleet row: how many machines are in it. */
   machineCount?: number;
@@ -2878,6 +2906,21 @@ export interface SidebarRow {
 /** `expanded` key for a project's archived folder. Furled unless toggled. */
 /** The fold key of a project group's archived folder. */
 export function archiveKey(group: string): string { return `${group}:archived`; }
+
+/**
+ * The fold key of a fleet's archived-projects section. Furled unless the
+ * reader opens it: the section exists to take rows off the screen.
+ *
+ * The default fleet scopes no key, for the reason `machinesKey` does not: a
+ * fold lives in the client's config, and a key that changed the first time
+ * covey learned a second fleet would unfurl what the reader had furled.
+ */
+export function projectsArchiveKey(fleet: string): string {
+  return isDefaultFleet(fleet) ? PROJECTS_ARCHIVE_KEY : `${PROJECTS_ARCHIVE_KEY}:${fleetKey(fleet)}`;
+}
+
+/** The fold key of the archived-projects section of the default fleet. */
+export const PROJECTS_ARCHIVE_KEY = "projects:archived";
 
 /** `expanded` key for a run's members. Open unless furled. */
 export function runKey(machine: string, runId: string): string { return `${machine}:run:${runId}`; }
@@ -3087,6 +3130,12 @@ export function sidebarRows(s: AppState): SidebarRow[] {
   for (const fleet of fleets) {
     const keys = fleetMachines(s, fleet);
     const groups = projectGroups(s, fleet);
+    // The projects the reader works in, and the ones they put away. An
+    // archived project is painted inside a fold at the foot of the fleet, so
+    // every count above it — the fleet row's, the sidebar header's — counts
+    // the list a reader actually reads.
+    const live = groups.filter((g) => !g.archived);
+    const away = groups.filter((g) => g.archived);
     if (headed) {
       // What a furled fleet owes the reader is what a furled project owes:
       // that something inside is working, that something waits on a person,
@@ -3102,17 +3151,25 @@ export function sidebarRows(s: AppState): SidebarRow[] {
           fwaiting ||= t.status === "waiting" || t.pendingApprovals > 0;
         }
       }
-      rows.push({ key: `f:${fleetKey(fleet)}`, kind: "fleet", machine: "", fleet, busy: fbusy, waiting: fwaiting, count: groups.length, machineCount: keys.length, depth: 0 });
+      rows.push({ key: `f:${fleetKey(fleet)}`, kind: "fleet", machine: "", fleet, busy: fbusy, waiting: fwaiting, count: live.length, machineCount: keys.length, depth: 0 });
       if (!(s.expanded[fleetRowKey(fleet)] ?? true)) continue;
     }
     const inFleet = new Set(keys);
     for (const { machine, run } of homeless) if (inFleet.has(machine)) pushRun(machine, run, base);
     const connected = keys.find((k) => s.machines.get(k)?.conn === "connected");
-    if (groups.length === 0 && connected) rows.push({ key: `e:${fleetKey(fleet)}`, kind: "empty", machine: connected, fleet, depth: base });
-    for (const g of groups) {
+    // Nothing to work in is nothing to work in: a fleet whose every project is
+    // archived says what to press, and the archived section still sits below.
+    if (live.length === 0 && connected) rows.push({ key: `e:${fleetKey(fleet)}`, kind: "empty", machine: connected, fleet, depth: base });
+    /**
+     * One project and everything under it: its threads, the runs of each, and
+     * its own archived folder. `depth` is where the project row sits, because
+     * the archived section puts a level above the projects inside it, the way
+     * a fleet row does above every project of a fleet.
+     */
+    const pushProject = (g: ProjectGroup, depth: number, inArchive: boolean) => {
       const first = g.members[0]!;
       const pooled = poolMachines(g.members) > 1;
-      rows.push({ key: `p:${g.key}`, kind: "project", machine: first.machine, projectId: first.projectId, project: first.project, pool: g.members, groupKey: g.key, fleet, depth: base });
+      rows.push({ key: `p:${g.key}`, kind: "project", machine: first.machine, projectId: first.projectId, project: first.project, pool: g.members, groupKey: g.key, fleet, depth, ...(inArchive ? { archived: true } : {}) });
       // Every machine's threads of this repository, in one list by recency. A
       // thread's row keeps the machine it lives on; the tag says which when the
       // pool has more than one. The row's dot and count are summed here, once
@@ -3134,7 +3191,7 @@ export function sidebarRows(s: AppState): SidebarRow[] {
         }
       }
       Object.assign(rows[rows.length - 1]!, { busy, waiting, count });
-      if (!(s.expanded[g.key] ?? true)) continue;
+      if (!(s.expanded[g.key] ?? true)) return;
       owned.sort((a, b) => byRecency(a.t, b.t));
       const threads = owned.map((o) => o.t);
       // One map serves both "is this thread here?" and "where does it live?".
@@ -3243,8 +3300,8 @@ export function sidebarRows(s: AppState): SidebarRow[] {
       };
       // A run above the threads, for the reason it always was: a run is why the
       // work under it exists, and it is what the operator watches.
-      for (const r of projectRunRows) pushRun(r.machine, r.run, base + 1, g.members.find((x) => x.machine === r.machine)?.projectId, g.key);
-      for (const t of roots) pushThread(t, base + 1);
+      for (const r of projectRunRows) pushRun(r.machine, r.run, depth + 1, g.members.find((x) => x.machine === r.machine)?.projectId, g.key);
+      for (const t of roots) pushThread(t, depth + 1);
       // The project's own archived folder, below its live threads and inside
       // its fold: the old threads of this project on every machine, most
       // recently archived first. Moved threads are tombstones, not archive —
@@ -3254,15 +3311,39 @@ export function sidebarRows(s: AppState): SidebarRow[] {
         const m = s.machines.get(x.machine)!;
         for (const t of m.threads.values()) if (t.projectId === x.projectId && t.archivedAt && !t.movedTo) archived.push({ machine: x.machine, projectId: x.projectId, t });
       }
-      if (archived.length === 0) continue;
+      if (archived.length === 0) return;
       archived.sort((a, b) => b.t.archivedAt!.localeCompare(a.t.archivedAt!));
       const ak = archiveKey(g.key);
-      rows.push({ key: `a:${ak}`, kind: "archived", machine: first.machine, projectId: first.projectId, groupKey: g.key, archived: true, count: archived.length, depth: base + 1 });
-      if (!(s.expanded[ak] ?? false)) continue;
+      rows.push({ key: `a:${ak}`, kind: "archived", machine: first.machine, projectId: first.projectId, groupKey: g.key, archived: true, count: archived.length, depth: depth + 1 });
+      if (!(s.expanded[ak] ?? false)) return;
       for (const x of archived) {
         const tag = tagOf(x.machine);
-        rows.push({ key: `t:${x.machine}:${x.t.id}`, kind: "thread", machine: x.machine, projectId: x.projectId, groupKey: g.key, thread: x.t, archived: true, depth: base + 2, ...(tag ? { tag } : {}) });
+        rows.push({ key: `t:${x.machine}:${x.t.id}`, kind: "thread", machine: x.machine, projectId: x.projectId, groupKey: g.key, thread: x.t, archived: true, depth: depth + 2, ...(tag ? { tag } : {}) });
       }
+    };
+    for (const g of live) pushProject(g, base, false);
+    // The projects the reader put away, in one fold at the foot of the fleet's
+    // work. It is painted only when there is something in it, so a reader who
+    // never archives a project never sees the row.
+    //
+    // A fold may not hide that something inside it is working or waiting on a
+    // person — the rule the fleet row and the project row both keep — because
+    // archiving a project stops nothing. The dot is the whole reason a reader
+    // may archive a project with a turn still running in it.
+    if (away.length > 0) {
+      let abusy = false, awaiting = false;
+      for (const g of away) {
+        for (const x of g.members) {
+          const m = s.machines.get(x.machine)!;
+          for (const r of runsOf.get(`${x.machine}:${x.projectId}`) ?? []) { abusy ||= runIsBusy(r.run); awaiting ||= runNeedsPerson(s, r.run); }
+          for (const t of liveThreads(m, x.projectId, s.showHidden)) {
+            abusy ||= t.status === "running" || t.status === "starting";
+            awaiting ||= t.status === "waiting" || t.pendingApprovals > 0;
+          }
+        }
+      }
+      rows.push({ key: `ap:${fleetKey(fleet)}`, kind: "archivedProjects", machine: "", fleet, busy: abusy, waiting: awaiting, count: away.length, depth: base });
+      if (s.expanded[projectsArchiveKey(fleet)] ?? false) for (const g of away) pushProject(g, base + 1, true);
     }
     // The machines of this fleet, below its work. A machine row still opens
     // the control panel, and an offline one still says what to press; the
