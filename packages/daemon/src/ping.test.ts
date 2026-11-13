@@ -23,6 +23,7 @@ import { createServer } from "node:http";
 import { WebSocket } from "ws";
 import { startServer } from "./server.js";
 import { Updater } from "./update.js";
+import { ClaudeSwitcher } from "./claudeSwitch.js";
 import { AppBuilder } from "./appBuild.js";
 
 /** Short enough that the test is milliseconds, long enough not to race the loop. */
@@ -60,7 +61,7 @@ async function serve(t: { after: (fn: () => unknown) => void }) {
     } as any,
     engine: {} as any,
     updater: new Updater("m1", () => {}),
-    builder: new AppBuilder("m1", () => {}),
+    builder: new AppBuilder("m1", () => {}), claude: new ClaudeSwitcher("m1", () => {}),
     host: "127.0.0.1",
     log: () => {},
     pingMs: PING_MS,

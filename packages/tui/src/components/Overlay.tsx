@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { runMemberStateLabel, runState, tallyRun, type MachineUpdate, type Run, type RunMemberState, type UpdateStep } from "@covey/protocol";
+import { runMemberStateLabel, runState, tallyRun, type ClaudeInstallRun, type MachineUpdate, type Run, type RunMemberState, type UpdateStep } from "@covey/protocol";
 import { sumUsage, usageRows, fmtTokens, fmtCost, USAGE_WINDOWS, type Overlay } from "../store.js";
 import { PLACEMENT_RULE } from "../run.js";
 import { T } from "../theme.js";
@@ -12,7 +12,7 @@ const HYPERLINKS = hyperlinksEnabled();
 /** cmd+click on a Mac, ctrl+click elsewhere — see `openGesture`. */
 const OPEN_GESTURE = openGesture(process.platform, HYPERLINKS);
 
-export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick, run, machineNameOf, secretKeys }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | null; machineName?: string; tick?: number; run?: Run | null; machineNameOf?: (id: string) => string; secretKeys?: string[] }) {
+export function OverlayView({ overlay, cursor, filter, checked, width, height, update, machineName, tick, run, machineNameOf, secretKeys }: { overlay: Overlay; cursor: number; filter: string; checked: boolean; width: number; height: number; update?: MachineUpdate | ClaudeInstallRun | null; machineName?: string; tick?: number; run?: Run | null; machineNameOf?: (id: string) => string; secretKeys?: string[] }) {
   const w = Math.min(width - 4, 80);
   const maxRows = Math.max(4, Math.min(height - 10, 20));
   // Rendered in place of the transcript (not floated): Ink cannot paint an
@@ -140,14 +140,15 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
       ), many ? "↑↓ move · space mark · enter done · esc cancel" : toggle ? "↑↓ move · tab check · enter select · esc cancel" : "↑↓ move · enter select · esc cancel");
     }
     case "update": {
-      if (!update) return frame("Update", <Box marginY={1}><Text color={T.subtle}>starting…</Text></Box>, "esc close");
+      if (!update) return frame(overlay.claude ? "Claude Code" : "Update", <Box marginY={1}><Text color={T.subtle}>starting…</Text></Box>, "esc close");
       const running = update.steps.find((s) => s.status === "running");
       const failed = update.steps.find((s) => s.status === "failed");
       const shown = failed ?? running;
       // The tail of whatever is running is the only part worth the rows.
       const outRows = Math.max(3, Math.min(maxRows - update.steps.length - 1, 10));
       const out = (shown?.output ?? "").split("\n").filter((l) => l.trim()).slice(-outRows);
-      return frame(`Update ${machineName ?? ""}`.trim() + stateSuffix(update), (
+      const what = overlay.claude ? "Claude Code" : "Update";
+      return frame(`${what} ${machineName ?? ""}`.trim() + stateSuffix(update), (
         <Box flexDirection="column">
           {update.steps.map((s) => <StepRow key={s.name} step={s} width={w} tick={tick ?? 0} />)}
           {out.length > 0 && (
@@ -157,7 +158,7 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
           )}
           {update.error && <Text color={T.danger}>{truncate(update.error, w - 4)}</Text>}
         </Box>
-      ), update.state === "running" || update.state === "restarting" ? "esc close — the update keeps running" : "esc close");
+      ), update.state === "running" || update.state === "restarting" ? `esc close — the ${overlay.claude ? "install" : "update"} keeps running` : "esc close");
     }
     case "usage":
       return frame("Usage — estimated", <UsageBody overlay={overlay} width={w} maxRows={maxRows} />,
@@ -235,11 +236,19 @@ function UsageBody({ overlay, width, maxRows }: { overlay: Extract<Overlay, { ki
   );
 }
 
-function stateSuffix(u: MachineUpdate): string {
+/**
+ * The head's suffix, for either record. A machine update names the commit it
+ * landed on and a Claude Code change names the version it will run, because in
+ * both cases that is the one thing the reader opened the row to find out.
+ */
+function stateSuffix(u: MachineUpdate | ClaudeInstallRun): string {
   switch (u.state) {
     case "running": return " — running";
     case "restarting": return " — restarting the daemon";
-    case "succeeded": return u.toCommit ? ` — done, now at ${u.toCommit}` : " — done";
+    case "succeeded": {
+      const at = "toCommit" in u ? u.toCommit : u.installed?.claude;
+      return at ? ` — done, now at ${at}` : " — done";
+    }
     case "failed": return " — failed";
   }
 }

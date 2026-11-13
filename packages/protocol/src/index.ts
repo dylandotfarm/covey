@@ -64,6 +64,12 @@ export interface MachineInfo {
   build?: BuildInfo;
   protocolVersion: number;
   claudeCodeVersion?: string;
+  /**
+   * Which Claude Code this machine runs and what else it could run, so the
+   * control panel can change it. Absent on a daemon built before the field;
+   * `claudeCodeVersion` is then the only thing a client knows.
+   */
+  claudeInstall?: ClaudeInstall;
   /** Tailscale MagicDNS name, if the daemon is on a tailnet. */
   tailnetName?: string;
   tailnetIps?: string[];
@@ -235,6 +241,17 @@ export interface MachineSettings {
    * placement all stay inside one fleet.
    */
   fleet?: string | null;
+  /**
+   * Which Claude Code this machine's sessions run. `null` or absent means the
+   * one the daemon's own lockfile pins, which is what every machine starts
+   * with. `CLAUDE_SYSTEM` means the `claude` on the PATH. Anything else is an
+   * exact Agent SDK version covey has installed under its data directory.
+   *
+   * Set it through `machine.setClaude`, never through `machine.settings`: the
+   * version has to be installed and verified first, and the daemon has to
+   * restart to load it.
+   */
+  claudeVersion?: string | null;
   /**
    * Which addresses the daemon listens on: `loopback`, `tailnet` (plus
    * loopback), `all`, or one address. Changed while the daemon runs: it
@@ -433,7 +450,7 @@ export interface MachineSource {
  * the Android app build (`install`, `prebuild`, `apk`). They share the step
  * record as well, so a client paints progress for both the same way.
  */
-export type UpdateStepName = "pull" | "install" | "build" | "restart" | "prebuild" | "apk";
+export type UpdateStepName = "pull" | "install" | "build" | "restart" | "prebuild" | "apk" | "verify";
 
 export interface UpdateStep {
   name: UpdateStepName;
@@ -508,6 +525,125 @@ export interface AppBuildRun {
   error: string | null;
   /** What the machine holds now the run is over, so a client need not re-ask. */
   built: AppBuild | null;
+}
+
+/**
+ * Which Claude Code a machine runs, and what else it could run.
+ *
+ * Covey's sessions never use the `claude` on the machine's PATH. The Agent SDK
+ * spawns its own bundled binary unless a caller sets
+ * `pathToClaudeCodeExecutable`, and SDK `0.3.N` carries Claude Code `2.1.N` —
+ * so the version a session reports is the one the daemon's own dependency
+ * pins, and `claude update` in a terminal changes nothing here. That surprised
+ * a reader into a 400 from the API: a model shipped, their terminal's Claude
+ * knew it, and every covey thread answered `does not support this model`.
+ *
+ * So the machine's control panel owns the choice. `source` says where the
+ * install in force came from, and the three are not interchangeable:
+ *
+ * - `lockfile` — the version the daemon's own `pnpm-lock.yaml` pins. Every
+ *   machine has it, it needs no network, and it is the repair path: an install
+ *   covey cannot load falls back here rather than leaving a machine that
+ *   cannot start a session.
+ * - `managed` — a version a reader picked, installed under the daemon's data
+ *   directory. Nothing goes near the checkout, so `git pull --ff-only` on the
+ *   next machine update still works.
+ * - `system` — the `claude` on that machine's PATH, through
+ *   `pathToClaudeCodeExecutable`. The reader's own `claude update` then moves
+ *   covey with it, which is the point, and covey stops owning the number.
+ */
+export type ClaudeSource = "lockfile" | "managed" | "system";
+
+/** The value `MachineSettings.claudeVersion` holds for the PATH's own `claude`. */
+export const CLAUDE_SYSTEM = "system";
+
+/**
+ * One Claude Code a machine could run.
+ *
+ * `sdk` is what covey installs and `claude` is what comes out, because those
+ * are two numbers for one thing and a reader knows only the second. For a
+ * version covey has installed, `claude` is read from the install's own
+ * `manifest.json`; for one it has only heard of from the registry it follows
+ * the `0.3.N` → `2.1.N` convention, which is why `exact` says which.
+ */
+export interface ClaudeRelease {
+  /** The Agent SDK version, e.g. `0.3.325`. */
+  sdk: string;
+  /** The Claude Code version it carries, e.g. `2.1.325`. */
+  claude: string;
+  /** True when `claude` was read from a manifest, false when it was inferred. */
+  exact: boolean;
+  /** When npm published it, when covey has read the registry. */
+  publishedAt?: string;
+  /** True when this version is already on the machine, so picking it is instant. */
+  installed?: boolean;
+}
+
+/**
+ * What a machine's Claude Code is, and what it could be.
+ *
+ * Shaped like `SessionBudget`: the setting is `null` for "the one the lockfile
+ * pins", no client can work out what that resolves to, so the daemon resolves
+ * it and re-sends the answer with every `machine.updated`. A client that gets
+ * none of this is talking to a daemon built before the field and says so
+ * rather than guessing.
+ */
+export interface ClaudeInstall {
+  /** The Claude Code in force, e.g. `2.1.280`; null when covey cannot read it. */
+  version: string | null;
+  /** Where the install in force came from. */
+  source: ClaudeSource;
+  /** The Agent SDK behind it, when there is one. `system` has none. */
+  sdk?: string | null;
+  /**
+   * What the setting asked for, when that is not what is running. Present only
+   * on a fallback, so a client can say which version failed as well as which
+   * one it got — one word for both is what #132 is about.
+   */
+  requested?: string | null;
+  /** Why the request is not what runs: a failed install, no `claude` on PATH. */
+  reason?: string;
+  /** The lockfile's own version, always available and always the repair path. */
+  lockfile: ClaudeRelease | null;
+  /** The `claude` on this machine's PATH, or null when there is none. */
+  system?: ClaudeRelease | null;
+  /** Versions covey has installed here besides the lockfile's, newest first. */
+  managed?: ClaudeRelease[];
+  /** What the registry offers, newest first and bounded. Absent until read. */
+  available?: ClaudeRelease[];
+  /** When covey last read the registry. Absent when it never reached it. */
+  availableAt?: string;
+  /** Why the registry could not be read, so a client says that rather than
+   *  showing an empty list as though nothing had been published. */
+  availableError?: string;
+}
+
+/**
+ * A run of `pnpm install` for one Claude Code, and the restart after it.
+ *
+ * Re-sent whole and broadcast, as `MachineUpdate` and `AppBuildRun` are: one
+ * machine runs one daemon, and every client of it watches the same row. The
+ * call that starts it answers at once, because a cold pnpm store makes this a
+ * 223 MB download.
+ *
+ * A change to `lockfile` or `system` installs nothing and still gets a run, so
+ * a client has one thing to watch whichever of the three a reader picked. The
+ * setting is written when the install has been verified and never before: a
+ * setting that names a version covey could not load is a machine that falls
+ * back on every start with a reason nobody ever clears.
+ */
+export interface ClaudeInstallRun {
+  id: string;
+  machineId: MachineId;
+  state: "running" | "succeeded" | "failed";
+  /** What was asked for: `null` for the lockfile's, `system`, or an SDK version. */
+  requested: string | null;
+  steps: UpdateStep[];
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+  /** What the machine will run once it restarts, when the run succeeded. */
+  installed: ClaudeRelease | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2850,6 +2986,28 @@ export interface RpcMethods {
    * `pnpm run build`, and none of those reach `mobile/`.
    */
   "machine.buildApp": { params: Record<string, never>; result: AppBuildRun };
+  /**
+   * Run a chosen Claude Code on this machine from now on.
+   *
+   * `version` is `null` for the one the lockfile pins, `CLAUDE_SYSTEM` for the
+   * `claude` on the PATH, or an exact Agent SDK version such as `0.3.325`.
+   * Returns as soon as the run starts; progress arrives as
+   * `machine.claudeInstall` pushes, and the daemon restarts at the end so the
+   * new install is loaded. A second call while one is running returns the run
+   * in flight rather than starting a second pnpm.
+   *
+   * This is not a machine update. An update moves the whole checkout and takes
+   * whatever Claude Code the new lockfile pins; this moves one dependency and
+   * leaves the checkout alone, so the two do not fight.
+   */
+  "machine.setClaude": { params: { version: string | null }; result: ClaudeInstallRun };
+  /**
+   * What Claude Code versions this machine could run, read from the npm
+   * registry. Returns the same `ClaudeInstall` that rides on `MachineInfo`,
+   * with `available` filled in. Read on demand, because a control panel that
+   * nobody opens must not make a machine poll npm.
+   */
+  "machine.claudeVersions": { params: { refresh?: boolean }; result: ClaudeInstall };
   /** Restart the daemon without updating. `pid` is the process that will exit. */
   "machine.restart": { params: Record<string, never>; result: { pid: number } };
   /**
@@ -3062,7 +3220,10 @@ export type PushMessage =
   | { push: "machine.update"; update: MachineUpdate }
   /** App build progress. Broadcast for the same reason an update is: one
    *  machine builds one app, and every client of it is watching the one row. */
-  | { push: "machine.appBuild"; run: AppBuildRun };
+  | { push: "machine.appBuild"; run: AppBuildRun }
+  /** Claude Code install progress. Broadcast for the reason an update is: it
+   *  changes what every thread on the machine runs, and ends in a restart. */
+  | { push: "machine.claudeInstall"; run: ClaudeInstallRun };
 
 export type WireFromClient = RpcRequest;
 export type WireFromDaemon = RpcResponse | PushMessage;

@@ -11,6 +11,10 @@ export {
   IDLE_CHOICES, LIVE_CHOICES, budgetValue, idleChoices, idleLabel, idleValueLabel,
   liveChoices, liveValueLabel, sessionMemoryLabel, type BudgetChoice,
 } from "./sessionBudget.js";
+export {
+  ageLabel, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel,
+  releaseLabel, type ClaudeChoice,
+} from "./claudeVersions.js";
 export { tableAt, tableCells, type Align, type Table } from "./markdown.js";
 export { firstSentence, replyLead, threadActivity, type Activity, type ActivityState } from "./digest.js";
 export { threadNews, type AttentionMark, type ThreadNews } from "./attention.js";

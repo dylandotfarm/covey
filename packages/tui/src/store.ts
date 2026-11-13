@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { RpcMethodName, RpcMethods, BuildInfo, PeerMachine, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals, TerminalEvent } from "@covey/protocol";
+import type { RpcMethodName, RpcMethods, BuildInfo, PeerMachine, MachineInfo, Project, RepoInfo, Run, RunIssue, RunMember, RunMemberPatch, RunMemberState, RunTask, SecretScope, SecretWrite, Thread, TimelineItem, SavedMachine, ShellEvent, ThreadEvent, ThreadSnapshot, PermissionMode, TurnDiff, ProjectGit, RemoteBranches, MachineUpdate, ClaudeInstall, ClaudeInstallRun, MachineSource, MachineSettings, ThreadCommands, PathEntry, UsageGroupBy, UsageReport, UsageTotals, TerminalEvent } from "@covey/protocol";
 import { asLod, DEFAULT_LOD, DEFAULT_PORT, isFinalMemberState, LOD_LABEL, LOD_ORDER, threadIsBusy, threadIsHidden, threadNeedsPerson, type Lod } from "@covey/protocol";
 import WebSocket from "ws";
 import { DEFAULT_FLEET, MachineClient, cleanFleet, coveyCommand, fleetKey, fleetOf, fleetScope, isDefaultFleet, projectPool, sortFleets, threadNews, type ClientOptions, type ConnState } from "@covey/client";
@@ -47,6 +47,8 @@ export interface MachineState {
   runs: Map<string, Run>;
   /** The update in flight on that machine, or the last one it reported. */
   update: MachineUpdate | null;
+  /** The Claude Code change in flight there, or the last one it reported. */
+  claudeInstall: ClaudeInstallRun | null;
   /** We asked the daemon to restart, so the drop that follows is expected. */
   restarting: boolean;
   /**
@@ -144,8 +146,15 @@ export type Overlay =
   /** `mask` paints a bullet per character: a secret being typed or pasted must
    *  not stand on the screen (#126). */
   | { kind: "input"; title: string; placeholder?: string; initial?: string; mask?: boolean; onSubmit: (v: string) => void; onCancel?: () => void }
-  /** Live progress of `machine.update`; closing it leaves the update running. */
-  | { kind: "update"; machine: string }
+  /**
+   * Live progress of `machine.update`, or of a Claude Code change when
+   * `claude` is set; closing it leaves the work running.
+   *
+   * One kind for both because the two records are the same shape — steps, a
+   * state and an error — and a second view would be the same twenty lines
+   * waiting to drift from these.
+   */
+  | { kind: "update"; machine: string; claude?: boolean }
   /**
    * A picture from `covey show`, painted over the transcript (#163).
    *
@@ -662,7 +671,7 @@ export class Store {
    */
   addMachine(saved: SavedMachine, persist = true, joining?: string) {
     if (this.clients.has(saved.url)) return;
-    const ms: MachineState = { key: saved.url, saved, conn: "connecting", error: null, info: null, projects: new Map(), threads: new Map(), runs: new Map(), update: null, restarting: false, ...(joining ? { joining } : {}) };
+    const ms: MachineState = { key: saved.url, saved, conn: "connecting", error: null, info: null, projects: new Map(), threads: new Map(), runs: new Map(), update: null, claudeInstall: null, restarting: false, ...(joining ? { joining } : {}) };
     this.state.machines.set(saved.url, ms);
     this.state.order.push(saved.url);
     // Everything a machine reports goes through `touchFromMachine`, and
@@ -718,6 +727,17 @@ export class Store {
         // asked to restart, and the reconnect that reports success never comes.
         if (update.state === "restarting") { ms.restarting = true; client.expectRestart(); }
         this.noticeUpdate(ms, prev, update);
+        this.touchFromMachine();
+      },
+      machineClaudeInstall: (run) => {
+        ms.claudeInstall = run;
+        // The restart step is the drop that follows, so the client has to be
+        // told before it happens — the same reason `machineUpdate` does it.
+        const restarting = run.steps.find((st) => st.name === "restart");
+        if (restarting?.status === "running" || restarting?.status === "ok") { ms.restarting = true; client.expectRestart(); }
+        const who = ms.info?.name ?? ms.key;
+        if (run.state === "failed") this.notify(`${who}: ${run.error ?? "could not change Claude Code"}`, "error");
+        else if (run.state === "succeeded") this.notify(`${who}: now runs Claude Code ${run.installed?.claude ?? "as asked"}`, "success");
         this.touchFromMachine();
       },
     }, this.clientOpts);
@@ -1593,6 +1613,41 @@ export class Store {
       ms.update = await client.rpc("machine.update", {});
       this.setOverlay({ kind: "update", machine });
     } catch (e: any) { this.notify(this.machineError(machine, e), "error"); }
+  }
+
+  /**
+   * Run a different Claude Code on that machine from now on.
+   *
+   * `version` is `null` for the one that daemon's own lockfile pins,
+   * `CLAUDE_SYSTEM` for the `claude` on its PATH, or an exact Agent SDK
+   * version. The daemon installs, verifies and restarts; progress arrives as
+   * pushes, so this answers as soon as the run has started.
+   *
+   * The budget is the daemon's own: a cold pnpm store makes the install a
+   * 223 MB download, which is minutes and not the default minute.
+   */
+  async setClaudeVersion(machine: string, version: string | null) {
+    const client = this.clients.get(machine);
+    const ms = this.state.machines.get(machine);
+    if (!client || !ms) return;
+    try {
+      ms.claudeInstall = await client.rpc("machine.setClaude", { version }, 10 * 60_000);
+      this.touch();
+    } catch (e: any) { this.notify(this.machineError(machine, e), "error"); }
+  }
+
+  /**
+   * What Claude Code versions that machine could run.
+   *
+   * Asked when the picker opens and never on a timer: a machine whose control
+   * panel nobody opens must not poll npm. The daemon caches the answer, so
+   * opening the row twice costs one read.
+   */
+  async claudeVersions(machine: string, refresh = false): Promise<ClaudeInstall | null> {
+    const client = this.clients.get(machine);
+    if (!client) return null;
+    try { return await client.rpc("machine.claudeVersions", refresh ? { refresh: true } : {}); }
+    catch (e: any) { this.notify(this.machineError(machine, e), "error"); return null; }
   }
 
   /** Restart the daemon without updating. The client reconnects on its own. */

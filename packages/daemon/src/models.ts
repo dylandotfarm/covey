@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { query as SdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelChoice } from "@covey/protocol";
 
 /**
@@ -42,11 +42,18 @@ export interface SdkModelInfo {
  * Claude Code too old to answer keeps the fallback list rather than losing its
  * model picker.
  */
-export async function readModels(cwd = process.cwd()): Promise<ClaudeModels | null> {
+export async function readModels(cwd = process.cwd(), q?: typeof SdkQuery): Promise<ClaudeModels | null> {
+  // `q` is how an install that is not the one this process loaded gets asked:
+  // `claudeInstall.ts` verifies a fresh install by reading its models, which
+  // is the only check that proves the whole chain — the JavaScript loads, the
+  // binary extracts, and it answers. The default is imported here rather than
+  // at the top of the file because `sdk.ts` imports `claudeInstall.ts`, and a
+  // static edge back would close a cycle through a top-level await.
+  const run = q ?? (await import("./sdk.js")).query;
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
   try {
-    const q = query({
+    const started = run({
       prompt: neverSends(),
       options: {
         cwd,
@@ -59,7 +66,7 @@ export async function readModels(cwd = process.cwd()): Promise<ClaudeModels | nu
         },
       },
     });
-    const infos = (await q.supportedModels()) as SdkModelInfo[];
+    const infos = (await started.supportedModels()) as SdkModelInfo[];
     return toChoices(infos);
   } catch {
     return null;

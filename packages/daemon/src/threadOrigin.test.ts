@@ -28,6 +28,7 @@ import { Db } from "./db.js";
 import { Engine, threadOrigin } from "./engine.js";
 import { startServer } from "./server.js";
 import { Updater } from "./update.js";
+import { ClaudeSwitcher } from "./claudeSwitch.js";
 import { AppBuilder } from "./appBuild.js";
 import { scratchRemote } from "./scratch.js";
 
@@ -122,7 +123,7 @@ async function daemon() {
     defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null,
   };
   const server = await startServer({
-    config, engine, updater: new Updater("m1", () => {}), builder: new AppBuilder("m1", () => {}), host: "127.0.0.1", log: () => {},
+    config, engine, updater: new Updater("m1", () => {}), builder: new AppBuilder("m1", () => {}), claude: new ClaudeSwitcher("m1", () => {}), host: "127.0.0.1", log: () => {},
   });
   closers.push(server.close);
   const remote = await scratchRemote("covey-origin-remote-");

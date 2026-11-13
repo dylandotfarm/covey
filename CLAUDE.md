@@ -756,6 +756,52 @@
   tree read after the agent started would be a diff that is not one. And the tail of an
   interrupted turn opens nothing (`ClaudeSession.interrupted`), or esc would leave the
   thread running.
+- **Which Claude Code a machine runs is the reader's to choose**, from its control
+  panel. Covey never runs the `claude` on the PATH: the SDK spawns its own bundled
+  binary, so the version every session reports is the one `pnpm-lock.yaml` pins, and
+  `claude update` in a terminal moves nothing — which a reader met as a 400, with a
+  model their own Claude Code knew and every thread refusing it. The bump cannot be a
+  checkout edit: a machine update is `git pull --ff-only`, so a dependency covey wrote
+  in place would break the button above it with `the checkout has uncommitted changes`.
+  So a chosen version is a **pnpm project of its own under the daemon's data directory**
+  (`claudeInstall.ts`), as `mobile/` is a workspace of its own, and it carries its own
+  `pnpm-workspace.yaml` because pnpm *writes* a `minimumReleaseAgeExclude` entry to the
+  nearest one and the nearest one must never be the checkout's. `minimum-release-age=0`
+  there is the same excuse this package already has in `pnpm-workspace.yaml` and
+  `scripts/pkg-age.mjs`: a model ships with a Claude Code, and a week-old pin cannot run
+  it. Three sources (`ClaudeSource`) and the first is the floor — `lockfile` is on every
+  machine, needs no network, and is what covey falls back to; `managed` is a version a
+  reader picked; `system` is `pathToClaudeCodeExecutable` pointed at the PATH's own
+  `claude`, which is covey's SDK JavaScript with somebody else's binary, so it is
+  offered and labelled rather than recommended. `sdk.ts` is the one place that loads the
+  SDK and so the one place that decides, with a **top-level await** — that is what keeps
+  `import { query }` ordinary in the other six modules and makes the executable override
+  impossible to forget. It never throws: an install that will not load falls back and
+  records why, because a reader must never be able to pick a Claude Code that leaves a
+  machine unable to start a session. The setting is written **between verify and
+  restart** and never before, or a `claudeVersion` naming a version that failed is a
+  machine that falls back on every start with a reason nobody clears. Verifying is
+  loading it and reading its models, and **a version already on disk goes through the
+  same load** (`loadInstalled`): `entryFor` tests that `sdk.mjs` exists and nothing
+  more, so an interrupted install would otherwise be written down as the machine's
+  Claude Code and fall back on every start, with a step record saying it was verified.
+  Never a look for the platform package by path, which lives beside the *real* package
+  inside `.pnpm` and not in the top-level link, so a path check reads a working install
+  as a broken one. Each install is about 223 MB, so
+  `pruneInstalls` keeps the one in force and runs at start, when nothing holds any of
+  them. The registry is read **on demand** (`machine.claudeVersions`), never on a timer:
+  a control panel nobody opens must not make a machine poll npm. The picker's words are
+  `client/src/claudeVersions.ts`, pure and node-tested, so a terminal and a phone say the
+  same thing; a fallback names the version that went missing *and* the one running,
+  which is #132 again. `ClaudeInstall.system` is three states and not two — `undefined`
+  is "covey has not looked", which is every start, because only the picker's own
+  `machine.claudeVersions` probes the PATH, and `null` is "covey looked and there is
+  none"; paint the first as the second and the row claims what covey has not earned.
+  The TUI picker opens on what the machine already said and repaints when the registry
+  answers, so its guard is the **overlay's own identity** and never `kind === "pick"`:
+  the confirmation it raises is a pick too, and 15 seconds is long enough for a reader
+  to have pressed one of the two rows that need no registry at all. That repaint is
+  `setOverlay` and not `openPick`, which resets the cursor and the filter under them.
 - The model picker is read from the Claude Code covey runs, not from a list covey ships:
   the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
   no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The

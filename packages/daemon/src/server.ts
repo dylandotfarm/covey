@@ -7,6 +7,8 @@ import { serveApk } from "./apk.js";
 import { isLoopback, isTailnetIp, whois, tailscaleSelf, type TailscaleSelf } from "./tailscale.js";
 import { sourceInfo, scheduleRestart, type Updater } from "./update.js";
 import { type AppBuilder } from "./appBuild.js";
+import { type ClaudeSwitcher } from "./claudeSwitch.js";
+import { claudeVersions } from "./claudeInfo.js";
 import { readPeers, type DaemonConfig } from "./config.js";
 import { listRepos, createRepo, cloneUrlsFor, GH_CWD } from "./repos.js";
 import { listRemoteBranches } from "./git.js";
@@ -35,6 +37,8 @@ export interface ServerOptions {
   updater: Updater;
   /** The same, for the one app build a machine may be running (#185). */
   builder: AppBuilder;
+  /** The same, for the one Claude Code change a machine may be running. */
+  claude: ClaudeSwitcher;
   host: string;
   log: (msg: string) => void;
   /** How often to ping a connection, in milliseconds. Only a test moves it. */
@@ -372,6 +376,15 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
         return o.updater.start({ restart: p.restart });
       case "machine.buildApp":
         return o.builder.start();
+      case "machine.setClaude": {
+        // `null` is a real value here — it is how "the version the lockfile
+        // pins" is asked for — so an absent key is read as that and not as a
+        // missing argument.
+        const v = p.version === undefined || p.version === null ? null : String(p.version);
+        return o.claude.start(v);
+      }
+      case "machine.claudeVersions":
+        return claudeVersions({ refresh: !!p.refresh });
       case "run.issues":
         return engine.runIssues(String(p.projectId), Array.isArray(p.numbers) ? p.numbers.map(Number) : []);
       case "repos.list":
@@ -453,18 +466,24 @@ function handleConnection(ws: WebSocket, o: ServerOptions, tailnet: TailscaleSel
   const unUpdate = o.updater.on((update) => send({ push: "machine.update", update }));
   // And the app build, for the same reason: one machine builds one app.
   const unBuild = o.builder.on((run) => send({ push: "machine.appBuild", run }));
+  // And a Claude Code change, which ends in a restart and so concerns every
+  // client of this machine even more directly than an update does.
+  const unClaude = o.claude.on((run) => send({ push: "machine.claudeInstall", run }));
   // A build reports at its steps' boundaries, and gradle is tens of minutes
   // between two of them. So a client that arrives in the middle — a phone whose
   // socket died while the screen was off, which is every phone — is told once,
   // now, rather than waiting for the next step to end.
   if (o.builder.current) send({ push: "machine.appBuild", run: o.builder.current });
+  // The same for a Claude Code install: a cold pnpm store makes it a 223 MB
+  // download, which is minutes a client may well arrive in the middle of.
+  if (o.claude.current) send({ push: "machine.claudeInstall", run: o.claude.current });
 
   ws.on("message", async (data) => {
     let req: RpcRequest;
     try { req = JSON.parse(data.toString()); } catch { return; }
     send(await rpc(req));
   });
-  ws.on("close", () => { unUpdate(); unBuild(); for (const un of subs.values()) un(); subs.clear(); });
+  ws.on("close", () => { unUpdate(); unBuild(); unClaude(); for (const un of subs.values()) un(); subs.clear(); });
   ws.on("error", () => {});
   // The ping needs a deadline, or it says nothing (#217). A client whose
   // computer went to sleep leaves the connection half open: no FIN arrives, the
