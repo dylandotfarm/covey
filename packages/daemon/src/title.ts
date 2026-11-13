@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from "./sdk.js";
 
 /**
  * Thread titles, written by a weak model from the user's first message.

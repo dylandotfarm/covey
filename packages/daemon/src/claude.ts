@@ -1,4 +1,7 @@
-import { query, type Options, type Query, type SDKMessage, type SDKUserMessage, type PermissionResult, type PermissionMode as SdkPermissionMode } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, Query, SDKMessage, SDKUserMessage, PermissionResult, PermissionMode as SdkPermissionMode } from "@anthropic-ai/claude-agent-sdk";
+// The loader, not the package: one place decides which Claude Code this
+// machine runs, and it binds the executable onto every query (`sdk.ts`).
+import { query } from "./sdk.js";
 import { randomUUID } from "node:crypto";
 import type { PermissionMode, TimelineItem, ToolCallItem, ToolBackground, ApprovalItem, QuestionItem, QuestionAsk, Attachment, SlashCommandInfo, ModelCounts, TurnUsage } from "@covey/protocol";
 import { summariseTool } from "./toolSummary.js";

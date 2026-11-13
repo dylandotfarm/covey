@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { appBuild, canBuildApp } from "./apk.js";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
+import { claudeInstallInfo } from "./claudeInfo.js";
 import { readModels } from "./models.js";
 import { dataDir, loadDaemonConfig, machineSettings, platformInfo, projectsDir, type DaemonConfig } from "./config.js";
 import { Db } from "./db.js";
@@ -13,6 +14,9 @@ import { buildInfo, buildLabel } from "./build.js";
 import { tailscaleSelf } from "./tailscale.js";
 import { Updater } from "./update.js";
 import { AppBuilder } from "./appBuild.js";
+import { ClaudeSwitcher } from "./claudeSwitch.js";
+import { pruneInstalls } from "./claudeInstall.js";
+import { claudeChoice } from "./sdk.js";
 import { clearPidFile, writePidFile } from "./pidfile.js";
 import { machineResources } from "./resources.js";
 import { webAddresses } from "./addresses.js";
@@ -65,6 +69,7 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
     machineId: config.machineId, name: config.name, ...platformInfo(),
     daemonVersion: buildLabel(build), build, protocolVersion: PROTOCOL_VERSION,
     claudeCodeVersion: detectClaudeVersion(),
+    claudeInstall: claudeInstallInfo(),
     tailnetName: ts?.dnsName, tailnetIps: ts?.ips,
     // `transcribes` is read here and not per call: a client that knows this
     // machine has no service set up never uploads an utterance to it (#180).
@@ -87,16 +92,22 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   const updater = new Updater(config.machineId, log);
   // One app build per machine, shared with every listener, as the updater is.
   const builder = new AppBuilder(config.machineId, log);
+  const claude = new ClaudeSwitcher(config.machineId, log);
+  // Each install is about 223 MB, so keep the one in force and throw the rest
+  // away. Here, at start, because nothing holds any of them yet: pruning the
+  // directory a running process imported from is a way to find out what a
+  // half-loaded module does.
+  pruneInstalls([claudeChoice.requested], log);
   /** The listeners now open. `bind` moves them; `close` ends them. */
   let listeners: { close(): void; port: number }[] = [];
   const listen = async (bind: string, engine: Engine) => {
     const h = hostFor(bind);
     const opened: { close(): void; port: number }[] = [];
-    opened.push(await startServer({ config, engine, updater, builder, host: h, log }));
+    opened.push(await startServer({ config, engine, updater, builder, claude, host: h, log }));
     // Also listen on loopback so the local TUI never needs credentials. A
     // wildcard listener already covers it, and a second bind would fail.
     if (h !== "127.0.0.1" && h !== "0.0.0.0") {
-      try { opened.push(await startServer({ config: { ...config }, engine, updater, builder, host: "127.0.0.1", log })); }
+      try { opened.push(await startServer({ config: { ...config }, engine, updater, builder, claude, host: "127.0.0.1", log })); }
       catch (e: any) { log(`loopback listener unavailable: ${e.message}`); }
     }
     return { host: h, opened };
@@ -199,25 +210,20 @@ export function installStopHandlers(d: DaemonHandle): void {
 }
 
 /**
- * The Claude Code covey runs, which is the one the Agent SDK ships.
+ * The Claude Code covey runs — the one `sdk.ts` actually loaded.
  *
- * Not `claude --version` from the PATH. The SDK spawns its own binary unless
- * a caller sets `pathToClaudeCodeExecutable`, and covey never does, so a
- * machine whose own install is newer would have reported a version that runs
- * nothing here — and, worse, a version that disagrees with the one every
- * session reports, which made the engine re-read the model list on the first
- * turn after every start. The SDK's manifest names the binary it carries:
- * SDK `0.3.N` ships Claude Code `2.1.N`.
+ * Never `claude --version` from the PATH on its own. The SDK spawns its own
+ * binary unless a caller sets `pathToClaudeCodeExecutable`, so a machine whose
+ * own install is newer used to report a version that ran nothing here — and,
+ * worse, a version that disagrees with the one every session reports, which
+ * made the engine re-read the model list on the first turn after every start.
+ *
+ * Now a reader may choose, so the number has to come from the choice rather
+ * than from either place in particular. `claudeInstallInfo` resolves it once;
+ * this reports its answer, and the two can no longer disagree.
  */
 function detectClaudeVersion(): string | undefined {
-  try {
-    const sdk = dirname(fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk")));
-    const manifest = JSON.parse(readFileSync(join(sdk, "manifest.json"), "utf8")) as { version?: string };
-    if (manifest.version) return manifest.version;
-  } catch { /* fall through to the install on the PATH */ }
-  // Better than nothing on a build where the manifest moved: it is at least a
-  // Claude Code on this machine.
-  try { return execFileSync("claude", ["--version"], { timeout: 5000 }).toString().trim().split(/\s+/)[0]; } catch { return undefined; }
+  return claudeInstallInfo().version ?? undefined;
 }
 
 // Direct execution: `node dist/main.js [--port N] [--bind tailnet|loopback|all|ip]`

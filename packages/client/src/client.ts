@@ -2,7 +2,8 @@ import {
   PROTOCOL_VERSION, USER_CLIENT, isPush, type RpcMethods, type RpcMethodName, type WireFromDaemon, type PushMessage,
   type MachineInfo, type ShellSnapshot, type ShellEvent, type ThreadEvent, type SavedMachine, type CommandEnvelope, type Command,
   type TerminalEvent, type TerminalId,
-  type AppBuildRun, type MachineUpdate,
+  type AppBuildRun,
+  type ClaudeInstallRun, type MachineUpdate,
 } from "@covey/protocol";
 import { uuid } from "./uuid.js";
 
@@ -67,6 +68,15 @@ export interface ClientEvents {
    * the row — it is the only one that can install what comes out.
    */
   machineAppBuild?(run: AppBuildRun): void;
+  /**
+   * Progress of a Claude Code change on that machine.
+   *
+   * Optional for `machineAppBuild`'s reason: a broadcast arrives whether a
+   * client asked or not, and one with nowhere to paint it has no member. It
+   * ends in a restart, so the last thing a client hears on this socket is
+   * often the run that says `succeeded`.
+   */
+  machineClaudeInstall?(run: ClaudeInstallRun): void;
 }
 
 const BACKOFF = [500, 1000, 2000, 4000, 8000];
@@ -542,6 +552,9 @@ export class MachineClient {
         return;
       case "machine.appBuild":
         this.ev.machineAppBuild?.(m.run);
+        return;
+      case "machine.claudeInstall":
+        this.ev.machineClaudeInstall?.(m.run);
         return;
     }
   }

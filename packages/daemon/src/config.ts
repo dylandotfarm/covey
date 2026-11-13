@@ -76,6 +76,8 @@ export interface DaemonConfig {
   archiveOnMerge?: boolean | null;
   /** Which fleet this machine belongs to; null = the default fleet. */
   fleet?: string | null;
+  /** Which Claude Code the sessions run; null = the one the lockfile pins. */
+  claudeVersion?: string | null;
   /** The machines the web client dials besides this one. The TUI sets it. */
   peers?: PeerMachine[];
 }
@@ -165,7 +167,7 @@ function readConfigFile(): Record<string, unknown> {
 }
 
 /** Settings written before these fields existed simply read as "no opinion". */
-export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled" | "archiveOnMerge" | "fleet" | "bind">>): MachineSettings {
+export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" | "defaultPermissionMode" | "defaultStreaming" | "sessionIdleMinutes" | "maxLiveSessions" | "webEnabled" | "archiveOnMerge" | "fleet" | "claudeVersion" | "bind">>): MachineSettings {
   return {
     defaultModel: cfg.defaultModel ?? null,
     defaultPermissionMode: cfg.defaultPermissionMode ?? null,
@@ -194,8 +196,28 @@ export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" |
     // moved back, however many times a reader pressed the row that says it
     // moved. A fleet is set from the machine's control panel, like its name.
     fleet: fleetSetting(cfg.fleet),
+    // `null` is "the version the lockfile pins", which is most machines, so
+    // the key is written down only when a reader has chosen something else.
+    claudeVersion: typeof cfg.claudeVersion === "string" && cfg.claudeVersion ? cfg.claudeVersion : null,
     ...(cfg.bind ? { bind: cfg.bind } : {}),
   };
+}
+
+/**
+ * Which Claude Code this machine runs, read straight off the file.
+ *
+ * Its own reader because `sdk.ts` needs the answer *synchronously*, before it
+ * imports the SDK, and before anything has built a `DaemonConfig`.
+ *
+ * No environment escape, unlike the session limits beside it, and for
+ * `fleet`'s reason: `null` is a real value here — it is how "the version the
+ * lockfile pins" is written — so `cfg.x ?? process.env.X` would mean a machine
+ * started with one named in its environment could never be put back on the
+ * lockfile's, however many times a reader pressed the row that says it moved.
+ */
+export function claudeVersionSetting(): string | null {
+  const v = readConfigFile()["claudeVersion"];
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : null;
 }
 
 /** A whole number from the environment, or null when it is absent or not one. */

@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from "./sdk.js";
 import { MIN_CHAIN, type TimelineItem, type ToolCallItem } from "@covey/protocol";
 
 /**

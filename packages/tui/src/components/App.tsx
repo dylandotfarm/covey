@@ -2,8 +2,8 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { DEFAULT_FLEET, budgetValue, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { DEFAULT_FLEET, budgetValue, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { localProjectError, localProjectId } from "@covey/protocol";
 import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
@@ -1011,6 +1011,11 @@ export function App({ store }: { store: Store }) {
       // where the reasoning fits.
       { id: "live", label: `Live sessions: ${liveValueLabel(settings.maxLiveSessions, budget)}`, hint: sessionMemoryLabel(settings.maxLiveSessions ?? budget?.liveLimit ?? 0, budget) || "the memory ceiling" },
       { id: "idle", label: `Release when idle: ${idleValueLabel(settings.sessionIdleMinutes, budget)}`, hint: "resumes from disk" },
+      // Which Claude Code the sessions run — not the `claude` on this
+      // machine's PATH, which is the mistake this row exists to undo. The
+      // hint names a fallback when there is one, because a reader who picked
+      // a version and silently got the old one has to be told (#132).
+      { id: "claude", label: `Claude Code: ${claudeValueLabel(info.claudeInstall)}`, hint: claudeNotice(info.claudeInstall) ?? "new models ship with new versions" },
     ];
     if (m.update) opts.push({ id: "log", label: "Show the last update's log", hint: m.update.state });
     // The client's own settings, from the place a reader looks for settings.
@@ -1087,10 +1092,65 @@ export function App({ store }: { store: Store }) {
             ? "keeps an idle session until the live-session limit releases it"
             : `releases an idle session after ${idleValueLabel(n, budget)}`}`);
         });
+        case "claude": return void pickClaude(machineKey!, info);
         case "log": { store.setOverlay({ kind: "update", machine: machineKey! }); return; }
         case "settings": return settingsPanel();
       }
     });
+  };
+
+  /**
+   * The Claude Code picker for one machine.
+   *
+   * The list is read when the row is pressed and never on a timer: a machine
+   * whose control panel nobody opens must not poll npm. That read is a 1.2 MB
+   * document over the network, so the picker opens on what the machine already
+   * said and fills in when the answer lands — a reader must not watch a blank
+   * screen to find out what they are running.
+   *
+   * Picking one restarts the daemon, so it is confirmed the way an update is,
+   * in the same two rows and the same words: it ends every turn that machine is
+   * running, and the reader may well be in one of them.
+   */
+  const pickClaude = async (machineKey: string, info: MachineInfo) => {
+    const open = (install: ClaudeInstall | undefined, loading: boolean) => {
+      const note = install ? claudeListNote(install) : null;
+      const rows = claudeChoices(install);
+      openPick(
+        `Claude Code on ${info.name}${loading ? " — reading the published versions…" : note ? ` — ${note}` : ""}`,
+        rows.map((c) => ({
+          id: c.id,
+          label: c.label,
+          // `current` replaces the hint, as the session-limit pickers do. A row
+          // that cannot be picked keeps its reason there instead, and is shown
+          // rather than hidden: a reader looking for it has to be told it is
+          // not there, not left wondering where it went.
+          hint: c.current ? "current" : c.pickable ? c.hint : c.hint,
+        })),
+        (id) => {
+          const row = rows.find((c) => c.id === id);
+          // Nothing to do, and nothing to say: the hint already says why.
+          if (!row || !row.pickable || row.current) { store.setOverlay(null); return; }
+          const busy = runningTurns(machineKey);
+          openPick(`Run ${row.label} on ${info.name}?`, [
+            { id: "no", label: "Cancel", hint: "" },
+            {
+              id: "yes", label: "Install and restart the daemon",
+              hint: busy ? `${busy} running turn${busy === 1 ? "" : "s"} will be interrupted` : "threads keep their history",
+            },
+          ], (go) => {
+            store.setOverlay(null);
+            if (go === "yes") void store.setClaudeVersion(machineKey, claudeValue(id));
+          });
+        },
+      );
+    };
+    // What the machine already told us, now; the registry read fills the rest.
+    open(info.claudeInstall, true);
+    const full = await store.claudeVersions(machineKey);
+    // Repaint only if the reader is still on this picker: a slow read must not
+    // reopen a list they have walked away from.
+    if (full && store.state.overlay?.kind === "pick") open(full, false);
   };
 
   /**

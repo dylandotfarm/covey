@@ -3,7 +3,7 @@ import { readFile, stat } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from "./sdk.js";
 
 const run = promisify(execFile);
 

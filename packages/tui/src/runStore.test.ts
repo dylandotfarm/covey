@@ -110,7 +110,7 @@ function machine(key: string, o: { name: string; os: string; cores: number; tool
   return {
     key, saved: { name: o.name, url: key }, conn: "connected", error: null, info,
     projects: new Map([[project.id, project]]), threads: new Map(), runs: new Map(),
-    update: null, restarting: false,
+    update: null, claudeInstall: null, restarting: false,
   };
 }
 

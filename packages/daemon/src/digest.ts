@@ -1,4 +1,4 @@
-import { query } from "@anthropic-ai/claude-agent-sdk";
+import { query } from "./sdk.js";
 
 /**
  * One sentence for the last thing the agent said in a turn (#172).

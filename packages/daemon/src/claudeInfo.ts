@@ -1,0 +1,91 @@
+/**
+ * What this machine's Claude Code is, and what else it could be.
+ *
+ * Its own module because both ends need it and neither may import the other:
+ * `main.ts` puts the answer on `MachineInfo`, and `server.ts` answers
+ * `machine.claudeVersions` with it. It is also the one place that may import
+ * both `sdk.ts` — which is what actually loaded — and `claudeInstall.ts` —
+ * which is what is on disk; `claudeInstall.ts` must not import `sdk.ts` back,
+ * or the cycle would close through a top-level await.
+ */
+import { execFileSync } from "node:child_process";
+import { CLAUDE_SYSTEM, type ClaudeInstall, type ClaudeRelease, type ClaudeSource } from "@covey/protocol";
+import { claudeChoice } from "./sdk.js";
+import { lockfileRelease, managedReleases, readRegistry, releaseFor, systemClaude } from "./claudeInstall.js";
+
+/**
+ * Which Claude Code this machine runs and what else it could run.
+ *
+ * The `SessionBudget` shape: `MachineSettings.claudeVersion` is `null` for
+ * "the one the lockfile pins", no client can work out what that resolves to,
+ * so the daemon resolves it and re-sends the answer. `available` is left out —
+ * the registry is read on demand by `machine.claudeVersions`, because a
+ * control panel nobody opens must not make a machine poll npm.
+ */
+export function claudeInstallInfo(): ClaudeInstall {
+  const lockfile = lockfileRelease();
+  const choice = claudeChoice;
+  const managed = managedReleases();
+  // Only probed for the row that offers it: a machine on the lockfile's Claude
+  // Code must not pay for a `which` and a `--version` on every start.
+  const sys = choice.source === "system" ? { path: choice.executable!, version: systemVersionOf(choice.executable!) } : systemClaudeQuietly();
+  const running: ClaudeRelease | null =
+    choice.source === "system" ? (sys ? releaseFor(sys.version, { claude: sys.version }) : null)
+    : choice.source === "managed" ? (managed.find((r) => r.sdk === choice.requested) ?? null)
+    : lockfile;
+  return {
+    version: running?.claude ?? null,
+    source: choice.source,
+    sdk: choice.source === "system" ? null : running?.sdk ?? null,
+    ...(choice.requested !== null && choice.source !== sourceOf(choice.requested) ? { requested: choice.requested } : {}),
+    ...(choice.reason ? { reason: choice.reason } : {}),
+    lockfile,
+    ...(sys ? { system: releaseFor(sys.version, { claude: sys.version }) } : { system: null }),
+    ...(managed.length ? { managed } : {}),
+  };
+}
+
+/** Which source a setting asks for, so a fallback can be told from a match. */
+function sourceOf(requested: string): ClaudeSource {
+  return requested === CLAUDE_SYSTEM ? "system" : "managed";
+}
+
+/** `claude --version` of a known path, for the row that is already using it. */
+function systemVersionOf(path: string): string {
+  try { return execFileSync(path, ["--version"], { timeout: 5000 }).toString().trim().split(/\s+/)[0] ?? ""; } catch { return ""; }
+}
+
+/** The PATH's `claude`, for the row that offers it. Never a reason to fail. */
+function systemClaudeQuietly(): { path: string; version: string } | null {
+  try { return systemClaude(); } catch { return null; }
+}
+
+/**
+ * The registry answer, cached for this long.
+ *
+ * A control panel is opened, shut and opened again while a reader makes up
+ * their mind, and the document is 1.2 MB. `refresh` is the row that says
+ * "check again" and skips the cache.
+ */
+const REGISTRY_TTL_MS = 10 * 60_000;
+let cached: { at: number; releases: ClaudeRelease[]; error?: string } | null = null;
+
+/**
+ * `machine.claudeVersions`: the install, with what the registry offers.
+ *
+ * Read on demand and never on a timer — a machine whose control panel nobody
+ * opens must not poll npm. A read that failed says why and leaves `available`
+ * absent, because an empty list reads as "npm has published nothing" (#132).
+ */
+export async function claudeVersions(opts: { refresh?: boolean } = {}): Promise<ClaudeInstall> {
+  const info = claudeInstallInfo();
+  if (opts.refresh || !cached || Date.now() - cached.at > REGISTRY_TTL_MS) {
+    const got = await readRegistry();
+    cached = { at: Date.now(), releases: got.releases, ...(got.error ? { error: got.error } : {}) };
+  }
+  return {
+    ...info,
+    ...(cached.releases.length ? { available: cached.releases, availableAt: new Date(cached.at).toISOString() } : {}),
+    ...(cached.error ? { availableError: cached.error } : {}),
+  };
+}
