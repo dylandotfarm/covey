@@ -1,7 +1,4 @@
-import { dirname, join } from "node:path";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { appBuild, canBuildApp } from "./apk.js";
 import { PROTOCOL_VERSION, type MachineInfo } from "@covey/protocol";
 import { claudeInstallInfo } from "./claudeInfo.js";
@@ -213,7 +210,6 @@ export function installStopHandlers(d: DaemonHandle): void {
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 }
-
 
 // Direct execution: `node dist/main.js [--port N] [--bind tailnet|loopback|all|ip]`
 if (process.argv[1] && /main\.(ts|js)$/.test(process.argv[1])) {
