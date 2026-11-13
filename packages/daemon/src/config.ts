@@ -196,8 +196,10 @@ export function machineSettings(cfg: Partial<Pick<DaemonConfig, "defaultModel" |
     // moved back, however many times a reader pressed the row that says it
     // moved. A fleet is set from the machine's control panel, like its name.
     fleet: fleetSetting(cfg.fleet),
-    // `null` is "the version the lockfile pins", which is most machines, so
-    // the key is written down only when a reader has chosen something else.
+    // `null` is "the version the lockfile pins". A machine that has never had
+    // the row pressed holds no key at all; one put *back* on the lockfile's
+    // records an explicit `null`, because that is a choice the reader made and
+    // not an absence, and the two read the same way here.
     claudeVersion: typeof cfg.claudeVersion === "string" && cfg.claudeVersion ? cfg.claudeVersion : null,
     ...(cfg.bind ? { bind: cfg.bind } : {}),
   };

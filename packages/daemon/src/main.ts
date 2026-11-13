@@ -65,11 +65,16 @@ export async function runDaemon(opts: RunDaemonOptions = {}): Promise<DaemonHand
   // And whether it could build a new one if a reader asked (#185). A machine
   // that holds no `mobile/` is never offered the row.
   const canBuild = await canBuildApp();
+  // Resolved once and read twice. `claudeCodeVersion` is the same answer under
+  // an older name, and asking separately spawned a `which` and a bun binary's
+  // `--version` twice on every start — which is also what made the comment on
+  // `systemClaude` untrue.
+  const claudeInstall = claudeInstallInfo();
   const machine: MachineInfo = {
     machineId: config.machineId, name: config.name, ...platformInfo(),
     daemonVersion: buildLabel(build), build, protocolVersion: PROTOCOL_VERSION,
-    claudeCodeVersion: detectClaudeVersion(),
-    claudeInstall: claudeInstallInfo(),
+    claudeCodeVersion: claudeInstall.version ?? undefined,
+    claudeInstall,
     tailnetName: ts?.dnsName, tailnetIps: ts?.ips,
     // `transcribes` is read here and not per call: a client that knows this
     // machine has no service set up never uploads an utterance to it (#180).
@@ -209,22 +214,6 @@ export function installStopHandlers(d: DaemonHandle): void {
   process.on("SIGTERM", stop);
 }
 
-/**
- * The Claude Code covey runs — the one `sdk.ts` actually loaded.
- *
- * Never `claude --version` from the PATH on its own. The SDK spawns its own
- * binary unless a caller sets `pathToClaudeCodeExecutable`, so a machine whose
- * own install is newer used to report a version that ran nothing here — and,
- * worse, a version that disagrees with the one every session reports, which
- * made the engine re-read the model list on the first turn after every start.
- *
- * Now a reader may choose, so the number has to come from the choice rather
- * than from either place in particular. `claudeInstallInfo` resolves it once;
- * this reports its answer, and the two can no longer disagree.
- */
-function detectClaudeVersion(): string | undefined {
-  return claudeInstallInfo().version ?? undefined;
-}
 
 // Direct execution: `node dist/main.js [--port N] [--bind tailnet|loopback|all|ip]`
 if (process.argv[1] && /main\.(ts|js)$/.test(process.argv[1])) {

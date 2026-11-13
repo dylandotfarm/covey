@@ -781,15 +781,27 @@
   machine unable to start a session. The setting is written **between verify and
   restart** and never before, or a `claudeVersion` naming a version that failed is a
   machine that falls back on every start with a reason nobody clears. Verifying is
-  loading it and reading its models — never a look for the platform package by path,
-  which lives beside the *real* package inside `.pnpm` and not in the top-level link, so
-  a path check reads a working install as a broken one. Each install is about 223 MB, so
+  loading it and reading its models, and **a version already on disk goes through the
+  same load** (`loadInstalled`): `entryFor` tests that `sdk.mjs` exists and nothing
+  more, so an interrupted install would otherwise be written down as the machine's
+  Claude Code and fall back on every start, with a step record saying it was verified.
+  Never a look for the platform package by path, which lives beside the *real* package
+  inside `.pnpm` and not in the top-level link, so a path check reads a working install
+  as a broken one. Each install is about 223 MB, so
   `pruneInstalls` keeps the one in force and runs at start, when nothing holds any of
   them. The registry is read **on demand** (`machine.claudeVersions`), never on a timer:
   a control panel nobody opens must not make a machine poll npm. The picker's words are
   `client/src/claudeVersions.ts`, pure and node-tested, so a terminal and a phone say the
   same thing; a fallback names the version that went missing *and* the one running,
-  which is #132 again.
+  which is #132 again. `ClaudeInstall.system` is three states and not two — `undefined`
+  is "covey has not looked", which is every start, because only the picker's own
+  `machine.claudeVersions` probes the PATH, and `null` is "covey looked and there is
+  none"; paint the first as the second and the row claims what covey has not earned.
+  The TUI picker opens on what the machine already said and repaints when the registry
+  answers, so its guard is the **overlay's own identity** and never `kind === "pick"`:
+  the confirmation it raises is a pick too, and 15 seconds is long enough for a reader
+  to have pressed one of the two rows that need no registry at all. That repaint is
+  `setOverlay` and not `openPick`, which resets the cursor and the filter under them.
 - The model picker is read from the Claude Code covey runs, not from a list covey ships:
   the daemon asks it (`packages/daemon/src/models.ts`, a query whose prompt never yields —
   no turn, no tokens, about 300 ms) and the answer rides on `MachineInfo.models`. The

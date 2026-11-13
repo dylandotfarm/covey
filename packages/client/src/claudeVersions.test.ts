@@ -55,6 +55,17 @@ test("the machine's own claude is offered, and says what moves it", () => {
   assert.equal(sys.pickable, true);
 });
 
+test("a machine covey has not probed yet is not reported as having no claude", () => {
+  // The daemon does not read the PATH at start, so this is the first paint of
+  // the picker while the registry read is in flight. Saying "no claude here"
+  // there is a claim covey has not earned, and the row is still pickable
+  // because the daemon probes again and refuses by name if there is none.
+  const rows = claudeChoices(install({ system: undefined }), NOW);
+  const sys = rows.find((r) => r.id === "system")!;
+  assert.equal(sys.pickable, true);
+  assert.doesNotMatch(sys.hint, /no `claude`/);
+});
+
 test("a machine with no claude on its PATH is told so, not left guessing", () => {
   const rows = claudeChoices(install({ system: null }), NOW);
   const sys = rows.find((r) => r.id === "system")!;

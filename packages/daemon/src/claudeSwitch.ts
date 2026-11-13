@@ -29,7 +29,7 @@
 import { randomUUID } from "node:crypto";
 import type { ClaudeInstallRun, ClaudeRelease, MachineId, UpdateStep } from "@covey/protocol";
 import { CLAUDE_SYSTEM } from "@covey/protocol";
-import { entryFor, installDir, installSdk, lockfileRelease, manifestVersion, releaseFor, systemClaude, verifyInstall } from "./claudeInstall.js";
+import { entryFor, installDir, installSdk, loadInstalled, lockfileRelease, releaseFor, systemClaude, verifyInstall } from "./claudeInstall.js";
 import { saveMachineSettings } from "./config.js";
 import { scheduleRestart, tail } from "./update.js";
 
@@ -123,7 +123,18 @@ export class ClaudeSwitcher {
       install.status = "skipped";
       install.note = `the \`claude\` at ${sys.path}`;
     } else if (entryFor(version)) {
-      release = releaseFor(version, { claude: manifestVersion(installDir(version)), installed: true });
+      // Already here, so nothing is downloaded — but it is still *loaded*
+      // below, because `entryFor` tests that `sdk.mjs` exists and nothing
+      // more. A half-written directory would otherwise be written down as the
+      // machine's Claude Code and fall back on every start after the restart.
+      try {
+        const loaded = await loadInstalled(version);
+        release = loaded.release;
+        query = loaded.query;
+      } catch (e: any) {
+        install.status = "failed";
+        return this.fail(`the Claude Code ${version} install on this machine is broken: ${e?.message ?? e}`);
+      }
       install.status = "skipped";
       install.note = "already installed on this machine";
     } else {
@@ -155,8 +166,11 @@ export class ClaudeSwitcher {
       verify.note = models ? `offers ${models.length} models: ${models.slice(0, 4).join(", ")}…` : "covey could not read its model list; the install itself loaded";
       verify.status = "ok";
     } else {
+      // The two that covey never loads here: the lockfile's is already running
+      // in this process, and `system` is a binary the reader installed and
+      // covey has only checked the version of.
       verify.status = "skipped";
-      verify.note = version === CLAUDE_SYSTEM ? "a Claude Code the reader installed" : "already loaded by this daemon";
+      verify.note = version === CLAUDE_SYSTEM ? "a Claude Code the reader installed" : "this daemon is already running it";
     }
     u.installed = release;
     this.emit();

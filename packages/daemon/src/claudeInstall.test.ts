@@ -9,7 +9,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CLAUDE_SYSTEM } from "@covey/protocol";
-import { chooseClaude, claudeFromSdk, compareSdk, releaseFor, releasesFrom } from "./claudeInstall.js";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chooseClaude, claudeFromSdk, compareSdk, loadInstalled, releaseFor, releasesFrom } from "./claudeInstall.js";
 
 const nothing = { entryFor: () => null, systemClaude: () => null };
 const everything = {
@@ -101,4 +105,44 @@ test("a release covey only inferred says so, so a client can print the sdk inste
   // Outside the 0.3 line there is nothing to infer, so the label falls back to
   // the one number covey is sure of.
   assert.equal(releaseFor("0.4.0").claude, "0.4.0");
+});
+
+/**
+ * A directory that looks like an install from the outside.
+ *
+ * This is what `entryFor` sees and accepts, and it is why the already-installed
+ * path may not skip the load: an interrupted `pnpm install` or a full disk
+ * leaves exactly this.
+ */
+function halfWritten(sdk: string): string {
+  const home = mkdtempSync(join(tmpdir(), "covey-claude-"));
+  process.env.COVEY_HOME = home;
+  const dir = join(home, "claude", sdk, "node_modules", "@anthropic-ai", "claude-agent-sdk");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "sdk.mjs"), "export const notQuery = 1;\n");
+  return home;
+}
+
+test("a half-written install is refused rather than written down as the machine's Claude Code", async (t) => {
+  const was = process.env.COVEY_HOME;
+  t.after(() => { if (was === undefined) delete process.env.COVEY_HOME; else process.env.COVEY_HOME = was; });
+  halfWritten("0.3.999");
+  // `entryFor` is satisfied — `sdk.mjs` is there — which is the whole point:
+  // the load is the only thing that tells this from a working install.
+  await assert.rejects(() => loadInstalled("0.3.999"), /manifest\.json/);
+});
+
+test("an install whose sdk.mjs exports no query is refused by name", async (t) => {
+  const was = process.env.COVEY_HOME;
+  t.after(() => { if (was === undefined) delete process.env.COVEY_HOME; else process.env.COVEY_HOME = was; });
+  const home = halfWritten("0.3.998");
+  writeFileSync(join(home, "claude", "0.3.998", "node_modules", "@anthropic-ai", "claude-agent-sdk", "manifest.json"), JSON.stringify({ version: "2.1.998" }));
+  await assert.rejects(() => loadInstalled("0.3.998"), /exports no `query`/);
+});
+
+test("a version with no directory at all is refused before anything is loaded", async (t) => {
+  const was = process.env.COVEY_HOME;
+  t.after(() => { if (was === undefined) delete process.env.COVEY_HOME; else process.env.COVEY_HOME = was; });
+  process.env.COVEY_HOME = mkdtempSync(join(tmpdir(), "covey-claude-"));
+  await assert.rejects(() => loadInstalled("0.3.997"), /sdk\.mjs/);
 });

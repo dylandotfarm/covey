@@ -8,10 +8,9 @@
  * which is what is on disk; `claudeInstall.ts` must not import `sdk.ts` back,
  * or the cycle would close through a top-level await.
  */
-import { execFileSync } from "node:child_process";
 import { CLAUDE_SYSTEM, type ClaudeInstall, type ClaudeRelease, type ClaudeSource } from "@covey/protocol";
 import { claudeChoice } from "./sdk.js";
-import { lockfileRelease, managedReleases, readRegistry, releaseFor, systemClaude } from "./claudeInstall.js";
+import { lockfileRelease, managedReleases, readRegistry, systemClaude } from "./claudeInstall.js";
 
 /**
  * Which Claude Code this machine runs and what else it could run.
@@ -22,15 +21,20 @@ import { lockfileRelease, managedReleases, readRegistry, releaseFor, systemClaud
  * the registry is read on demand by `machine.claudeVersions`, because a
  * control panel nobody opens must not make a machine poll npm.
  */
-export function claudeInstallInfo(): ClaudeInstall {
+export function claudeInstallInfo(opts: { probeSystem?: boolean } = {}): ClaudeInstall {
   const lockfile = lockfileRelease();
   const choice = claudeChoice;
   const managed = managedReleases();
-  // Only probed for the row that offers it: a machine on the lockfile's Claude
-  // Code must not pay for a `which` and a `--version` on every start.
-  const sys = choice.source === "system" ? { path: choice.executable!, version: systemVersionOf(choice.executable!) } : systemClaudeQuietly();
+  // Only probed where the answer is needed, which is the claim the comments
+  // here and on `systemClaude` make: a machine on the lockfile's Claude Code
+  // pays for no `which` and no `--version` at start. `probeSystem` is the
+  // picker asking, through `machine.claudeVersions`, and a machine already
+  // running the PATH's `claude` has to read it either way.
+  const sys = choice.source === "system"
+    ? systemClaudeQuietly()
+    : opts.probeSystem ? systemClaudeQuietly() : undefined;
   const running: ClaudeRelease | null =
-    choice.source === "system" ? (sys ? releaseFor(sys.version, { claude: sys.version }) : null)
+    choice.source === "system" ? systemRelease(sys)
     : choice.source === "managed" ? (managed.find((r) => r.sdk === choice.requested) ?? null)
     : lockfile;
   return {
@@ -40,7 +44,10 @@ export function claudeInstallInfo(): ClaudeInstall {
     ...(choice.requested !== null && choice.source !== sourceOf(choice.requested) ? { requested: choice.requested } : {}),
     ...(choice.reason ? { reason: choice.reason } : {}),
     lockfile,
-    ...(sys ? { system: releaseFor(sys.version, { claude: sys.version }) } : { system: null }),
+    // `undefined` is "covey did not look", which is not the same as `null`,
+    // "covey looked and there is none" — a client must not paint the first as
+    // a machine with no `claude`.
+    ...(sys === undefined ? {} : { system: systemRelease(sys) }),
     ...(managed.length ? { managed } : {}),
   };
 }
@@ -50,9 +57,15 @@ function sourceOf(requested: string): ClaudeSource {
   return requested === CLAUDE_SYSTEM ? "system" : "managed";
 }
 
-/** `claude --version` of a known path, for the row that is already using it. */
-function systemVersionOf(path: string): string {
-  try { return execFileSync(path, ["--version"], { timeout: 5000 }).toString().trim().split(/\s+/)[0] ?? ""; } catch { return ""; }
+/**
+ * The PATH's `claude` as a release row.
+ *
+ * `sdk` is empty on purpose: the field is the *Agent SDK* version, and this
+ * install has none that covey put there. Writing the Claude Code version into
+ * it would read as a fact and is not one.
+ */
+function systemRelease(sys: { path: string; version: string } | null | undefined): ClaudeRelease | null {
+  return sys ? { sdk: "", claude: sys.version, exact: true } : null;
 }
 
 /** The PATH's `claude`, for the row that offers it. Never a reason to fail. */
@@ -78,7 +91,9 @@ let cached: { at: number; releases: ClaudeRelease[]; error?: string } | null = n
  * absent, because an empty list reads as "npm has published nothing" (#132).
  */
 export async function claudeVersions(opts: { refresh?: boolean } = {}): Promise<ClaudeInstall> {
-  const info = claudeInstallInfo();
+  // The picker offers "this machine's claude", so this is the caller that
+  // wants the PATH read; the start-up one does not.
+  const info = claudeInstallInfo({ probeSystem: true });
   if (opts.refresh || !cached || Date.now() - cached.at > REGISTRY_TTL_MS) {
     const got = await readRegistry();
     cached = { at: Date.now(), releases: got.releases, ...(got.error ? { error: got.error } : {}) };

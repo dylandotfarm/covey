@@ -289,18 +289,33 @@ export async function installSdk(sdk: string, log: (m: string) => void): Promise
   await run("pnpm", ["install", "--ignore-workspace", "--no-frozen-lockfile"], {
     cwd: dir, timeout: INSTALL_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, env: installEnv(),
   });
+  const loaded = await loadInstalled(sdk);
+  log(`installed Claude Code ${loaded.release.claude} (sdk ${sdk})`);
+  return loaded;
+}
+
+/**
+ * Load a version that is already on disk, and hand back its `query`.
+ *
+ * The check that matters, and the one `sdk.ts` would otherwise make on every
+ * start for ever. Both callers go through it — a fresh install and a version
+ * the reader picked again — because `entryFor` tests that `sdk.mjs` exists and
+ * nothing more: an interrupted `pnpm install` or a full disk leaves a
+ * directory that passes and a daemon that falls back after the restart, with a
+ * step record claiming the install was verified.
+ *
+ * Never a look for the platform package by path. pnpm keeps it beside the
+ * *real* package inside `.pnpm` rather than in the top-level link, so a path
+ * check reads a working install as a broken one and couples covey to a layout
+ * that is not its own.
+ */
+export async function loadInstalled(sdk: string): Promise<{ release: ClaudeRelease; query: typeof import("@anthropic-ai/claude-agent-sdk").query }> {
   const entry = entryFor(sdk);
-  if (!entry) throw new Error(`the install left no ${PACKAGE}/sdk.mjs in ${dir}`);
-  const claude = manifestVersion(dir);
+  if (!entry) throw new Error(`there is no ${PACKAGE}/sdk.mjs in ${installDir(sdk)}`);
+  const claude = manifestVersion(installDir(sdk));
   if (!claude) throw new Error("the install carries no readable manifest.json, so covey cannot say which Claude Code it is");
-  // Loading it is the check that matters, and it is the one `sdk.ts` would
-  // otherwise make on every start for ever. Never a look for the platform
-  // package by path: pnpm keeps it beside the *real* package inside `.pnpm`,
-  // not in the top-level link, so a path check reads a working install as a
-  // broken one and couples covey to a layout that is not its own.
   const mod = (await import(entry)) as { query: typeof import("@anthropic-ai/claude-agent-sdk").query };
   if (typeof mod.query !== "function") throw new Error("the install exports no `query`, so covey cannot start a session with it");
-  log(`installed Claude Code ${claude} (sdk ${sdk})`);
   return { release: releaseFor(sdk, { claude, installed: true }), query: mod.query };
 }
 

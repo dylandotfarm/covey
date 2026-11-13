@@ -135,12 +135,20 @@ export function claudeChoices(install?: ClaudeInstall, now = Date.now()): Claude
 
   // 3. This machine's own. Shown even when there is none, so the reader is
   //    told rather than left looking for it.
+  //
+  //    Three states and not two. `undefined` is "covey has not looked" — the
+  //    machine does not probe the PATH at start, so this is what the first
+  //    paint holds while the registry read is still in flight — and painting
+  //    that as "no claude here" is a claim covey has not earned. It stays
+  //    pickable, because the daemon probes again and refuses by name when
+  //    there is really none. `null` is "covey looked and there is none".
+  const sys = install.system;
   rows.push({
     id: CLAUDE_SYSTEM,
-    label: install.system ? `This machine's claude (${releaseLabel(install.system)})` : "This machine's claude",
-    hint: install.system ? "moves when you run `claude update`" : "no `claude` on this machine's PATH",
+    label: sys ? `This machine's claude (${releaseLabel(sys)})` : "This machine's claude",
+    hint: sys ? "moves when you run `claude update`" : sys === null ? "no `claude` on this machine's PATH" : "",
     current: install.source === "system",
-    pickable: !!install.system,
+    pickable: sys !== null,
   });
 
   // 4. The recent few, newest first, minus whatever is already above.

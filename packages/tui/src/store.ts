@@ -146,8 +146,15 @@ export type Overlay =
   /** `mask` paints a bullet per character: a secret being typed or pasted must
    *  not stand on the screen (#126). */
   | { kind: "input"; title: string; placeholder?: string; initial?: string; mask?: boolean; onSubmit: (v: string) => void; onCancel?: () => void }
-  /** Live progress of `machine.update`; closing it leaves the update running. */
-  | { kind: "update"; machine: string }
+  /**
+   * Live progress of `machine.update`, or of a Claude Code change when
+   * `claude` is set; closing it leaves the work running.
+   *
+   * One kind for both because the two records are the same shape — steps, a
+   * state and an error — and a second view would be the same twenty lines
+   * waiting to drift from these.
+   */
+  | { kind: "update"; machine: string; claude?: boolean }
   /**
    * A picture from `covey show`, painted over the transcript (#163).
    *
