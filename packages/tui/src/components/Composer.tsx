@@ -1,7 +1,9 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { Thread, TimelineItem } from "@covey/protocol";
+import { threadOnTimer, type Thread, type TimelineItem } from "@covey/protocol";
+import { timerLeftLabel } from "@covey/client";
 import { T } from "../theme.js";
+import { TIMER_MARK } from "./Sidebar.js";
 import { fmtMs } from "../lines.js";
 import { caretToVisual, type VisualLine } from "../editor.js";
 import { menuWindowStart, MENU_ROWS, type MenuView } from "../composerMenu.js";
@@ -51,6 +53,12 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   const stats = turnStats(turn);
   const diff = turn?.diff && !turn.diff.unavailable && turn.diff.files.length > 0 ? turn.diff : null;
   const queued = thread?.queuedTurns ?? 0;
+  // `threadOnTimer` and not `thread.timer`: a fired timer stays on the row, and
+  // the row it stays on must not read as a thread still waiting. `Date.now()`
+  // here is what `relTime` already does in the sidebar — the store ticks the
+  // client at `CLOCK_MS`, which is what keeps both true.
+  const timer = thread && threadOnTimer(thread) ? thread.timer! : null;
+  const now = Date.now();
   return (
     /* `100%`, not `width`: see the root box in `App.tsx`. The width prop is
        still what the editor wraps to; this box has to be the width the terminal
@@ -81,6 +89,13 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
             {thread && <Text color={modeColor} bold={bypass}>  {modeLabel}</Text>}
             {thread && !bypass && width > 90 && <Text color={T.faint}> (shift+tab)</Text>}
             {thread?.branch && <Text color={T.subtle}>  ⎇ {thread.branch}</Text>}
+            {/* The timer, in the row the reader is already looking at while
+                they read the conversation. It says what the sidebar's
+                dim row says, for the one thread that is open: this is asleep
+                until covey wakes it, and here is how long. The note is left to
+                the sidebar and the status line — this row is the branch and
+                the machine, and a sentence here would push both off it. */}
+            {timer && <Text color={T.subtle}>  {TIMER_MARK} {timerLeftLabel(timer, now)}</Text>}
             {thread && <Text color={T.faint}>  @{machineName}</Text>}
           </Text>
         </Box>

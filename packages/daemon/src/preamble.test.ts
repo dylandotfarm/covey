@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import type { Options, Query, SessionStore } from "@anthropic-ai/claude-agent-sdk";
 import type { MachineInfo, Project, Thread } from "@covey/protocol";
 import { ClaudeSession, type SessionSink } from "./claude.js";
-import { COVEY_PREAMBLE } from "./plugin.js";
+import { COVEY_LOCAL_PREAMBLE, COVEY_PREAMBLE } from "./plugin.js";
 import { Db } from "./db.js";
 import { Engine } from "./engine.js";
 
@@ -133,11 +133,31 @@ test("a session that gets no skill gets no note either", async (t) => {
  * points at costs nothing until the model loads the skill. So the note names
  * the skill and the command and stops. The budget is the point of the case: a
  * note that grew into a second copy of the loop would drift from the first.
+ *
+ * It was 1200 until the timer took four lines of it. The budget moved
+ * rather than the rule: what grew is one more thing the session has to know
+ * *before* it decides to read the skill, which is what this note is for, and
+ * not a second account of anything the skill already says.
  */
 test("the note points at the skill, and stays short enough to ride on every turn", () => {
   assert.match(COVEY_PREAMBLE, /covey:covey/, "the note never names the skill the session must load");
   assert.match(COVEY_PREAMBLE, /`covey` command/, "the note never names the command the skill is driven with");
-  assert.ok(COVEY_PREAMBLE.length < 1200, `the note is ${COVEY_PREAMBLE.length} characters; keep it a pointer to the skill`);
+  assert.ok(COVEY_PREAMBLE.length < 1400, `the note is ${COVEY_PREAMBLE.length} characters; keep it a pointer to the skill`);
+});
+
+/**
+ * The timer, in the note rather than only in the skill.
+ *
+ * The moment a session needs it is the moment it is about to end a turn with a
+ * build still running, and a model that has not loaded the skill does not know
+ * the command exists — so it writes `sleep 600`, or polls, which is the turn
+ * spent and the thread asleep for ever after. Both halves are here: the command
+ * to run, and that waiting it out inside the turn is not the way.
+ */
+test("the note tells a session how a turn ends while work it started runs on", () => {
+  assert.match(COVEY_PREAMBLE, /covey timer/);
+  assert.match(COVEY_PREAMBLE, /Never `sleep` and never poll/);
+  assert.match(COVEY_LOCAL_PREAMBLE, /covey timer/, "a local project has no loop, and this is the only thing that wakes a thread of one");
 });
 
 /**

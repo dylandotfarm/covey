@@ -17,7 +17,7 @@
  *
  * Pure and node-tested, like `timelineRows` and for the same reason.
  */
-import { threadIsFinished, type Thread } from "@covey/protocol";
+import { threadIsFinished, threadOnTimer, type Thread } from "@covey/protocol";
 
 /**
  * The mark a row carries once this has fired, and the three things a reader
@@ -85,6 +85,13 @@ export function threadNews(prev: Thread, next: Thread): ThreadNews | null {
   // Nothing for the reader to do, and silence would be worse: a background
   // thread that stops with no word reads as stalled. So the review is reported
   // and marks nothing — the mark means "yours again", and it is not.
-  if (turnEnded) return { mark: null, lead: "under review", wants: false };
+  //
+  // A timer is the same case under another name: the thread ended its
+  // turn on purpose with work running somewhere else, and covey holds the only
+  // thing that will wake it. It earns no bell and no notification for exactly
+  // the review's reason — there is nothing the reader has to do — and it is
+  // named rather than passed over, because "under review" about a thread with
+  // no pull request is covey saying a thing that is not true.
+  if (turnEnded) return { mark: null, lead: threadOnTimer(next) ? "waiting on a timer" : "under review", wants: false };
   return null;
 }

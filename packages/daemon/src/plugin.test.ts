@@ -122,3 +122,30 @@ test("the skill and the local note both name the command that reaches another ma
   assert.match(skill, /It reads and never writes/, "a reader has to be told it sends nothing");
   assert.match(COVEY_LOCAL_PREAMBLE, /covey threads/, "a local project is where this matters most");
 });
+
+/**
+ * The timer. The three texts that decide whether an agent ever reaches
+ * for it all have to name it: the description, which is the whole of what a
+ * plugin puts in a session's context; the note every thread reads before its
+ * first turn; and the skill, which holds the rules.
+ *
+ * The rule that cannot be left to the skill alone is that a timer fires once.
+ * An agent that reads its timer turn, finds the build still running and stops
+ * the turn without setting another is a thread nothing will wake again — and
+ * `covey timer` is the one command here whose whole point is that the turn
+ * ends.
+ */
+test("the skill names the timer, and the one rule that a thread cannot recover from", () => {
+  const root = sourceRoot(dirname(fileURLToPath(import.meta.url)))!;
+  const skill = readFileSync(join(root, "plugin", "skills", "covey", "SKILL.md"), "utf8");
+  const description = /^description: (.+)$/m.exec(skill)?.[1] ?? "";
+  assert.match(description, /covey timer/, "the description never names the command");
+  assert.match(skill, /^## Wake yourself later: `covey timer`$/m);
+  assert.match(skill, /A timer fires once/);
+  assert.match(skill, /One minute at the shortest, six hours at the longest/);
+  assert.match(skill, /covey timer stop/);
+  // The command works in a local project, where there is no loop at all, so
+  // that section names it too.
+  assert.match(COVEY_LOCAL_PREAMBLE, /covey timer/);
+  assert.match(skill, /`covey show`, `covey env`, `covey timer` and `covey threads`/);
+});

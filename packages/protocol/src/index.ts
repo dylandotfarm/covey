@@ -957,6 +957,13 @@ export interface Thread {
   pullRequest?: ThreadPullRequest | null;
   watch?: PullRequestWatch | null;
   /**
+   * The timer this thread set on itself, or absent when none runs. The
+   * daemon that holds the thread fires it, so a restart resumes it from the
+   * row and nothing is re-armed. Absent on every thread written before timers
+   * existed, which reads as no timer.
+   */
+  timer?: ThreadTimer | null;
+  /**
    * Set on a review thread: the pull request it reviews, and the thread that
    * asked. Absent on every other thread, and on every thread written before
    * the automated review existed.
@@ -1046,12 +1053,96 @@ export function threadReviewing(t: Thread): number {
  * review ran sent the reader to a thread with nothing to do in it. The mark of
  * the review (`threadReviewing`) is what the row carries instead.
  *
+ * A timer is the same case under another name. A thread that set one
+ * stopped its turn on purpose, with work still running somewhere else and
+ * covey holding the only thing that will wake it. It is no more the reader's
+ * again than a thread under review is.
+ *
  * What a person has to act on is nearer than this and is asked first:
  * `threadNeedsPerson` holds an error and an approval, and a reviewer that is
  * blocked is painted whatever this says.
  */
 export function threadIsFinished(t: Thread): boolean {
-  return t.latestTurn?.state === "completed" && threadReviewing(t) === 0;
+  return t.latestTurn?.state === "completed" && threadReviewing(t) === 0 && !threadOnTimer(t);
+}
+
+/**
+ * The shortest and the longest a timer may run.
+ *
+ * A minute at the bottom, because anything less is a `sleep` in the turn the
+ * agent is already running and costs a whole session to say nothing. Six hours
+ * at the top, because a timer is covey waking an agent and not a cron: work
+ * that needs a longer wait needs a person to come back to it.
+ */
+export const TIMER_MIN_MS = 60_000;
+export const TIMER_MAX_MS = 6 * 3_600_000;
+
+/**
+ * The timer a thread set on itself.
+ *
+ * An agent that starts work it cannot watch — a build, a deploy, a test run on
+ * another machine — has to be woken to look at it again, and the ways it had
+ * of arranging that were all guesses: a watcher on the wrong process, a poll
+ * inside the turn that burns the turn, or a background task whose end is not
+ * the end of the work. So it asks covey instead: one time, one line saying
+ * what it waits for, and a turn when the time is up.
+ *
+ * One timer per thread. A second `thread.timer` replaces the first, because a
+ * thread waiting on two things at once is waiting on the later of them and
+ * there is nothing a reader could read in a list of them.
+ */
+export interface ThreadTimer {
+  /**
+   * What the thread said it waits for, in one line, or null when it said
+   * nothing. It is for the reader: the row says a timer runs, and this says
+   * why, which is the difference between a thread that is stuck and a thread
+   * that is waiting on a deploy.
+   */
+  note: string | null;
+  /**
+   * How long the timer was set for, in milliseconds.
+   *
+   * A length and never an interval. A timer fires once, which is the rule the
+   * whole feature rests on, and a name that read as "every ten minutes" would
+   * quietly say the opposite of it.
+   */
+  lengthMs: number;
+  setAt: string;
+  dueAt: string;
+  /**
+   * When covey fired it, or null while it waits.
+   *
+   * A fired timer stays on the row rather than going. It is what lets the next
+   * timer say how many there have been in a row, and what lets `covey timer`
+   * answer "the last one fired four minutes ago" instead of "there is no
+   * timer" to an agent that is reading the turn the timer sent it.
+   */
+  firedAt: string | null;
+  /**
+   * How many timers this thread has set in an unbroken chain. Each timer set
+   * while the row still holds the one before it adds one; `covey timer stop`
+   * and `/clear` break the chain.
+   *
+   * Covey bounds nothing by it — a four-hour build is a four-hour build — but
+   * the turn it sends names the count, so an agent that has waited eleven
+   * times in a row for work that was never going to finish can see that it
+   * has.
+   */
+  round: number;
+}
+
+/**
+ * True when this thread is waiting on a timer and nothing else.
+ *
+ * The one copy of the decision every client paints: the TUI dims the row, the
+ * page and the app take the green dot off it, and all three say so beside the
+ * title. A thread that is *working* carries no such mark however its timer
+ * stands — the timer is cleared when it fires, so this is near enough always
+ * an idle thread, and the test is here rather than at three call sites so that
+ * the one exception reads the same everywhere.
+ */
+export function threadOnTimer(t: Thread): boolean {
+  return !!t.timer && !t.timer.firedAt && !t.archivedAt && !threadIsBusy(t);
 }
 
 /** The issue a thread took. The number is the link; the rest is for the reader. */
@@ -2475,6 +2566,16 @@ export type Command =
    * own; this is for a pull request opened by hand.
    */
   | { type: "thread.watch"; threadId: ThreadId; number: number | null; maxRounds?: number; merge?: MergePolicy; mergeMethod?: MergeMethod }
+  /**
+   * Set the timer that wakes this thread, or clear it with `null`.
+   *
+   * `ms` is between `TIMER_MIN_MS` and `TIMER_MAX_MS`; the daemon refuses
+   * anything else by name rather than clamping it, because a timer silently
+   * moved is a timer the agent will wait the wrong length for. A second set
+   * replaces the first. `note` is one line for the reader saying what the
+   * thread waits for.
+   */
+  | { type: "thread.timer"; threadId: ThreadId; ms: number | null; note?: string | null }
   /**
    * Change who merges, on a thread whose watch runs. A person who has looked
    * at the change and wants it landed switches the thread to `auto`; the
