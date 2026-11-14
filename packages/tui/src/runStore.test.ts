@@ -480,7 +480,7 @@ test("sidebarCells gives one line to a run row and one to each member", async ()
   const { store } = twoMachines();
   await runOf(store, "44 45");
   const rows = sidebarRows(store.state as AppState);
-  const cells = sidebarCells(rows, 0, 40);
+  const cells = sidebarCells(rows);
   const painted = cells.filter((c) => c.kind === "row").map((c) => (c as any).index);
   assert.deepEqual(painted, rows.map((_, i) => i));
 });

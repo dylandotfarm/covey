@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { archiveKey, fleetMachines, fleetRowKey, machinesKey, poolMachines, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
+import { archiveKey, fleetMachines, fleetRowKey, machinesKey, poolMachines, projectsArchiveKey, runKey, threadGroupKey, type AppState, type SidebarRow } from "../store.js";
 import { DEFAULT_FLEET } from "@covey/client";
 import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
@@ -63,7 +63,9 @@ function headerRoom(width: number): number { return width - 10; }
  */
 function headerCount(rows: SidebarRow[], state: AppState): string {
   let p = 0, f = 0;
-  for (const r of rows) { if (r.kind === "project") p++; else if (r.kind === "fleet") f++; }
+  // Archived projects are not counted. The number says how long the list the
+  // reader reads is, and archiving is how they made it shorter.
+  for (const r of rows) { if (r.kind === "project" && !r.archived) p++; else if (r.kind === "fleet") f++; }
   const m = state.order.length;
   const machines = `${m} machine${m === 1 ? "" : "s"}`;
   // With fleets, the projects are counted on every fleet row already, and
@@ -236,8 +238,35 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
         </Box>
       );
     }
-    case "empty":
-      return <Box paddingLeft={headIndent(row.depth)} height={1} backgroundColor={bg}><Text color={T.subtle} italic>no projects — press a</Text></Box>;
+    case "archivedProjects": {
+      // A heading of the fleet, beside MACHINES: the projects the reader put
+      // away. Painted like that section, because it is one — a fold at the
+      // foot of the fleet holding rows that are not the work in hand.
+      const open = state.expanded[projectsArchiveKey(row.fleet ?? DEFAULT_FLEET)] ?? false;
+      const { busy = false, waiting = false, count = 0 } = row;
+      // Furled, the fold still says that something inside is working or waits
+      // on a person: archiving a project stops none of its threads.
+      const agg = !open && (waiting || busy)
+        ? <Text color={waiting ? T.awaiting : T.working}>●</Text>
+        : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
+      const meta = String(count);
+      const indent = headIndent(row.depth);
+      return (
+        <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
+          {agg}
+          <Text color={T.muted} bold> {truncate("ARCHIVED", width - indent - 5 - meta.length)}</Text>
+          <Text color={T.faint}>  {meta}</Text>
+        </Box>
+      );
+    }
+    case "empty": {
+      // "Nothing here" and "nothing to work in" are different sentences, and
+      // the row above an `ARCHIVED 3` is only true of the second. The count
+      // rides on the row so this needs no second walk of the tree.
+      const indent = headIndent(row.depth);
+      const words = row.count ? "projects archived — press a" : "no projects — press a";
+      return <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}><Text color={T.subtle} italic>{truncate(words, width - indent - 1)}</Text></Box>;
+    }
     case "project": {
       const open = state.expanded[row.groupKey!] ?? true;
       // Every machine in the pool answers the three questions: a fold may

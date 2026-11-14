@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Project, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { DEFAULT_FLEET, budgetValue, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { localProjectError, localProjectId } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
+import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, projectsArchiveKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth, type Line } from "../lines.js";
 import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
@@ -26,7 +26,7 @@ const OPEN_GESTURE = openGesture(process.platform, HYPERLINKS);
  */
 const CELL_SIZE_DELAY_MS = 250;
 import { parseMouse, wheelDelta, copyToClipboard, countClick, type ClickRun, type MouseEvent } from "../mouse.js";
-import { sidebarCells, rowAtScreenRow, cursorIndex } from "../sidebar.js";
+import { sidebarCells, sidebarTop, sidebarWindow, rowAtScreenRow, cursorIndex } from "../sidebar.js";
 import { firstUnmet, parseTaskList, withIssueTitles } from "../run.js";
 import { buildLine, buildSkew } from "../build.js";
 import { Sidebar } from "./Sidebar.js";
@@ -176,6 +176,17 @@ export function App({ store }: { store: Store }) {
   const [cursorKey, setCursorKey] = useState("");
   /** The index that key was on, for when the row it names goes away. */
   const lastCursor = useRef(0);
+  /**
+   * The first line of the sidebar on screen: the reader's own window over the
+   * tree.
+   *
+   * The sidebar used to have no window but the cursor — it centred the list on
+   * whatever the cursor was on — so a click re-centred the tree under the hand
+   * that clicked it, and the wheel could not touch it at all, because moving
+   * the cursor opens the thread it lands on. This is the window, and the
+   * cursor pulls it only when the cursor itself moves (`sidebarTop`).
+   */
+  const [sidebarTopLine, setSidebarTopLine] = useState(0);
   const [ovCursor, setOvCursor] = useState(0);
   const [ovFilter, paintFilter] = useState("");
   /**
@@ -250,7 +261,13 @@ export function App({ store }: { store: Store }) {
   const sidebarVisible = !state.sidebarCollapsed && size.cols >= 70;
   // Hoisted out of Sidebar for the same reason the transcript's lines are:
   // the click hit test and the painter have to agree on which row is where.
-  const cells = useMemo(() => sidebarCells(rows, cursor, Math.max(0, size.rows - 2)), [rows, cursor, size.rows]);
+  const sidebarH = Math.max(0, size.rows - 2);
+  const allCells = useMemo(() => sidebarCells(rows), [rows]);
+  // Clamped here and nowhere else: the list shrinks under a window the reader
+  // left at the bottom — a project folds, a thread is archived — and a window
+  // past the end would paint nothing at all.
+  const cellTop = sidebarTop(allCells, cursor, sidebarH, sidebarTopLine, false);
+  const cells = useMemo(() => sidebarWindow(allCells, cellTop, sidebarH), [allCells, cellTop, sidebarH]);
   const mainW = size.cols - (sidebarVisible ? SIDEBAR_W : 0);
   const pending = store.pendingRequest();
   // Wrap here rather than in Composer: the box has to be sized to the wrapped
@@ -377,6 +394,23 @@ export function App({ store }: { store: Store }) {
   const machineName = state.view ? (state.machines.get(state.view.machine)?.info?.name ?? "") : "";
 
   useEffect(() => { lastCursor.current = cursor; }, [cursor]);
+  /**
+   * The cursor pulls the window to itself, and only when the cursor moves.
+   *
+   * `cursorKey` is the dependency and the index is not, on purpose. The index
+   * changes whenever the tree re-sorts — a turn on any machine moves a thread
+   * to the top of its project — and a window that followed that would drag the
+   * screen back to the cursor while the reader was reading somewhere else,
+   * which is #114 in the other pane. The reader's own scroll is clamped at
+   * paint time instead.
+   *
+   * The window usually needs no move, because the row is already on screen:
+   * `sidebarTop` then returns the number it was given and React paints
+   * nothing. That is what makes a click cost no scroll.
+   */
+  useEffect(() => {
+    setSidebarTopLine((top) => sidebarTop(allCells, cursor, sidebarH, top, true));
+  }, [cursorKey, sidebarH]);
   // The key has to name a row that exists. When the row it named has gone,
   // `cursorIndex` has already fallen back to the nearest surviving one; write
   // that row's key back, or the cursor is an index again until the next move.
@@ -886,10 +920,18 @@ export function App({ store }: { store: Store }) {
       const srcPool = srcProject ? projectPool(srcProject) : null;
       const same = srcPool ? projects.filter((p) => projectPool(p) === srcPool) : [];
       const kin = srcProject?.repositoryIdentity ? projects.filter((p) => !same.includes(p) && p.repositoryIdentity === srcProject.repositoryIdentity) : [];
+      // A project the reader put away is still a destination — they may be
+      // naming exactly that one — but the row says so, the way `kin` names the
+      // base it works from. A move is the second door into a project and the
+      // only one where the reader cannot otherwise see the state they are
+      // choosing: without this the thread lands inside a furled section, and
+      // the section's dot lights only for work that is running or waiting, so
+      // an idle thread goes off the screen with nothing said.
+      const hintFor = (p: Project, hint: string) => p.archivedAt ? (hint ? `archived · ${hint}` : "archived") : hint;
       const opts: PickOption[] = [
-        ...same.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: "same repo ✓" })),
-        ...kin.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: `same repo · from ${p.baseBranch ?? "the default branch"}` })),
-        ...projects.filter((p) => !same.includes(p) && !kin.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: p.workspaceRoot })),
+        ...same.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: hintFor(p, "same repo ✓") })),
+        ...kin.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: hintFor(p, `same repo · from ${p.baseBranch ?? "the default branch"}`) })),
+        ...projects.filter((p) => !same.includes(p) && !kin.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: hintFor(p, p.workspaceRoot) })),
         ...(same.length === 0 && srcProject?.repositoryIdentity ? [{ id: "clone", label: `Clone ${srcProject.repositoryIdentity} there`, hint: m.info?.projectsDir ?? "" }] : []),
         // A local project has nothing to clone, so the destination makes the
         // directory. The id is the same: the daemon reads the export and
@@ -898,8 +940,17 @@ export function App({ store }: { store: Store }) {
       ];
       openPick(`Destination project on ${m.info!.name}`, opts, (pid) => {
         store.setOverlay(null);
-        if (pid === "clone") void store.moveThread(sel, { machine: mk });
-        else void store.moveThread(sel, { machine: mk, projectId: pid.slice(2) });
+        if (pid === "clone") { void store.moveThread(sel, { machine: mk }); return; }
+        const projectId = pid.slice(2);
+        void (async () => {
+          // The same rule `n` keeps on the project row: covey never puts work
+          // inside a fold the reader is not in. Awaited rather than fired off
+          // beside the move, so the notice the reader is left with is the
+          // move's own answer and not the unarchive's.
+          const g = groupOfProject(state, mk, projectId);
+          if (g?.archived) await store.archiveProject(g.members, false);
+          await store.moveThread(sel, { machine: mk, projectId });
+        })();
       });
     });
   };
@@ -1768,6 +1819,7 @@ export function App({ store }: { store: Store }) {
         return store.setOverlay({ kind: "run", machine: row.machine, runId: row.run!.id, marked: new Set(), busy: null });
       }
       case "archived": return store.toggleExpanded(archiveKey(row.groupKey!), false);
+      case "archivedProjects": return store.toggleExpanded(projectsArchiveKey(row.fleet ?? DEFAULT_FLEET), false);
       case "machine": return machinePanel(row.machine);
       case "fleet": return fleetPanel(row.fleet!);
       case "empty": return addProject(row.fleet);
@@ -2136,20 +2188,34 @@ export function App({ store }: { store: Store }) {
       // before any of that.
       const delta = wheelDelta(ev, Math.floor(transcriptH / 2));
       if (delta === 0) return;
-      // Where the pointer is does not choose the target: a scroll anywhere in
-      // the terminal scrolls the conversation that is open. Scrolling is how
-      // you move inside what you are reading, and it must never move you
-      // between things to read.
+      // The sidebar has a window of its own, so a notch over it moves that
+      // window and nothing else. The cursor stays where it is: the cursor
+      // opens the thread it lands on, and a scroll must never change what is
+      // open. That is why the sidebar answered the wheel not at all until it
+      // had a window — the notch had nowhere to go but the cursor.
       //
-      // The sidebar used to take the notch and move its cursor, and the
-      // cursor opens the thread it lands on — so a notch over the sidebar
-      // opened a conversation nobody asked for. The sidebar has no viewport
-      // of its own to scroll instead; the cursor *is* the window. Giving it
-      // one is a larger change than this defect needs, so for now the sidebar
-      // does not answer the wheel at all, and the notch goes to the
-      // transcript like every other notch.
+      // A sidebar with nothing to scroll does not swallow the notch. The tree
+      // fits the screen for most readers, and a notch that did nothing there
+      // would be worse than the conversation scrolling, which is what a notch
+      // anywhere else in the terminal does.
       //
-      // A notch also does not call `setFocus`. Scrolling is not a click.
+      // A notch does not call `setFocus`. Scrolling is not a click.
+      if (inSidebar && allCells.length > sidebarH) {
+        // Functional, for the reason every other notch reads from the store:
+        // a chunk holds several notches and is replayed one at a time, and
+        // `sidebarTopLine` is the last render's snapshot, which does not move
+        // inside the loop. A notch up goes towards the first row.
+        // Half of *this* pane for the modifier, not half of the transcript:
+        // the two panes are different heights and a page is a page of what is
+        // under the pointer.
+        const step = wheelDelta(ev, Math.floor(sidebarH / 2));
+        setSidebarTopLine((top) => sidebarTop(allCells, cursor, sidebarH, top - step, false));
+        return;
+      }
+      // Where the pointer is does not otherwise choose the target: a scroll
+      // anywhere in the terminal scrolls the conversation that is open.
+      // Scrolling is how you move inside what you are reading, and it must
+      // never move you between things to read.
       //
       // Same rule as `scrollPane`: a chunk holds several notches and is
       // replayed one at a time, so every notch measures from the store rather
@@ -2585,6 +2651,18 @@ export function App({ store }: { store: Store }) {
       return activateRow(row);
     }
     if (input === "h" || key.leftArrow) {
+      // Inside the archived-projects section, left furls the project itself
+      // first and the section after it, which is the tree idiom one level up:
+      // ←← is the way out of the archive from any row inside it.
+      if (row.kind === "archivedProjects" || (row.kind === "project" && row.archived)) {
+        if (row.kind === "project" && store.isExpanded(row.groupKey!, true)) { store.toggleExpanded(row.groupKey!, true); return; }
+        // Furling the section is the whole of the second step: it takes the
+        // project row away with it, and `cursorIndex` puts the cursor on
+        // whatever stands where it was — which is the section itself.
+        const k = projectsArchiveKey(row.fleet ?? DEFAULT_FLEET);
+        if (store.isExpanded(k, false)) store.toggleExpanded(k, false);
+        return;
+      }
       // Inside the archived folder, left folds the folder rather than the
       // project the thread happens to belong to.
       if (row.archived) { const k = archiveKey(row.groupKey!); if (store.isExpanded(k, false)) store.toggleExpanded(k, false); return; }
@@ -2647,7 +2725,18 @@ export function App({ store }: { store: Store }) {
       }
       return;
     }
-    if (input === "n") { if (row.projectId) void newThread(row.machine, row.projectId); return; }
+    if (input === "n") {
+      if (!row.projectId) return;
+      // Covey never puts new work inside a fold the reader is not in: a thread
+      // made in an archived project would be invisible the moment the section
+      // closed. Working in a project is what brings it back.
+      const pool = row.kind === "project" && row.archived ? row.pool ?? [] : null;
+      void (async () => {
+        if (pool) await store.archiveProject(pool, false);
+        await newThread(row.machine, row.projectId!);
+      })();
+      return;
+    }
     if (input === "a") return addProject();
     if (input === "d" && state.view) return void store.toggleDiff();
     if (input === "m" && row.kind === "thread") return moveThread();
@@ -2664,6 +2753,34 @@ export function App({ store }: { store: Store }) {
     // The values go to the daemon and never come back (#126).
     if (input === "e" && (row.kind === "project" || row.kind === "thread")) return openSecrets(row);
     if (input === "x" && row.kind === "thread") return void store.threadCommand({ type: "thread.archive", threadId: row.thread!.id, archived: !row.thread!.archivedAt }, row.machine);
+    if (input === "x" && row.kind === "project") {
+      const pool = row.pool ?? [];
+      // Bringing one back needs no question: it puts a row on the screen, and
+      // the reader is looking at the row they pressed. Putting one away takes
+      // a subtree off the screen, so it asks — and the question says what
+      // archiving is *not*, because the key beside it deletes.
+      if (row.archived) return void store.archiveProject(pool, false);
+      // What the row already knows, summed once by `sidebarRows`: how much is
+      // in the project, and whether any of it is moving. A reader about to put
+      // forty threads behind a fold is owed both — and the hint is the one
+      // line of room there is, so the moving work wins it. That is the one
+      // thing the word "archive" might be read as promising and does not: a
+      // turn that is running goes on running.
+      const held = row.count ? `${row.count} thread${row.count === 1 ? "" : "s"}` : "";
+      const machines = poolMachines(pool);
+      return openPick(`Archive "${row.project!.title}"?`, [
+        { id: "no", label: "Cancel" },
+        {
+          id: "yes",
+          label: "Archive — it moves to ARCHIVED; nothing is deleted",
+          hint: row.busy || row.waiting ? "work in it keeps running"
+            : machines > 1 ? `${machines} machines` : held || "x there brings it back",
+        },
+      ], (id) => {
+        store.setOverlay(null);
+        if (id === "yes") void store.archiveProject(pool, true);
+      });
+    }
     // Flip who merges the thread's pull request. A person who has looked at
     // the change and wants it landed presses this once.
     if (input === "M" && row.kind === "thread" && row.thread!.watch?.state === "watching") return void store.threadCommand({ type: "thread.setMerge", threadId: row.thread!.id, merge: row.thread!.watch!.merge === "auto" ? "manual" : "auto" }, row.machine);

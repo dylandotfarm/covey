@@ -703,6 +703,17 @@ export interface Project {
    * Absent on a project written before secrets existed.
    */
   secretKeys?: string[];
+  /**
+   * When the reader put the project away, or absent while it is in use.
+   *
+   * An archive is a fold and nothing more: the clone stays, the threads stay,
+   * a session that runs goes on running, and the pull requests covey watches
+   * are still watched. What changes is where the project is painted — inside
+   * the sidebar's archived section rather than in the list above it — so a
+   * reader with forty projects sees the five they work in. `project.delete`
+   * is the other act, and it takes the rows and the threads away for good.
+   */
+  archivedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -2382,6 +2393,13 @@ export type Command =
    * Refused with code `unsupported` on a project that is not local.
    */
   | { type: "project.makeGit"; projectId: ProjectId; url: string; push?: boolean }
+  /**
+   * Put a project away, or bring it back. Nothing but `Project.archivedAt`
+   * moves: no thread is archived, no session is dropped and no watch ends.
+   * It is how a reader with forty projects reads a sidebar again, and it is
+   * the act `project.delete` is not — everything is still there afterwards.
+   */
+  | { type: "project.archive"; projectId: ProjectId; archived: boolean }
   | { type: "project.delete"; projectId: ProjectId }
   /**
    * Set or remove secrets of a project (#126). Every write is applied; a
