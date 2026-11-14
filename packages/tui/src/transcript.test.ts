@@ -76,12 +76,23 @@ test("steps puts every call back on a row of its own", () => {
 });
 
 test("minimal folds the middle of what the agent said, keeping the ends", () => {
-  const items = [user("a", "go"), say("a", "starting"), say("a", "halfway"), say("a", "nearly"), say("a", "done")];
+  const long = (lead: string) => `${lead}\nand a second line under it, so the message fills more than one row.`;
+  const items = [user("a", "go"), say("a", "starting"), say("a", long("halfway there")), say("a", long("nearly there")), say("a", "done")];
   const out = text(layoutTranscript(view(items, "a"), 80, new Set(), undefined, "minimal"));
   assert.match(out, /starting/);
   assert.match(out, /done/);
-  assert.doesNotMatch(out, /halfway/);
-  assert.match(out, /2 more messages/);
+  assert.doesNotMatch(out, /second line under it/);
+  // The row says what it holds: the reader is looking for words they read.
+  // Two messages with nothing between them are one run, so one row.
+  assert.match(out, /▸ halfway there {2}\+1 more/);
+});
+
+test("a tap on a folded message paints it where it stood", () => {
+  const long = "halfway there\nand a second line under it, so the message fills more than one row.";
+  const items = [user("a", "go"), say("a", "starting"), say("a", long), say("a", "done")];
+  const ids = items.map((i) => i.id);
+  const layout = layoutTranscript(view(items, "a"), 80, new Set([`said:${ids[2]}`]), undefined, "minimal");
+  assert.match(text(layout), /second line under it/);
 });
 
 test("every foldable row is a click target, at the line it starts on", () => {

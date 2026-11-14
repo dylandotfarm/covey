@@ -1042,7 +1042,7 @@ export function rowSignature(row: TimelineRow): string {
   if (row.kind === "chain") {
     return ["c", row.label, row.open ? 1 : 0, row.items.length, row.running, row.failed, row.durationMs ?? ""].join("|");
   }
-  if (row.kind === "said") return ["s", row.open ? 1 : 0, row.items.map((i) => i.id).join(",")].join("|");
+  if (row.kind === "said") return ["s", row.open ? 1 : 0, row.lead, row.items.map((i) => i.id).join(",")].join("|");
   return ["i", row.open ? 1 : 0, row.item.updatedAt, row.live ? 1 : 0].join("|");
 }
 

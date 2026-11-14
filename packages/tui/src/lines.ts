@@ -558,14 +558,20 @@ export function renderChainHead(row: ChainRow, o: { width: number; links?: LinkC
 /**
  * The row that holds what the agent said in the middle of a turn, at
  * `minimal`. The first thing it said and the last one keep their own rows.
+ *
+ * Shut, it shows the message's opening words: the reader is looking for a
+ * paragraph they have already read, and a count of what is hidden gives them
+ * nothing to recognise it by.
  */
 export function renderSaidHead(row: SaidRow, o: { width: number }): Line[] {
-  const n = row.items.length;
+  const more = row.items.length - 1;
   const head: Line = [
     { text: "  " },
     { text: row.open ? "▾" : "▸", color: T.subtle },
-    { text: ` ${n} more message${n === 1 ? "" : "s"}`, color: T.subtle, italic: true },
+    { text: row.open ? " said" : ` ${row.lead}`, color: T.subtle, italic: row.open },
   ];
+  // The count names what the row hides, so an open row does not carry one.
+  if (more > 0 && !row.open) head.push({ text: `  +${more} more`, color: T.faint });
   const lines = wrapSpans(head, Math.max(20, o.width));
   return row.open ? lines : [...lines, []];
 }
