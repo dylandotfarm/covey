@@ -570,7 +570,8 @@ export function renderSaidHead(row: SaidRow, o: { width: number }): Line[] {
     { text: row.open ? "▾" : "▸", color: T.subtle },
     { text: row.open ? " said" : ` ${row.lead}`, color: T.subtle, italic: row.open },
   ];
-  if (more > 0) head.push({ text: `  +${more} more`, color: T.faint });
+  // The count names what the row hides, so an open row does not carry one.
+  if (more > 0 && !row.open) head.push({ text: `  +${more} more`, color: T.faint });
   const lines = wrapSpans(head, Math.max(20, o.width));
   return row.open ? lines : [...lines, []];
 }

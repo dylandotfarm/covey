@@ -894,8 +894,12 @@ export class Renderer {
   private renderRow(row: TimelineRow): HTMLElement {
     if (row.kind === "chain") return this.foldRow(row.key, row.open, chainSummary(row), row.items);
     if (row.kind === "said") {
+      // Shut, the row says what it holds; open, the messages say it themselves.
+      // `noteFold`'s rule: the lead and the rest together are the text, so
+      // nothing is painted twice. The count names what is hidden, and an open
+      // row hides nothing.
       const more = row.items.length - 1;
-      const label = more > 0 ? `${row.lead}  +${more} more` : row.lead;
+      const label = row.open ? "said" : more > 0 ? `${row.lead}  +${more} more` : row.lead;
       return this.foldRow(row.key, row.open, [h("span", { class: "summary" }, label)], row.items);
     }
     const el = renderItem(row.item, this.a, this.markdown, this.fileSrc);
