@@ -259,8 +259,14 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
         </Box>
       );
     }
-    case "empty":
-      return <Box paddingLeft={headIndent(row.depth)} height={1} backgroundColor={bg}><Text color={T.subtle} italic>no projects — press a</Text></Box>;
+    case "empty": {
+      // "Nothing here" and "nothing to work in" are different sentences, and
+      // the row above an `ARCHIVED 3` is only true of the second. The count
+      // rides on the row so this needs no second walk of the tree.
+      const indent = headIndent(row.depth);
+      const words = row.count ? "projects archived — press a" : "no projects — press a";
+      return <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}><Text color={T.subtle} italic>{truncate(words, width - indent - 1)}</Text></Box>;
+    }
     case "project": {
       const open = state.expanded[row.groupKey!] ?? true;
       // Every machine in the pool answers the three questions: a fold may

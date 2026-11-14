@@ -133,11 +133,15 @@ test("no archived project means no section at all", () => {
   assert.ok(!sidebarRows(appState([project("a")], [thread("t", "a")])).some((r) => r.kind === "archivedProjects"));
 });
 
-test("a fleet whose every project is archived still says what to press", () => {
+test("a fleet whose every project is archived still says what to press, and says why it is empty", () => {
   // Nothing to work in is nothing to work in: the row that says `a` adds one
   // is painted, and the archived section sits below it.
   const rows = sidebarRows(appState([archivedProject("b")], []));
   assert.deepEqual(rows.map((r) => r.kind), ["empty", "archivedProjects", "machines"]);
+  // "nothing here" and "nothing to work in" are different sentences, and the
+  // row says which by the count it carries.
+  assert.equal(rows[0]!.count, 1);
+  assert.equal(sidebarRows(appState([], []))[0]!.count, 0, "a client with no project at all has none archived either");
 });
 
 const row = (kind: SidebarRow["kind"], key: string, depth = 1): SidebarRow => ({ key, kind, machine: "ws://m", depth });

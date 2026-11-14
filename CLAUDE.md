@@ -528,10 +528,16 @@
   not land. The fold may not hide that something inside is working or waits on a
   person — the rule the fleet row and the project row already keep — because
   archiving stops nothing. And covey never puts new work inside a fold the reader is
-  not in: `n` on an archived project brings it back first. The page and the phone
-  paint no archived project at all (`projectRows`, and its threads go with it): they
-  cannot add or remove a project either, so what they owe a reader is the list the
-  TUI shows them.
+  not in: **`n` and a move both bring it back first**, because those are the only two
+  doors into a project and a move is the one where the reader cannot see the state
+  they are choosing — so the destination pick names it `archived` as well, the way
+  `kin` names the base it works from. The page and the phone paint no archived
+  project at all (`projectRows`, and its threads go with it): they cannot add or
+  remove a project either, so what they owe a reader is the list the TUI shows them.
+  A machine of the pool that did not answer is **named** in the notice, with what
+  the row does meanwhile: `threadCommand` has already said `not connected`, which
+  names neither the machine nor the project, and beside a row that did not move
+  those two words are #132 again.
 - The daemon can be exercised without the TUI: run `node packages/daemon/dist/main.js
   --bind loopback --port 3799` with `COVEY_HOME=/tmp/x`, then speak JSON over ws (see
   `docs/DESIGN.md` → Protocol).

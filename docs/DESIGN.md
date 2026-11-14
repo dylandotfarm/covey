@@ -2131,12 +2131,18 @@ Three rules come out of that:
 - **The row is the pool, so the archive is the pool's.** `archiveProject` sends
   `project.archive` to every machine of the group, and `ProjectGroup.archived` is true only
   when every member's record says so. A machine that was away has not been told, and showing
-  the project is the safe direction: nothing is then hidden by a write that did not land.
+  the project is the safe direction: nothing is then hidden by a write that did not land. That
+  machine is named in the notice, with what the row does meanwhile — `threadCommand` has
+  already said `not connected`, and those two words name neither the machine nor the project.
 - **The fold still says what needs a person.** Archiving stops no work, so the section carries
   the attention dot a furled project row and a furled fleet row carry, summed over what is
   inside it. Without that a reader could put a running turn somewhere they cannot see it.
 - **Covey never puts new work inside a fold the reader is not in.** `n` on an archived project
-  brings the project back before it makes the thread.
+  brings it back before it makes the thread, and so does a move. Those are the only two doors
+  into a project, and a move is the one where the reader cannot otherwise see the state they
+  are choosing — the destination pick lists every project on the target machine by title — so
+  that pick marks an archived one `archived`, the way it already names the base a sibling
+  project works from.
 
 The page and the phone paint no archived project, and no thread of one (`projectRows` in
 `packages/web/src/state.ts`). Neither client can add or remove a project either — both are the

@@ -1362,21 +1362,36 @@ export class Store {
     return errors.every((e) => e === null);
   }
 
-  /** Take a machine out of a project's pool: the project and its threads go from that machine. */
   /**
    * Put a project away, or bring it back, on every machine of its pool.
    *
    * The whole pool, because the row is the pool: a project archived on one
    * machine and not on another is one project with two answers, and the
-   * sidebar would paint it live until the last machine agreed. A machine that
-   * refuses — one that is away — is named, so the reader knows the row will
-   * come back when it answers.
+   * sidebar paints it live until the last machine agrees.
+   *
+   * Which is why a machine that did not answer is *named*, with what the row
+   * does meanwhile. `threadCommand` has already said `not connected` by the
+   * time this runs, and that sentence names no machine and no project: a
+   * reader who pressed `x` on a two-machine pool with one machine asleep would
+   * otherwise be handed those two words beside a row that did not move, with
+   * nothing to tie them together. This is the one case the rule above it
+   * exists for, so it is worth a sentence of its own.
    */
   async archiveProject(pool: { machine: string; projectId: string }[], archived: boolean): Promise<void> {
-    const errors = await Promise.all(pool.map((x) => this.threadCommand({ type: "project.archive", projectId: x.projectId, archived }, x.machine)));
-    if (errors.every((e) => e === null)) this.notify(archived ? "archived — press x on it under ARCHIVED to bring it back" : "back in the project list", "success");
+    const errors = await Promise.all(pool.map(async (x) => [x.machine, await this.threadCommand({ type: "project.archive", projectId: x.projectId, archived }, x.machine)] as const));
+    const away = [...new Set(errors.filter(([, e]) => e !== null).map(([m]) => machineLabel(this.state, m)))];
+    if (away.length === 0) {
+      this.notify(archived ? "archived — press x on it under ARCHIVED to bring it back" : "back in the project list", "success");
+      return;
+    }
+    const who = `${away.join(", ")} did not answer`;
+    // Which way the row went is not the same question as which way the write
+    // went: archived is `every`, so one refusal keeps the project in the list,
+    // while one machine that *did* unarchive brings the row back on its own.
+    this.notify(archived ? `${who}, so the project stays in the list` : `${who}, so it is still archived there`, "warning");
   }
 
+  /** Take a machine out of a project's pool: the project and its threads go from that machine. */
   async removeFromPool(machine: string, projectId: string): Promise<void> {
     await this.threadCommand({ type: "project.delete", projectId }, machine);
   }
@@ -2884,7 +2899,9 @@ export interface SidebarRow {
   archived?: boolean;
   /** How many threads the archived folder holds; on a project row, its
    *  threads and the run tasks that are not threads yet, over the pool; on a
-   *  fleet row, its projects; on the archived-projects row, its projects. */
+   *  fleet row, its live projects; on the archived-projects row, the projects
+   *  inside it; on the `empty` row, how many are archived, which is what tells
+   *  "nothing here" from "nothing to work in". */
   count?: number;
   /** Set on a fleet row: how many machines are in it. */
   machineCount?: number;
@@ -3159,7 +3176,7 @@ export function sidebarRows(s: AppState): SidebarRow[] {
     const connected = keys.find((k) => s.machines.get(k)?.conn === "connected");
     // Nothing to work in is nothing to work in: a fleet whose every project is
     // archived says what to press, and the archived section still sits below.
-    if (live.length === 0 && connected) rows.push({ key: `e:${fleetKey(fleet)}`, kind: "empty", machine: connected, fleet, depth: base });
+    if (live.length === 0 && connected) rows.push({ key: `e:${fleetKey(fleet)}`, kind: "empty", machine: connected, fleet, count: away.length, depth: base });
     /**
      * One project and everything under it: its threads, the runs of each, and
      * its own archived folder. `depth` is where the project row sits, because

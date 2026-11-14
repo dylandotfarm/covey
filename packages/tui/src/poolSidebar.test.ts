@@ -279,3 +279,50 @@ test("one repository on two base branches is two project rows, and each places i
   assert.deepEqual(store.placementMachines(identity).map((m) => m.projectId), ["p-main"]);
   assert.deepEqual(store.placementMachines(`${identity}#ui-rework`).map((m) => m.projectId), ["p-feat"]);
 });
+
+// ---- archiving a pooled project (#204) -------------------------------------
+
+/**
+ * A pooled project is archived on every machine of the pool, because the row
+ * *is* the pool. A machine that was away has not been told, so the row stays
+ * in the list — and the reader has to be told which machine, or they are
+ * handed `not connected` beside a row that did not move, with nothing tying
+ * the two facts together.
+ */
+function poolStore(answer: (machine: string) => Promise<void>) {
+  const store = new Store([]);
+  const s = store as any;
+  s.state = tree();
+  const notices: { text: string; tone?: string }[] = [];
+  s.notify = (text: string, tone?: string) => { notices.push({ text, tone }); };
+  for (const key of [PI, MAC]) {
+    s.clients.set(key, { state: "connected", command: async () => { await answer(key); } });
+  }
+  return { store, notices };
+}
+
+test("archiving a pooled project writes to every machine of the pool", async () => {
+  const sent: { machine: string }[] = [];
+  const { store, notices } = poolStore(async (m) => { sent.push({ machine: m }); });
+  await store.archiveProject([{ machine: PI, projectId: "p-covey" }, { machine: MAC, projectId: "m-covey" }], true);
+  assert.deepEqual(sent.map((x) => x.machine).sort(), [MAC, PI].sort());
+  assert.equal(notices.at(-1)!.tone, "success");
+  assert.match(notices.at(-1)!.text, /ARCHIVED/);
+});
+
+test("a machine that did not answer is named, with what the row does meanwhile", async () => {
+  const { store, notices } = poolStore(async (m) => { if (m === MAC) throw new Error("not connected"); });
+  await store.archiveProject([{ machine: PI, projectId: "p-covey" }, { machine: MAC, projectId: "m-covey" }], true);
+  const last = notices.at(-1)!;
+  assert.equal(last.tone, "warning");
+  // The machine, because `not connected` on its own names neither the machine
+  // nor the project, and the row the reader pressed `x` on has not moved.
+  assert.match(last.text, /mac/);
+  assert.match(last.text, /stays in the list/);
+
+  // Coming back the other way, the row *is* back — one machine that
+  // unarchived is enough for `every` — so the sentence is about that machine.
+  notices.length = 0;
+  await store.archiveProject([{ machine: PI, projectId: "p-covey" }, { machine: MAC, projectId: "m-covey" }], false);
+  assert.match(notices.at(-1)!.text, /mac did not answer, so it is still archived there/);
+});

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Project, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
 import { DEFAULT_FLEET, budgetValue, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { localProjectError, localProjectId } from "@covey/protocol";
@@ -920,10 +920,18 @@ export function App({ store }: { store: Store }) {
       const srcPool = srcProject ? projectPool(srcProject) : null;
       const same = srcPool ? projects.filter((p) => projectPool(p) === srcPool) : [];
       const kin = srcProject?.repositoryIdentity ? projects.filter((p) => !same.includes(p) && p.repositoryIdentity === srcProject.repositoryIdentity) : [];
+      // A project the reader put away is still a destination — they may be
+      // naming exactly that one — but the row says so, the way `kin` names the
+      // base it works from. A move is the second door into a project and the
+      // only one where the reader cannot otherwise see the state they are
+      // choosing: without this the thread lands inside a furled section, and
+      // the section's dot lights only for work that is running or waiting, so
+      // an idle thread goes off the screen with nothing said.
+      const hintFor = (p: Project, hint: string) => p.archivedAt ? (hint ? `archived · ${hint}` : "archived") : hint;
       const opts: PickOption[] = [
-        ...same.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: "same repo ✓" })),
-        ...kin.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: `same repo · from ${p.baseBranch ?? "the default branch"}` })),
-        ...projects.filter((p) => !same.includes(p) && !kin.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: p.workspaceRoot })),
+        ...same.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: hintFor(p, "same repo ✓") })),
+        ...kin.map((p) => ({ id: `p:${p.id}`, label: p.title, hint: hintFor(p, `same repo · from ${p.baseBranch ?? "the default branch"}`) })),
+        ...projects.filter((p) => !same.includes(p) && !kin.includes(p)).map((p) => ({ id: `p:${p.id}`, label: p.title, hint: hintFor(p, p.workspaceRoot) })),
         ...(same.length === 0 && srcProject?.repositoryIdentity ? [{ id: "clone", label: `Clone ${srcProject.repositoryIdentity} there`, hint: m.info?.projectsDir ?? "" }] : []),
         // A local project has nothing to clone, so the destination makes the
         // directory. The id is the same: the daemon reads the export and
@@ -932,8 +940,17 @@ export function App({ store }: { store: Store }) {
       ];
       openPick(`Destination project on ${m.info!.name}`, opts, (pid) => {
         store.setOverlay(null);
-        if (pid === "clone") void store.moveThread(sel, { machine: mk });
-        else void store.moveThread(sel, { machine: mk, projectId: pid.slice(2) });
+        if (pid === "clone") { void store.moveThread(sel, { machine: mk }); return; }
+        const projectId = pid.slice(2);
+        void (async () => {
+          // The same rule `n` keeps on the project row: covey never puts work
+          // inside a fold the reader is not in. Awaited rather than fired off
+          // beside the move, so the notice the reader is left with is the
+          // move's own answer and not the unarchive's.
+          const g = groupOfProject(state, mk, projectId);
+          if (g?.archived) await store.archiveProject(g.members, false);
+          await store.moveThread(sel, { machine: mk, projectId });
+        })();
       });
     });
   };
@@ -2639,9 +2656,11 @@ export function App({ store }: { store: Store }) {
       // ←← is the way out of the archive from any row inside it.
       if (row.kind === "archivedProjects" || (row.kind === "project" && row.archived)) {
         if (row.kind === "project" && store.isExpanded(row.groupKey!, true)) { store.toggleExpanded(row.groupKey!, true); return; }
+        // Furling the section is the whole of the second step: it takes the
+        // project row away with it, and `cursorIndex` puts the cursor on
+        // whatever stands where it was — which is the section itself.
         const k = projectsArchiveKey(row.fleet ?? DEFAULT_FLEET);
-        if (store.isExpanded(k, false)) { store.toggleExpanded(k, false); return; }
-        if (row.kind === "project") { const at = rows.findIndex((r) => r.kind === "archivedProjects" && r.fleet === row.fleet); if (at >= 0) setCursorKey(rows[at]!.key); }
+        if (store.isExpanded(k, false)) store.toggleExpanded(k, false);
         return;
       }
       // Inside the archived folder, left folds the folder rather than the
@@ -2711,8 +2730,11 @@ export function App({ store }: { store: Store }) {
       // Covey never puts new work inside a fold the reader is not in: a thread
       // made in an archived project would be invisible the moment the section
       // closed. Working in a project is what brings it back.
-      if (row.kind === "project" && row.archived) void store.archiveProject(row.pool ?? [], false);
-      void newThread(row.machine, row.projectId);
+      const pool = row.kind === "project" && row.archived ? row.pool ?? [] : null;
+      void (async () => {
+        if (pool) await store.archiveProject(pool, false);
+        await newThread(row.machine, row.projectId!);
+      })();
       return;
     }
     if (input === "a") return addProject();
