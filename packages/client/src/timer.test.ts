@@ -84,7 +84,7 @@ test("a length of time is said in the fewest words that say it", () => {
 
 const NOW = Date.parse("2026-11-14T12:00:00Z");
 const timer = (over: Partial<ThreadTimer> = {}): ThreadTimer => ({
-  note: null, everyMs: 600_000, setAt: "2026-11-14T11:55:00Z",
+  note: null, lengthMs: 600_000, setAt: "2026-11-14T11:55:00Z",
   dueAt: "2026-11-14T12:07:00Z", round: 1, ...over,
 });
 

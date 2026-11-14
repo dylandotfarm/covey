@@ -146,7 +146,7 @@ test("no thread and no daemon are each a sentence naming what is missing", async
 
 const NOW = Date.parse("2026-11-14T10:03:00Z");
 const timer = (over: Partial<NonNullable<Thread["timer"]>> = {}) => ({
-  note: null, everyMs: 10 * MINUTE, setAt: "2026-11-14T10:00:00Z",
+  note: null, lengthMs: 10 * MINUTE, setAt: "2026-11-14T10:00:00Z",
   dueAt: "2026-11-14T10:10:00Z", firedAt: null, round: 1, ...over,
 });
 

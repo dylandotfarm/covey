@@ -932,7 +932,7 @@ export class Engine {
         // later of them and there is nothing a reader could read in a list.
         const timer: ThreadTimer = {
           note: timerNoteText(cmd.note),
-          everyMs: ms,
+          lengthMs: ms,
           setAt: new Date(at).toISOString(),
           dueAt: new Date(at + ms).toISOString(),
           firedAt: null,
@@ -2066,34 +2066,49 @@ export class Engine {
    */
   async fireTimers(): Promise<string[]> {
     const now = this.now();
-    const due: Thread[] = [];
-    for (const t of this.db.listThreads()) {
-      const timer = t.timer;
-      if (!timer || timer.firedAt || t.movedTo || t.archivedAt) continue;
-      if (Date.parse(timer.dueAt) > now) continue;
+    // Which timers are due, and whether one may be fired now. Read twice: once
+    // to find the work, and again on each thread as its turn comes round,
+    // because the row may have moved in between.
+    const ready = (t: Thread | null | undefined): t is Thread => {
+      const timer = t?.timer;
+      if (!t || !timer || timer.firedAt || t.movedTo || t.archivedAt) return false;
+      if (Date.parse(timer.dueAt) > now) return false;
       // A thread that is working does not need waking, and a thread stopped on
       // an approval or a question is waiting on a person rather than on a
-      // clock. So the timer stays due and the next tick tries again: nothing
-      // is lost, the row reads `timer due` meanwhile, and a turn that asked
-      // "is that build done yet?" never lands behind one the reader is reading.
-      if (threadIsBusy(t)) continue;
-      due.push(t);
-    }
+      // clock. So the timer stays due and the next tick tries again: nothing is
+      // lost, and a turn that asked "is that build done yet?" never lands
+      // behind one the reader is reading.
+      return !threadIsBusy(t);
+    };
+    const due = this.db.listThreads().filter(ready);
     // One at a time, not `Promise.all`: each of these starts a session of about
     // 250 MB, and ten timers that came due in the same minute must not be ten
     // processes starting together.
-    for (const t of due) {
-      const timer: ThreadTimer = { ...t.timer!, firedAt: new Date(now).toISOString() };
-      t.timer = timer;
-      this.putThreadAndEmit(t);
-      this.opts.log?.(`timer fired thread=${t.id.slice(0, 8)} round=${timer.round} after=${timerLabel(timer.everyMs)}`);
+    const woke: string[] = [];
+    for (const { id } of due) {
+      // Read the thread again, and test it again. The dispatch below is not
+      // short — it revives a worktree, starts a session and takes a checkpoint
+      // — so by the time the second thread of a batch comes round its row is
+      // seconds old, and writing that copy back would undo whatever else
+      // touched it. Two things really do: `pollWatches` runs on this same tick,
+      // so a watch cursor and its spent round would be rolled back and the same
+      // news delivered twice; and a reader who writes to the thread meanwhile
+      // would have `status`, `latestTurn` and `lastMessageAt` rolled back under
+      // the running turn. `pollWatch` keeps this rule for its own long read.
+      const fresh = this.db.getThread(id);
+      if (!ready(fresh)) continue;
+      const timer: ThreadTimer = { ...fresh.timer!, firedAt: new Date(now).toISOString() };
+      fresh.timer = timer;
+      this.putThreadAndEmit(fresh);
+      woke.push(id);
+      this.opts.log?.(`timer fired thread=${id.slice(0, 8)} round=${timer.round} after=${timerLabel(timer.lengthMs)}`);
       // A turn, and not a note: a note is read by a person, and a turn resumes
       // the session the engine released. That is the whole reason a timer
       // exists — it is the watch's rule under another name.
-      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: t.id, turnId: randomUUID(), text: timerTurn(timer, now), system: true })
-        .catch((e: any) => this.note(t.id, "warning", `The timer was up, but covey could not deliver it as a turn: ${e?.message ?? String(e)}. Nothing else will wake this thread.`));
+      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: id, turnId: randomUUID(), text: timerTurn(timer, now), system: true })
+        .catch((e: any) => this.note(id, "warning", `The timer was up, but covey could not deliver it as a turn: ${e?.message ?? String(e)}. Nothing else will wake this thread.`));
     }
-    return due.map((t) => t.id);
+    return woke;
   }
 
   /** One poll: read the pull request, work out the news, deliver it once. */

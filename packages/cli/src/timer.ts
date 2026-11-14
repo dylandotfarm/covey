@@ -132,13 +132,13 @@ export function describeTimer(t: Thread, nowMs: number): string[] {
   if (timer.firedAt) {
     const ago = timerLabel(Math.max(0, nowMs - Date.parse(timer.firedAt)));
     return [
-      `the ${timerLabel(timer.everyMs)} timer fired ${ago} ago, and no timer is running now.`,
+      `the ${timerLabel(timer.lengthMs)} timer fired ${ago} ago, and no timer is running now.`,
       ...(timer.note ? [`it was set for: ${timer.note}`] : []),
       "Set another one if the work you were waiting for is still running.",
     ];
   }
   return [
-    `a timer is running: ${timerLeftLabel(timer, nowMs)} left of ${timerLabel(timer.everyMs)}, due at ${timer.dueAt}.`,
+    `a timer is running: ${timerLeftLabel(timer, nowMs)} left of ${timerLabel(timer.lengthMs)}, due at ${timer.dueAt}.`,
     ...(timer.note ? [`waiting for: ${timer.note}`] : []),
     ...(timer.round > 1 ? [`this is timer ${timer.round} in a row on this thread.`] : []),
     "Stop the turn: covey sends a turn when it is up.",

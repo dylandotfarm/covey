@@ -100,7 +100,7 @@ test("a thread that has been put away is not news", () => {
  */
 test("a turn that ended onto a timer is progress and not an interruption", () => {
   const onTimer = (over: Partial<NonNullable<Thread["timer"]>> = {}): Partial<Thread> => ({
-    timer: { note: "the CI run", everyMs: 600_000, setAt: "", dueAt: "2099-01-01T00:00:00Z", firedAt: null, round: 1, ...over },
+    timer: { note: "the CI run", lengthMs: 600_000, setAt: "", dueAt: "2099-01-01T00:00:00Z", firedAt: null, round: 1, ...over },
   });
   assert.deepEqual(threadNews(running(onTimer()), ended(onTimer())),
     { mark: null, lead: "waiting on a timer", wants: false });

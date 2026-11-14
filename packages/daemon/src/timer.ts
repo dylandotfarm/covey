@@ -30,7 +30,7 @@ export const TIMER_PREFIX = "covey timer:";
  */
 export function timerTurn(timer: ThreadTimer, nowMs: number): string {
   const waited = timerLabel(Math.max(0, nowMs - Date.parse(timer.setAt)));
-  const asked = timerLabel(timer.everyMs);
+  const asked = timerLabel(timer.lengthMs);
   // The length asked for and the length waited are usually the same, and
   // saying both would read as a correction. They differ when the daemon was
   // off or busy, and then the second one is the fact that matters.
@@ -45,7 +45,7 @@ export function timerTurn(timer: ThreadTimer, nowMs: number): string {
     "Check that work now, and then do one of two things.",
     "",
     "- **It has finished.** Go on with it. Say what you found. Nothing has to be cleared: the timer has already fired.",
-    `- **It is still running.** Set another timer — \`covey timer ${timerCommandArg(timer.everyMs)}\` — and stop the turn. A timer fires once, so a turn that ends without one is a thread nothing will wake again.`,
+    `- **It is still running.** Set another timer — \`covey timer ${timerCommandArg(timer.lengthMs)}\` — and stop the turn. A timer fires once, so a turn that ends without one is a thread nothing will wake again.`,
     "",
     "Do not poll in a loop and do not sleep inside this turn. The timer is how covey waits for you.",
   ];
@@ -88,5 +88,5 @@ export function timerNote(timer: ThreadTimer | null): string {
   if (!timer) return "Timer cleared. Nothing will wake this thread until somebody writes to it.";
   const when = new Date(Date.parse(timer.dueAt)).toISOString().slice(11, 16);
   const why = timer.note ? `: ${timer.note}` : "";
-  return `Timer set for ${timerLabel(timer.everyMs)}, due at ${when} UTC${why}. Covey wakes this thread with a turn then.`;
+  return `Timer set for ${timerLabel(timer.lengthMs)}, due at ${when} UTC${why}. Covey wakes this thread with a turn then.`;
 }

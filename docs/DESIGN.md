@@ -2074,8 +2074,22 @@ will wake again.
 dispatch, and a timer that is due stays due until the thread stops. A thread that is
 working does not need waking; a thread stopped on an approval is waiting for a person
 and not for a clock; and a turn asking "is that build done yet?" must not land behind
-one the reader is reading. Nothing is lost by waiting — the row reads `timer due`
-meanwhile — and the next tick is fifteen seconds away.
+one the reader is reading. Nothing is lost by waiting, and the next tick is fifteen
+seconds away. The row says nothing about the clock while it waits, because
+`threadOnTimer` is false for a busy thread: a thread stopped on an approval paints the
+approval, which is the thing a person has to act on.
+
+**The row is read again as each timer's turn comes round.** The dispatch is not short —
+it revives a worktree, starts a session and takes a checkpoint — so by the time the
+second thread of a batch is reached, the row read at the top of the sweep is seconds
+old, and writing that copy back would undo whatever else had touched it. Two things
+really do touch it. `pollWatches` runs on the same tick, so a watch cursor and the round
+it had just spent would be rolled back and the same news delivered a second time. And a
+reader who writes to the thread meanwhile would have `status`, `latestTurn` and
+`lastMessageAt` rolled back under their own running turn. So each thread is read again
+and tested again — still a timer, not fired, not archived, still idle — and it is that
+row that is written. `pollWatch` keeps the same rule for its own long read, and states
+it in the same words.
 
 **A thread on a timer is not finished.** `threadIsFinished` reads `threadOnTimer`
 exactly as it reads `threadReviewing`, and for the same reason: the thread ended its

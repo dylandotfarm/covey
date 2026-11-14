@@ -44,7 +44,7 @@ const info: MachineInfo = {
 /** A timer due `minutes` from now, so the row paints a real countdown. */
 const timer = (minutes: number, over: Partial<ThreadTimer> = {}): ThreadTimer => ({
   note: "the CI run on main",
-  everyMs: 10 * 60_000,
+  lengthMs: 10 * 60_000,
   setAt: new Date(Date.now() - 60_000).toISOString(),
   dueAt: new Date(Date.now() + minutes * 60_000).toISOString(),
   firedAt: null,

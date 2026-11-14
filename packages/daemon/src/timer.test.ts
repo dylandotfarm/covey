@@ -49,12 +49,21 @@ function setup() {
   } as Project);
   let clock = Date.parse("2026-11-14T10:00:00Z");
   const cli = fakeCli();
-  const make = (database: Db) => new Engine(database, { ...MACHINE }, { now: () => clock, spawn: autoReply(cli) });
+  const reply = autoReply(cli);
+  // A hook on the one slow thing inside a dispatch. Whatever this writes is
+  // what some *other* part of the daemon wrote while a timer's turn was
+  // starting — a watch poll on the same tick, or a reader's own message.
+  let onSpawn = () => {};
+  const make = (database: Db) => new Engine(database, { ...MACHINE }, {
+    now: () => clock,
+    spawn: (args) => { onSpawn(); return reply(args); },
+  });
   const engines: Engine[] = [];
   let engine = make(db);
   engines.push(engine);
   return {
     db, dir, cli,
+    whileStarting(fn: () => void) { onSpawn = fn; },
     get engine() { return engine; },
     hold() { cli.held = true; },
     async release() { cli.held = false; cli.release(); cli.release = () => {}; await settle(); },
@@ -94,7 +103,7 @@ test("a timer goes on the row, with a note the reader can read", async (t) => {
   s.newThread("t1");
   await s.set("t1", 10 * MINUTE, "the CI run on main");
   const timer = s.thread("t1").timer!;
-  assert.equal(timer.everyMs, 10 * MINUTE);
+  assert.equal(timer.lengthMs, 10 * MINUTE);
   assert.equal(timer.note, "the CI run on main");
   assert.equal(timer.firedAt, null);
   assert.equal(timer.round, 1);
@@ -125,7 +134,7 @@ test("a time outside the bounds is refused by name, and sets nothing", async (t)
   assert.equal(s.thread("t1").timer, undefined);
   await s.set("t1", TIMER_MIN_MS);
   await s.set("t1", TIMER_MAX_MS);
-  assert.equal(s.thread("t1").timer!.everyMs, TIMER_MAX_MS, "the bounds themselves are allowed");
+  assert.equal(s.thread("t1").timer!.lengthMs, TIMER_MAX_MS, "the bounds themselves are allowed");
 });
 
 /**
@@ -141,7 +150,7 @@ test("a second timer replaces the first, and the chain counts", async (t) => {
   s.advance(MINUTE);
   await s.set("t1", 2 * MINUTE, "the build, checked sooner");
   const timer = s.thread("t1").timer!;
-  assert.equal(timer.everyMs, 2 * MINUTE);
+  assert.equal(timer.lengthMs, 2 * MINUTE);
   assert.equal(timer.round, 2);
   assert.equal(timer.note, "the build, checked sooner");
   assert.equal(Date.parse(timer.dueAt), s.now() + 2 * MINUTE, "the replacement runs from now, not from the first one");
@@ -281,7 +290,7 @@ test("timers that come due together are woken one at a time", async (t) => {
 // ---- what the turn says -----------------------------------------------------
 
 const timer = (over: Partial<Thread["timer"] & object> = {}) => ({
-  note: null, everyMs: 10 * MINUTE, setAt: "2026-11-14T10:00:00Z",
+  note: null, lengthMs: 10 * MINUTE, setAt: "2026-11-14T10:00:00Z",
   dueAt: "2026-11-14T10:10:00Z", firedAt: null, round: 1, ...over,
 });
 const NOW = Date.parse("2026-11-14T10:10:00Z");
@@ -339,4 +348,73 @@ test("a thread on a timer is not finished, and one whose timer fired is", () => 
   assert.equal(threadIsFinished({ ...base, timer: timer({ firedAt: "2026-11-14T10:10:00Z" }) }), true);
   assert.equal(threadOnTimer({ ...base, timer: timer(), archivedAt: "2026-11-14T10:00:00Z" }), false);
   assert.equal(threadOnTimer({ ...base, timer: timer(), status: "running" }), false, "a working thread shows its work, not its timer");
+});
+
+/**
+ * The row a timer writes is the row as it is *now*, not as it was when the
+ * sweep began.
+ *
+ * A dispatch is not short: it revives a worktree, starts a session of about
+ * 250 MB and takes a checkpoint. So by the time the second thread of a batch
+ * comes round, the copy read at the top of the sweep is seconds old, and
+ * writing it back would undo whatever else had touched the row. Two things
+ * really do. `pollWatches` runs on this same tick, so a watch cursor and the
+ * round it had just spent would be rolled back and the same news delivered a
+ * second time. And a reader writing to the thread would have `latestTurn` and
+ * `lastMessageAt` rolled back under their own running turn.
+ */
+test("a timer fired after another one writes the row as it is now, not as the sweep found it", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  s.newThread("t2");
+  await s.set("t1", MINUTE, "the first build");
+  await s.set("t2", MINUTE, "the second build");
+  // While t1's turn is starting, something else writes to t2's row — which is
+  // what a watch poll and a reader's message each really do.
+  s.db.putThread({ ...s.thread("t1"), updatedAt: "2027-01-01T00:00:00Z" });
+  // Once, and only during t1's turn: a second write would repair the row this
+  // case is about, and the test would pass over the bug.
+  let wrote = false;
+  s.whileStarting(() => {
+    if (wrote) return;
+    wrote = true;
+    const x = s.db.getThread("t2")!;
+    s.db.putThread({ ...x, title: "written while t1 woke", lastMessageAt: "2026-11-14T10:02:00Z" });
+  });
+  s.advance(2 * MINUTE);
+  assert.deepEqual((await s.tick()).sort(), ["t1", "t2"]);
+  const t2 = s.thread("t2");
+  assert.equal(t2.title, "written while t1 woke", "the sweep's stale copy was written back over it");
+  assert.equal(t2.lastMessageAt !== "2026-11-14T10:02:00Z", true, "the timer's own turn is newer still");
+  // And the timer still fired: reading the row again must not cost the wake.
+  assert.notEqual(t2.timer!.firedAt, null);
+  assert.equal(s.turns("t2").length, 1);
+});
+
+/**
+ * The second read is a test and not only a refresh. A timer cleared, replaced
+ * or archived while an earlier thread's turn was starting is one covey must
+ * not fire: every condition the sweep tested is tested again on the row that
+ * comes back.
+ */
+test("a timer that goes, or moves, while an earlier one fires is not fired", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  for (const id of ["t1", "cleared", "moved"]) { s.newThread(id); await s.set(id, MINUTE); }
+  // `listThreads` sorts by `updated_at`, so this is what makes t1 the thread
+  // the sweep reaches first and the other two the ones that move under it.
+  s.db.putThread({ ...s.thread("t1"), updatedAt: "2027-01-01T00:00:00Z" });
+  s.whileStarting(() => {
+    const a = s.db.getThread("cleared");
+    if (a?.timer) s.db.putThread({ ...a, timer: null });
+    const b = s.db.getThread("moved");
+    if (b?.timer && !b.timer.firedAt) s.db.putThread({ ...b, timer: { ...b.timer, dueAt: "2026-11-14T23:00:00Z" } });
+  });
+  s.advance(2 * MINUTE);
+  assert.deepEqual(await s.tick(), ["t1"], "only the thread that was still due was woken");
+  assert.equal(s.thread("cleared").timer, null);
+  assert.equal(s.thread("moved").timer!.firedAt, null, "a timer put off is not one that is up");
+  assert.equal(s.turns("cleared").length, 0);
+  assert.equal(s.turns("moved").length, 0);
 });

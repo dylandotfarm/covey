@@ -1099,8 +1099,14 @@ export interface ThreadTimer {
    * that is waiting on a deploy.
    */
   note: string | null;
-  /** How long the timer was set for, in milliseconds. */
-  everyMs: number;
+  /**
+   * How long the timer was set for, in milliseconds.
+   *
+   * A length and never an interval. A timer fires once, which is the rule the
+   * whole feature rests on, and a name that read as "every ten minutes" would
+   * quietly say the opposite of it.
+   */
+  lengthMs: number;
   setAt: string;
   dueAt: string;
   /**

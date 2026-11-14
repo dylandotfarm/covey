@@ -826,7 +826,7 @@ test("a thread sitting still under review does not read as idle", () => {
 test("a thread on a timer says so, with how long is left, and is not called done", () => {
   const ended = { turnId: "x", state: "completed" as const, startedAt: "", completedAt: "" };
   const timer = (over: Partial<NonNullable<Thread["timer"]>> = {}) => ({
-    note: null, everyMs: 600_000, setAt: new Date(Date.now() - 180_000).toISOString(),
+    note: null, lengthMs: 600_000, setAt: new Date(Date.now() - 180_000).toISOString(),
     dueAt: new Date(Date.now() + 420_000).toISOString(), firedAt: null, round: 1, ...over,
   });
   const sleeping = { ...thread("t", "p1"), latestTurn: ended, timer: timer() };
