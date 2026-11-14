@@ -1,4 +1,4 @@
-import { DEFAULT_LOD, MIN_CHAIN, type ItemId, type Lod, type TimelineItem, type ToolCallItem } from "@covey/protocol";
+import { DEFAULT_LOD, MIN_CHAIN, type AssistantMessageItem, type ItemId, type Lod, type TimelineItem, type ToolCallItem } from "@covey/protocol";
 
 /**
  * The fold that turns a transcript into rows, at one level of detail (#149).
@@ -68,13 +68,29 @@ export interface ChainRow {
  * What the agent said in the middle of a turn, folded away by `minimal`.
  *
  * The first thing it said opens the turn and the last one concludes it, so
- * those two keep their rows and everything between them comes here.
+ * those two keep their rows and what is between them folds.
+ *
+ * **The fold stands where the message stood.** A chain folds in place, and so
+ * must this: a reader who watched a paragraph arrive four screens down and
+ * found its row at the head of the turn read the paragraph as deleted, and
+ * opened the chain beside it looking for words that were never in it. So a
+ * row holds one *run* of messages — the ones with nothing between them — and
+ * sits where that run is.
  */
 export interface SaidRow {
   kind: "said";
-  /** The key the reader taps. `said:` and then the first message folded. */
+  /** The key the reader taps. `said:` and then the first message of the run. */
   key: string;
+  /** The messages this row stands for, in order. Usually one. */
   items: TimelineItem[];
+  /**
+   * The opening words of the first of them, which the shut row shows.
+   *
+   * A count says how much is hidden and never what it was. The reader is
+   * looking for one paragraph they have already read, so the row has to be
+   * something they can recognise it by.
+   */
+  lead: string;
   open: boolean;
 }
 
@@ -119,7 +135,7 @@ export function timelineRows(items: TimelineItem[], o: FoldOpts = {}): TimelineR
   }
 
   const chains = chainsOf(items);
-  const hidden = lod === "minimal" ? middleMessages(items) : new Map<ItemId, TimelineItem[]>();
+  const hidden = lod === "minimal" ? middleMessages(items) : new Map<ItemId, AssistantMessageItem[]>();
   const swallowed = new Set<ItemId>();
   for (const [, group] of hidden) for (const m of group) swallowed.add(m.id);
 
@@ -149,7 +165,7 @@ export function timelineRows(items: TimelineItem[], o: FoldOpts = {}): TimelineR
     if (group) {
       const key = `said:${item.id}`;
       const open = isOpen(key, false, toggled);
-      rows.push({ kind: "said", key, items: group, open });
+      rows.push({ kind: "said", key, items: group, open, lead: noteFold(group[0]!.text).lead });
       if (open) for (const it of group) rows.push({ kind: "item", item: it, key: it.id, open: true });
       continue;
     }
@@ -208,21 +224,43 @@ function chainRow(chain: TimelineItem[], toggled: ReadonlySet<string>): ChainRow
  * Each turn keeps the first thing the agent said and the last: the one says
  * what it set out to do and the other says how it went. A turn with two
  * messages or fewer hides nothing.
+ *
+ * Two rules decide the rest, and both are rules this file already keeps
+ * elsewhere.
+ *
+ * A message that fits on one row is left where it is, as `chainsOf` leaves a
+ * chain of one and `noteFold` leaves a short note: the row that hid it would
+ * be no shorter than the row it hid, and a reader who chose `minimal` loses a
+ * line of real words for an arrow.
+ *
+ * And a row holds one *run* — the messages with nothing between them — so it
+ * stands where they stand. Lumping a turn's middle into one row at the head of
+ * the turn is what made a paragraph four screens down read as deleted.
  */
-function middleMessages(items: TimelineItem[]): Map<ItemId, TimelineItem[]> {
-  const byTurn = new Map<string, TimelineItem[]>();
+function middleMessages(items: TimelineItem[]): Map<ItemId, AssistantMessageItem[]> {
+  const byTurn = new Map<string, AssistantMessageItem[]>();
   for (const item of items) {
     if (item.kind !== "assistant" || item.groupId) continue;
     const key = item.turnId ?? item.id;
     byTurn.set(key, [...(byTurn.get(key) ?? []), item]);
   }
-  const hidden = new Map<ItemId, TimelineItem[]>();
+  const foldable = new Map<ItemId, AssistantMessageItem>();
   for (const [, said] of byTurn) {
     if (said.length <= 2) continue;
-    const middle = said.slice(1, -1);
-    hidden.set(middle[0]!.id, middle);
+    for (const m of said.slice(1, -1)) if (noteFold(m.text).rest) foldable.set(m.id, m);
   }
-  return hidden;
+  // In the transcript's own order, so a run is what the reader sees as one
+  // block: anything else between two messages — a chain, a note, an approval —
+  // is a row between them, and so they are two runs.
+  const runs = new Map<ItemId, AssistantMessageItem[]>();
+  let run: AssistantMessageItem[] | null = null;
+  for (const item of items) {
+    const m = foldable.get(item.id);
+    if (!m) { run = null; continue; }
+    if (run) run.push(m);
+    else { run = [m]; runs.set(m.id, run); }
+  }
+  return runs;
 }
 
 // ---- the derived sentence ---------------------------------------------------

@@ -303,7 +303,7 @@ function RowBody({ row, ctx }: { row: TimelineRow; ctx: RowContext }) {
       <View style={{ gap: 4 }}>
         <Pressable onPress={() => ctx.onToggle(row.key)} style={st.fold}>
           <Icon name={row.open ? "open" : "shut"} size={16} colour={T.faint} />
-          <Text style={st.label}>{row.open ? "said" : `said ${row.items.length} more thing${row.items.length === 1 ? "" : "s"}`}</Text>
+          <Text style={st.label} numberOfLines={2}>{row.open ? "said" : row.items.length > 1 ? `${row.lead}  +${row.items.length - 1} more` : row.lead}</Text>
         </Pressable>
         {row.open ? (
           <View style={{ gap: 6, paddingLeft: 10 }}>

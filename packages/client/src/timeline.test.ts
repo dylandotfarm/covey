@@ -30,6 +30,9 @@ function chain(items: TimelineItem[]): TimelineItem[] {
   return items.map((i) => ({ ...i, groupId: items[0]!.id }));
 }
 
+/** A message too long for one row, which is the only kind `minimal` folds. */
+const LONG = "A paragraph that does not fit on one row.\nAnd a second line under it.";
+
 const rowKinds = (rows: { kind: string }[]) => rows.map((r) => r.kind);
 
 test("compact folds a chain into one row and keeps what the agent said", () => {
@@ -112,7 +115,7 @@ test("full opens every item, and a tap shuts one", () => {
 });
 
 test("minimal keeps the first and the last thing the agent said in a turn", () => {
-  const items = [said("a1", "starting"), said("a2", "middle"), said("a3", "more middle"), said("a4", "done")];
+  const items = [said("a1", "starting"), said("a2", LONG), said("a3", LONG), said("a4", "done")];
   const rows = timelineRows(items, { lod: "minimal" });
   assert.deepEqual(rowKinds(rows), ["item", "said", "item"]);
   assert.equal((rows[0] as ItemRow).item.id, "a1");
@@ -121,15 +124,57 @@ test("minimal keeps the first and the last thing the agent said in a turn", () =
   assert.equal((rows[2] as ItemRow).item.id, "a4");
 });
 
+/**
+ * The bug this fold was taught: a turn's middle went into one row at the head
+ * of the turn, so a paragraph written four screens down vanished from where it
+ * was written and nothing stood in its place. A reader reads that as deleted.
+ */
+test("minimal folds a message where the message stands, not at the head of the turn", () => {
+  const items = [
+    said("a1", "starting"),
+    ...chain([tool("c1"), tool("c2")]),
+    said("a2", LONG),
+    ...chain([tool("c3"), tool("c4")]),
+    said("a3", LONG),
+    said("a4", "done"),
+  ];
+  const rows = timelineRows(items, { lod: "minimal" });
+  assert.deepEqual(rowKinds(rows), ["item", "chain", "said", "chain", "said", "item"]);
+  assert.deepEqual((rows[2] as SaidRow).items.map((i) => i.id), ["a2"]);
+  assert.deepEqual((rows[4] as SaidRow).items.map((i) => i.id), ["a3"]);
+  assert.equal((rows[4] as SaidRow).key, "said:a3");
+});
+
+test("the shut row shows the message's opening words, so the reader knows which one it is", () => {
+  const rows = timelineRows([said("a1", "starting"), said("a2", LONG), said("a3", "done")], { lod: "minimal" });
+  assert.equal((rows[1] as SaidRow).lead, "A paragraph that does not fit on one row.");
+});
+
+test("a tap on the row puts the message back where it stood", () => {
+  const items = [said("a1", "starting"), said("a2", LONG), said("a3", "done")];
+  const rows = timelineRows(items, { lod: "minimal", toggled: new Set(["said:a2"]) });
+  assert.deepEqual(rowKinds(rows), ["item", "said", "item", "item"]);
+  assert.equal((rows[1] as SaidRow).open, true);
+  assert.equal((rows[2] as ItemRow).item.id, "a2");
+  assert.equal((rows[2] as ItemRow).open, true);
+});
+
+test("minimal leaves a message that already fits on one row", () => {
+  const items = [said("a1", "starting"), said("a2", "one short line"), said("a3", LONG), said("a4", "done")];
+  const rows = timelineRows(items, { lod: "minimal" });
+  assert.deepEqual(rowKinds(rows), ["item", "item", "said", "item"]);
+  assert.equal((rows[1] as ItemRow).item.id, "a2");
+});
+
 test("minimal hides nothing when a turn said two things or fewer", () => {
-  const items = [said("a1"), said("a2")];
+  const items = [said("a1", LONG), said("a2", LONG)];
   assert.deepEqual(rowKinds(timelineRows(items, { lod: "minimal" })), ["item", "item"]);
 });
 
 test("minimal counts each turn on its own", () => {
   const items = [
-    said("a1", "x", { turnId: "t1" }), said("a2", "x", { turnId: "t1" }), said("a3", "x", { turnId: "t1" }),
-    said("b1", "x", { turnId: "t2" }), said("b2", "x", { turnId: "t2" }),
+    said("a1", LONG, { turnId: "t1" }), said("a2", LONG, { turnId: "t1" }), said("a3", LONG, { turnId: "t1" }),
+    said("b1", LONG, { turnId: "t2" }), said("b2", LONG, { turnId: "t2" }),
   ];
   assert.deepEqual(rowKinds(timelineRows(items, { lod: "minimal" })), ["item", "said", "item", "item", "item"]);
 });

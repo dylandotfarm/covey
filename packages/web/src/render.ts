@@ -894,8 +894,9 @@ export class Renderer {
   private renderRow(row: TimelineRow): HTMLElement {
     if (row.kind === "chain") return this.foldRow(row.key, row.open, chainSummary(row), row.items);
     if (row.kind === "said") {
-      const n = row.items.length;
-      return this.foldRow(row.key, row.open, [h("span", { class: "summary" }, `${n} more message${n === 1 ? "" : "s"}`)], row.items);
+      const more = row.items.length - 1;
+      const label = more > 0 ? `${row.lead}  +${more} more` : row.lead;
+      return this.foldRow(row.key, row.open, [h("span", { class: "summary" }, label)], row.items);
     }
     const el = renderItem(row.item, this.a, this.markdown, this.fileSrc);
     if (row.item.kind === "tool" || row.item.kind === "thinking") {
