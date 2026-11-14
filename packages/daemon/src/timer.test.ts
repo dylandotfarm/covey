@@ -397,24 +397,38 @@ test("a timer fired after another one writes the row as it is now, not as the sw
  * or archived while an earlier thread's turn was starting is one covey must
  * not fire: every condition the sweep tested is tested again on the row that
  * comes back.
+ *
+ * The archived one is the case a reader can make happen by hand, and the one
+ * they would least forgive: a turn un-archives a thread, so a timer fired on a
+ * row somebody has just put away would put it back on their screen. It is
+ * guarded three times over — the archive clears the record, the sweep skips an
+ * archived row, and this second read skips one archived since — and this case
+ * is the third of those, because it is the only one a press of `x` during a
+ * sweep can reach.
  */
-test("a timer that goes, or moves, while an earlier one fires is not fired", async (t) => {
+test("a timer that goes, moves, or is archived while an earlier one fires is not fired", async (t) => {
   const s = setup();
   t.after(s.cleanup);
-  for (const id of ["t1", "cleared", "moved"]) { s.newThread(id); await s.set(id, MINUTE); }
+  for (const id of ["t1", "cleared", "moved", "archived"]) { s.newThread(id); await s.set(id, MINUTE); }
   // `listThreads` sorts by `updated_at`, so this is what makes t1 the thread
-  // the sweep reaches first and the other two the ones that move under it.
+  // the sweep reaches first and the other three the ones that move under it.
   s.db.putThread({ ...s.thread("t1"), updatedAt: "2027-01-01T00:00:00Z" });
   s.whileStarting(() => {
     const a = s.db.getThread("cleared");
     if (a?.timer) s.db.putThread({ ...a, timer: null });
     const b = s.db.getThread("moved");
     if (b?.timer && !b.timer.firedAt) s.db.putThread({ ...b, timer: { ...b.timer, dueAt: "2026-11-14T23:00:00Z" } });
+    // The row as a reader's `x` leaves it, timer and all: the record a real
+    // archive would have cleared is kept here on purpose, so that what this
+    // case proves is the guard in the sweep and not the one in the command.
+    const c = s.db.getThread("archived");
+    if (c && !c.archivedAt) s.db.putThread({ ...c, archivedAt: "2026-11-14T10:01:30Z" });
   });
   s.advance(2 * MINUTE);
   assert.deepEqual(await s.tick(), ["t1"], "only the thread that was still due was woken");
   assert.equal(s.thread("cleared").timer, null);
   assert.equal(s.thread("moved").timer!.firedAt, null, "a timer put off is not one that is up");
-  assert.equal(s.turns("cleared").length, 0);
-  assert.equal(s.turns("moved").length, 0);
+  assert.equal(s.thread("archived").timer!.firedAt, null);
+  assert.equal(s.thread("archived").archivedAt, "2026-11-14T10:01:30Z", "a thread the reader put away came back");
+  for (const id of ["cleared", "moved", "archived"]) assert.equal(s.turns(id).length, 0, id);
 });
