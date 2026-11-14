@@ -90,3 +90,28 @@ test("a thread that has been put away is not news", () => {
   assert.equal(threadNews(running(), ended({ archivedAt: "2026-10-13T00:00:00.000Z" })), null);
   assert.equal(threadNews(running(), failed({ archivedAt: "2026-10-13T00:00:00.000Z" })), null);
 });
+
+/**
+ * A timer is the review's case under another name. The thread ended its
+ * turn on purpose, with work running somewhere else and covey holding the only
+ * thing that will wake it — so it is reported and it interrupts nobody. Said
+ * as a bell, every agent that waits out a twenty-minute build would ring a
+ * phone twice: once to say it was waiting and once to say it was done.
+ */
+test("a turn that ended onto a timer is progress and not an interruption", () => {
+  const onTimer = (over: Partial<NonNullable<Thread["timer"]>> = {}): Partial<Thread> => ({
+    timer: { note: "the CI run", everyMs: 600_000, setAt: "", dueAt: "2099-01-01T00:00:00Z", firedAt: null, round: 1, ...over },
+  });
+  assert.deepEqual(threadNews(running(onTimer()), ended(onTimer())),
+    { mark: null, lead: "waiting on a timer", wants: false });
+  // The words are the timer's own. "Under review" about a thread with no pull
+  // request is covey saying a thing that is not true.
+  assert.deepEqual(threadNews(running(underReview("reviewing")), ended(underReview("reviewing"))),
+    { mark: null, lead: "under review", wants: false });
+  // A timer that fired is not one that runs, so the turn finishes the thread.
+  assert.deepEqual(threadNews(running(onTimer({ firedAt: "2026-11-14T10:00:00Z" })), ended(onTimer({ firedAt: "2026-11-14T10:00:00Z" }))),
+    { mark: "done", lead: "done", wants: true });
+  // And anything the reader has to act on still buries it.
+  assert.deepEqual(threadNews(running(onTimer()), ended({ ...onTimer(), pendingApprovals: 1 })),
+    { mark: "approval", lead: "needs approval", wants: true });
+});

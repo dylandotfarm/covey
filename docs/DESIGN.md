@@ -2037,6 +2037,83 @@ moment covey noticed would be a snapshot of a working tree the agent had already
 changed, which reads as a diff and is not one; `turn.revert` refuses a turn with no
 checkpoint for the same reason.
 
+## A timer a thread sets on itself
+
+A thread wakes when somebody writes to it, or when covey does. Nothing else. So an
+agent that starts work it cannot watch — a twenty-minute build, a deploy, a test run on
+another machine, a rate limit that clears in an hour — has to arrange its own return,
+and every way it had of doing that was a guess. A watcher on a process that turned out
+to be the wrong one. A poll inside the turn, which is the turn spent and a reader left
+watching a spinner. A background task, whose end is the task's end and not the work's.
+
+`covey timer 10m --note "the CI run on main"` is the honest version, and it is the
+watch's own rule with a clock in place of a pull request: the daemon holds the record,
+the thread stops its turn, and a turn arrives when the time is up. That turn starts
+`covey timer:`, as the watch's starts `covey watch:`, and carries `system: true`, so
+every client paints it as covey's own words.
+
+**The record is on the thread.** `Thread.timer` is the whole of it — the length asked
+for, when it was set, when it is due, the reader's note, and whether it has fired — so
+`fireTimers` reads the rows and re-arms nothing. A daemon that restarted, or was
+switched off for an hour, fires a timer that came due while it was gone; a `setTimeout`
+would have lost it. It rides on the watch tick (`WATCH_TICK_MS`, fifteen seconds)
+rather than taking an interval of its own: a timer is a minute at its shortest, so
+fifteen seconds is close enough, and a second interval would wake a sleeping daemon
+every few seconds to find nothing.
+
+**A timer fires once.** `firedAt` is what says it has, and it is why the record stays on
+the row instead of going. Two things read it. The next timer counts the chain from it
+(`round`), so an agent waiting for the eleventh time in a row is told it is, and a
+reader can see a loop. And `covey timer` can answer "the 10m timer fired four minutes
+ago" to the very agent that turn woke, where "no timer" would read as covey having lost
+the thing that woke it. What covey therefore has to say in the turn, and says twice, is
+that a turn which ends with the work unfinished and no new timer is a thread nothing
+will wake again.
+
+**A due timer waits for an idle thread.** `threadIsBusy` stands in front of the
+dispatch, and a timer that is due stays due until the thread stops. A thread that is
+working does not need waking; a thread stopped on an approval is waiting for a person
+and not for a clock; and a turn asking "is that build done yet?" must not land behind
+one the reader is reading. Nothing is lost by waiting — the row reads `timer due`
+meanwhile — and the next tick is fifteen seconds away.
+
+**A thread on a timer is not finished.** `threadIsFinished` reads `threadOnTimer`
+exactly as it reads `threadReviewing`, and for the same reason: the thread ended its
+turn on purpose, with work running somewhere else and covey holding the only thing that
+will wake it, so it is not the reader's again. No bell rings, no phone lights up
+(`threadNews` answers `waiting on a timer` with `wants: false`), and all three clients
+say so in one sentence — `timerLine` in `@covey/client`. The terminal dims the row and
+marks it `◷` in the status cell; the page and the app take the green dot off it and
+paint the line beside the title; the open thread's composer carries `◷ 7m` beside the
+branch. The note is what the dim is for: a reader looking at a quiet row has to be able
+to tell a thread waiting on a deploy from a thread that is stuck.
+
+**One minute to six hours, refused by name.** Under a minute is a wait that belongs
+inside the turn the agent is already in, and it would cost a whole session to say
+nothing. Over six hours is a person's to come back to. The daemon checks the bounds
+itself rather than trusting the CLI, and it refuses rather than clamping: a timer
+quietly moved is a timer the agent waits the wrong length for with nothing on screen to
+say so. The four ways a time can be unreadable are four sentences (#132) — nothing
+given, not a time, too short, too long — because one word for four problems is what
+makes an agent try the same spelling again.
+
+**One timer per thread**, because a thread waiting on two things is waiting on the later
+of them and there is nothing a reader could read in a list of them. A second set
+replaces the first and carries the chain on.
+
+**Archiving and `/clear` take it**, where the pull request, the branch and the secrets
+survive both. Archiving is "I am done here" and a timer would answer it with a turn, so
+the record goes rather than waits — a thread brought back a day later must not meet a
+timer that came due while it was away — and a timer set *on* an archived thread is
+refused by name. A clear empties the conversation, and the work the timer's own note
+describes was written in the transcript it just emptied.
+
+`packages/cli/src/timer.ts` is the agent's face, `packages/daemon/src/timer.ts` is what
+the turn says, and `packages/client/src/timer.ts` is the words every client shares. The
+CLI, the `/covey` skill and **both preambles** change together: the moment a session
+needs this is the moment it is about to end a turn with a build still running, and a
+model that has not loaded the skill writes `sleep 600` instead.
+
 ## Folding a chain of tool calls away (#149)
 
 A *chain* is the run of tool calls and thoughts the agent made between two things it

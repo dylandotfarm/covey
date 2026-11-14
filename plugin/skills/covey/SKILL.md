@@ -1,6 +1,6 @@
 ---
 name: covey
-description: Take work to a merged pull request inside a covey thread, from a GitHub issue number or from the user's own words. Do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. File no issue unless the user asks for one. Use when the user types /covey, names an issue to take or finish, describes a bug or a change to make here, or asks for a pull request that covey should watch or merge. Also use in a thread of a local project — a directory with no repository, where there is no loop — when the user asks to make that project a git repository. And use when the user asks what another thread of this project is doing, or for a file one wrote, on this machine or on another machine of the fleet: `covey threads` reads them.
+description: Take work to a merged pull request inside a covey thread, from a GitHub issue number or from the user's own words. Do the work on the thread's branch, open the pull request through covey, and act on each checks verdict, review and comment that covey sends back as a message, until the pull request merges. File no issue unless the user asks for one. Use when the user types /covey, names an issue to take or finish, describes a bug or a change to make here, or asks for a pull request that covey should watch or merge. Also use in a thread of a local project — a directory with no repository, where there is no loop — when the user asks to make that project a git repository. And use when the user asks what another thread of this project is doing, or for a file one wrote, on this machine or on another machine of the fleet: `covey threads` reads them. Use it too whenever a turn has to end while work it started is still running — a build, a deploy, a long test run: `covey timer` is how this thread is woken to look again.
 ---
 
 # The covey loop
@@ -335,6 +335,52 @@ The rules:
 demo that belongs to the pull request, and `covey show` to let the person you
 are talking to look at something now.
 
+## Wake yourself later: `covey timer`
+
+Some work does not finish inside your turn. A build runs for twenty minutes, a
+deploy settles, a test suite runs on another machine, a rate limit clears in an
+hour. The turn has to end — holding it open is a session held open and a reader
+left watching a spinner — and then nothing will wake you, because a thread
+wakes only when somebody writes to it or when covey does.
+
+So ask covey for a turn later:
+
+```
+covey timer 10m --note "the CI run on main"
+covey timer 2h --note "the rate limit on the deploy API"
+covey timer                what this thread's timer says, and how long is left
+covey timer stop           clear it
+```
+
+Then **stop the turn**. Say what you started and that you are waiting on the
+timer. When the time is up, covey sends you a message that starts `covey
+timer:`, exactly as a watch sends one that starts `covey watch:`.
+
+The rules:
+
+- **A timer fires once.** When it wakes you, look at the work. If it has
+  finished, go on. If it is still running, set another timer and stop the turn
+  again. A turn that ends with the work unfinished and no new timer is a thread
+  nothing will wake.
+- **One minute at the shortest, six hours at the longest.** A wait under a
+  minute belongs inside the turn you are in. A wait over six hours is a
+  person's to come back to; say so and stop.
+- **One timer per thread.** Setting a second replaces the first.
+- `--note` is one line for the reader, saying what you are waiting for. Write
+  one. The thread's row is dimmed while a timer runs, and this note is what
+  tells a person looking at it why — the difference between a thread that is
+  waiting on a deploy and a thread that is stuck.
+- **Do not use a timer to poll something you could watch.** A pull request is
+  the watch's job and covey already wakes you for it, so never set a timer to
+  go and look at one.
+- **Do not sleep and do not poll in a loop** to wait for the same thing. That
+  is a turn spent waiting, and it is what this command replaces.
+- A timer is not a reminder for the reader. It wakes *you*. To tell a person
+  something, say it in your reply.
+
+It works in a local project too: it needs no repository, no branch and no pull
+request.
+
 ## The other threads of this project
 
 A project is one row for the reader and several machines underneath. The same
@@ -390,10 +436,10 @@ a local project:
 - Do not look for a git repository and do not make one with `git init`. The
   project's own command below is the way, and it is the only one that moves
   the project covey holds.
-- `covey show`, `covey env` and `covey threads` work exactly as they do
-  anywhere else. The same local project may be on more than one machine, and
-  each one is a directory of its own: `covey threads` is the only way to what
-  a thread on another machine said and wrote.
+- `covey show`, `covey env`, `covey timer` and `covey threads` work exactly as
+  they do anywhere else. The same local project may be on more than one
+  machine, and each one is a directory of its own: `covey threads` is the only
+  way to what a thread on another machine said and wrote.
 
 ### Making it a git repository
 
@@ -473,6 +519,8 @@ covey env exec -- <cmd>    run one command with those secrets in its environment
 - Do not review your own change, and do not answer a review for the reviewer.
   Covey has a thread for that, and it is not this one.
 - Do not stop covey's watch (`covey pr watch --stop`) unless the user asks.
+- Do not `sleep`, and do not poll in a loop, to wait for work you started
+  yourself. Set a timer (`covey timer`) and stop the turn.
 
 ## Reference
 
@@ -493,6 +541,12 @@ covey project git <url>       make this thread's local project a git repository,
                               `gh repo create <name> --private`
 covey show <file>... [--text "…"]
                               put a picture or a video in this conversation
+covey timer <time> [--note "…"]
+                              wake this thread with a turn in <time> — 10m, 2h, 1h30m,
+                              or a bare number of minutes. One minute at the shortest,
+                              six hours at the longest, and it fires once
+covey timer                   what this thread's timer says, and how long is left
+covey timer stop              clear it
 covey threads [--all]         every thread of this project, on every machine of its fleet
 covey threads read <id> [--limit N]
                               what one of those threads said

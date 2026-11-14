@@ -893,6 +893,32 @@
   four writes, `mergePullRequest`, `createPullRequest`, `commentPullRequest` and
   `uploadAttachment`, exist on a host only when it was built with `allowMerge`,
   `allowCreate`, `allowComment` or `allowAttach`.
+- A thread can set a **timer** on itself: `covey timer 10m --note "…"`, and covey
+  sends a turn when the time is up. It is the watch's own rule with a clock in place of a
+  pull request, and it exists because every other way an agent had of being woken after
+  work it could not watch was a guess — a watcher on the wrong process, a poll that spends
+  the turn, a background task whose end is not the work's. `Thread.timer` is the whole of
+  it, so the daemon fires it from the row and a restart, or an hour switched off, loses
+  nothing; `fireTimers` rides on the watch tick, because a timer is a minute at its
+  shortest and a second interval would wake a sleeping daemon for nothing. Five rules.
+  **A timer fires once** and `firedAt` is what says it has, which is why the record stays
+  on the row: the next timer reads the chain off it (`round`, so an agent waiting for the
+  eleventh time can see that it is), and `covey timer` can answer "the last one fired four
+  minutes ago" to the very agent that turn woke. **A due timer waits for an idle thread**,
+  because a thread that is working does not need waking and a turn asking "is that build
+  done?" must not land behind one the reader is reading. **A thread on a timer is not
+  finished** — `threadIsFinished` reads it, as it reads the review, so no bell rings and no
+  phone lights up for a thread that stopped its turn on purpose; the TUI dims the row and
+  marks it `◷`, the page and the app take the green dot off it, and all three say
+  `timerLine` from `@covey/client`. **The bounds are the daemon's and not the CLI's**, one
+  minute to six hours, refused by name rather than clamped, because a timer quietly moved
+  is a timer the agent waits the wrong length for. And **archiving and `/clear` take it**,
+  where the pull request and the branch survive both: a turn would wake a row the reader
+  put away, and a clear empties the conversation the timer's own note describes. Change
+  `packages/cli/src/timer.ts`, the `/covey` skill and **both preambles** together, as with
+  the loop and `covey env` — the moment a session needs this is the moment it is about to
+  end a turn with a build still running, and a model that has not loaded the skill writes
+  `sleep 600` instead.
 - A thread can take an issue (`thread.takeIssue`), open a pull request
   (`thread.openPullRequest`) and be watched (`Thread.watch`): the daemon that holds the
   branch polls the pull request and sends every checks verdict, review, comment and merge to
