@@ -183,7 +183,10 @@ export function ListScreen({ navigation }: Props) {
                   >
                     <Dot colour={TONE[tone]} />
                     <View style={S.grow}>
-                      <Text style={S.title} numberOfLines={1}>{t.thread.title || "Untitled"}</Text>
+                      {/* A thread asleep on a timer steps back, the way its row
+                          does in the terminal and on the page: there is nothing
+                          in it to read until covey wakes it. */}
+                      <Text style={[S.title, tone === "timer" ? { color: T.subtle } : null]} numberOfLines={1}>{t.thread.title || "Untitled"}</Text>
                       <Text style={S.subtle} numberOfLines={1}>
                         {threadStatusLabel(t.thread)}
                         {refs.length ? ` · ${refs.map((r) => r.label).join(" ")}` : ""}

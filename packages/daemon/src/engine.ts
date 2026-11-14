@@ -6,7 +6,7 @@ import type {
   ShellSnapshot, ThreadSnapshot, AppBuild, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
-import { isUserClient, KNOWN_MODELS, MAX_THREAD_FILE_BYTES, MIN_CHAIN, localProjectError, localProjectId, type AssistantMessageItem,} from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS, MAX_THREAD_FILE_BYTES, MIN_CHAIN, TIMER_MAX_MS, TIMER_MIN_MS, localProjectError, localProjectId, threadIsBusy, type AssistantMessageItem, type ThreadTimer,} from "@covey/protocol";
 import { MAX_TERMINAL_INPUT, MAX_TERMINALS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
@@ -38,6 +38,8 @@ import { unwrapMarkdown } from "./integrate/reflow.js";
 import { news, emptyCursor, describeNews, describeArchive, asksForWork, endsWatch, splitForBudget, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 import { signComment } from "./integrate/sign.js";
+import { timerNote, timerNoteText, timerTurn } from "./timer.js";
+import { timerLabel } from "@covey/client";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -248,7 +250,11 @@ export class Engine {
     this.sweepTimer.unref?.();
     // The watches live in the thread rows, so a restart resumes every one of
     // them from its cursor: the tick reads the rows, and nothing is re-armed.
-    this.watchTimer = setInterval(() => { void this.pollWatches(); }, WATCH_TICK_MS);
+    // A thread's own timer rides on the same tick, for the same reason
+    // and with no timer of its own: it is a row to read, a timer is a minute
+    // at its shortest, and a second interval would wake a sleeping daemon
+    // every few seconds to find nothing.
+    this.watchTimer = setInterval(() => { void this.pollWatches(); void this.fireTimers(); }, WATCH_TICK_MS);
     this.watchTimer.unref?.();
     // What the two session limits resolve to here. A client reads `null` as
     // "the default" and cannot name it: the live ceiling comes from this
@@ -896,6 +902,47 @@ export class Engine {
         this.startWatch(t, facts.number, { maxRounds: cmd.maxRounds, merge: cmd.merge, mergeMethod: cmd.mergeMethod });
         return this.putThreadAndEmit(t);
       }
+      case "thread.timer": {
+        const t = this.db.getThread(cmd.threadId);
+        if (!t) throw new EngineError("not_found", "thread not found");
+        if (t.movedTo) throw new EngineError("moved", "thread has been moved to another machine");
+        if (cmd.ms === null) {
+          if (!t.timer) throw new EngineError("no_timer", "this thread has no timer to clear");
+          t.timer = null;
+          this.note(t.id, "info", timerNote(null));
+          return this.putThreadAndEmit(t);
+        }
+        // "I am done here" is what archiving says, and a timer would answer it
+        // with a turn. Refused by name rather than quietly un-archiving the
+        // thread: a row the reader put away must not come back on its own.
+        if (t.archivedAt) throw new EngineError("archived", "this thread is archived, so a timer would wake a thread the reader put away. Write to the thread first");
+        const ms = Math.round(cmd.ms);
+        // The bounds are checked here and not only in the CLI. A client is not
+        // to be trusted with them, and a timer quietly clamped is a timer the
+        // agent waits the wrong length for with nothing on screen to say so.
+        if (!Number.isFinite(ms) || ms < TIMER_MIN_MS || ms > TIMER_MAX_MS) {
+          // The number is quoted back as a length only when it is one: a
+          // client that sent nonsense is told what it sent, not `NaNs`.
+          const asked = Number.isFinite(ms) ? timerLabel(ms) : String(cmd.ms);
+          throw new EngineError("bad_timer", `a timer runs between ${timerLabel(TIMER_MIN_MS)} and ${timerLabel(TIMER_MAX_MS)}; ${asked} is outside that`);
+        }
+        const at = this.now();
+        // One timer per thread: a second set replaces the first and carries the
+        // chain on, because a thread waiting on two things is waiting on the
+        // later of them and there is nothing a reader could read in a list.
+        const timer: ThreadTimer = {
+          note: timerNoteText(cmd.note),
+          lengthMs: ms,
+          setAt: new Date(at).toISOString(),
+          dueAt: new Date(at + ms).toISOString(),
+          firedAt: null,
+          round: (t.timer?.round ?? 0) + 1,
+        };
+        t.timer = timer;
+        this.note(t.id, "info", timerNote(timer));
+        this.opts.log?.(`timer set thread=${t.id.slice(0, 8)} in=${timerLabel(ms)} round=${timer.round}`);
+        return this.putThreadAndEmit(t);
+      }
       case "thread.setMerge": {
         const t = this.db.getThread(cmd.threadId);
         if (!t) throw new EngineError("not_found", "thread not found");
@@ -922,6 +969,11 @@ export class Engine {
           // "I am done here" says otherwise. The record stays for the reader.
           const fresh = this.db.getThread(t.id);
           if (fresh?.watch?.state === "watching") { this.endWatch(fresh, "dropped", "The thread was archived, so the watch stopped."); this.db.putThread(fresh); }
+          // A timer would wake an archived thread with a turn, and the record
+          // is of no use to a reader who has put the row away. It goes rather
+          // than waits: a thread brought back a day later must not meet a
+          // timer that came due while it was gone.
+          if (fresh?.timer) { fresh.timer = null; this.note(fresh.id, "info", timerNote(null)); this.db.putThread(fresh); }
           // A review thread archived before it decided leaves the author
           // waiting on a verdict that is never coming, so the author is told.
           // One that signed off is already recorded, and `dropReviewer` leaves
@@ -2003,6 +2055,62 @@ export class Engine {
     return due.map((t) => t.id);
   }
 
+  /**
+   * Fire every timer that is due. The watch tick calls this; a test
+   * calls it by hand and moves the clock between calls.
+   *
+   * The timer is written down as fired *before* the turn goes, so a dispatch
+   * that fails cannot be fired again by the next tick. A timer fires once.
+   *
+   * @returns the threads it woke.
+   */
+  async fireTimers(): Promise<string[]> {
+    const now = this.now();
+    // Which timers are due, and whether one may be fired now. Read twice: once
+    // to find the work, and again on each thread as its turn comes round,
+    // because the row may have moved in between.
+    const ready = (t: Thread | null | undefined): t is Thread => {
+      const timer = t?.timer;
+      if (!t || !timer || timer.firedAt || t.movedTo || t.archivedAt) return false;
+      if (Date.parse(timer.dueAt) > now) return false;
+      // A thread that is working does not need waking, and a thread stopped on
+      // an approval or a question is waiting on a person rather than on a
+      // clock. So the timer stays due and the next tick tries again: nothing is
+      // lost, and a turn that asked "is that build done yet?" never lands
+      // behind one the reader is reading.
+      return !threadIsBusy(t);
+    };
+    const due = this.db.listThreads().filter(ready);
+    // One at a time, not `Promise.all`: each of these starts a session of about
+    // 250 MB, and ten timers that came due in the same minute must not be ten
+    // processes starting together.
+    const woke: string[] = [];
+    for (const { id } of due) {
+      // Read the thread again, and test it again. The dispatch below is not
+      // short — it revives a worktree, starts a session and takes a checkpoint
+      // — so by the time the second thread of a batch comes round its row is
+      // seconds old, and writing that copy back would undo whatever else
+      // touched it. Two things really do: `pollWatches` runs on this same tick,
+      // so a watch cursor and its spent round would be rolled back and the same
+      // news delivered twice; and a reader who writes to the thread meanwhile
+      // would have `status`, `latestTurn` and `lastMessageAt` rolled back under
+      // the running turn. `pollWatch` keeps this rule for its own long read.
+      const fresh = this.db.getThread(id);
+      if (!ready(fresh)) continue;
+      const timer: ThreadTimer = { ...fresh.timer!, firedAt: new Date(now).toISOString() };
+      fresh.timer = timer;
+      this.putThreadAndEmit(fresh);
+      woke.push(id);
+      this.opts.log?.(`timer fired thread=${id.slice(0, 8)} round=${timer.round} after=${timerLabel(timer.lengthMs)}`);
+      // A turn, and not a note: a note is read by a person, and a turn resumes
+      // the session the engine released. That is the whole reason a timer
+      // exists — it is the watch's rule under another name.
+      await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId: id, turnId: randomUUID(), text: timerTurn(timer, now), system: true })
+        .catch((e: any) => this.note(id, "warning", `The timer was up, but covey could not deliver it as a turn: ${e?.message ?? String(e)}. Nothing else will wake this thread.`));
+    }
+    return woke;
+  }
+
   /** One poll: read the pull request, work out the news, deliver it once. */
   private async pollWatch(t: Thread): Promise<void> {
     const w = t.watch!;
@@ -2611,6 +2719,12 @@ export class Engine {
       x.status = "idle";
       x.lastError = null;
       x.pendingApprovals = 0;
+      // The timer goes with the conversation. What it was for was written in
+      // the transcript this has just emptied, so the turn it would send names
+      // work the session has no memory of starting. The pull request, the
+      // branch and the secrets stay: a clear empties the conversation and
+      // nothing else, and a timer is part of the conversation.
+      x.timer = null;
     });
   }
 

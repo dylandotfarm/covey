@@ -6,7 +6,7 @@ import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { hyperlinksEnabled, osc8 } from "../links.js";
-import { runMemberStateLabel, runState, tallyRun, threadReviewing, type Thread } from "@covey/protocol";
+import { runMemberStateLabel, runState, tallyRun, threadOnTimer, threadReviewing, type Thread } from "@covey/protocol";
 import { buildSkew } from "../build.js";
 
 const HYPERLINKS = hyperlinksEnabled();
@@ -96,13 +96,24 @@ export const AGENT_MARK = "◇";
 export const REVIEW_MARK = "⊙";
 
 /**
+ * A thread waiting on a timer it set itself.
+ *
+ * The row is dimmed as well, which says *that* the thread is asleep; this says
+ * *why*, and the difference matters because the other reason a row is dim is
+ * that it is archived. Geometric Shapes again, like `AGENT_MARK` and
+ * `REVIEW_MARK`: one column wide on a narrow font, and readable where the
+ * palette is not.
+ */
+export const TIMER_MARK = "◷";
+
+/**
  * The one glyph on the left of a thread row, and its colour.
  *
  * The cell holds one glyph and is two columns wide on every row, so that every
  * thread title starts in the same column. The order is therefore the order of
  * what the reader has to act on: a turn that failed, the thread's own work or
- * an approval it has not seen, covey's automated review, a turn that finished,
- * the pin.
+ * an approval it has not seen, covey's automated review, a timer the thread set
+ * on itself, a turn that finished, the pin.
  *
  * The review used to sit past the title, at the right edge of the row. That is
  * not where a reader looks to see what a thread is doing — every other mark of
@@ -121,8 +132,32 @@ export function threadMark(t: Thread, attention: "approval" | "done" | "error" |
   if (attention === "error") return { glyph: "✗", color: T.danger };
   if (st !== "idle" || attention === "approval") return { glyph: "●", color: statusColor(st, pulse) };
   if (threadReviewing(t) > 0) return { glyph: REVIEW_MARK, color: T.awaiting };
+  // After the review and before the `✓`, for the review's own reason: the two
+  // can never both be true, because a thread with a timer running is not the
+  // reader's again (`threadIsFinished`), so no `done` is ever raised over one.
+  if (threadOnTimer(t)) return { glyph: TIMER_MARK, color: T.subtle };
   if (attention === "done") return { glyph: "✓", color: T.success };
   return { glyph: t.pinnedAt ? "⋆" : " ", color: statusColor(st, pulse) };
+}
+
+/**
+ * The colour of a thread's title in the sidebar.
+ *
+ * Three answers. The open thread keeps `T.text` whatever it is waiting on: the
+ * pane beside the sidebar *is* that conversation, and a dim title over it would
+ * read as the wrong row being open. A thread asleep on a timer it set
+ * is dimmed like an archived one — it is not work the reader has to read, and a
+ * sidebar of twenty threads reads better when the three waiting on a clock
+ * step back. Everything else is `T.muted`, which is what every row was.
+ *
+ * The timer and the archive share the dim, and the glyph in the cell before the
+ * title (`TIMER_MARK`) is what says which of the two it is. A colour is read
+ * from `T` at the moment of painting and never into a constant, because
+ * `setTheme` rewrites that object in place.
+ */
+export function threadTitleColor(t: Thread, o: { active: boolean; archived: boolean }): string {
+  if (o.active) return T.text;
+  return o.archived || threadOnTimer(t) ? T.faint : T.muted;
 }
 
 /**
@@ -431,7 +466,7 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           <Text color={row.group ? T.subtle : T.awaiting}>{caret}</Text>
           <Text color={mark.color}>{mark.glyph} </Text>
-          <Text color={active ? T.text : row.archived ? T.faint : T.muted} bold={active}>{linked}</Text>
+          <Text color={threadTitleColor(t, { active, archived: !!row.archived })} bold={active}>{linked}</Text>
           <Text color={T.subtle}>{held}</Text>
           <Text color={T.faint}>{tag}</Text>
           <Text color={T.faint}> {time}</Text>

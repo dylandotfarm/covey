@@ -32,11 +32,15 @@ export const T = {
 } as const;
 
 /** The colour a thread's state is painted in. `state.ts` decides the state. */
-export const TONE: Record<"busy" | "waiting" | "error" | "done" | "idle", string> = {
+export const TONE: Record<"busy" | "waiting" | "error" | "done" | "timer" | "idle", string> = {
   busy: T.working,
   waiting: T.awaiting,
   error: T.danger,
   done: T.success,
+  // A thread asleep on a timer it set: quieter than idle, because there
+  // is nothing in it for the reader until covey wakes it. `ListScreen` dims the
+  // title with it, which is what the TUI's row does and the page's CSS does.
+  timer: T.faint,
   idle: T.subtle,
 };
 

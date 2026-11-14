@@ -46,6 +46,13 @@ export function coveyPlugin(root: string | null): string | null {
  * end are the exception: an act a person cannot take back belongs where the
  * session reads it first, which is here.
  *
+ * The timer is the third exception, and it earns its lines the same way.
+ * The moment a session needs it is the moment it is about to end a turn with a
+ * build still running, and a model that has not loaded the skill does not know
+ * the command exists — so it writes `sleep 600` or polls, which is the turn
+ * spent and the thread asleep for ever after. The note names the command and
+ * the one rule, and leaves the rest to the skill.
+ *
  * The note goes out only with the plugin (`engine.ts`). A daemon that runs from
  * no checkout hands over neither, because a note that names a skill the session
  * does not have is worse than no note.
@@ -59,6 +66,8 @@ export function coveyPlugin(root: string | null): string | null {
 export const COVEY_PREAMBLE = `This session runs inside a covey thread. The covey daemon on this machine gave the thread a git worktree on its own branch, and it can push that branch, open a pull request for it, watch the pull request, and merge it. You ask with the \`covey\` command.
 
 Load the \`covey\` skill (\`covey:covey\`) and follow it for that work. Load it in the first turn that takes an issue, pushes a branch, opens or comments on a pull request, shows the reader a file, reads this thread's secrets, or asks what another thread of this project is doing. Prefer it over \`gh\` and over a plain \`git push\`; the skill says where \`gh\` still fits.
+
+Nothing wakes this thread but a message. So when a turn has to end while work you started is still running — a build, a deploy, a long test run — run \`covey timer 10m --note "…"\` and stop the turn, and covey wakes you when the time is up. Never \`sleep\` and never poll to wait it out.
 
 A message that starts \`covey review:\` means this thread reviews another thread's change. Read that message and the skill's reviewer section; never commit, push or merge on that branch.
 
@@ -78,11 +87,13 @@ Two rules hold before you read the skill, because a person cannot take either ac
  * and a session that believed it spent its first turn looking for a git
  * repository that is not there.
  *
- * It still names the three commands of the skill that do work here, because
- * they are the three a reader of a local thread actually wants: a picture in
- * the conversation, the project's secrets by name, and the other threads of
+ * It still names the four commands of the skill that do work here, because
+ * they are the four a reader of a local thread actually wants: a picture in
+ * the conversation, the project's secrets by name, the other threads of
  * the project — which on a local project is the whole of what a second
- * machine can offer, since the two directories are not the same directory.
+ * machine can offer, since the two directories are not the same directory —
+ * and the timer, which needs no repository and is the only way a thread of an
+ * automation project is woken at all.
  *
  * Keep it a pointer, as the other one is. Change this and the skill's
  * *A local project* section together.
@@ -91,7 +102,7 @@ export const COVEY_LOCAL_PREAMBLE = `This session runs inside a covey thread of 
 
 There is no branch, no pull request and no issue here. Do not look for a git repository, do not run \`covey issue\` or \`covey pr\`, and do not offer to open one; covey refuses them for this project.
 
-Three commands of the \`covey\` skill (\`covey:covey\`) do work here, and you may load it for any of them: \`covey show <file>\` puts a picture or a video in this conversation, \`covey env\` names the secrets this thread may use, and \`covey threads\` lists the other threads of this project, on this machine and on every other machine of the fleet, so you can read what they said and the files they wrote. Use a secret by writing \`$NAME\`, and never print its value.`;
+Four commands of the \`covey\` skill (\`covey:covey\`) do work here, and you may load it for any of them: \`covey show <file>\` puts a picture or a video in this conversation, \`covey env\` names the secrets this thread may use, \`covey threads\` lists the other threads of this project, on this machine and on every other machine of the fleet, so you can read what they said and the files they wrote, and \`covey timer 10m --note "…"\` wakes this thread with a turn later — the way to end a turn while work you started is still running, in place of a \`sleep\` or a poll. Use a secret by writing \`$NAME\`, and never print its value.`;
 
 /**
  * The note that goes with the plugin for one project: the loop for a

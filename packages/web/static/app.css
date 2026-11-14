@@ -86,6 +86,11 @@ button[disabled] { opacity: .45; }
 .tone-waiting .dot { background: var(--awaiting); animation: pulse 1.2s ease-in-out infinite; }
 .tone-error .dot { background: var(--danger); }
 .tone-done .dot { background: var(--success); }
+/* A thread asleep on a timer it set: the row steps back, because there
+   is nothing in it for the reader to read until covey wakes it. The archived
+   row is not in this list at all, so the dim is unambiguous here. */
+.tone-timer .dot { background: var(--faint); }
+.thread-row.tone-timer .title { color: var(--subtle); }
 @keyframes pulse { 50% { opacity: .35; } }
 .thread-row .text { flex: 1; min-width: 0; }
 .thread-row .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

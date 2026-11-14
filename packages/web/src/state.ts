@@ -13,11 +13,11 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadReviewing, type Lod,
+  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadOnTimer, threadReviewing, type Lod,
   type AppBuildRun, type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
-import { idleChoices, idleValueLabel, keepTagged, liveChoices, liveValueLabel, projectPool, timelineRows, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
+import { idleChoices, idleValueLabel, keepTagged, liveChoices, liveValueLabel, projectPool, timelineRows, timerLine, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
 
 export interface MachineSlot {
   /** The `ws://` URL the page dials. */
@@ -218,7 +218,7 @@ export function orderedItems(v: View): TimelineItem[] {
   return [...v.items.values()].sort((a, b) => a.seq - b.seq);
 }
 
-export type Tone = "busy" | "waiting" | "error" | "done" | "idle";
+export type Tone = "busy" | "waiting" | "error" | "done" | "timer" | "idle";
 
 /** One word for the dot beside a thread. `waiting` wins, because it is the
  *  one the reader can do something about.
@@ -231,6 +231,10 @@ export function threadTone(t: Thread): Tone {
   if (t.status === "error" || t.latestTurn?.state === "error") return "error";
   if (threadIsBusy(t)) return "busy";
   if (threadIsFinished(t)) return "done";
+  // A thread asleep on a timer it set. Its own tone and not `idle`,
+  // because the row is dimmed from it: the reader has nothing to read there
+  // until covey wakes it.
+  if (threadOnTimer(t)) return "timer";
   return "idle";
 }
 
@@ -449,6 +453,11 @@ export function threadStatusLabel(t: Thread): string {
   // reviewed is not something the reader has to act on.
   const reviewing = threadReviewing(t);
   if (reviewing > 0) return reviewing === 1 ? "under review" : `under review · ${reviewing} reviewers`;
+  // A thread asleep on a timer. After the review, for the review's own
+  // reason: neither is something the reader has to act on, and `idle` about a
+  // thread covey will wake in seven minutes is the word that reads as stalled.
+  // `timerLine` is the sentence every client says, in `@covey/client`.
+  if (threadOnTimer(t)) return timerLine(t.timer!, Date.now());
   return "idle";
 }
 

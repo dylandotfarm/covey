@@ -817,6 +817,34 @@ test("a thread sitting still under review does not read as idle", () => {
   assert.equal(threadTone({ ...thread("t", "p1"), latestTurn: ended }), "done");
 });
 
+/**
+ * A thread asleep on a timer it set. The page says it in the words
+ * `timerLine` gives every client, and the dot goes grey: `idle` about a thread
+ * covey will wake in seven minutes is the word that reads as stalled, and a
+ * green `done` dot on it is the mark of a thread the reader can pick up.
+ */
+test("a thread on a timer says so, with how long is left, and is not called done", () => {
+  const ended = { turnId: "x", state: "completed" as const, startedAt: "", completedAt: "" };
+  const timer = (over: Partial<NonNullable<Thread["timer"]>> = {}) => ({
+    note: null, lengthMs: 600_000, setAt: new Date(Date.now() - 180_000).toISOString(),
+    dueAt: new Date(Date.now() + 420_000).toISOString(), firedAt: null, round: 1, ...over,
+  });
+  const sleeping = { ...thread("t", "p1"), latestTurn: ended, timer: timer() };
+  assert.equal(threadStatusLabel(sleeping), "on a timer · 7m left");
+  assert.equal(threadStatusLabel({ ...sleeping, timer: timer({ note: "the deploy" }) }), "on a timer · 7m left · the deploy");
+  assert.equal(threadTone(sleeping), "timer");
+  // A timer that has already fired is not one that runs: the thread is the
+  // reader's again, and the row says what it said before timers existed.
+  const fired = { ...sleeping, timer: timer({ firedAt: new Date().toISOString() }) };
+  assert.equal(threadStatusLabel(fired), "idle");
+  assert.equal(threadTone(fired), "done");
+  // Anything the reader has to act on is the nearer answer, and work in front
+  // of a timer is the thread's own.
+  assert.equal(threadStatusLabel({ ...sleeping, pendingApprovals: 1 }), "needs approval");
+  assert.equal(threadStatusLabel({ ...sleeping, latestTurn: { ...ended, state: "running" } }), "working");
+  assert.equal(threadTone({ ...sleeping, latestTurn: { ...ended, state: "running" } }), "busy");
+});
+
 test("an app build says which step it is on, and what came out", () => {
   const step = (name: UpdateStep["name"], status: UpdateStep["status"]): UpdateStep =>
     ({ name, label: name, command: name, status, output: "", exitCode: null });
