@@ -249,11 +249,11 @@ test("a value a session says is taken out of the timeline and out of the transcr
   await settle();
 
   const said = s.items("t1").filter((i) => i.kind === "assistant").map((i) => (i as { text: string }).text);
-  assert.deepEqual(said, ["the key is [secret STRIPE_KEY], I read it from the environment"]);
+  assert.deepEqual(said, ["the key is [secret], I read it from the environment"]);
   assert.equal(s.everythingStored().includes(TOKEN), false, "not in an item, an event or the transcript");
   // The transcript is what a resumed session reads, so a secret left there
   // would go back to the model at every resume.
-  assert.match(JSON.stringify(s.db.loadTranscript("t1", "sess-t1", "")), /\[secret STRIPE_KEY\]/);
+  assert.match(JSON.stringify(s.db.loadTranscript("t1", "sess-t1", "")), /\[secret\]/);
 });
 
 test("a message the reader typed is redacted too", async (t) => {
@@ -263,7 +263,28 @@ test("a message the reader typed is redacted too", async (t) => {
   await s.send({ type: "project.setSecrets", projectId: "p1", secrets: [{ key: "STRIPE_KEY", value: TOKEN }] });
   await s.turn("t1", `use ${TOKEN} please`);
   const typed = s.items("t1").filter((i) => i.kind === "user").map((i) => (i as { text: string }).text);
-  assert.deepEqual(typed, ["use [secret STRIPE_KEY] please"]);
+  assert.deepEqual(typed, ["use [secret] please"]);
+});
+
+test("a value inside the repository's own name stands, so covey's own URL is still a link", async (t) => {
+  // The marker is positional. Strike the owner out of
+  // `https://github.com/owner/app/pull/37` and anybody who looks the
+  // repository up reads it back — and the link no longer opens. The
+  // `projects` table holds `github.com/owner/app` in the clear anyway, so
+  // keeping it there writes nothing new down.
+  const s = setup();
+  t.after(s.cleanup);
+  const p1 = s.db.getProject("p1")!;
+  p1.repositoryIdentity = "github.com/dylandotfarm/app";
+  s.db.putProject(p1);
+  s.newThread("t1");
+  await s.send({ type: "project.setSecrets", projectId: "p1", secrets: [{ key: "MODAL_PROFILE", value: "dylandotfarm" }] });
+  await s.turn("t1");
+  s.clis[0]!.reply("see https://github.com/dylandotfarm/app/pull/37 — dylandotfarm opened it");
+  await settle();
+
+  const said = s.items("t1").filter((i) => i.kind === "assistant").map((i) => (i as { text: string }).text);
+  assert.deepEqual(said, ["see https://github.com/dylandotfarm/app/pull/37 — [secret] opened it"]);
 });
 
 // ---- the session that already copied the old values --------------------------

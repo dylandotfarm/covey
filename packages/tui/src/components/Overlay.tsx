@@ -110,7 +110,7 @@ export function OverlayView({ overlay, cursor, filter, checked, width, height, u
             })}
             {keys.length === 0 && <Text color={T.subtle} italic> nothing set — press a to add one</Text>}
           </Box>
-          <Box marginTop={1}><Text color={T.faint}>The agent gets the names and never the values: covey puts them in the session's environment, and takes any that turn up back out of the transcript. `covey env` is what it reads.</Text></Box>
+          <Box marginTop={1}><Text color={T.faint}>The agent gets the names and never the values: covey takes any that turn up back out of the transcript, as `[secret]` — a short value too, where it stands alone.</Text></Box>
         </Box>
       ), "a add · enter change the value · D remove · esc close");
     }

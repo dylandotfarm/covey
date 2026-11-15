@@ -1076,9 +1076,32 @@
   (`Project.secretKeys`, `Thread.secretKeys`), and `secrets.env` — the one call that answers
   with a value — is refused off loopback, which is why `server.ts` passes `handleConnection`
   a flag it worked out rather than one a client declared. Every timeline item and every
-  transcript line goes through `redact.ts` first, so a `printenv` writes `[secret NAME]`;
-  keep it that way, and keep the eight-character floor, or a short value rewrites ordinary
-  prose. The one thing it leaves alone is the path of a file **in the
+  transcript line goes through `redact.ts` first, so a `printenv` writes `[secret]`. **The
+  marker names no secret, and never does again.** It read `[secret NAME]` for a year, and
+  that made it an oracle: a marker says a value stood in this exact place, so a reader who
+  can work out what stood there has the value — and the name told them which secret it was.
+  The reader very often can, because covey's own watch news carries
+  `https://github.com/[secret OWNER]/app/pull/37` and anybody can look that repository up.
+  Note which way it runs: a credential is never recoverable from the words around it and a
+  value that is also ordinary text always is, so the naming gave away exactly the values
+  the length rule protects least. Two rules come out of that, both in `redactor`. A value
+  is looked for **whatever its length** — the eight-character floor was a promise the
+  secrets panel made and covey did not keep, so a four-digit `PIN` went into the transcript
+  with nothing said — and below `WHOLE_TOKEN_BELOW` it is replaced only where it stands as
+  a whole token, because `1234` inside `some/path/1234/world` is a piece of a path and
+  replacing it costs the reader a line and tells nobody anything. And `keep` holds covey's
+  own bookkeeping out of the way: `repositoryNames` gives the repository's host and path, in
+  both spellings and in the remote's own case, and the `projects` table carries them in the
+  clear — so a value standing *inside* one of them is left there, which is what makes that
+  URL a link the reader can open. **Never the remote URL itself**: `remoteForms` answers
+  `null` for `https://token@github.com/org/repo.git`, because a token in an https URL is the
+  user's own credential, so `Project.remoteUrl` records that URL whole and vouching for it
+  would write the token into every `git remote -v` a thread's shell ran. It is `keepFilePaths`' rule for
+  a text covey wrote rather than for a field, and the two overlap without being one
+  decision: this one says the repository's name is public, that one says a file covey put
+  in the store is covey's own. `unredactor` still reads the *named* form, and only that
+  form, because the items on disk from before this carry it. The one thing redaction leaves
+  alone is the path of a file **in the
   thread's own store** (`keepFilePaths`): that path is covey's own, not a session's words —
   the daemon wrote the bytes there and recorded where — and a project directory named after
   an account whose name is also a secret turned every picture of that project into `file:

@@ -569,11 +569,38 @@ A value goes to three places and no others:
    `$STRIPE_KEY` the way it reads `$PATH`. A secret may not take a name covey sets itself or
    the session needs (`secretKeyError`): `PATH`, `HOME`, anything starting with `COVEY_`.
 2. **The redactor** (`redact.ts`). Every timeline item and every transcript line the daemon
-   stores passes through it first, and a value it finds becomes `[secret NAME]`. That covers
-   a stray `printenv`, a script that echoes its own command line, a library that logs the
-   header it sent. A value under eight characters is left alone: a short string turns up by
-   chance, and replacing every one of them would cost the reader more than it protects. The
-   SDK's own transcript is redacted too, because that is what a resumed session reads back.
+   stores passes through it first, and a value it finds becomes `[secret]`. That covers a
+   stray `printenv`, a script that echoes its own command line, a library that logs the
+   header it sent. The SDK's own transcript is redacted too, because that is what a resumed
+   session reads back.
+
+   **The marker names no secret.** It read `[secret NAME]` until a reader saw covey's own
+   watch news come out as `https://github.com/[secret OWNER]/app/pull/37`: a marker says a
+   value stood in this exact place, so a reader who can work out what stood there has the
+   value, and the name told them which secret it was. Anybody can look that repository up.
+   Note which way it runs — a credential is never recoverable from the words around it and a
+   value that is also ordinary text always is, so the naming gave away exactly the values
+   the length rule protects least.
+
+   **Every value is looked for, whatever its length.** A floor of eight characters was a
+   promise the secrets panel made and covey did not keep: a four-digit `PIN` went into the
+   transcript with nothing said about it. Below `WHOLE_TOKEN_BELOW` a value is replaced only
+   where it stands as a whole token, which is what makes that bearable — `1234` inside
+   `some/path/1234/world` is a piece of a path, and replacing it costs the reader a line
+   they need while telling nobody anything. The cost lands on a value that is an ordinary
+   word: set `ENV` to `prod` and the word `prod` is a marker in prose too, which the panel
+   now says.
+
+   **Covey's own bookkeeping is held out of the way.** `redactor` takes a `keep` list, and
+   `Engine.redact` fills it from `repositoryNames`: the repository's host and path, in both
+   spellings and in the remote's own case. The `projects` table carries them in the clear,
+   so a value standing inside one of them is left there and the URL above is a link again.
+   Never the remote URL itself — `remoteForms` answers `null` for
+   `https://token@github.com/org/repo.git`, so `Project.remoteUrl` records that URL whole,
+   and vouching for it would write the token into every `git remote -v` a thread's shell
+   ran. This is `keepFilePaths`' rule for a text covey wrote rather than for a field, and
+   the two overlap without being one decision: this one says the repository's name is
+   public, that one says a file covey put in the store is covey's own.
 3. **`covey env exec`**, over loopback. `secrets.env` is the one call that answers with a
    value and the one a token does not open — the server allows it on a loopback connection
    alone, which is the only fact about a connection the daemon works out for itself.
