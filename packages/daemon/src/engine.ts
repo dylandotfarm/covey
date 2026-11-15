@@ -14,7 +14,8 @@ import { ClaudeSession, type SessionSink, type QueryFactory } from "./claude.js"
 import { makeSessionStore } from "./sessionStore.js";
 import { preambleFor } from "./plugin.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
-import { redactDeep, redactor } from "./redact.js";
+import { keepFilePaths, redactDeep, redactor, unredactor } from "./redact.js";
+import { threadFileTarget } from "./threadFiles.js";
 import { normaliseRemote, projectSlug, publishDirectory, listRemoteBranches, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, fleetSetting, projectsDir, savePeers } from "./config.js";
@@ -380,7 +381,11 @@ export class Engine {
   private persistItem(rawItem: TimelineItem): number {
     // Before anything is written down or sent: a value the reader gave covey
     // never goes into a transcript, however the session came to say it (#126).
-    const item = this.redact(rawItem.threadId, rawItem);
+    // The path of a file in the thread's own store is covey's own and keeps
+    // the value it had: a project directory named after an account is a path,
+    // not a leak, and the store is what the `/file` route serves. A path
+    // anywhere else on the machine is nobody's picture, so it stays redacted.
+    const item = keepFilePaths(this.redact(rawItem.threadId, rawItem), rawItem, (p) => this.inThreadStore(rawItem.threadId, p));
     const existing = this.db.getItem(item.id);
     const seq = existing ? existing.seq : this.db.nextThreadSeq(item.threadId);
     const groupId = this.chainFor(item, existing);
@@ -3056,6 +3061,37 @@ export class Engine {
   threadFilesRoot(threadId: string): string | null {
     const t = this.db.getThread(threadId);
     return t ? threadFilesDir(this.threadCwd(t), t.id) : null;
+  }
+
+  /**
+   * A path a client asks the `/file` route for, with the values of this
+   * thread's secrets put back into it.
+   *
+   * An item covey wrote before `keepFilePaths` carries `[secret NAME]` where a
+   * directory of the path stood, so the one route to those bytes refused them.
+   * The caller still resolves the answer against the thread's own store, which
+   * is the boundary that was there before this and is unmoved by it. A path
+   * with no marker in it comes back as it went in.
+   */
+  threadFilePath(threadId: string, path: string): string {
+    // Every path written since `keepFilePaths` holds no marker, and a seeking
+    // player asks this route once per range, so the common answer costs a
+    // string search and not a row of the database.
+    if (!path.includes("[secret ")) return path;
+    const t = this.db.getThread(threadId);
+    if (!t) return path;
+    const back = unredactor(threadEnv(this.db, t.projectId, t.id));
+    return back ? back(path) : path;
+  }
+
+  /**
+   * True when `path` names a file in this thread's own store: the one test the
+   * `/file` route makes, asked here so that a path covey keeps whole is a path
+   * a client can open, and nothing else is kept.
+   */
+  private inThreadStore(threadId: string, path: string): boolean {
+    const root = this.threadFilesRoot(threadId);
+    return root !== null && threadFileTarget(root, path) !== null;
   }
 
   /** Where a thread's session runs, and therefore where its dropped files go.
