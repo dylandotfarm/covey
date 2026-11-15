@@ -92,7 +92,14 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
           repository project is already a repository. The row is the one place
           the reader looks for the keys, so a key that only ever answers with
           a refusal is worse than a row without it. */}
-      <Text color={T.faint} wrap="truncate">enter fold · n new thread{p.kind === "local" ? " · g make it a git repository" : " · b base branch"} · ctrl+k add a machine to this project · D remove project</Text>
+      {/* A project the reader put away has no fold to open — its row inside
+          ARCHIVED is a leaf — so the row names the two keys that are the way
+          back in, and says what `n` does before it starts a thread. This pane
+          is where a reader reads an archived project, because the sidebar no
+          longer lists its threads. */}
+      {p.archivedAt
+        ? <Text color={T.faint} wrap="truncate">archived · x brings it back · n brings it back and starts a thread · D remove project</Text>
+        : <Text color={T.faint} wrap="truncate">enter fold · n new thread{p.kind === "local" ? " · g make it a git repository" : " · b base branch"} · ctrl+k add a machine to this project · D remove project</Text>}
     </>
   );
 }
