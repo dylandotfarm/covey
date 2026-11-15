@@ -3102,6 +3102,20 @@ export function App({ store }: { store: Store }) {
   function askLarge(large: LargeDrop[], paths = "", cut?: Ed.EditState): boolean {
     if (large.length === 0 || !state.view) return false;
     const { threadId } = state.view;
+    // The drop is consumed from here down: every way out below answers true,
+    // so the cut goes in now rather than beside the pick. It used to sit lower,
+    // and then a *split* re-drop of a file already going up left the front half
+    // of its path in the draft — which is the shape this function's own rule
+    // rules out, and the thing the cut exists to prevent.
+    //
+    // Both halves of it: the state, because that is what paints, and the store,
+    // because `attachLater` reads the draft from there and an upload can finish
+    // before a React effect does.
+    if (cut) {
+      store.setDraft(threadId, cut.value);
+      applyEdit(cut);
+      pasteSeam.current = null;
+    }
     // A file already on its way up is not a new drop: `splitInFlight` holds
     // that rule, and the window it closes is the one where there is no chip
     // for `revealDrop` to match yet.
@@ -3111,21 +3125,13 @@ export function App({ store }: { store: Store }) {
       if (waiting.length === 0) return true;
     }
     const prompt = largeDropPrompt(waiting);
-    if (!prompt) return false;
+    if (!prompt) return true;
     // The thread's *own* machine serves the route, which is the same address
     // and token a shown file is read back from (`viewFileBase`).
     const base = viewFileBase;
     if (!base) {
       store.notify(`covey has no address for the machine this thread runs on, so ${waiting.length === 1 ? waiting[0]!.name : "those files"} cannot go up`, "error");
       return true;
-    }
-    if (cut) {
-      // Both halves: the state, because that is what paints, and the store,
-      // because `attachLater` reads the draft from there and an upload can
-      // finish before a React effect does.
-      store.setDraft(threadId, cut.value);
-      applyEdit(cut);
-      pasteSeam.current = null;
     }
     openPick(prompt.title, [
       { id: "no", label: "Cancel", hint: "nothing is sent" },
@@ -3139,9 +3145,14 @@ export function App({ store }: { store: Store }) {
   /** Upload each confirmed file, one at a time, and chip what arrived. */
   async function sendLarge(threadId: string, base: string, large: LargeDrop[], paths: string): Promise<void> {
     const done: Attachment[] = [];
+    // Every file of this yes is marked before the first byte of the first one
+    // goes, not as its own turn comes round: re-drop the third file while the
+    // first is still uploading and an unmarked one reads as a fresh drop,
+    // which is the double upload `splitInFlight` exists to stop, one file
+    // along. Each is unmarked again as it lands, so the set stays honest.
+    for (const f of large) uploading.current.add(f.path);
     for (const f of large) {
       let said = 0;
-      uploading.current.add(f.path);
       try {
         done.push(await uploadDrop(f, base, threadId, (sent, total) => {
           // A notice lives four seconds, so saying where the upload is also
