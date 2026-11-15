@@ -1,5 +1,8 @@
 /**
- * Bring a photograph under the API's image limit, in the browser (#135).
+ * The two things an attachment needs a browser for (#135): shrinking a
+ * photograph, and streaming a file too big to carry inline.
+ *
+ * Bring a photograph under the API's image limit, in the browser.
  *
  * The TUI shells out to `sips`, `magick`, `convert` or `ffmpeg`, whichever the
  * machine has. A browser needs none of them: `createImageBitmap` decodes the
@@ -15,7 +18,8 @@
  * when scaling was not enough.
  */
 import { MAX_IMAGE_BYTES, SHRINK_LONG_EDGE } from "@covey/protocol";
-import type { PickedFile, Shrinker } from "./attach.js";
+import { readUploadAnswer, uploadUrl } from "@covey/client";
+import { fileMime, type PickedFile, type Shrinker, type Uploader } from "./attach.js";
 
 /** The two passes, longest edge and JPEG quality, in the order they are tried. */
 const PASSES: [number, number][] = [[SHRINK_LONG_EDGE, 0.85], [Math.round(SHRINK_LONG_EDGE / 2), 0.7]];
@@ -68,9 +72,53 @@ export const shrinkInBrowser: Shrinker = async (file: PickedFile) => {
   }
 };
 
+/**
+ * A picked file, and the `File` it came from.
+ *
+ * `PickedFile` hides the browser's own object on purpose, so the shared reader
+ * depends on no platform's idea of one. The uploader does need it — a 200 MB
+ * video goes to the daemon as a body the browser streams, never as bytes this
+ * page read first — and the one maker of these is below, so the `File` rides
+ * along under a name the uploader can ask for. It is `DeviceFile`'s `uri` on
+ * the phone, and for the same reason.
+ */
+export interface BrowserFile extends PickedFile {
+  raw: File;
+}
+
+/**
+ * Stream one large file to the daemon that holds the thread (`POST /upload`).
+ *
+ * `XMLHttpRequest` and not `fetch`, for the one thing it still does better: it
+ * says how much of the body has gone. A `fetch` of a 200 MB video leaves the
+ * reader one unchanging line for four minutes, which reads as a page that hung.
+ *
+ * The `File` goes as the body, so the browser streams it off the disk and this
+ * page never holds it — which is the whole reason the ceiling can be as high
+ * as it is. `base` is the thread's own machine as an HTTP origin with its
+ * token, because an upload from the page carries no header the socket would
+ * have carried.
+ */
+export function uploadInBrowser(base: string, threadId: string, onProgress: (name: string, sent: number, total: number) => void): Uploader {
+  return (file) => new Promise((done, fail) => {
+    const raw = (file as BrowserFile).raw;
+    const name = file.name || "file";
+    if (!(raw instanceof Blob)) { fail(new Error("this browser gave covey no file to send")); return; }
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", uploadUrl(base, threadId, name));
+    xhr.setRequestHeader("content-type", fileMime(file));
+    xhr.upload.onprogress = (e) => onProgress(name, e.loaded, e.total || file.size);
+    xhr.onload = () => { try { done(readUploadAnswer(xhr.status, xhr.responseText)); } catch (e) { fail(e as Error); } };
+    xhr.onerror = () => fail(new Error("the machine could not be reached"));
+    xhr.onabort = () => fail(new Error("the upload stopped"));
+    xhr.send(raw);
+  });
+}
+
 /** A `File` from a picker, a paste or a drag, behind the shape `attach.ts` reads. */
-export function picked(file: File): PickedFile {
+export function picked(file: File): BrowserFile {
   return {
+    raw: file,
     name: file.name || "file",
     type: file.type,
     size: file.size,

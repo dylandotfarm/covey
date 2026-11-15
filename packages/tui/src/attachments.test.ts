@@ -8,6 +8,7 @@ import { mkdirSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
 import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, splitDropJoin, droppedPathText, isDrop, isDirectoryDrop, readClipboard, readClipboardText, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, cutTag, revealDrop, tagSpanAt, type RunReader } from "./attachments.js";
+import { largeDropPrompt } from "@covey/client";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -340,13 +341,30 @@ test("a file the API would refuse still travels: only covey's own cap turns one 
   const six = join(dir, "run.log");
   writeFileSync(six, Buffer.alloc(6 * 1024 * 1024));
   assert.equal(readDroppedFiles(six).attachments.length, 1, "6 MB is nothing to a file the agent opens by path");
+});
 
+test("a file over the frame is neither sent nor refused: it waits on the reader", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const big = join(dir, "huge.log");
   writeFileSync(big, Buffer.alloc(33 * 1024 * 1024));
-  const { attachments, failed } = readDroppedFiles(big);
-  assert.equal(attachments.length, 0);
-  assert.equal(failed[0]!.chip, "33 MB, over the 32 MB limit");
-  assert.match(failed[0]!.message, /huge\.log is 33 MB, over the 32 MB limit/);
+  const drop = readDroppedFiles(big);
+  assert.deepEqual(drop.attachments, []);
+  assert.deepEqual(drop.failed, []);
+  assert.deepEqual(drop.large.map((f) => [f.name, f.size]), [["huge.log", 33 * 1024 * 1024]]);
+  // Still a drop, or the composer would fall through and put the path in the
+  // draft as text.
+  assert.equal(isDrop(drop), true);
+  // Nothing was read: `large` carries where the file is, not what is in it.
+  assert.equal(drop.large[0]!.path, big);
+});
+
+test("the question names the file and its size, and the words are the shared ones", () => {
+  const prompt = largeDropPrompt([{ name: "clip.mp4", size: 90 * 1024 * 1024 }])!;
+  assert.equal(prompt.title, "Send clip.mp4 (90 MB)?");
+  assert.match(prompt.detail, /over the 32 MB covey sends without asking/);
+  assert.match(prompt.detail, /not to commit one/);
+  assert.equal(prompt.accept, "Send it");
+  assert.equal(largeDropPrompt([]), null, "nothing to ask about is no question");
 });
 
 // --- clipboard -------------------------------------------------------------
@@ -487,7 +505,7 @@ test("an oversized clipboard image reports its size", () => {
   assert.match(readClipboard(run, LINUX).errors[0]!, /limit 5 MB/);
 });
 
-test("an oversized copied file gets the same chip a dropped one gets", () => {
+test("an oversized copied file waits on the reader, as a dropped one does", () => {
   const dir = mkdtempSync(join(tmpdir(), "covey-att-"));
   const big = join(dir, "huge.log");
   writeFileSync(big, Buffer.alloc(33 * 1024 * 1024));
@@ -497,8 +515,10 @@ test("an oversized copied file gets the same chip a dropped one gets", () => {
   });
   const r = readClipboard(run, LINUX);
   assert.deepEqual(r.attachments, []);
-  assert.deepEqual(r.failed.map((f) => f.name), ["huge.log"]);
-  assert.match(r.failed[0]!.message, /huge\.log is 33 MB, over the 32 MB limit/);
+  assert.deepEqual(r.failed, []);
+  // A copied file is read by the drop's own reader, so a video copied in a file
+  // manager asks the reader exactly as a dropped one does.
+  assert.deepEqual(r.large.map((f) => f.name), ["huge.log"]);
 });
 
 // --- the macOS pasteboard --------------------------------------------------

@@ -1,14 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, extname, isAbsolute, join } from "node:path";
-import { readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { Transform, Readable } from "node:stream";
 import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import {
-  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_DIRECTORY_FILES, MAX_IMAGE_BYTES,
+  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_DIRECTORY_FILES, MAX_IMAGE_BYTES, MAX_UPLOAD_BYTES,
   PACK_ATTACHMENT_BYTES, SHRINK_LONG_EDGE, type Attachment,
 } from "@covey/protocol";
-import type { FailedDrop } from "@covey/client";
+import { readUploadAnswer, tooLargeToUpload, uploadUrl, type FailedDrop } from "@covey/client";
 
 /**
  * Terminals do not deliver file *data* on drag-and-drop — they paste a path.
@@ -184,6 +185,22 @@ function longestRun(tokens: string[], i: number): { path: string; end: number } 
   return null;
 }
 
+/**
+ * A dropped file that is too big to carry inline, waiting on the reader's word.
+ *
+ * Neither an attachment nor a failure: covey can send it, over `POST /upload`,
+ * but only once the reader has agreed to the upload (`largeDropPrompt`). The
+ * composer asks, and on a yes it uploads this and attaches what comes back.
+ */
+export interface LargeDrop {
+  /** What to call it: the base name, as a chip and in the question. */
+  name: string;
+  /** Where it is on this machine, which is where the upload reads it from. */
+  path: string;
+  size: number;
+  mimeType: string;
+}
+
 export interface DropResult {
   attachments: Attachment[];
   /**
@@ -199,6 +216,12 @@ export interface DropResult {
    * quietly changes what the agent gets has to say so (#132).
    */
   warnings: string[];
+  /**
+   * The files of this drop covey will not carry inline, and which the reader
+   * has not yet been asked about. Nothing is read for one: only its size, its
+   * name and where it is.
+   */
+  large: LargeDrop[];
 }
 
 /**
@@ -209,8 +232,13 @@ export interface DropResult {
  * An image over the cap is shrunk rather than refused (#132): a screenshot off
  * a retina display carries megabytes the model never sees, because the API
  * scales anything past its long edge down before it reads it.
+ *
+ * A file still over `MAX_ATTACHMENT_BYTES` after that comes back as `large`
+ * rather than as a failure: it can go, over `POST /upload`, once the reader
+ * says so. Nothing is read for one — a 400 MB video must not be loaded into
+ * memory to find out that it will be streamed.
  */
-export function readFileAttachment(path: string): { attachment?: Attachment; failure?: FailedDrop; warning?: string } {
+export function readFileAttachment(path: string): { attachment?: Attachment; failure?: FailedDrop; warning?: string; large?: LargeDrop } {
   const name = basename(path);
   let size: number;
   try {
@@ -229,7 +257,10 @@ export function readFileAttachment(path: string): { attachment?: Attachment; fai
     if (smaller) { read = smaller.path; mimeType = smaller.mimeType; size = statSync(read).size; }
     else warning = `${name} is ${mb(size)} MB and covey found no tool to shrink it (it looks for sips, magick, convert or ffmpeg on the PATH). It goes as a file the agent can open, but the model cannot see an image over ${mb(MAX_IMAGE_BYTES)} MB.`;
   }
-  if (size > MAX_ATTACHMENT_BYTES) return { failure: tooBig(name, path, size) };
+  if (size > MAX_UPLOAD_BYTES) return { failure: tooLargeToUpload(name, size), warning };
+  // Over the frame, under the ceiling: the reader decides. `read` and not
+  // `path`, so an image covey shrank is the one that goes up.
+  if (size > MAX_ATTACHMENT_BYTES) return { large: { name, path: read, size, mimeType }, warning };
   try {
     return { attachment: { name, path: read, mimeType, ...packBytes(readFileSync(read)) }, warning };
   } catch (e: any) {
@@ -330,21 +361,19 @@ function statFailure(name: string, path: string, e: NodeJS.ErrnoException): Fail
   return { name, chip: "unreadable", message: `could not read ${path}: ${e?.message ?? e}` };
 }
 
-function tooBig(name: string, path: string, size: number): FailedDrop {
-  const limit = `${mb(MAX_ATTACHMENT_BYTES)} MB`;
-  return {
-    name, chip: `${mb(size)} MB, over the ${limit} limit`,
-    message: imageMime(path)
-      ? `${name} is ${mb(size)} MB, over the ${limit} limit, and covey found no tool to shrink it (it looks for sips, magick, convert or ffmpeg on the PATH). Scale it down and drop it again.`
-      : `${name} is ${mb(size)} MB, over the ${limit} limit.`,
-  };
-}
-
+/**
+ * A dropped directory that comes to more than covey carries inline.
+ *
+ * Refused rather than uploaded, unlike a single large file: a tree of two
+ * hundred files is not the one video the upload route is for, and the way
+ * through is to drop the files that matter. So the sentence says that, which
+ * is #132's rule — the reader is told which problem this is and what to do.
+ */
 function tooBigDirectory(name: string, path: string, size: number): FailedDrop {
   const limit = `${mb(MAX_ATTACHMENT_BYTES)} MB`;
   return {
-    name, chip: `over the ${limit} limit`,
-    message: `${path} comes to more than ${limit}, the limit on one drop. Drop the files you mean instead.`,
+    name, chip: `${mb(size)} MB, over the ${limit} limit`,
+    message: `${path} comes to ${mb(size)} MB, over the ${limit} covey carries on one drop, and a directory never goes as an upload. Drop the files you mean instead.`,
   };
 }
 
@@ -359,15 +388,17 @@ function readFiles(paths: string[]): DropResult {
   const attachments: Attachment[] = [];
   const failed: FailedDrop[] = [];
   const warnings: string[] = [];
+  const large: LargeDrop[] = [];
   const dirs = new Set<string>();
   for (const path of paths) {
     let isDir = false;
     try { isDir = statSync(path).isDirectory(); } catch { /* the read below reports it */ }
     if (!isDir) {
-      const { attachment, failure, warning } = readFileAttachment(path);
-      if (attachment) attachments.push(attachment);
-      else failed.push(failure!);
-      if (warning) warnings.push(warning);
+      const one = readFileAttachment(path);
+      if (one.attachment) attachments.push(one.attachment);
+      else if (one.large) large.push(one.large);
+      else failed.push(one.failure!);
+      if (one.warning) warnings.push(one.warning);
       continue;
     }
     const read = readDirectoryAttachments(path);
@@ -375,7 +406,56 @@ function readFiles(paths: string[]): DropResult {
     const dir = uniqueDir(basename(path) || path, dirs);
     for (const a of read.attachments) attachments.push({ ...a, dir });
   }
-  return { attachments, failed, warnings };
+  return { attachments, failed, warnings, large };
+}
+
+/**
+ * Send a large file to the daemon that holds the thread, and give back the
+ * attachment that names the copy.
+ *
+ * The bytes are streamed off the disk and never held: `createReadStream` into
+ * `fetch`, which is what makes the ceiling a question about disk rather than
+ * about memory. The attachment carries no `data` — the daemon reads that as
+ * "the bytes are already here" — and the path is the route's own answer, which
+ * is always inside that thread's store.
+ *
+ * `base` is the thread's machine as an HTTP origin with its token
+ * (`httpBaseFor`). The same listener answers `/file`, so a TUI on a laptop
+ * uploads to a daemon anywhere.
+ *
+ * @throws Error with one sentence for the notice: the route's own words where
+ *   it refused, and the connection's where it never answered.
+ */
+export async function uploadDrop(
+  file: LargeDrop,
+  base: string,
+  threadId: string,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<Attachment> {
+  let sent = 0;
+  const count = new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      sent += chunk.byteLength;
+      onProgress?.(sent, file.size);
+      cb(null, chunk);
+    },
+  });
+  const body = Readable.toWeb(createReadStream(file.path).pipe(count)) as ReadableStream<Uint8Array>;
+  let res: Response;
+  try {
+    res = await fetch(uploadUrl(base, threadId, file.name), {
+      method: "POST",
+      body,
+      // undici wants this for a streamed body, and the types have not caught
+      // up with it. Without it the request is refused before it is sent.
+      duplex: "half",
+      headers: { "content-type": file.mimeType || "application/octet-stream" },
+    } as RequestInit);
+  } catch (e: any) {
+    throw new Error(`${file.name} did not reach the machine: ${e?.message ?? e}`);
+  }
+  const answer = readUploadAnswer(res.status, await res.text().catch(() => ""));
+  return { name: file.name, path: answer.path, mimeType: file.mimeType };
 }
 
 /** A directory name no other directory in this drop already took. */
@@ -441,7 +521,7 @@ export function droppedPathText(raw: string): string {
  */
 export function readDroppedFiles(raw: string): DropResult {
   const paths = droppedPaths(raw);
-  if (!paths) return { attachments: [], failed: [], warnings: [] };
+  if (!paths) return { attachments: [], failed: [], warnings: [], large: [] };
   return readFiles(paths);
 }
 
@@ -456,9 +536,16 @@ export function isDirectoryDrop(d: DropResult): boolean {
   return d.failed.length === 0 && d.attachments.length > 0 && d.attachments.every((a) => !!a.dir);
 }
 
-/** True when the drop read nothing at all: no file, and no name to chip. */
+/**
+ * True when the drop read nothing at all: no file, no name to chip, and
+ * nothing to ask the reader about.
+ *
+ * A drop of one large file counts, and has to: the composer falls back to
+ * putting the chunk in the draft as text when this is false, and a 90 MB video
+ * would then read as a path nobody asked for.
+ */
 export function isDrop(d: DropResult): boolean {
-  return d.attachments.length > 0 || d.failed.length > 0;
+  return d.attachments.length > 0 || d.failed.length > 0 || d.large.length > 0;
 }
 
 /**
@@ -765,6 +852,12 @@ export interface ClipboardResult {
   /** What attached, but not the way the reader meant. See `DropResult`. */
   warnings: string[];
   errors: string[];
+  /**
+   * The copied files covey will not carry inline. A copied file is read by
+   * `readFiles`, the drop's own reader, so a video copied in a file manager
+   * asks the reader exactly as a dropped one does.
+   */
+  large: LargeDrop[];
   /** Text, when that is all the clipboard held. The caller pastes it. */
   text?: string;
 }
@@ -814,7 +907,7 @@ const IMAGE_NOT_TEXT = "the clipboard holds an image, which has no text — ctrl
  * composer can say one line and carry on.
  */
 export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platform = process.platform): ClipboardResult {
-  const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], failed: [], warnings: [], errors });
+  const nothing = (errors: string[]): ClipboardResult => ({ attachments: [], failed: [], warnings: [], large: [], errors });
   const r = findClipboard(run, platform);
   if ("error" in r) return nothing([r.error]);
   if ("absent" in r) return nothing([`to paste an image: ${r.absent.join(", or ")}`]);
@@ -824,12 +917,12 @@ export function readClipboard(run: RunReader = runReader, platform: NodeJS.Platf
   if (r.found.paths) return { ...readFiles(r.found.paths), errors: [] };
   if (r.found.image) {
     try {
-      return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], failed: [], warnings: [], errors: [] };
+      return { attachments: [saveClipboardImage(r.found.image.buf, r.found.image.mime)], failed: [], warnings: [], large: [], errors: [] };
     } catch {
       return nothing(["could not write the clipboard image to a temporary file"]);
     }
   }
-  return { attachments: [], failed: [], warnings: [], errors: [], text: r.found.text };
+  return { attachments: [], failed: [], warnings: [], large: [], errors: [], text: r.found.text };
 }
 
 /**

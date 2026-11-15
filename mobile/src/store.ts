@@ -25,21 +25,21 @@
  * the same reason `setDraft` on the page repaints only when a chip appears or
  * goes.
  */
-import { AppState } from "react-native";
-import { applyDrop, coveyCommand, MachineClient, uuid, type TaggedAttachment } from "@covey/client";
+import { Alert, AppState } from "react-native";
+import { applyDrop, coveyCommand, largeDropPrompt, MachineClient, uploadingLabel, uuid, type TaggedAttachment } from "@covey/client";
 import {
   APP_CLIENT, asLod, DEFAULT_LOD, type ApprovalItem, type GitHubAction, type Lod, type MachineInfo,
   type PeerMachine, type QuestionItem, type Thread,
 } from "@covey/protocol";
 import {
   addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, composerKey, emptyState,
-  openView, pendingAttachments, pendingBytes, primaryMachine, sendableAttachments, setPendingAttachments,
-  syncAttachments, type MachineSlot, type SheetTarget, type State, type View,
+  machineHttpBase, openView, pendingAttachments, pendingBytes, primaryMachine, sendableAttachments,
+  setPendingAttachments, syncAttachments, type MachineSlot, type SheetTarget, type State, type View,
 } from "@covey/web";
-import { attachingLabel, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
+import { attachingLabel, readConfirmed, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
 import { forgetMachine, readLod, readMachines, readNotifyWanted, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveNotifyWanted, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
 import { asTalk, DEFAULT_TALK, type TalkMode } from "./talk";
-import { shrinkOnDevice } from "./attach";
+import { shrinkOnDevice, uploadFromDevice } from "./attach";
 import { primeUpdateToken } from "./ota";
 import { sheetCommand } from "./sheet";
 import { noteFor, noteId } from "./notes";
@@ -60,6 +60,26 @@ const NOTICE_MS = 4000;
  * call that may clone ten minutes; this is that budget, and the daemon's.
  */
 const CREATE_WAIT_MS = 10 * 60_000 + 10_000;
+
+/**
+ * Put the question about a large drop to the reader, and answer their word.
+ *
+ * A promise, because `Alert.alert` answers through a button handler and the
+ * reading that asked has to wait for it. `onDismiss` is a no as well: Android
+ * takes an alert down on a back press without calling either button, and
+ * without it a reader who pressed back would leave the composer waiting on a
+ * promise nothing resolves.
+ */
+function askLarge(files: { name: string; size: number }[]): Promise<boolean> {
+  const prompt = largeDropPrompt(files.map((f) => ({ name: f.name, size: f.size })));
+  if (!prompt) return Promise.resolve(false);
+  return new Promise((done) => {
+    Alert.alert(prompt.title, prompt.detail, [
+      { text: "Cancel", style: "cancel", onPress: () => done(false) },
+      { text: prompt.accept, onPress: () => done(true) },
+    ], { onDismiss: () => done(false) });
+  });
+}
 
 class Store {
   readonly state: State = emptyState();
@@ -590,12 +610,32 @@ class Store {
     }
     // The reader may have left the thread while a photograph was scaling.
     if (this.state.view?.machine !== machine || this.state.view.threadId !== threadId) return null;
+    // A video is the file this client exists for and the one a phone cannot
+    // shrink, so it goes to the machine's own `/upload` instead of inline —
+    // and never without the reader's word, because it is their link and their
+    // minutes. The question is `largeDropPrompt`'s, so the terminal and the
+    // page ask it in the same words.
+    const attachments = [...read.attachments];
+    const failed = [...read.failed];
+    if (read.large.length > 0 && await askLarge(read.large)) {
+      const base = machineHttpBase(this.state.machines.get(machine));
+      const sent = await readConfirmed(read.large, uploadFromDevice(base, threadId, (name, at, of_) => {
+        this.state.attaching = uploadingLabel(name, at, of_);
+        this.schedule();
+      }));
+      this.state.attaching = null;
+      this.schedule();
+      // And again: an upload is minutes, which is long enough to walk away.
+      if (this.state.view?.machine !== machine || this.state.view.threadId !== threadId) return null;
+      attachments.push(...sent.attachments);
+      failed.push(...sent.failed);
+    }
     // A file that did not attach, and one that attached but not the way the
     // reader meant, each say so where every other failure says it (#132).
     for (const w of read.warnings) this.fail(new Error(w));
-    for (const f of read.failed) this.fail(new Error(f.message));
-    if (read.attachments.length === 0 && read.failed.length === 0) return null;
-    const drop = applyDrop(draft, draft.length, read.attachments, held, read.failed);
+    for (const f of failed) this.fail(new Error(f.message));
+    if (attachments.length === 0 && failed.length === 0) return null;
+    const drop = applyDrop(draft, draft.length, attachments, held, failed);
     setPendingAttachments(this.state, machine, threadId, drop.attachments);
     this.schedule();
     const before = new Set(held.map((a) => a.tag));

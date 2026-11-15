@@ -1799,10 +1799,13 @@ Three shapes go over the wire, all as one `Attachment`:
   archive is one more step before anybody can. `.git` and symbolic links never go, and a
   directory over `MAX_DIRECTORY_FILES` is refused by count rather than read for a minute.
 
-Two limits, not one. `MAX_ATTACHMENT_BYTES` (32 MB) is what covey carries on one drop, and it
-bounds the websocket frame too: 32 MB of bytes is about 43 MB of base64, under the 64 MB the
-socket accepts. `MAX_IMAGE_BYTES` (5 MB) is what the model may be shown. They used to be one
-number, which is why a 6 MB screenshot was refused outright instead of travelling as a file.
+Three limits, not one. `MAX_ATTACHMENT_BYTES` (32 MB) is what covey carries *inline* on one
+drop, and it bounds the websocket frame too: 32 MB of bytes is about 43 MB of base64, under
+the 64 MB the socket accepts. `MAX_UPLOAD_BYTES` (512 MB) is what covey carries at all, over
+`POST /upload` and with the reader's word. `MAX_IMAGE_BYTES` (5 MB) is what the model may be
+shown. The first two were one number, which is why a 6 MB screenshot was refused outright
+instead of travelling as a file; the first and the second were one number too, which is why a
+phone could not send a video at all.
 
 The daemon writes what arrives into the thread's **file store**, `<cwd>/.covey/threads/<thread
 id>/files`, where `cwd` is the worktree the thread's session runs in
@@ -1818,6 +1821,61 @@ are counted against the same limit the client applies.
 `attachmentBlocks` then builds the turn. An image under the API's limit becomes a real
 `image` block; everything else is a line that names the file and its path relative to the
 agent's own cwd, and a dropped directory is one line with the count, not one line per file.
+
+### A file too big to carry inline
+
+Above `MAX_ATTACHMENT_BYTES`, covey **asks the reader**, and the file then does not go inline
+at all.
+
+Both halves of that sentence come from the same fact. Inline is base64 inside the `turn.send`
+command, so the sending client holds the file, its base64 and the whole command at once, and
+so does the daemon — about four times the file on each end. A phone with a recording of a bug
+cannot pay that, and shrinking is no answer: `shrinkImage` scales a photograph down to what
+the model would have read anyway, and there is nothing like it for a video.
+
+So the bytes go up on their own, before the message. The client streams the file to
+`POST /upload?thread=…&name=…` on the daemon that holds the thread, which writes it straight
+into that thread's file store and answers with the path it wrote
+(`packages/daemon/src/threadUpload.ts`, `reserveUploadPath`). The `turn.send` behind it
+carries that path and no `data`, which `materialiseAttachments` already reads as "the bytes
+are here". Neither end ever holds the whole file, and that is the whole reason the ceiling can
+be as high as it is: it bounds a worktree's disk and the reader's patience, never a frame.
+
+The route's rules:
+
+- `authenticate` is the whole gate, exactly as it is for `/file`. A client that may
+  `terminal.open` a shell in the thread's working directory may already write every file in
+  it, and `webEnabled` has no say — the daemon that holds a thread is very often not the one
+  that served the page.
+- The name is cut to one plain segment by the store's own rule, so nothing can write outside
+  it.
+- `content-length` decides nothing. The header is the client's claim about the body, so the
+  body is counted as it arrives; a request over the ceiling is stopped mid-flight. The header
+  is still read first, as a courtesy, so a reader who picked a 2 GB file hears about it at
+  once instead of after the 2 GB.
+- A write that is refused or cut short takes its half-written file with it. A truncated video
+  left in the store is one the agent reads as whole and `/file` serves.
+
+The reader is asked once per drop and the question is the same question in all three clients,
+so its words are `largeDropPrompt` in `@covey/client` — the name, the size, where the file
+goes, and that the agent is warned. The *asking* is each client's own (a pick overlay in the
+terminal, `confirm` on the page, an `Alert` on the phone), and so is the upload, because only
+the platform can stream a file it holds without reading it first: `uploadDrop` from a path,
+`uploadInBrowser` from a `File`, `uploadFromDevice` from a `content://` URI. All three report
+progress, because four minutes of one unchanging line reads as a client that has hung.
+
+Nothing of a large file is ever read to decide any of this: the size the picker reported is
+what decides, and the byte count after a read is only the net under a picker that reported
+none. A dropped *directory* over the cap is still refused rather than uploaded — a tree of two
+hundred files is not the one video this is for.
+
+And the agent is told, on receipt. A file over `MAX_ATTACHMENT_BYTES` gets its size on its own
+line, and the message gets one `largeFileNote` naming the two costs a reader cannot see for
+them: the repository, which keeps the bytes in every clone for good, and anywhere outside the
+store, which the worktree's cleanup does not reach. The store itself costs nothing, and the
+note says so — that is what makes the warning actionable rather than a thing to work around.
+Once for the message and never once per file: a note repeated four times is a note read none
+of the four.
 
 In the composer a drop is a **chip** — `[shot.png]`, `[notes/]`, or `[shot.png — not on this
 machine]` when it failed — spliced into the draft at the caret. The chip is ordinary text and

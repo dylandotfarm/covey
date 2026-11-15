@@ -726,6 +726,18 @@ export function httpBase(key: string): string {
 }
 
 /**
+ * The same, carrying that machine's own token when the page dials with one.
+ *
+ * It is what every route of a machine other than the one that served the page
+ * needs: an `<img>` and an upload both send no header, so the credential has
+ * to be on the URL. The TUI's `httpBaseFor` is this function.
+ */
+export function machineHttpBase(m: MachineSlot | undefined): string {
+  if (!m) return "";
+  return `${httpBase(m.key)}${m.token ? `?token=${encodeURIComponent(m.token)}` : ""}`;
+}
+
+/**
  * Where the bytes of a file dropped on a thread are (#135).
  *
  * The daemon that holds the thread serves them, which need not be the daemon

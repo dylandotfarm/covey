@@ -8,8 +8,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES } from "@covey/protocol";
-import { attachingLabel, extensionOf, fileMime, isDrop, isPicture, readPicked, renamed, sendingLabel, toBase64, type PickedFile, type Shrinker } from "./attach.js";
+import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_UPLOAD_BYTES } from "@covey/protocol";
+import { largeDropPrompt } from "@covey/client";
+import { attachingLabel, extensionOf, fileMime, isDrop, isPicture, readConfirmed, readPicked, renamed, sendingLabel, toBase64, type PickedFile, type Shrinker, type Uploader } from "./attach.js";
 
 /** A file the reader picked, of `size` bytes that are all `fill`. */
 function file(name: string, type: string, size: number, fill = 7): PickedFile {
@@ -87,28 +88,97 @@ test("a type the model refuses that the browser could not convert says so in its
   assert.match(r.warnings[0]!, /image\/jpeg/, "it names what the model does read");
 });
 
-test("a file over what one message carries is refused with its size, and the others still go", async () => {
+test("a file over what one message carries inline waits on the reader, and the others still go", async () => {
   const r = await readPicked([
     file("ok.txt", "text/plain", 10),
-    file("enormous.bin", "application/octet-stream", MAX_ATTACHMENT_BYTES + 1),
+    file("clip.mp4", "video/mp4", MAX_ATTACHMENT_BYTES + 1),
   ], cannotShrink);
   assert.deepEqual(r.attachments.map((a) => a.name), ["ok.txt"]);
-  assert.equal(r.failed.length, 1);
-  assert.equal(r.failed[0]!.name, "enormous.bin");
-  assert.match(r.failed[0]!.chip, /over the limit/);
-  assert.match(r.failed[0]!.message, /32 MB/);
+  assert.deepEqual(r.failed, []);
+  assert.deepEqual(r.large.map((f) => f.name), ["clip.mp4"]);
+  assert.equal(isDrop(r), true);
+});
+
+test("a file over the ceiling is refused outright, however willing the reader is", async () => {
+  const r = await readPicked([file("film.mov", "video/quicktime", MAX_UPLOAD_BYTES + 1)], cannotShrink);
+  assert.deepEqual(r.attachments, []);
+  assert.deepEqual(r.large, []);
+  assert.equal(r.failed[0]!.name, "film.mov");
+  assert.match(r.failed[0]!.message, /512 MB covey carries at all/);
+  assert.match(r.failed[0]!.message, /Put it on the machine/);
+});
+
+test("nothing of a large file is read: the reported size is what decides", async () => {
+  let reads = 0;
+  const watched: PickedFile = {
+    name: "big.mp4", type: "video/mp4", size: MAX_ATTACHMENT_BYTES + 1,
+    bytes: async () => { reads++; return new Uint8Array(0); },
+  };
+  const r = await readPicked([watched], cannotShrink);
+  assert.equal(reads, 0, "a phone cannot hold a video to find out that covey will stream it");
+  assert.equal(r.large[0], watched, "the picked file itself, because the upload needs it");
 });
 
 test("the cap is the whole message, not one file, and counts what the composer already holds", async () => {
   const half = Math.floor(MAX_ATTACHMENT_BYTES / 2) + 1;
   const r = await readPicked([file("a.bin", "", half), file("b.bin", "", half)], cannotShrink);
   assert.deepEqual(r.attachments.map((a) => a.name), ["a.bin"]);
-  assert.equal(r.failed.length, 1, "the second one is what takes the message over");
-  assert.match(r.failed[0]!.message, /is left/);
+  assert.deepEqual(r.large.map((f) => f.name), ["b.bin"], "the second one is what takes the message over");
 
   const already = await readPicked([file("c.bin", "", 1000)], cannotShrink, MAX_ATTACHMENT_BYTES - 10);
   assert.deepEqual(already.attachments, []);
-  assert.equal(already.failed.length, 1);
+  assert.deepEqual(already.large.map((f) => f.name), ["c.bin"]);
+});
+
+test("a picker that reported no size at all is still caught, by the bytes", async () => {
+  // A cloud drive hands a browser a file with `size: 0`. The size cannot
+  // decide, so the read happens and the old refusal is the net under it.
+  const lied: PickedFile = {
+    name: "mystery.bin", type: "", size: 0,
+    bytes: async () => new Uint8Array(MAX_ATTACHMENT_BYTES + 1),
+  };
+  const r = await readPicked([lied], cannotShrink);
+  assert.deepEqual(r.attachments, []);
+  assert.deepEqual(r.large, []);
+  assert.match(r.failed[0]!.message, /over the 32 MB a message carries/);
+});
+
+test("the question is the shared one, and names every file when there are several", () => {
+  const one = largeDropPrompt([{ name: "clip.mp4", size: 90 * 1024 * 1024 }])!;
+  assert.equal(one.title, "Send clip.mp4 (90 MB)?");
+  assert.equal(one.accept, "Send it");
+  const two = largeDropPrompt([
+    { name: "a.mp4", size: 40 * 1024 * 1024 },
+    { name: "b.mov", size: 60 * 1024 * 1024 },
+  ])!;
+  assert.equal(two.title, "Send 2 files (100 MB)?", "the size the reader is deciding on stays in the title");
+  assert.match(two.detail, /a\.mp4 \(40 MB\), b\.mov \(60 MB\)/, "and the names go in the detail");
+  assert.equal(two.accept, "Send them");
+});
+
+test("a confirmed file is an attachment with no data, pointing at the copy the daemon made", async () => {
+  const clip = file("clip.mp4", "video/mp4", MAX_ATTACHMENT_BYTES + 1);
+  const upload: Uploader = async (f) => ({ path: `/w/.covey/threads/t1/files/${f.name}` });
+  const r = await readConfirmed([clip], upload);
+  assert.deepEqual(r.failed, []);
+  assert.deepEqual(r.attachments, [{
+    name: "clip.mp4", path: "/w/.covey/threads/t1/files/clip.mp4", mimeType: "video/mp4",
+  }]);
+  assert.equal(r.attachments[0]!.data, undefined, "the bytes are on the daemon, not on the wire");
+});
+
+test("an upload that failed is a chip saying so, and does not stop the next file", async () => {
+  const a = file("a.mp4", "video/mp4", 1);
+  const b = file("b.mp4", "video/mp4", 1);
+  const upload: Uploader = async (f) => {
+    if (f.name === "a.mp4") throw new Error("upload: the machine has no room left for it");
+    return { path: `/w/files/${f.name}` };
+  };
+  const r = await readConfirmed([a, b], upload);
+  assert.deepEqual(r.attachments.map((x) => x.name), ["b.mp4"]);
+  assert.equal(r.failed[0]!.name, "a.mp4");
+  assert.equal(r.failed[0]!.chip, "did not go up");
+  assert.match(r.failed[0]!.message, /no room left/);
 });
 
 test("a file the browser would not read is named, and does not stop the rest", async () => {

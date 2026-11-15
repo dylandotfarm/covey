@@ -43,8 +43,8 @@ import { sentMessages, stepHistory, type HistoryWalk } from "../history.js";
 import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken } from "../commands.js";
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
-import { readClipboard, readClipboardText, readDroppedFiles, readSplitDrop, droppedPathText, splitDropJoin, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, type DropResult, type FailedDrop, type TaggedAttachment } from "../attachments.js";
-import { applyPaste, chipsPaste, keepTagged, pasteLines, pastedAlready, revealDrop, revealPaste } from "@covey/client";
+import { readClipboard, readClipboardText, readDroppedFiles, readSplitDrop, droppedPathText, splitDropJoin, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, uploadDrop, type DropResult, type FailedDrop, type LargeDrop, type TaggedAttachment } from "../attachments.js";
+import { applyPaste, chipsPaste, keepTagged, largeDropPrompt, pasteLines, pastedAlready, revealDrop, revealPaste, uploadingLabel } from "@covey/client";
 import { T, THEMES, themeFor, themeGeneration } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -3040,6 +3040,104 @@ export function App({ store }: { store: Store }) {
     return true;
   }
   /**
+   * Put files into the draft after an await — the one upload path (#135).
+   *
+   * `attach` reads the draft out of the render that made it, which is right for
+   * a key the reader pressed and wrong for an upload that took a minute: they
+   * have had that minute to type. So the draft comes from the store, which the
+   * effect above keeps in step, and the tags go on the *end* rather than at a
+   * caret the reader has since moved — the rule the page and the phone already
+   * follow, for the same reason.
+   *
+   * It paints only while that thread is still the one on screen. The draft is
+   * written either way, so a reader who walked away comes back to the chip.
+   */
+  function attachLater(threadId: string, attachments: Attachment[]): void {
+    if (attachments.length === 0) return;
+    const text = store.draft(threadId);
+    const drop = applyDrop(text, text.length, attachments, store.attachments(threadId));
+    store.setAttachments(threadId, drop.attachments);
+    store.setDraft(threadId, drop.value);
+    if (store.state.selected?.threadId === threadId) applyEdit({ value: drop.value, caret: drop.caret });
+  }
+  /**
+   * Ask the reader about the files of a drop covey will not carry inline, and
+   * on a yes send them to the daemon that holds the thread.
+   *
+   * The question is `largeDropPrompt`'s, so the terminal, the page and the
+   * phone all ask it in the same words. The upload is this client's own, and
+   * streams the file off the disk: the ceiling is a question about a worktree's
+   * disk and about the reader's patience, never about memory.
+   *
+   * `cut` is the draft with the text of this drop taken out, for the one case
+   * where nothing else has taken it out: a path the terminal wrote in two goes
+   * leaves its front half in the draft, and `attach` only cuts that when it had
+   * a file of its own to chip.
+   *
+   * It is applied as the question *opens*, whatever the answer. A drop covey
+   * asked about leaves the draft as it stood before the drop either way, which
+   * is already what the whole-chunk case does — the path never went in there at
+   * all. The other way round was worse than the refusal it replaced: a cancel
+   * left `see /tmp/shots/`, the front half of a path and no file, where the old
+   * refusal left a chip naming the file and its size.
+   *
+   * @returns true when there was something to ask about, so the caller stops
+   *   rather than falling through to putting the chunk in the draft as text —
+   *   a dropped video must not read as a path nobody wrote.
+   */
+  function askLarge(large: LargeDrop[], cut?: Ed.EditState): boolean {
+    const prompt = largeDropPrompt(large);
+    if (!prompt) return false;
+    if (!state.view) return false;
+    const { threadId } = state.view;
+    // The thread's *own* machine serves the route, which is the same address
+    // and token a shown file is read back from (`viewFileBase`).
+    const base = viewFileBase;
+    if (!base) {
+      store.notify(`covey has no address for the machine this thread runs on, so ${large.length === 1 ? large[0]!.name : "those files"} cannot go up`, "error");
+      return true;
+    }
+    if (cut) {
+      // Both halves: the state, because that is what paints, and the store,
+      // because `attachLater` reads the draft from there and an upload can
+      // finish before a React effect does.
+      store.setDraft(threadId, cut.value);
+      applyEdit(cut);
+      pasteSeam.current = null;
+    }
+    openPick(prompt.title, [
+      { id: "no", label: "Cancel", hint: "nothing is sent" },
+      { id: "yes", label: prompt.accept, hint: prompt.short },
+    ], (id) => {
+      store.setOverlay(null);
+      if (id === "yes") void sendLarge(threadId, base, large);
+    });
+    return true;
+  }
+  /** Upload each confirmed file, one at a time, and chip what arrived. */
+  async function sendLarge(threadId: string, base: string, large: LargeDrop[]): Promise<void> {
+    const done: Attachment[] = [];
+    for (const f of large) {
+      let said = 0;
+      try {
+        done.push(await uploadDrop(f, base, threadId, (sent, total) => {
+          // A notice lives four seconds, so saying where the upload is also
+          // keeps the row alive. Twice a second at most: a paint is this
+          // client's dearest act and nothing else on the screen is moving.
+          const now = Date.now();
+          if (now - said < 500 && sent < total) return;
+          said = now;
+          store.notify(uploadingLabel(f.name, sent, total));
+        }));
+      } catch (e: any) {
+        store.notify(e?.message ?? String(e), "error");
+      }
+    }
+    if (done.length === 0) return;
+    attachLater(threadId, done);
+    store.notify(done.length === 1 ? `${done[0]!.name} is on the machine` : `${done.length} files are on the machine`, "success");
+  }
+  /**
    * Put the path back where its chip stands, and let the file go with it.
    *
    * The chip is the only record of the file, so taking the chip out is what
@@ -3104,12 +3202,16 @@ export function App({ store }: { store: Store }) {
       // else the chunk reads as on its own is what the reader dropped.
       if (isDrop(whole) && !(split && isDirectoryDrop(whole))) {
         report(whole);
-        if (attach(whole.attachments, whole.failed, { value: draft, caret }, paths)) return;
+        // The small files chip now and the large ones wait on the reader, so a
+        // drop of one of each is not held up by the question about the other.
+        const did = attach(whole.attachments, whole.failed, { value: draft, caret }, paths);
+        if (askLarge(whole.large) || did) return;
       }
       if (split) {
         report(split.drop);
         const cut = { value: seam!.value.slice(0, split.start) + seam!.value.slice(seam!.caret), caret: split.start };
-        if (attach(split.drop.attachments, split.drop.failed, cut, droppedPathText(split.text))) return;
+        const did = attach(split.drop.attachments, split.drop.failed, cut, droppedPathText(split.text));
+        if (askLarge(split.drop.large, did ? undefined : cut) || did) return;
       }
     }
     // Ordinary text. Normalise line endings and tabs first: what the draft
@@ -3187,11 +3289,12 @@ export function App({ store }: { store: Store }) {
       else if (text) pasteText(text, true);
       return;
     }
-    const { attachments, failed, warnings, errors, text } = readClipboard();
+    const { attachments, failed, warnings, large, errors, text } = readClipboard();
     for (const e of errors) store.notify(e, "error");
     for (const f of failed) store.notify(f.message, "error");
     for (const w of warnings) store.notify(w, "warning");
-    if (attach(attachments, failed)) return;
+    const did = attach(attachments, failed);
+    if (askLarge(large) || did) return;
     if (text) pasteText(text);
   }
   function applyEdit(next: Ed.EditState) { setDraft(next.value); setCaret(next.caret); }

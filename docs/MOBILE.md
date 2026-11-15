@@ -45,6 +45,7 @@ never do is write a second copy of a decision:
 | What a sheet says | `sheetRows`, `sheetChoices` | Two lists of settings that disagree is two clients. |
 | What counts as a table | `tableAt` in `@covey/client` | A reply read as a table on one client and as prose on the other is a bug the reader cannot explain. |
 | The attachment caps and the four failure words | `readPicked` in `@covey/web/attach` | One word for four problems is what made a screenshot read as "unreadable" for weeks (#132). |
+| What covey asks before it sends a large file | `largeDropPrompt` in `@covey/client` | Three clients asking three different questions about the same video is three different answers about what a yes costs. |
 | Where speech is written out | `askMachine` in `src/transcribe.ts` (#180) | A phone that asked the machine about the device's audio and not about its own has two answers to one question. |
 | What a thread's change says to a reader who is elsewhere | `threadNews` in `@covey/client` | A thread the terminal rings a bell for and the phone says nothing about is one reader with two answers. |
 
@@ -336,6 +337,40 @@ its back button are the stack's own. Two screens exist because of that:
 The transcript is an **inverted** `FlatList`, and that is this platform's answer
 to #114: row zero is the newest, so a reply that streams longer pushes nothing
 and a reader who scrolled up stays where they were.
+
+## A video goes up, not inline
+
+A recording of a bug is the one file this client cannot shrink and cannot hold.
+`shrinkOnDevice` is covey's answer for a photograph — scale it to the long edge
+the API reads anyway — and there is nothing like it for a video. Inline is
+worse: base64 inside `turn.send` means the file, its base64 and the whole
+command in the app's heap at once, about four times the file, and an older
+Android has nothing like that to spare.
+
+So above `MAX_ATTACHMENT_BYTES` the bytes go on their own, before the message,
+to `POST /upload` on the daemon that holds the thread. Four things to keep:
+
+- **The reader is asked first**, because it is their link and their minutes, and
+  because a yes leaves megabytes in a worktree. The words are
+  `largeDropPrompt`'s so the terminal and the page ask the same thing;
+  `Alert.alert` is the asking, and **`onDismiss` is a no as well** — Android
+  takes an alert down on a back press without calling either button, and
+  without it the composer would wait on a promise nothing resolves.
+- **Nothing of the file is read to decide it.** The size the picker reported is
+  what decides, so a 300 MB video is never loaded to find out that covey will
+  stream it.
+- **The native uploader, never `fetch`.** React Native's `fetch` cannot send a
+  `content://` URI as a body, and reading one first is the heap again:
+  `new File(uri).upload(…)` with `UploadType.BINARY_CONTENT` reads the URI
+  natively and reports progress, which the composer says — a line that does not
+  move for four minutes reads as an app that stopped.
+- **The thread's own machine serves the route**, so the base carries that
+  machine's token (`machineHttpBase`). A native upload holds no socket and so no
+  credential of its own.
+
+The attachment that follows carries the path and no `data`, and the agent is
+told on receipt that the file is large and told not to commit it
+(`largeFileNote` on the daemon).
 
 ## Dictation
 

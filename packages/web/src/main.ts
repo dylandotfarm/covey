@@ -5,12 +5,12 @@
  * re-sends an item every few tens of milliseconds and the phone has one
  * thread for the paint and the keyboard.
  */
-import { applyDrop, budgetValue, coveyCommand, MachineClient, uuid } from "@covey/client";
+import { applyDrop, budgetValue, coveyCommand, largeDropPrompt, MachineClient, uploadingLabel, uuid } from "@covey/client";
 import { asLod, DEFAULT_LOD, WEB_CLIENT, type Lod, type ApprovalItem, type Command, type PeerMachine, type PermissionMode, type QuestionItem } from "@covey/protocol";
 import { Renderer, type Actions } from "./render.js";
-import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, baseHash, composerKey, emptyState, itemHash, mediaHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
-import { attachingLabel, readPicked, sendingLabel } from "./attach.js";
-import { picked, shrinkInBrowser } from "./shrink.js";
+import { addMachine, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, baseHash, composerKey, emptyState, itemHash, machineHttpBase, mediaHash, openView, pendingAttachments, pendingBytes, primaryMachine, routeOf, sendableAttachments, setPendingAttachments, syncAttachments, threadHash, viewRowNumber, type MachineSlot, type Route, type SheetTarget } from "./state.js";
+import { attachingLabel, readConfirmed, readPicked, sendingLabel } from "./attach.js";
+import { picked, shrinkInBrowser, uploadInBrowser } from "./shrink.js";
 
 const TOKEN_KEY = "covey.token";
 /** Where this device keeps its level of detail (#149). */
@@ -309,15 +309,35 @@ const actions: Actions = {
     }
     // The reader may have left the thread while a photograph was scaling.
     if (state.view?.machine !== machine || state.view.threadId !== threadId) return null;
+    // A file over what a message carries inline is neither sent nor refused
+    // until the reader says: it goes to the machine's own `/upload`, which
+    // costs them the link and leaves the bytes in the worktree. The words are
+    // `largeDropPrompt`'s, so the terminal and the phone ask the same thing.
+    const attachments = [...read.attachments];
+    const failed = [...read.failed];
+    const prompt = largeDropPrompt(read.large.map((f) => ({ name: f.name, size: f.size })));
+    if (prompt && confirm(`${prompt.title}\n\n${prompt.detail}`)) {
+      const base = machineHttpBase(state.machines.get(machine));
+      const sent = await readConfirmed(read.large, uploadInBrowser(base, threadId, (name, at, of_) => {
+        state.attaching = uploadingLabel(name, at, of_);
+        schedule();
+      }));
+      state.attaching = null;
+      schedule();
+      // And again: an upload is minutes, which is long enough to walk away.
+      if (state.view?.machine !== machine || state.view.threadId !== threadId) return null;
+      attachments.push(...sent.attachments);
+      failed.push(...sent.failed);
+    }
     // A file that did not attach, and a file that attached but not the way the
     // reader meant, each say so where every other failure on this page says it.
     for (const w of read.warnings) fail(new Error(w));
-    for (const f of read.failed) fail(new Error(f.message));
-    if (read.attachments.length === 0 && read.failed.length === 0) return null;
+    for (const f of failed) fail(new Error(f.message));
+    if (attachments.length === 0 && failed.length === 0) return null;
     // The caret belongs to the renderer, so the tags are worked out here and
     // put into the draft there. `draft` is only what they must be unique
     // against — the text of it at the moment the reader picked.
-    const drop = applyDrop(draft, draft.length, read.attachments, held, read.failed);
+    const drop = applyDrop(draft, draft.length, attachments, held, failed);
     setPendingAttachments(state, machine, threadId, drop.attachments);
     schedule();
     const before = new Set(held.map((a) => a.tag));

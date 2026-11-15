@@ -17,7 +17,7 @@ import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } fro
 import { keepFilePaths, redactDeep, redactor, unredactor } from "./redact.js";
 import { threadFileTarget } from "./threadFiles.js";
 import { normaliseRemote, projectSlug, repositoryNames, publishDirectory, listRemoteBranches, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
-import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
+import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, reserveUploadPath, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, fleetSetting, projectsDir, savePeers } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
 import { ChainTracker, summariseActivity } from "./activity.js";
@@ -3074,6 +3074,20 @@ export class Engine {
   threadFilesRoot(threadId: string): string | null {
     const t = this.db.getThread(threadId);
     return t ? threadFilesDir(this.threadCwd(t), t.id) : null;
+  }
+
+  /**
+   * Where a file a client is about to upload will land, or null when this
+   * daemon holds no such thread. The `POST /upload` route reads it, so a file
+   * too big for the `turn.send` frame still reaches the thread.
+   *
+   * The path is reserved before the bytes arrive, because the route streams to
+   * it — and reserved in the one store, so the attachment that follows names a
+   * path `materialiseAttachments` will accept.
+   */
+  threadUploadPath(threadId: string, name: string): string | null {
+    const t = this.db.getThread(threadId);
+    return t ? reserveUploadPath(this.threadCwd(t), t.id, name) : null;
   }
 
   /**
