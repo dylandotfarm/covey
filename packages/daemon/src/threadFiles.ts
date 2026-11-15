@@ -87,13 +87,15 @@ export function byteRange(header: string | undefined, size: number): { start: nu
  * `restore` puts the values of that thread's secrets back into the path it was
  * given, for an item written while covey redacted its own file paths. It is
  * read before the store is checked and it moves the boundary nowhere: the
- * answer is inside the store or there is no answer.
+ * answer is inside the store or there is no answer. Every caller passes it,
+ * and it is not optional for that reason: a caller that forgot it would lose
+ * the repair and say nothing.
  */
 export function serveThreadFile(
   req: IncomingMessage,
   res: ServerResponse,
   rootOf: (threadId: string) => string | null,
-  restore?: (threadId: string, path: string) => string,
+  restore: (threadId: string, path: string) => string,
 ): void {
   if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); res.end(); return; }
   const url = new URL(req.url ?? "/", "http://x");
@@ -109,7 +111,7 @@ export function serveThreadFile(
   // back in before the store decides. The store decides all the same: a path
   // that lands outside it is refused, whatever it is spelled with (#126).
   const asked = url.searchParams.get("path");
-  const file = threadFileTarget(root, asked && restore ? restore(threadId, asked) : asked);
+  const file = threadFileTarget(root, asked === null ? null : restore(threadId, asked));
   if (!file) {
     res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
     res.end("file: the path must be one of that thread's own files\n");

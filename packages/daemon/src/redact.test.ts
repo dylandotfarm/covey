@@ -67,13 +67,17 @@ test("numbers, nulls and booleans pass through untouched", () => {
 
 // ---- the files covey stored itself ----------------------------------------
 
+/** The thread's own file store, which is where a path covey kept must be. */
+const STORE = "/p/github.com/dylandotfarm/app/t1/.covey/threads/t1/files";
+const held = (path: string) => path.startsWith(STORE + "/");
+
 test("a file covey stored keeps the path covey gave it", () => {
   const r = redactor({ OWNER: "dylandotfarm" })!;
   const raw = {
     id: "note:1", threadId: "t1", kind: "note", text: "the sidebar after the fix",
-    files: [{ name: "shot.png", path: "/p/github.com/dylandotfarm/app/t1/.covey/threads/t1/files/shot.png", mimeType: "image/png" }],
+    files: [{ name: "shot.png", path: `${STORE}/shot.png`, mimeType: "image/png" }],
   };
-  const out = keepFilePaths(redactDeep(raw, r), raw);
+  const out = keepFilePaths(redactDeep(raw, r), raw, held);
   // The path names a file in the thread's own store, and the `/file` route
   // refuses everything else — so a path rewritten here is a picture nobody can
   // open. The directory is already in the `projects` table as it stands.
@@ -86,19 +90,33 @@ test("the words around a kept path are redacted all the same", () => {
   const r = redactor({ OWNER: "dylandotfarm" })!;
   const raw = {
     id: "user:1", threadId: "t1", kind: "user", text: "here is dylandotfarm",
-    attachments: [{ name: "a.png", path: "/p/dylandotfarm/t1/.covey/threads/t1/files/a.png" }],
+    attachments: [{ name: "a.png", path: `${STORE}/a.png` }],
   };
-  const out = keepFilePaths(redactDeep(raw, r), raw);
+  const out = keepFilePaths(redactDeep(raw, r), raw, held);
   assert.equal(out.text, "here is [secret OWNER]");
   assert.equal(out.attachments[0]!.path, raw.attachments[0]!.path);
+});
+
+test("an attachment covey left where it was keeps the marker", () => {
+  // An attachment sent with no inline bytes keeps the path it came with
+  // (`materialiseAttachments`), and that path is anywhere on the machine. The
+  // route refuses it whatever it is spelled with, so keeping the value would
+  // write one down for no picture at all.
+  const r = redactor({ OWNER: "dylandotfarm" })!;
+  const raw = {
+    id: "user:2", threadId: "t1", kind: "user", text: "look at this",
+    attachments: [{ name: "notes.txt", path: "/home/dylandotfarm/notes.txt" }],
+  };
+  const out = keepFilePaths(redactDeep(raw, r), raw, held);
+  assert.equal(out.attachments[0]!.path, "/home/[secret OWNER]/notes.txt");
 });
 
 test("an item with no files of its own is the object redaction made", () => {
   const r = redactor({ OWNER: "dylandotfarm" })!;
   const raw = { id: "a", text: "ordinary" };
   const red = redactDeep(raw, r);
-  assert.equal(keepFilePaths(red, raw), red);
-  assert.equal(keepFilePaths("a string" as unknown, "a string" as unknown), "a string");
+  assert.equal(keepFilePaths(red, raw, held), red);
+  assert.equal(keepFilePaths("a string" as unknown, "a string" as unknown, held), "a string");
 });
 
 // ---- putting a value back into a path -------------------------------------

@@ -97,7 +97,8 @@ function walk(value: unknown, redact: (s: string) => string): unknown {
 const FILE_FIELDS = ["attachments", "files"] as const;
 
 /**
- * `redacted` with the file paths of `raw` put back.
+ * `redacted` with the file paths of `raw` put back, for every file the thread
+ * really holds.
  *
  * A stored attachment's `path` is covey's own bookkeeping and never a
  * session's words: the daemon writes the bytes into the thread's file store
@@ -107,10 +108,16 @@ const FILE_FIELDS = ["attachments", "files"] as const;
  * refuses a path outside the store, so the picture the reader clicks is a
  * refusal instead of a picture.
  *
- * This writes no value down that covey did not hold already: the store's root
- * is the thread's worktree, which the `threads` table carries whole.
+ * `held` is what keeps that narrow. Not every attachment is in the store: one
+ * sent with no inline bytes keeps the path it came with
+ * (`materialiseAttachments`), and that path is anywhere on the machine. A path
+ * outside the store buys no picture — the route refuses it however it is
+ * spelled — so it stays as the redaction made it, and the promise here is the
+ * whole truth: the only value this writes down is part of the store's own
+ * root, which is the thread's worktree, and the `threads` table carries that
+ * whole.
  */
-export function keepFilePaths<T>(redacted: T, raw: T): T {
+export function keepFilePaths<T>(redacted: T, raw: T, held: (path: string) => boolean): T {
   if (redacted === raw || !redacted || typeof redacted !== "object") return redacted;
   let out = redacted as Record<string, unknown>;
   for (const field of FILE_FIELDS) {
@@ -121,6 +128,9 @@ export function keepFilePaths<T>(redacted: T, raw: T): T {
     const files = red.map((f, i) => {
       const path = (src[i] as { path?: unknown } | undefined)?.path;
       if (!f || typeof f !== "object" || typeof path !== "string" || (f as { path?: unknown }).path === path) return f;
+      // The question is asked only for a path the walk rewrote, so a thread
+      // with no secrets and an item with nothing in the store pay nothing.
+      if (!held(path)) return f;
       changed = true;
       return { ...(f as object), path };
     });
