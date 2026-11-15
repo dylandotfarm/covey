@@ -16,6 +16,7 @@ import { findWebRoots, serveWeb } from "./web.js";
 import { findUpdateDir, serveUpdates } from "./updates.js";
 import { serveMedia } from "./media.js";
 import { serveThreadFile } from "./threadFiles.js";
+import { serveThreadUpload } from "./threadUpload.js";
 import { webAddresses } from "./addresses.js";
 
 const STARTED_AT = new Date().toISOString();
@@ -97,6 +98,19 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
       void authenticate(req, o.config, selfUserId).then((auth) => {
         if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`file: ${auth.reason}\n`); return; }
         serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id), (id, path) => o.engine.threadFilePath(id, path));
+      }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
+      return;
+    }
+    // A file too big to carry inline, on its way *in*: the client streams it
+    // here and the `turn.send` behind it names the copy. Gated exactly as
+    // `/file` is, and for the same reasons — `authenticate` is the whole gate
+    // (a client that may open a shell in that directory may already write
+    // every file in it), and the web client's own setting has no say, because
+    // the daemon that holds the thread is often not the one serving the page.
+    if (req.url === "/upload" || req.url?.startsWith("/upload?")) {
+      void authenticate(req, o.config, selfUserId).then((auth) => {
+        if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`upload: ${auth.reason}\n`); return; }
+        return serveThreadUpload(req, res, { reserve: (id, name) => o.engine.threadUploadPath(id, name), log: o.log });
       }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
       return;
     }

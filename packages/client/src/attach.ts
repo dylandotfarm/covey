@@ -58,7 +58,7 @@ export interface FailedDrop {
   message: string;
 }
 
-/** Bytes as a whole-number MiB string, so a limit reads as "5 MB" not "5.24288 MB". */
+/** Bytes as MiB to one decimal, so a limit reads as "5 MB" and a file as "38.1 MB". */
 export function megabytes(n: number): string {
   return String(Math.round((n / (1024 * 1024)) * 10) / 10);
 }

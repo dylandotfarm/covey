@@ -6,21 +6,24 @@
  * deliberate and it is #132's lesson — one word for four problems is what made
  * a screenshot read as "unreadable" for weeks, and two clients with two copies
  * of that logic would drift back into it. `readPicked` is pure and node-tested,
- * and it takes the two things only a real device can do as arguments.
+ * and it takes the things only a real device can do as arguments.
  *
- * So this file is the two arguments and nothing else:
+ * So this file is those arguments and nothing else:
  *
  *  - a `PickedFile` over what Android's pickers hand back, which is a URI
  *    rather than the bytes a browser gives;
  *  - a `Shrinker` over `expo-image-manipulator`, which is this platform's
- *    answer to `sips`, `magick` and a browser's canvas.
+ *    answer to `sips`, `magick` and a browser's canvas;
+ *  - an `Uploader` over this platform's own native upload, for the one file a
+ *    phone can neither shrink nor hold — a video.
  */
 import * as DocumentPicker from "expo-document-picker";
-import { File } from "expo-file-system";
+import { File, UploadType } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import { MAX_IMAGE_BYTES, SHRINK_LONG_EDGE } from "@covey/protocol";
-import type { PickedFile, Shrinker } from "@covey/web/attach";
+import { readUploadAnswer, uploadUrl } from "@covey/client";
+import { fileMime, type PickedFile, type Shrinker, type Uploader } from "@covey/web/attach";
 
 /**
  * A picked file, and the URI it came from.
@@ -150,3 +153,36 @@ export const shrinkOnDevice: Shrinker = async (file: PickedFile) => {
   }
   return null;
 };
+
+/**
+ * Stream one large file to the daemon that holds the thread (`POST /upload`).
+ *
+ * The native uploader, not `fetch`: React Native's `fetch` has no way to send
+ * a `content://` URI as a body, and reading it first is the whole file in the
+ * app's heap — which for a video is the thing this route exists to avoid. The
+ * module reads the URI itself and reports how much has gone, so the composer
+ * can say so; a line that does not move for four minutes reads as an app that
+ * has stopped.
+ *
+ * `base` is the thread's own machine as an HTTP origin with its token
+ * (`machineHttpBase`): a native upload carries no socket and so no credential
+ * of its own.
+ */
+export function uploadFromDevice(base: string, threadId: string, onProgress: (name: string, sent: number, total: number) => void): Uploader {
+  return async (file) => {
+    // Every file that reaches here came from a picker above, so it is a
+    // `DeviceFile` — stated, as `shrinkOnDevice` states it, rather than relied on.
+    const { uri } = file as DeviceFile;
+    const name = file.name || "file";
+    if (typeof uri !== "string" || !uri) throw new Error("this file came from no picker covey knows");
+    const res = await new File(uri).upload(uploadUrl(base, threadId, name), {
+      httpMethod: "POST",
+      // The file as the body and nothing else. Multipart would make the daemon
+      // parse a form to find one file it already knows the name of.
+      uploadType: UploadType.BINARY_CONTENT,
+      mimeType: fileMime(file),
+      onProgress: ({ bytesSent, totalBytes }) => onProgress(name, bytesSent, totalBytes > 0 ? totalBytes : file.size),
+    });
+    return readUploadAnswer(res.status, res.body);
+  };
+}

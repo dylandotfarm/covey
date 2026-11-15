@@ -47,14 +47,54 @@
   in — so the agent opens a drop with a path it can guess, the files go when the worktree
   goes, and `.covey/.gitignore` (`*`) keeps them out of `git status` and out of a checkpoint.
   Everything from the wire is cut down first (`safeSegments`): a name must not write outside
-  that store. Two caps, and never one again: `MAX_ATTACHMENT_BYTES` is what covey carries on
-  one drop and bounds the socket frame with it; `MAX_IMAGE_BYTES` is what the model may be
-  shown. An image over the second is shrunk — `shrinkImage` scales the long edge to
+  that store. Three caps, and never a fourth: `MAX_ATTACHMENT_BYTES` is what covey carries
+  *inline* on one drop and bounds the socket frame with it; `MAX_UPLOAD_BYTES` is what covey
+  carries at all; `MAX_IMAGE_BYTES` is what the model may be shown. An image over the last is
+  shrunk — `shrinkImage` scales the long edge to
   `SHRINK_LONG_EDGE` with `sips`, `magick`, `convert` or `ffmpeg`, whichever the machine has,
   and that constant is the API's own, so scaling to it costs nothing; scaling comes before
   quality because heavy JPEG is what makes a screenshot's text illegible. An image no tool
   could shrink still travels, with a warning that the model will read it as a file. Over 1 MB
-  a file goes `gzip`ped when that saves more than a tenth. A dropped *directory* goes as one
+  a file goes `gzip`ped when that saves more than a tenth.
+  **Over the first cap covey asks the reader, and then the file does not go inline at all.**
+  Inline is base64 in the `turn.send` command, which is about four times the file in memory on
+  each end, and a phone with a video of a bug cannot pay that — shrinking, covey's answer for
+  a photograph, is no answer for a recording. So the bytes go up on their own first, streamed
+  to `POST /upload` on the daemon that holds the thread
+  (`packages/daemon/src/threadUpload.ts`), which writes them straight into that thread's store
+  and answers with the path; the `turn.send` behind it carries that path and no `data`.
+  Neither end ever holds the file, which is the whole reason the ceiling can be as high as it
+  is — it bounds a worktree's disk and the reader's patience, never a frame. The route is
+  gated by `authenticate` and by nothing else, as `/file` is and for the same two reasons: a
+  client that may open a shell in that directory may already write every file in it, and the
+  daemon holding the thread is often not the one serving the page. `content-length` decides
+  nothing — the body is counted as it arrives, because the header is the client's claim about
+  the body — and a write that is refused or cut short takes its half-written file with it, or
+  the agent would read a truncated video as whole. The stream opens `wx` and never `w`:
+  `reserveUploadPath` creates nothing, so two clients uploading one name at one moment are
+  both handed `clip.mp4` and the second would truncate the first — and `EEXIST` is then the
+  one failure that must *not* remove the file, because this request wrote none of it. The question is one question in three
+  places, so its words are `largeDropPrompt` in `@covey/client` (`hiddenPanel`'s rule); the
+  *asking* is each client's own — a pick in the terminal, `confirm` on the page, an `Alert` on
+  the phone — and so is the upload, because only the platform can stream a file it holds
+  without reading it (`uploadDrop` from a path, `uploadInBrowser` from a `File`,
+  `uploadFromDevice` from a `content://` URI). Every one of them reports progress: four
+  minutes of one unchanging line reads as a client that hung. **Nothing of a large file is
+  ever read to decide this** — the size the picker reported is what decides, and the bytes are
+  the net under a picker that reported none. A dropped *directory* over the cap is still
+  refused rather than uploaded: a tree of two hundred files is not the one video this is for.
+  Two rules a reader cannot undo. The chip an upload leaves **carries the paths it stands
+  for**, like every other chip, or `revealDrop` can never match it — and then the gesture for
+  *undoing* a drop (paste the path again) is the gesture that uploads the whole file a second
+  time, at the one size where that costs minutes and leaves a `clip-2.mp4`. And a file
+  already on its way up is **not a new drop** (`splitInFlight`): there is no chip until the
+  bytes land, so that window is exactly where the reveal cannot save the reader and the only
+  thing that can is remembering what is in flight.
+  And the agent is told on receipt, in `attachmentBlocks`: a file over the first cap gets its
+  size on its own line and the message gets one `largeFileNote` naming the two costs a reader
+  cannot see — the repository, which keeps the bytes in every clone for good, and anywhere
+  outside the store, which the worktree's cleanup does not reach. Said once for the message
+  and never once per file. A dropped *directory* goes as one
   attachment per file, each with the path it had inside and all sharing one `dir`, so the tree
   arrives whole and the composer shows one chip; never an archive, because the agent would
   have to unpack it. When a read fails, say which of the four things went wrong — not there,

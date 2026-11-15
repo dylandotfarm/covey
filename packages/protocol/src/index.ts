@@ -1859,6 +1859,11 @@ export interface Attachment {
    * daemon on another machine. Transport only — the daemon writes the bytes to
    * disk and strips this before the attachment is persisted on a timeline item,
    * so snapshots never replay megabytes of base64.
+   *
+   * Absent means the bytes are on the daemon already. For a file over
+   * `MAX_ATTACHMENT_BYTES` that is because the client streamed it to
+   * `POST /upload` first — the one route such a file takes — and `path` is the
+   * copy that route made in the thread's own file store.
    */
   data?: string;
   /**
@@ -1878,13 +1883,37 @@ export interface Attachment {
 }
 
 /**
- * What one drop may weigh, unpacked, across every file in it.
+ * What one drop may weigh, unpacked, across every file that travels *inline*.
  *
- * A drop travels inline, as base64 in the `turn.send` command, so this bounds
+ * An inline drop rides as base64 in the `turn.send` command, so this bounds
  * the websocket frame as well: 32 MB of bytes is about 43 MB of base64, under
  * the 64 MB the daemon's socket accepts.
+ *
+ * It is also the line above which covey asks the reader. Below it a drop costs
+ * nothing anybody would notice; above it the file goes over `POST /upload`
+ * instead, which is minutes of a mobile link and megabytes in the worktree,
+ * and that is a cost only the person paying it may agree to. Two caps bound
+ * two different things and neither one bounds the other: this one is the frame,
+ * `MAX_UPLOAD_BYTES` is the disk.
  */
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * What one file may weigh and still reach a thread at all, once the reader has
+ * said yes to it.
+ *
+ * These bytes never cross the socket. A file over `MAX_ATTACHMENT_BYTES` is
+ * streamed to `POST /upload` on the daemon that holds the thread, which writes
+ * it straight into that thread's file store, so neither end ever holds the
+ * whole file in memory and the frame stays where it was. That is the whole
+ * reason the ceiling can be this high: it bounds the disk in a worktree and
+ * the reader's patience, and nothing else.
+ *
+ * A phone is why it exists (`mobile/`): a video is the one thing a reader
+ * cannot shrink on the device, and `shrinkImage`'s answer — scale it down —
+ * is no answer for a recording of a bug.
+ */
+export const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
 
 /**
  * What one image may weigh and still be shown to the model. The Anthropic API

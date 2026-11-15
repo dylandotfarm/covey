@@ -36,7 +36,7 @@ export function attachmentsDir(threadId: string): string {
 
 export class AttachmentError extends Error {}
 
-/** Bytes as a whole-number MiB string, so limits read as "5 MB" not "5.24288 MB". */
+/** Bytes as MiB to one decimal, so a limit reads as "5 MB" and a file as "38.1 MB". */
 const mb = (n: number) => String(Math.round((n / (1024 * 1024)) * 10) / 10);
 
 /**
@@ -59,7 +59,12 @@ export function materialiseAttachments(cwd: string, threadId: string, atts: Atta
     // An empty string is a file of no bytes, which a client may well send, so
     // the question is whether the field is there and not whether it is truthy.
     if (a.data === undefined) {
-      // No inline bytes: only usable if the path happens to be on this machine.
+      // No inline bytes: the file is already on this machine. That is either a
+      // path a local client named, or — since #135 — the copy `POST /upload`
+      // made in this thread's own store for a file too big to carry inline.
+      // The boundary does not move for the second case: the route is what
+      // decides where an uploaded file lands, and it writes in the store and
+      // nowhere else.
       if (!existsSync(a.path)) throw new AttachmentError(`attachment ${a.name} has no data and ${a.path} does not exist on this machine`);
       return { ...a };
     }
@@ -84,6 +89,23 @@ export function materialiseAttachments(cwd: string, threadId: string, atts: Atta
     const { data: _data, packing: _packing, ...rest } = a;
     return { ...rest, path: dest };
   });
+}
+
+/**
+ * Reserve a path in a thread's file store for a file about to be uploaded
+ * (`POST /upload`), and make the store if it is not there yet.
+ *
+ * It is `materialiseAttachments`' own rule, lifted out so the two ways a file
+ * reaches the store cannot drift: the name is cut down to one plain segment,
+ * and a name the store already holds gets a name of its own rather than
+ * landing on the file that has it. The path comes back before a byte arrives,
+ * because the route streams to it.
+ */
+export function reserveUploadPath(cwd: string, threadId: string, name: string): string {
+  const root = threadFilesDir(cwd, threadId);
+  mkdirSync(root, { recursive: true });
+  ignoreStore(cwd);
+  return join(root, unique(root, safeName(name), new Set()));
 }
 
 /** The bytes of an attachment, however the client packed them for the wire. */
@@ -220,6 +242,32 @@ export function keepAttachmentFile(threadId: string, path: string, name: string)
 }
 
 /**
+ * What the agent is told about the files on a message that are over what covey
+ * carries without asking.
+ *
+ * A file this size came up over `POST /upload`, which means the reader was
+ * asked about it and said yes — so the agent is not being warned about the
+ * reader, it is being told what the file costs *elsewhere*. Two things cost:
+ * the repository, which keeps a blob forever and for every clone, and anywhere
+ * on the machine outside the store, which the worktree's own cleanup does not
+ * reach. The store itself costs nothing — `.covey/.gitignore` holds `*`, so the
+ * file is in no `git status` and no checkpoint, and it goes when the worktree
+ * goes.
+ *
+ * Said once for the whole message and never once per file: a note repeated
+ * four times is a note read none of the four.
+ *
+ * @returns the line, or null when every file on the message came inline.
+ */
+export function largeFileNote(files: { name: string; bytes: number }[]): string | null {
+  if (files.length === 0) return null;
+  const named = files.map((f) => `${f.name} (${mb(f.bytes)} MB)`).join(", ");
+  const they = files.length === 1 ? "it is" : "they are";
+  const one = files.length === 1 ? "that file" : "a file this size";
+  return `${named}: ${they} over the ${mb(MAX_ATTACHMENT_BYTES)} MB covey carries without asking, and the reader confirmed the upload. Do not commit ${one} to the repository, and do not copy it anywhere outside this thread's own file store, unless the reader asks you to — git ignores the store and it goes with the worktree, while a commit keeps the bytes in every clone of the repository for good.`;
+}
+
+/**
  * Build the SDK content blocks for a turn. Images become real `image` blocks so
  * the model actually sees them; anything else is referenced by path so the
  * agent can open it with its own tools.
@@ -227,15 +275,22 @@ export function keepAttachmentFile(threadId: string, path: string, name: string)
  * A path under `cwd` is named relative to it, because that is the path the
  * agent types. A dropped directory is one line, not one line per file: the
  * agent is told where the tree is and how big it is, and reads what it needs.
+ *
+ * A file over `MAX_ATTACHMENT_BYTES` gets its size on its own line and one
+ * more line for the whole message (`largeFileNote`), because the agent's next
+ * act with a 90 MB video may be `git add`.
  */
 export function attachmentBlocks(atts: Attachment[], cwd?: string): { blocks: unknown[]; noteLines: string[] } {
   const blocks: unknown[] = [];
   const noteLines: string[] = [];
+  const large: { name: string; bytes: number }[] = [];
   const shown = (p: string) => {
     if (!cwd) return p;
     const rel = relative(cwd, p);
     return rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : p;
   };
+  /** How big the file on disk is, or null when it is not there to ask. */
+  const sizeOf = (p: string) => { try { return statSync(p).size; } catch { return null; } };
   const dirs = new Set<string>();
   for (const a of atts) {
     if (a.dir) {
@@ -249,17 +304,22 @@ export function attachmentBlocks(atts: Attachment[], cwd?: string): { blocks: un
       noteLines.push(`Attached directory: ${a.dir} (${shown(at)}, ${files.length} file${files.length === 1 ? "" : "s"})`);
       continue;
     }
-    if (isImageMime(a.mimeType) && existsSync(a.path) && statSync(a.path).size <= MAX_IMAGE_BYTES) {
+    const size = sizeOf(a.path);
+    if (isImageMime(a.mimeType) && size !== null && size <= MAX_IMAGE_BYTES) {
       blocks.push({
         type: "image",
         source: { type: "base64", media_type: a.mimeType, data: readFileSync(a.path).toString("base64") },
       });
       noteLines.push(`Attached image: ${a.name} (${shown(a.path)})`);
-    } else {
-      // The store may have renamed the file to keep two drops of one name
-      // apart, so the line carries the name it was dropped under as well.
-      noteLines.push(`Attached file: ${a.name} (${shown(a.path)})`);
+      continue;
     }
+    // The store may have renamed the file to keep two drops of one name
+    // apart, so the line carries the name it was dropped under as well.
+    const big = size !== null && size > MAX_ATTACHMENT_BYTES;
+    noteLines.push(`Attached file: ${a.name} (${shown(a.path)}${big ? `, ${mb(size)} MB` : ""})`);
+    if (big) large.push({ name: a.name, bytes: size });
   }
+  const note = largeFileNote(large);
+  if (note) noteLines.push(note);
   return { blocks, noteLines };
 }

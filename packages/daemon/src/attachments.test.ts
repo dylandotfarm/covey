@@ -8,7 +8,7 @@ import { join } from "node:path";
 // dataDir() reads COVEY_HOME at call time, so point it at a throwaway dir
 // before importing the module under test.
 process.env.COVEY_HOME = mkdtempSync(join(tmpdir(), "covey-daemon-att-"));
-const { materialiseAttachments, attachmentBlocks, storeShownFiles, threadFilesDir, removeThreadFiles } = await import("./attachments.js");
+const { materialiseAttachments, attachmentBlocks, largeFileNote, reserveUploadPath, storeShownFiles, threadFilesDir, removeThreadFiles } = await import("./attachments.js");
 
 const PNG = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
 const b64 = (b: Buffer) => b.toString("base64");
@@ -139,6 +139,71 @@ test("a drop over the limit is refused, counting every file in it", () => {
   const dir = cwd();
   const half = { name: "a.bin", path: "/a.bin", mimeType: "application/octet-stream", data: b64(Buffer.alloc(20 * 1024 * 1024)) };
   assert.throws(() => materialiseAttachments(dir, "t", [half, { ...half, name: "b.bin" }]), /over the 32 MB limit/);
+});
+
+// ---------------------------------------------------------------------------
+// A file too big to carry inline (`POST /upload`)
+// ---------------------------------------------------------------------------
+
+test("an uploaded file is reserved in the store, with the store's own naming rules", () => {
+  const dir = cwd();
+  const first = reserveUploadPath(dir, "t", "clip.mp4");
+  assert.equal(first, join(threadFilesDir(dir, "t"), "clip.mp4"));
+  // The path is reserved before a byte arrives, because the route streams to
+  // it — so nothing is on disk yet and the next reservation of that name has
+  // only the first one's absence to go on.
+  assert.equal(existsSync(first), false);
+  writeFileSync(first, "x");
+  assert.equal(reserveUploadPath(dir, "t", "clip.mp4"), join(threadFilesDir(dir, "t"), "clip-2.mp4"));
+  // And it cannot climb out, which is `materialiseAttachments`' rule.
+  assert.equal(reserveUploadPath(dir, "t", "../../out.txt"), join(threadFilesDir(dir, "t"), "out.txt"));
+  assert.equal(readFileSync(join(dir, ".covey", ".gitignore"), "utf8"), "*\n");
+});
+
+test("a file over what covey carries inline is named with its size, and the agent is warned once", () => {
+  const dir = cwd();
+  const store = threadFilesDir(dir, "t");
+  mkdirSync(store, { recursive: true });
+  // As the upload route leaves it: in the store, and no `data` on the wire.
+  const big = join(store, "clip.mp4");
+  writeFileSync(big, Buffer.alloc(40 * 1024 * 1024));
+  const stored = materialiseAttachments(dir, "t", [
+    { name: "clip.mp4", path: big, mimeType: "video/mp4" },
+    { name: "notes.txt", path: "/ignored.txt", mimeType: "text/plain", data: b64(Buffer.from("hi")) },
+  ]);
+  const { blocks, noteLines } = attachmentBlocks(stored, dir);
+  assert.equal(blocks.length, 0);
+  assert.equal(noteLines[0], "Attached file: clip.mp4 (.covey/threads/t/files/clip.mp4, 40 MB)");
+  // The ordinary line is unchanged: a size beside every file would be noise on
+  // the thousand drops a day that are screenshots.
+  assert.equal(noteLines[1], "Attached file: notes.txt (.covey/threads/t/files/notes.txt)");
+  // One warning for the message, after the files, naming only the big one.
+  assert.equal(noteLines.length, 3);
+  assert.match(noteLines[2]!, /^clip\.mp4 \(40 MB\): it is over the 32 MB covey carries without asking/);
+  assert.doesNotMatch(noteLines[2]!, /notes\.txt/);
+});
+
+test("the warning says what the two costs are, and which one is free", () => {
+  const note = largeFileNote([{ name: "clip.mp4", bytes: 90 * 1024 * 1024 }])!;
+  assert.match(note, /Do not commit that file to the repository/);
+  assert.match(note, /do not copy it anywhere outside this thread's own file store/);
+  // Both halves: why the store is safe, and why a commit is not.
+  assert.match(note, /git ignores the store and it goes with the worktree/);
+  assert.match(note, /every clone of the repository for good/);
+  // The reader already said yes, so the agent is told that rather than left to
+  // read the note as covey having been surprised by the file.
+  assert.match(note, /the reader confirmed the upload/);
+});
+
+test("the warning is one line however many files it covers, and none when there are none", () => {
+  assert.equal(largeFileNote([]), null);
+  const two = largeFileNote([
+    { name: "a.mp4", bytes: 40 * 1024 * 1024 },
+    { name: "b.mov", bytes: 50 * 1024 * 1024 },
+  ])!;
+  assert.match(two, /^a\.mp4 \(40 MB\), b\.mov \(50 MB\): they are over/);
+  assert.match(two, /Do not commit a file this size/);
+  assert.equal(two.split("\n").length, 1, "four copies of a warning is a warning read none of the four");
 });
 
 test("an attachment with no data and no local file is rejected", () => {

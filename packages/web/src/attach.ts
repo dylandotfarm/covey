@@ -13,9 +13,10 @@
  * `shrink.ts` holds the real one.
  */
 import {
-  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, isImageMime, type Attachment,
+  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_UPLOAD_BYTES, isImageMime,
+  type Attachment,
 } from "@covey/protocol";
-import { megabytes, type FailedDrop } from "@covey/client";
+import { megabytes, tooLargeToUpload, type FailedDrop } from "@covey/client";
 
 /** A file the reader picked, as much of it as this file needs. */
 export interface PickedFile {
@@ -38,7 +39,29 @@ export interface ReadResult {
   failed: FailedDrop[];
   /** What attached, but not the way the reader meant. */
   warnings: string[];
+  /**
+   * The files too big to carry inline, which the reader has not been asked
+   * about yet (`largeDropPrompt`). Not failures: covey can send one, over
+   * `POST /upload`, once they say so — and `readConfirmed` is what does it.
+   *
+   * The picked files themselves, not a copy of their names, because the upload
+   * needs the thing the picker handed over. **Nothing of one has been read**:
+   * a video is the one file a phone cannot hold in memory, and finding out
+   * that covey will stream it must not cost the whole file first.
+   */
+  large: PickedFile[];
 }
+
+/**
+ * Stream one file to the daemon that holds the thread, and answer with the
+ * path of the copy it made.
+ *
+ * Each client's own, like `Shrinker`, because only the platform knows how to
+ * send a file it holds without reading it: the page posts the `File` the
+ * browser gave it, and the phone hands a `content://` URI to the native
+ * uploader. Both end at the same route.
+ */
+export type Uploader = (file: PickedFile) => Promise<{ path: string; name?: string }>;
 
 /**
  * Media types by extension, for a browser that names none. A phone always
@@ -126,11 +149,18 @@ function unreadable(name: string, e: unknown): FailedDrop {
  * `MAX_ATTACHMENT_BYTES` itself rather than letting the daemon answer, because
  * on a phone the upload is the cost: a refusal that arrives after 30 MB went
  * over a mobile link is a refusal that arrived too late.
+ *
+ * A file over what is left of that cap is neither read nor refused: it goes to
+ * `large`, and the caller asks the reader before `readConfirmed` streams it.
+ * The size the picker reported is what decides, because deciding from the bytes
+ * would mean holding a video in memory to find out that covey will not put one
+ * there.
  */
 export async function readPicked(files: PickedFile[], shrink: Shrinker, already = 0): Promise<ReadResult> {
   const attachments: Attachment[] = [];
   const failed: FailedDrop[] = [];
   const warnings: string[] = [];
+  const large: PickedFile[] = [];
   let total = already;
   for (const file of files) {
     let name = file.name || "file";
@@ -157,9 +187,19 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
         warnings.push(`${name} is ${mimeType}, which the model cannot read, and this browser could not convert it. It goes as a file the agent can open. The model reads ${IMAGE_MIME_TYPES.join(", ")}.`);
       }
     }
+    // Nothing has been read yet, so this is the one chance to decide from the
+    // size alone. A shrunk image already holds its bytes and is small by
+    // construction, so it is past this.
+    if (!bytes && file.size > MAX_ATTACHMENT_BYTES - total) {
+      if (file.size > MAX_UPLOAD_BYTES) failed.push(tooLargeToUpload(name, file.size));
+      else large.push(file);
+      continue;
+    }
     if (!bytes) {
       try { bytes = await file.bytes(); } catch (e) { failed.push(unreadable(name, e)); continue; }
     }
+    // The backstop, for a picker that reported no size at all: the bytes are
+    // in hand, so there is nothing left to save by uploading them instead.
     if (total + bytes.byteLength > MAX_ATTACHMENT_BYTES) {
       failed.push(tooBig(name, bytes.byteLength, MAX_ATTACHMENT_BYTES - total));
       continue;
@@ -171,12 +211,37 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
     // anything, so nothing downstream reads this one.
     attachments.push({ name, path: name, mimeType, data: toBase64(bytes) });
   }
-  return { attachments, failed, warnings };
+  return { attachments, failed, warnings, large };
 }
 
-/** True when the read produced something the composer has to show. */
+/**
+ * Send the files the reader confirmed, one at a time, and make an attachment
+ * for each that arrived.
+ *
+ * The attachment carries no `data`: the bytes are on the daemon already, and
+ * `path` is where that daemon put them. One at a time rather than all at once,
+ * because two uploads over one mobile link finish no sooner together and the
+ * reader can read one line of progress.
+ */
+export async function readConfirmed(files: PickedFile[], upload: Uploader): Promise<{ attachments: Attachment[]; failed: FailedDrop[] }> {
+  const attachments: Attachment[] = [];
+  const failed: FailedDrop[] = [];
+  for (const file of files) {
+    const name = file.name || "file";
+    try {
+      const sent = await upload(file);
+      attachments.push({ name, path: sent.path, mimeType: fileMime(file) });
+    } catch (e) {
+      const why = (e as Error)?.message ?? String(e);
+      failed.push({ name, chip: "did not go up", message: `${name} did not reach the machine: ${why}` });
+    }
+  }
+  return { attachments, failed };
+}
+
+/** True when the read produced something the composer has to show or ask about. */
 export function isDrop(r: ReadResult): boolean {
-  return r.attachments.length > 0 || r.failed.length > 0;
+  return r.attachments.length > 0 || r.failed.length > 0 || r.large.length > 0;
 }
 
 /** What the composer says while a drop is being read, or a message sent. */
