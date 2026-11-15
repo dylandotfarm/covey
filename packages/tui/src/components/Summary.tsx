@@ -19,7 +19,7 @@ export function Summary({ state, row, width, height }: { state: AppState; row: S
   const inner = width - 4;
   const m = state.machines.get(row.machine);
   const body = row.kind === "project" && row.pool
-    ? <ProjectSummary state={state} pool={row.pool} width={inner} height={height - 1} tick={state.tick} />
+    ? <ProjectSummary state={state} pool={row.pool} archived={!!row.archived} width={inner} height={height - 1} tick={state.tick} />
     : row.kind === "machines" || row.kind === "fleet" || !m
       ? <MachinesSummary state={state} fleet={row.fleet} height={height - 1} />
       : <MachineSummary m={m} state={state} width={inner} height={height - 1} tick={state.tick} />;
@@ -35,7 +35,7 @@ export function Summary({ state, row, width, height }: { state: AppState; row: S
  * A project across its pool: the repository, one line per machine that holds
  * it, and the threads of every machine in one list by recency.
  */
-function ProjectSummary({ state, pool, width, height, tick }: { state: AppState; pool: PoolMember[]; width: number; height: number; tick: number }) {
+function ProjectSummary({ state, pool, archived, width, height, tick }: { state: AppState; pool: PoolMember[]; archived: boolean; width: number; height: number; tick: number }) {
   const p = pool[0]?.project;
   if (!p) return <Text color={T.subtle} italic>this project is no longer there</Text>;
   // One pass over each machine's threads: the live ones into the list, the
@@ -96,8 +96,19 @@ function ProjectSummary({ state, pool, width, height, tick }: { state: AppState;
           ARCHIVED is a leaf — so the row names the two keys that are the way
           back in, and says what `n` does before it starts a thread. This pane
           is where a reader reads an archived project, because the sidebar no
-          longer lists its threads. */}
-      {p.archivedAt
+          longer lists its threads.
+
+          The answer comes from the row and never from `p.archivedAt`. A pool
+          is archived only when *every* machine of it says so, which is the
+          direction `archiveProject` fails in on purpose: one machine that did
+          not answer keeps the project in the live list. `pool[0]` is then a
+          project with an `archivedAt` standing on a row with a caret, and this
+          line would name two keys that do the opposite of what it says — `x`
+          would open the archive confirmation and `n` would start a thread with
+          no unarchive, because both of them read `SidebarRow.archived`. One
+          flag for the row, the keys and this sentence, so the three cannot
+          drift. */}
+      {archived
         ? <Text color={T.faint} wrap="truncate">archived · x brings it back · n brings it back and starts a thread · D remove project</Text>
         : <Text color={T.faint} wrap="truncate">enter fold · n new thread{p.kind === "local" ? " · g make it a git repository" : " · b base branch"} · ctrl+k add a machine to this project · D remove project</Text>}
     </>

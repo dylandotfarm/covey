@@ -344,8 +344,11 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
-          {/* A project the reader put away is dimmed, the way an archived
-              thread is: it is a name to come back to, not the work in hand. */}
+          {/* A project the reader put away is dimmed to `T.muted`, which is
+              what the ARCHIVED heading above it paints: it is a name to come
+              back to, not the work in hand. Not the `T.faint` of an archived
+              thread — this title is bold, and bold faint reads as a fault in
+              the terminal rather than as a row that is quiet. */}
           <Text color={row.archived ? T.muted : T.text} bold> {truncate(row.project!.title, Math.max(1, room - base.length))}</Text>
           <Text color={T.subtle}>{base}</Text>
           <Text color={T.subtle}>{pool}</Text>
