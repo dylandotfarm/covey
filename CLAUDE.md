@@ -1078,7 +1078,15 @@
   a flag it worked out rather than one a client declared. Every timeline item and every
   transcript line goes through `redact.ts` first, so a `printenv` writes `[secret NAME]`;
   keep it that way, and keep the eight-character floor, or a short value rewrites ordinary
-  prose. Never let a secret take a name covey sets (`secretKeyError`): a thread that could
+  prose. The one thing it leaves alone is the **path of a stored file** (`keepFilePaths`):
+  that path is covey's own, not a session's words — the daemon wrote the bytes into the
+  thread's file store and recorded where — and a project directory named after an account
+  whose name is also a secret turned every picture of that project into `file: the path
+  must be one of that thread's own files`. No value is written down that the `projects`
+  and `threads` tables did not already hold. `/file` puts the values back into a path a
+  client sends (`unredactor`, `Engine.threadFilePath`), so a note written before this still
+  opens; the store is still what decides, because the answer is resolved against it after
+  the substitution. Never let a secret take a name covey sets (`secretKeyError`): a thread that could
   rewrite `COVEY_THREAD_ID` would file its work under another thread. The agent reads
   `covey env`, which prints names; `packages/cli/src/env.ts` and the `/covey` skill are one
   change, like the loop.

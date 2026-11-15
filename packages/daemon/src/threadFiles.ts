@@ -83,18 +83,33 @@ export function byteRange(header: string | undefined, size: number): { start: nu
  * Answer `GET /file?thread=…&path=…`. The caller has authenticated the request
  * and checked that the web client is on; `rootOf` says where that thread keeps
  * its files, and answers null for a thread this daemon does not hold.
+ *
+ * `restore` puts the values of that thread's secrets back into the path it was
+ * given, for an item written while covey redacted its own file paths. It is
+ * read before the store is checked and it moves the boundary nowhere: the
+ * answer is inside the store or there is no answer.
  */
-export function serveThreadFile(req: IncomingMessage, res: ServerResponse, rootOf: (threadId: string) => string | null): void {
+export function serveThreadFile(
+  req: IncomingMessage,
+  res: ServerResponse,
+  rootOf: (threadId: string) => string | null,
+  restore?: (threadId: string, path: string) => string,
+): void {
   if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); res.end(); return; }
   const url = new URL(req.url ?? "/", "http://x");
-  const threadId = url.searchParams.get("thread");
+  const threadId = url.searchParams.get("thread") ?? "";
   const root = threadId ? rootOf(threadId) : null;
   if (!root) {
     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
     res.end("file: no such thread on this machine\n");
     return;
   }
-  const file = threadFileTarget(root, url.searchParams.get("path"));
+  // A path an item carried before covey kept its file paths out of the
+  // redaction holds `[secret NAME]` where a directory stood, so the values go
+  // back in before the store decides. The store decides all the same: a path
+  // that lands outside it is refused, whatever it is spelled with (#126).
+  const asked = url.searchParams.get("path");
+  const file = threadFileTarget(root, asked && restore ? restore(threadId, asked) : asked);
   if (!file) {
     res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
     res.end("file: the path must be one of that thread's own files\n");

@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { byteRange, fileHeaders, threadFileTarget } from "./threadFiles.js";
+import { unredactor } from "./redact.js";
 
 const ROOT = "/work/.covey/threads/t1/files";
 
@@ -26,6 +27,19 @@ test("a path inside the thread's own store is served, and nothing else is", () =
   assert.equal(threadFileTarget(ROOT, ROOT), null, "the store itself is a directory, not a file");
   assert.equal(threadFileTarget(ROOT, null), null);
   assert.equal(threadFileTarget(ROOT, ""), null);
+});
+
+test("a path covey redacted opens again, and the store still decides (#126)", () => {
+  // A project directory named after an account whose name is also a secret
+  // read back as `/…/[secret OWNER]/…`, which is no path at all. The route
+  // puts the value back first, and then asks the same question it always did.
+  const back = unredactor({ OWNER: "dylandotfarm", UP: "../../../../etc" })!;
+  const store = "/p/dylandotfarm/app/.covey/threads/t1/files";
+  assert.equal(threadFileTarget(store, back(`/p/[secret OWNER]/app/.covey/threads/t1/files/shot.png`)), `${store}/shot.png`);
+  // A value that climbs out of the store is a path outside it, and the answer
+  // is the one it was before: no.
+  assert.equal(threadFileTarget(store, back(`${store}/[secret UP]/passwd`)), null);
+  assert.equal(threadFileTarget(store, back("/p/[secret OWNER]/other/shot.png")), null);
 });
 
 test("the page is shown what it renders and downloads everything else", () => {

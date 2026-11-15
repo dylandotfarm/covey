@@ -96,7 +96,7 @@ export async function startServer(o: ServerOptions): Promise<{ close(): void; po
     if (req.url?.startsWith("/file?") || req.url === "/file") {
       void authenticate(req, o.config, selfUserId).then((auth) => {
         if (!auth.ok) { res.writeHead(401, { "content-type": "text/plain; charset=utf-8" }); res.end(`file: ${auth.reason}\n`); return; }
-        serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id));
+        serveThreadFile(req, res, (id) => o.engine.threadFilesRoot(id), (id, path) => o.engine.threadFilePath(id, path));
       }).catch(() => { if (!res.headersSent) res.writeHead(500); res.end(); });
       return;
     }

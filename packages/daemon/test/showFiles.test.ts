@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { networkInterfaces } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { startDaemon, stopAll } from "./daemons.js";
 import { threadFilesDir } from "../src/attachments.js";
 import { scratchRemote } from "../src/scratch.js";
@@ -60,6 +60,51 @@ test("a file an agent shows lands in the thread's store, on a note, and serves o
     const gone = await rpc(d.port, "thread.showFiles", { threadId, files: [{ name: "gone.png", path: join(thread.worktreePath, "gone.png") }] });
     assert.equal(gone.ok, false);
     assert.match(gone.error.message, /could not read/);
+  } finally {
+    remote.drop();
+  }
+});
+
+test("a secret in the project's own path leaves the picture openable (#126)", async () => {
+  const remote = await scratchRemote("covey-show-secret-");
+  try {
+    const d = await startDaemon({ name: "show-secret" });
+    const base = `http://127.0.0.1:${d.port}`;
+    await rpc(d.port, "command", { commandId: randomUUID(), type: "project.create", url: remote.url });
+    const projectId = (await rpc(d.port, "shell.snapshot", {})).result.projects[0]!.id;
+    const threadId = randomUUID();
+    await rpc(d.port, "command", { commandId: randomUUID(), type: "thread.create", projectId, threadId, sessionId: randomUUID() });
+    const thread = (await rpc(d.port, "shell.snapshot", {})).result.threads.find((t: { id: string }) => t.id === threadId);
+
+    // The project directory is named after the repository, and a value the
+    // reader keeps can be the very same word — a Modal profile that is also a
+    // GitHub login is what found this. Redacting the path covey wrote made
+    // `/file` refuse every picture of that project.
+    const owner = basename(dirname(dirname(thread.worktreePath)));
+    assert.ok(owner.length >= 8, `the directory name has to be long enough to be redacted at all: ${thread.worktreePath}`);
+    const set = await rpc(d.port, "command", { commandId: randomUUID(), type: "project.setSecrets", projectId, secrets: [{ key: "OWNER", value: owner }] });
+    assert.equal(set.ok, true, JSON.stringify(set));
+
+    const made = join(thread.worktreePath, "shot.png");
+    writeFileSync(made, PNG);
+    const shown = await rpc(d.port, "thread.showFiles", { threadId, files: [{ name: "shot.png", path: made }] });
+    assert.equal(shown.ok, true, JSON.stringify(shown));
+    const copy = join(threadFilesDir(thread.worktreePath, threadId), "shot.png");
+
+    const items = (await rpc(d.port, "thread.snapshot", { threadId })).result.items as any[];
+    const note = items.find((i) => i.kind === "note" && i.files);
+    assert.deepEqual(note.files, [{ name: "shot.png", path: copy, mimeType: "image/png" }], "the path is covey's own and keeps the word");
+    const got = await fetch(`${base}/file?thread=${threadId}&path=${encodeURIComponent(copy)}`);
+    assert.equal(got.status, 200);
+
+    // And a note written before this still opens: the route puts the value
+    // back into the path a client read off it.
+    const old = copy.replace(owner, "[secret OWNER]");
+    assert.notEqual(old, copy);
+    const repaired = await fetch(`${base}/file?thread=${threadId}&path=${encodeURIComponent(old)}`);
+    const bytes = Buffer.from(await repaired.arrayBuffer());
+    assert.equal(repaired.status, 200, bytes.toString("utf8"));
+    assert.deepEqual(bytes, PNG);
   } finally {
     remote.drop();
   }

@@ -7,7 +7,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MIN_REDACTED_LENGTH, redactDeep, redactor } from "./redact.js";
+import { keepFilePaths, MIN_REDACTED_LENGTH, redactDeep, redactor, unredactor } from "./redact.js";
 
 test("a value becomes its own name, wherever it stands", () => {
   const r = redactor({ STRIPE_KEY: "sk_live_0123456789" })!;
@@ -63,4 +63,58 @@ test("an item that holds no secret comes back as the same object", () => {
 test("numbers, nulls and booleans pass through untouched", () => {
   const r = redactor({ TOKEN: "sk_live_0123456789" })!;
   assert.deepEqual(redactDeep({ n: 1, b: true, z: null }, r), { n: 1, b: true, z: null });
+});
+
+// ---- the files covey stored itself ----------------------------------------
+
+test("a file covey stored keeps the path covey gave it", () => {
+  const r = redactor({ OWNER: "dylandotfarm" })!;
+  const raw = {
+    id: "note:1", threadId: "t1", kind: "note", text: "the sidebar after the fix",
+    files: [{ name: "shot.png", path: "/p/github.com/dylandotfarm/app/t1/.covey/threads/t1/files/shot.png", mimeType: "image/png" }],
+  };
+  const out = keepFilePaths(redactDeep(raw, r), raw);
+  // The path names a file in the thread's own store, and the `/file` route
+  // refuses everything else — so a path rewritten here is a picture nobody can
+  // open. The directory is already in the `projects` table as it stands.
+  assert.equal(out.files[0]!.path, raw.files[0]!.path);
+  assert.equal(out.files[0]!.name, "shot.png");
+  assert.equal(out.text, "the sidebar after the fix");
+});
+
+test("the words around a kept path are redacted all the same", () => {
+  const r = redactor({ OWNER: "dylandotfarm" })!;
+  const raw = {
+    id: "user:1", threadId: "t1", kind: "user", text: "here is dylandotfarm",
+    attachments: [{ name: "a.png", path: "/p/dylandotfarm/t1/.covey/threads/t1/files/a.png" }],
+  };
+  const out = keepFilePaths(redactDeep(raw, r), raw);
+  assert.equal(out.text, "here is [secret OWNER]");
+  assert.equal(out.attachments[0]!.path, raw.attachments[0]!.path);
+});
+
+test("an item with no files of its own is the object redaction made", () => {
+  const r = redactor({ OWNER: "dylandotfarm" })!;
+  const raw = { id: "a", text: "ordinary" };
+  const red = redactDeep(raw, r);
+  assert.equal(keepFilePaths(red, raw), red);
+  assert.equal(keepFilePaths("a string" as unknown, "a string" as unknown), "a string");
+});
+
+// ---- putting a value back into a path -------------------------------------
+
+test("a path covey redacted is spelled back from the thread's own secrets", () => {
+  const back = unredactor({ OWNER: "dylandotfarm", SHORT: "abc" })!;
+  assert.equal(back("/p/github.com/[secret OWNER]/app/files/shot.png"), "/p/github.com/dylandotfarm/app/files/shot.png");
+  // A name this thread does not hold stays as it is, and so does a value too
+  // short for `redactor` to have replaced.
+  assert.equal(back("/p/[secret GONE]/x.png"), "/p/[secret GONE]/x.png");
+  assert.equal(back("/p/[secret SHORT]/x.png"), "/p/[secret SHORT]/x.png");
+  assert.equal(back("/p/app/files/shot.png"), "/p/app/files/shot.png");
+  assert.equal(unredactor({}), null);
+});
+
+test("the values go back in one pass, so a value holding a marker is not read again", () => {
+  const back = unredactor({ A: "[secret B]x", B: "0123456789" })!;
+  assert.equal(back("/p/[secret A]/f.png"), "/p/[secret B]x/f.png");
 });

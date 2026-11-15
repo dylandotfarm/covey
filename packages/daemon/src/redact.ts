@@ -89,3 +89,66 @@ function walk(value: unknown, redact: (s: string) => string): unknown {
   }
   return value;
 }
+
+/**
+ * The fields of a timeline item that carry files covey wrote itself: the
+ * attachments of a message, and the files of a `covey show` note.
+ */
+const FILE_FIELDS = ["attachments", "files"] as const;
+
+/**
+ * `redacted` with the file paths of `raw` put back.
+ *
+ * A stored attachment's `path` is covey's own bookkeeping and never a
+ * session's words: the daemon writes the bytes into the thread's file store
+ * and records where it put them. A project directory can carry a secret value
+ * in its name — a repository owned by an account that is also a login, say —
+ * and the path would then become `/…/[secret NAME]/…`. The `/file` route
+ * refuses a path outside the store, so the picture the reader clicks is a
+ * refusal instead of a picture.
+ *
+ * This writes no value down that covey did not hold already: the store's root
+ * is the thread's worktree, which the `threads` table carries whole.
+ */
+export function keepFilePaths<T>(redacted: T, raw: T): T {
+  if (redacted === raw || !redacted || typeof redacted !== "object") return redacted;
+  let out = redacted as Record<string, unknown>;
+  for (const field of FILE_FIELDS) {
+    const red = out[field];
+    const src = (raw as Record<string, unknown>)[field];
+    if (!Array.isArray(red) || !Array.isArray(src) || red.length !== src.length) continue;
+    let changed = false;
+    const files = red.map((f, i) => {
+      const path = (src[i] as { path?: unknown } | undefined)?.path;
+      if (!f || typeof f !== "object" || typeof path !== "string" || (f as { path?: unknown }).path === path) return f;
+      changed = true;
+      return { ...(f as object), path };
+    });
+    if (changed) out = { ...out, [field]: files };
+  }
+  return out as T;
+}
+
+/** A marker `redactor` left behind, and the name inside it. */
+const MARKER = /\[secret ([A-Za-z_][A-Za-z0-9_]*)\]/g;
+
+/**
+ * A function that puts the values back into a string covey redacted, or
+ * `null` when this environment holds nothing to put back.
+ *
+ * One route needs this and no other: a client asks the `/file` route for a
+ * path it read off a timeline item, and an item written before `keepFilePaths`
+ * carries the marker in place of a directory. The route still resolves the
+ * answer against the thread's own store, so this gives a client no path it
+ * could not already name.
+ *
+ * One pass, so a value that holds a marker of its own is never read again.
+ */
+export function unredactor(env: Record<string, string>): ((s: string) => string) | null {
+  const values = new Map(Object.entries(env).filter(([, v]) => v.length >= MIN_REDACTED_LENGTH));
+  if (values.size === 0) return null;
+  return (s: string) => {
+    MARKER.lastIndex = 0;
+    return s.replace(MARKER, (whole, key: string) => values.get(key) ?? whole);
+  };
+}
