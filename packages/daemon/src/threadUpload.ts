@@ -55,7 +55,7 @@ export interface UploadHooks {
   cap?: number;
 }
 
-/** Bytes as a whole-number MiB string, so a limit reads as "512 MB". */
+/** Bytes as MiB to one decimal, so a limit reads as "512 MB" and a file as "38.1 MB". */
 const mb = (n: number) => String(Math.round((n / (1024 * 1024)) * 10) / 10);
 
 /** Say why, in one line, the way every other route here does. */
@@ -115,11 +115,21 @@ export async function serveThreadUpload(req: IncomingMessage, res: ServerRespons
 
   let written = 0;
   try {
-    await pipeline(req, capped(cap, (n) => { written = n; }), createWriteStream(dest));
+    // `wx`, not the default `w`. `reserveUploadPath` creates nothing — the
+    // route streams to the path it answers with — so two clients uploading one
+    // name to one thread at the same moment are both handed `clip.mp4`, and
+    // under `w` the second write would truncate the first. `EEXIST` lands in
+    // the catch below, which already removes the file and says so, and that is
+    // cheap insurance for a route whose whole promise is that a file in the
+    // store is whole.
+    await pipeline(req, capped(cap, (n) => { written = n; }), createWriteStream(dest, { flags: "wx" }));
   } catch (e: any) {
     // A half-written file in the store is worse than no file: the agent would
-    // read it as whole, and `/file` would serve it.
-    await rm(dest, { force: true }).catch(() => {});
+    // read it as whole, and `/file` would serve it. `EEXIST` is the one failure
+    // where this request wrote nothing — `wx` refused because another upload
+    // holds that path — so removing it here would take *their* whole file
+    // instead, which is the bug the guard was added to prevent.
+    if ((e as NodeJS.ErrnoException)?.code !== "EEXIST") await rm(dest, { force: true }).catch(() => {});
     const { status, why } = uploadFailure(e);
     hooks.log?.(`upload of ${asked} for ${threadId} failed: ${why}`);
     if (!res.headersSent) refuse(res, status, why);
@@ -145,5 +155,6 @@ export function uploadFailure(e: unknown): { status: number; why: string } {
     return { status: 400, why: "the upload stopped before the file was whole" };
   }
   if (code === "ENOSPC") return { status: 507, why: "the machine has no room left for it" };
+  if (code === "EEXIST") return { status: 409, why: "another upload took that name first; send it again" };
   return { status: 500, why: `could not write the file: ${(e as Error)?.message ?? e}` };
 }

@@ -1855,6 +1855,10 @@ The route's rules:
   once instead of after the 2 GB.
 - A write that is refused or cut short takes its half-written file with it. A truncated video
   left in the store is one the agent reads as whole and `/file` serves.
+- The stream opens `wx`. `reserveUploadPath` creates nothing, so two clients uploading one
+  name to one thread at the same moment are both handed `clip.mp4` and under `w` the second
+  would truncate the first. `EEXIST` is then the one failure that must *not* remove the file,
+  because this request wrote none of it — removing it would take the winner's whole file.
 
 The reader is asked once per drop and the question is the same question in all three clients,
 so its words are `largeDropPrompt` in `@covey/client` — the name, the size, where the file
@@ -1868,6 +1872,22 @@ Nothing of a large file is ever read to decide any of this: the size the picker 
 what decides, and the byte count after a read is only the net under a picker that reported
 none. A dropped *directory* over the cap is still refused rather than uploaded — a tree of two
 hundred files is not the one video this is for.
+
+Two rules about the chip, and a reader cannot undo either.
+
+The chip an upload leaves **carries the paths it stands for** (`TaggedAttachment.paths`), like
+every other chip. Without them `revealDrop` can never match it, and then pasting the path a
+second time — the reader's one way back from a file to the path — falls through to
+`readDroppedFiles`, asks again, and on a yes sends the whole file again. The gesture for
+undoing a drop becomes the gesture that repeats it, at the one size where repeating it costs
+minutes of the link and leaves a `clip-2.mp4` in the worktree.
+
+And a file **already on its way up is not a new drop** (`splitInFlight` in `@covey/client`,
+pure and node-tested). There is no chip until the bytes land, so the window between the yes
+and the answer is exactly where the reveal cannot help: the only thing that can is remembering
+what is in flight. The *path a file is read from* is the identity there, never the chunk the
+reader pasted, because one file reaches the composer by several spellings — whole, cut in two
+(#130), or copied in a file manager.
 
 And the agent is told, on receipt. A file over `MAX_ATTACHMENT_BYTES` gets its size on its own
 line, and the message gets one `largeFileNote` naming the two costs a reader cannot see for

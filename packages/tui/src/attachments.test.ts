@@ -361,7 +361,7 @@ test("a file over the frame is neither sent nor refused: it waits on the reader"
 test("the question names the file and its size, and the words are the shared ones", () => {
   const prompt = largeDropPrompt([{ name: "clip.mp4", size: 90 * 1024 * 1024 }])!;
   assert.equal(prompt.title, "Send clip.mp4 (90 MB)?");
-  assert.match(prompt.detail, /over the 32 MB covey sends without asking/);
+  assert.match(prompt.detail, /A message carries 32 MB without asking and this one is over that/);
   assert.match(prompt.detail, /not to commit one/);
   assert.equal(prompt.accept, "Send it");
   assert.equal(largeDropPrompt([]), null, "nothing to ask about is no question");

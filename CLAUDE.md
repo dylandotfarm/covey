@@ -70,7 +70,10 @@
   daemon holding the thread is often not the one serving the page. `content-length` decides
   nothing — the body is counted as it arrives, because the header is the client's claim about
   the body — and a write that is refused or cut short takes its half-written file with it, or
-  the agent would read a truncated video as whole. The question is one question in three
+  the agent would read a truncated video as whole. The stream opens `wx` and never `w`:
+  `reserveUploadPath` creates nothing, so two clients uploading one name at one moment are
+  both handed `clip.mp4` and the second would truncate the first — and `EEXIST` is then the
+  one failure that must *not* remove the file, because this request wrote none of it. The question is one question in three
   places, so its words are `largeDropPrompt` in `@covey/client` (`hiddenPanel`'s rule); the
   *asking* is each client's own — a pick in the terminal, `confirm` on the page, an `Alert` on
   the phone — and so is the upload, because only the platform can stream a file it holds
@@ -80,6 +83,13 @@
   ever read to decide this** — the size the picker reported is what decides, and the bytes are
   the net under a picker that reported none. A dropped *directory* over the cap is still
   refused rather than uploaded: a tree of two hundred files is not the one video this is for.
+  Two rules a reader cannot undo. The chip an upload leaves **carries the paths it stands
+  for**, like every other chip, or `revealDrop` can never match it — and then the gesture for
+  *undoing* a drop (paste the path again) is the gesture that uploads the whole file a second
+  time, at the one size where that costs minutes and leaves a `clip-2.mp4`. And a file
+  already on its way up is **not a new drop** (`splitInFlight`): there is no chip until the
+  bytes land, so that window is exactly where the reveal cannot save the reader and the only
+  thing that can is remembering what is in flight.
   And the agent is told on receipt, in `attachmentBlocks`: a file over the first cap gets its
   size on its own line and the message gets one `largeFileNote` naming the two costs a reader
   cannot see — the repository, which keeps the bytes in every clone for good, and anywhere

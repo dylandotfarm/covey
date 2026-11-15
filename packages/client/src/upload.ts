@@ -59,12 +59,47 @@ export function largeDropPrompt(files: LargeFile[]): LargeDropPrompt | null {
   // every one of the three clients, and a list of names is what pushes the
   // size — the number the reader is deciding on — off the end of it.
   const named = one ? "" : `${files.map((f) => `${f.name} (${megabytes(f.size)} MB)`).join(", ")}. `;
+  // "this message is over it" and never "that file is over it": a client counts
+  // the whole message against the cap, so a 20 MB file picked beside another
+  // 20 MB one takes this route while being under the cap itself. The sentence
+  // has to be true of every file it is shown about, and the title already
+  // carries the number the reader is deciding on.
   return {
     title,
-    detail: `${named}That is over the ${megabytes(MAX_ATTACHMENT_BYTES)} MB covey sends without asking, so it goes to the machine as an upload: it takes as long as the link takes, and it stays in the thread's working directory until the thread goes. covey tells the agent the file is large, and tells it not to commit one.`,
+    detail: `${named}A message carries ${megabytes(MAX_ATTACHMENT_BYTES)} MB without asking and this one is over that, so ${one ? "it goes" : "they go"} to the machine as an upload: it takes as long as the link takes, and ${one ? "it stays" : "they stay"} in the thread's working directory until the thread goes. covey tells the agent the file is large, and tells it not to commit one.`,
     short: "uploaded to the machine; covey tells the agent not to commit it",
     accept: files.length === 1 ? "Send it" : "Send them",
   };
+}
+
+/**
+ * Split a drop into the files to ask about and the files already going up.
+ *
+ * A chip is the only record of a file and there is no chip until the bytes
+ * land, so between the yes and the answer `revealDrop` has nothing to match:
+ * a second paste of that path reads as a fresh drop, and at this size that is
+ * the whole file over the link twice and a `clip-2.mp4` nobody asked for. The
+ * path a file is read from is the identity, not the chunk the reader pasted,
+ * because the same file reaches the composer by several spellings — whole, cut
+ * in two, or copied in a file manager.
+ *
+ * Here rather than in a client, because it is a rule and not a gesture, and
+ * because every client has the same window.
+ */
+export function splitInFlight<T extends { name: string; path: string }>(
+  files: readonly T[],
+  inFlight: ReadonlySet<string>,
+): { waiting: T[]; already: T[] } {
+  const waiting: T[] = [];
+  const already: T[] = [];
+  for (const f of files) (inFlight.has(f.path) ? already : waiting).push(f);
+  return { waiting, already };
+}
+
+/** What to tell a reader who dropped a file that is already on its way. */
+export function inFlightNotice(already: readonly { name: string }[]): string {
+  if (already.length === 1) return `${already[0]!.name} is already on its way to the machine`;
+  return `${already.length} of those files are already on their way to the machine`;
 }
 
 /**

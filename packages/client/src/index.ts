@@ -33,8 +33,8 @@ export {
   revealPaste, type PastedText,
 } from "./paste.js";
 export {
-  largeDropPrompt, readUploadAnswer, tooLargeToUpload, uploadUrl, uploadingLabel,
-  type LargeDropPrompt, type LargeFile, type UploadAnswer,
+  inFlightNotice, largeDropPrompt, readUploadAnswer, splitInFlight, tooLargeToUpload, uploadUrl,
+  uploadingLabel, type LargeDropPrompt, type LargeFile, type UploadAnswer,
 } from "./upload.js";
 export {
   ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, DEVICE_DOWNLINK_UUID, DEVICE_NAME_PREFIX,

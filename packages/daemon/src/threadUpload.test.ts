@@ -165,6 +165,34 @@ test("an upload cut short takes its half-written file with it", async () => {
   assert.deepEqual(inStore(d.store), []);
 });
 
+test("two uploads handed one path do not land on each other", async () => {
+  // `reserveUploadPath` creates nothing, so two clients uploading one name to
+  // one thread at the same moment are both handed `clip.mp4` — `unique` sees
+  // no file for either. Under the default `w` the second write would truncate
+  // the first, which breaks the one promise this route makes: a file in the
+  // store is whole. The hook here is that race, held still.
+  const cwd = mkdtempSync(join(tmpdir(), "covey-upload-race-"));
+  const store = threadFilesDir(cwd, "t");
+  const fixed = reserveUploadPath(cwd, "t", "clip.mp4");
+  const server = createServer((req, res) => {
+    void serveThreadUpload(req, res, { reserve: () => fixed });
+  });
+  servers.push(server);
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+  const { port } = server.address() as AddressInfo;
+  const url = `http://127.0.0.1:${port}/upload?thread=t&name=clip.mp4`;
+  const both = await Promise.all([
+    fetch(url, { method: "POST", body: "first" }),
+    fetch(url, { method: "POST", body: "second" }),
+  ]);
+  const codes = both.map((r) => r.status).sort();
+  assert.deepEqual(codes, [200, 409], "one lands, the other is told to send it again");
+  // And what is on disk is one whole file, not one file with the other's bytes
+  // written over it.
+  assert.deepEqual(readdirSync(store), ["clip.mp4"]);
+  assert.ok(["first", "second"].includes(readFileSync(fixed, "utf8")));
+});
+
 test("four problems, four answers (#132)", () => {
   // Each wants something different from the person holding the phone: a file
   // they can do something about, a link to try again, a machine that is full,
@@ -172,6 +200,7 @@ test("four problems, four answers (#132)", () => {
   assert.equal(uploadFailure(Object.assign(new Error("x"), { code: "ERR_STREAM_PREMATURE_CLOSE" })).status, 400);
   assert.match(uploadFailure(Object.assign(new Error("x"), { code: "ECONNRESET" })).why, /stopped before the file was whole/);
   assert.match(uploadFailure(Object.assign(new Error("x"), { code: "ENOSPC" })).why, /no room left/);
+  assert.match(uploadFailure(Object.assign(new Error("x"), { code: "EEXIST" })).why, /took that name first/);
   const other = uploadFailure(new Error("the disk is on fire"));
   assert.equal(other.status, 500);
   assert.match(other.why, /the disk is on fire/);

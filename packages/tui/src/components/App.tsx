@@ -44,7 +44,7 @@ import { LOCAL_COMMANDS, acceptCommand, commandMenu, commandRows, commandToken }
 import { menuHeight, type MenuView } from "../composerMenu.js";
 import { acceptMention, entryRows, filterEntries, mentionAt, mentionDir, mentionLeaf } from "../mentions.js";
 import { readClipboard, readClipboardText, readDroppedFiles, readSplitDrop, droppedPathText, splitDropJoin, isDrop, isDirectoryDrop, applyDrop, cutTag, tagSpanAt, uploadDrop, type DropResult, type FailedDrop, type LargeDrop, type TaggedAttachment } from "../attachments.js";
-import { applyPaste, chipsPaste, keepTagged, largeDropPrompt, pasteLines, pastedAlready, revealDrop, revealPaste, uploadingLabel } from "@covey/client";
+import { applyPaste, chipsPaste, inFlightNotice, keepTagged, largeDropPrompt, pasteLines, pastedAlready, revealDrop, revealPaste, splitInFlight, uploadingLabel } from "@covey/client";
 import { T, THEMES, themeFor, themeGeneration } from "../theme.js";
 
 /** The sidebar's width. Exported so `resize.test.ts` can hold the rail to it. */
@@ -221,6 +221,14 @@ export function App({ store }: { store: Store }) {
   // not is the reader's own writing — prose joined onto the next paste would
   // disappear into its chip.
   const pasteSeam = useRef<{ at: number; value: string; caret: number; chip?: { from: Ed.EditState; raw: string } } | null>(null);
+  // The files on their way to a daemon right now, by the path they are read
+  // from. A drop over the inline cap leaves no chip until its bytes land, so
+  // in that window there is nothing for `revealDrop` to match and a second
+  // paste of the path reads as a fresh drop — which at this size means the
+  // whole file over the link twice, and a `clip-2.mp4` nobody asked for.
+  // A ref and not state: nothing paints from it, and a chunk is judged against
+  // what is in flight now rather than at the last render.
+  const uploading = useRef(new Set<string>());
   // Answering a question uses its own buffer and cursor so the composer draft
   // is preserved across the interruption.
   const [answerDraft, setAnswerDraft] = useState("");
@@ -3051,11 +3059,17 @@ export function App({ store }: { store: Store }) {
    *
    * It paints only while that thread is still the one on screen. The draft is
    * written either way, so a reader who walked away comes back to the chip.
+   *
+   * `paths` is the text the drop came from, and it is not optional in spirit:
+   * a chip with no paths can never match a chunk that names one, so without it
+   * `revealDrop` answers null, the paste falls through to `readDroppedFiles`,
+   * and the reader's gesture for *undoing* a drop becomes the gesture that
+   * uploads the whole file a second time.
    */
-  function attachLater(threadId: string, attachments: Attachment[]): void {
+  function attachLater(threadId: string, attachments: Attachment[], paths = ""): void {
     if (attachments.length === 0) return;
     const text = store.draft(threadId);
-    const drop = applyDrop(text, text.length, attachments, store.attachments(threadId));
+    const drop = applyDrop(text, text.length, attachments, store.attachments(threadId), [], paths);
     store.setAttachments(threadId, drop.attachments);
     store.setDraft(threadId, drop.value);
     if (store.state.selected?.threadId === threadId) applyEdit({ value: drop.value, caret: drop.caret });
@@ -3085,16 +3099,24 @@ export function App({ store }: { store: Store }) {
    *   rather than falling through to putting the chunk in the draft as text —
    *   a dropped video must not read as a path nobody wrote.
    */
-  function askLarge(large: LargeDrop[], cut?: Ed.EditState): boolean {
-    const prompt = largeDropPrompt(large);
-    if (!prompt) return false;
-    if (!state.view) return false;
+  function askLarge(large: LargeDrop[], paths = "", cut?: Ed.EditState): boolean {
+    if (large.length === 0 || !state.view) return false;
     const { threadId } = state.view;
+    // A file already on its way up is not a new drop: `splitInFlight` holds
+    // that rule, and the window it closes is the one where there is no chip
+    // for `revealDrop` to match yet.
+    const { waiting, already } = splitInFlight(large, uploading.current);
+    if (already.length > 0) {
+      store.notify(inFlightNotice(already));
+      if (waiting.length === 0) return true;
+    }
+    const prompt = largeDropPrompt(waiting);
+    if (!prompt) return false;
     // The thread's *own* machine serves the route, which is the same address
     // and token a shown file is read back from (`viewFileBase`).
     const base = viewFileBase;
     if (!base) {
-      store.notify(`covey has no address for the machine this thread runs on, so ${large.length === 1 ? large[0]!.name : "those files"} cannot go up`, "error");
+      store.notify(`covey has no address for the machine this thread runs on, so ${waiting.length === 1 ? waiting[0]!.name : "those files"} cannot go up`, "error");
       return true;
     }
     if (cut) {
@@ -3110,15 +3132,16 @@ export function App({ store }: { store: Store }) {
       { id: "yes", label: prompt.accept, hint: prompt.short },
     ], (id) => {
       store.setOverlay(null);
-      if (id === "yes") void sendLarge(threadId, base, large);
+      if (id === "yes") void sendLarge(threadId, base, waiting, paths);
     });
     return true;
   }
   /** Upload each confirmed file, one at a time, and chip what arrived. */
-  async function sendLarge(threadId: string, base: string, large: LargeDrop[]): Promise<void> {
+  async function sendLarge(threadId: string, base: string, large: LargeDrop[], paths: string): Promise<void> {
     const done: Attachment[] = [];
     for (const f of large) {
       let said = 0;
+      uploading.current.add(f.path);
       try {
         done.push(await uploadDrop(f, base, threadId, (sent, total) => {
           // A notice lives four seconds, so saying where the upload is also
@@ -3131,10 +3154,14 @@ export function App({ store }: { store: Store }) {
         }));
       } catch (e: any) {
         store.notify(e?.message ?? String(e), "error");
+      } finally {
+        // Whatever happened: a file nothing is carrying must be droppable
+        // again, or one failure would refuse that path for the session.
+        uploading.current.delete(f.path);
       }
     }
     if (done.length === 0) return;
-    attachLater(threadId, done);
+    attachLater(threadId, done, paths);
     store.notify(done.length === 1 ? `${done[0]!.name} is on the machine` : `${done.length} files are on the machine`, "success");
   }
   /**
@@ -3205,13 +3232,13 @@ export function App({ store }: { store: Store }) {
         // The small files chip now and the large ones wait on the reader, so a
         // drop of one of each is not held up by the question about the other.
         const did = attach(whole.attachments, whole.failed, { value: draft, caret }, paths);
-        if (askLarge(whole.large) || did) return;
+        if (askLarge(whole.large, paths) || did) return;
       }
       if (split) {
         report(split.drop);
         const cut = { value: seam!.value.slice(0, split.start) + seam!.value.slice(seam!.caret), caret: split.start };
         const did = attach(split.drop.attachments, split.drop.failed, cut, droppedPathText(split.text));
-        if (askLarge(split.drop.large, did ? undefined : cut) || did) return;
+        if (askLarge(split.drop.large, droppedPathText(split.text), did ? undefined : cut) || did) return;
       }
     }
     // Ordinary text. Normalise line endings and tabs first: what the draft

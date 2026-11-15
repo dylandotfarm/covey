@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_ATTACHMENT_BYTES, MAX_UPLOAD_BYTES } from "@covey/protocol";
-import { largeDropPrompt, readUploadAnswer, tooLargeToUpload, uploadUrl, uploadingLabel } from "./upload.js";
+import { inFlightNotice, largeDropPrompt, readUploadAnswer, splitInFlight, tooLargeToUpload, uploadUrl, uploadingLabel } from "./upload.js";
 
 test("nothing to ask about is no question", () => {
   assert.equal(largeDropPrompt([]), null);
@@ -18,10 +18,21 @@ test("one file: the name and the size are the question", () => {
   const p = largeDropPrompt([{ name: "clip.mp4", size: 90 * 1024 * 1024 }])!;
   assert.equal(p.title, "Send clip.mp4 (90 MB)?");
   assert.equal(p.accept, "Send it");
-  assert.match(p.detail, /over the 32 MB covey sends without asking/);
-  assert.match(p.detail, /stays in the thread's working directory/, "a yes leaves the bytes somewhere");
+  assert.match(p.detail, /A message carries 32 MB without asking and this one is over that/);
+  assert.match(p.detail, /it stays in the thread's working directory/, "a yes leaves the bytes somewhere");
   assert.match(p.detail, /not to commit one/, "and the reader is told the agent is warned");
   assert.doesNotMatch(p.detail, /^clip\.mp4 \(/, "one file is already named in the title");
+});
+
+test("the sentence is about the message and never about one file", () => {
+  // A client counts the whole message against the cap, so a 20 MB file picked
+  // beside another one takes this route while being under the cap itself. A
+  // detail that said "that file is over 32 MB" would be saying something false
+  // about a 20 MB file.
+  const p = largeDropPrompt([{ name: "b.bin", size: 20 * 1024 * 1024 }])!;
+  assert.match(p.detail, /A message carries 32 MB without asking and this one is over that/);
+  assert.doesNotMatch(p.detail, /that file is over/);
+  assert.equal(p.title, "Send b.bin (20 MB)?", "and the title carries the honest number");
 });
 
 test("several files: the total is in the title and the names are in the detail", () => {
@@ -33,6 +44,7 @@ test("several files: the total is in the title and the names are in the detail",
   // names are not allowed to push it off the end.
   assert.equal(p.title, "Send 2 files (100 MB)?");
   assert.match(p.detail, /^a\.mp4 \(40 MB\), b\.mov \(60 MB\)\. /);
+  assert.match(p.detail, /they go to the machine/, "several files are not an it");
   assert.equal(p.accept, "Send them");
 });
 
@@ -41,6 +53,28 @@ test("the one-line form keeps what a reader cannot work out for themselves", () 
   assert.match(p.short, /uploaded to the machine/);
   assert.match(p.short, /not to commit it/);
   assert.ok(p.short.length <= 70, `a pick hint longer than its row truncates the label away: ${p.short.length}`);
+});
+
+test("a file already going up is not a new drop", () => {
+  const clip = { name: "clip.mp4", path: "/a/clip.mp4" };
+  const other = { name: "demo.mov", path: "/a/demo.mov" };
+  // Between the yes and the answer there is no chip, so `revealDrop` has
+  // nothing to match and a second paste of the path reads as a fresh drop —
+  // at this size, the whole file over the link twice.
+  const held = new Set(["/a/clip.mp4"]);
+  assert.deepEqual(splitInFlight([clip], held), { waiting: [], already: [clip] });
+  // A drop of one that is going and one that is not asks about the second.
+  assert.deepEqual(splitInFlight([clip, other], held), { waiting: [other], already: [clip] });
+  assert.deepEqual(splitInFlight([other], held), { waiting: [other], already: [] });
+  assert.deepEqual(splitInFlight([], held), { waiting: [], already: [] });
+  // The *path* is the identity and never the chunk the reader pasted: one file
+  // reaches the composer whole, cut in two, and copied in a file manager.
+  assert.deepEqual(splitInFlight([{ name: "clip.mp4", path: "/b/clip.mp4" }], held).already, []);
+});
+
+test("what a reader is told about a file already going up", () => {
+  assert.equal(inFlightNotice([{ name: "clip.mp4" }]), "clip.mp4 is already on its way to the machine");
+  assert.equal(inFlightNotice([{ name: "a" }, { name: "b" }]), "2 of those files are already on their way to the machine");
 });
 
 test("a file over the ceiling says the ceiling, and says what to do instead", () => {
