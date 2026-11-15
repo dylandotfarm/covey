@@ -8,6 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { keepFilePaths, redactDeep, redactor, unredactor, WHOLE_TOKEN_BELOW } from "./redact.js";
+import { repositoryNames } from "./git.js";
 
 test("a value becomes a marker that names no secret, wherever it stands", () => {
   const r = redactor({ STRIPE_KEY: "sk_live_0123456789" })!;
@@ -103,7 +104,42 @@ test("numbers, nulls and booleans pass through untouched", () => {
   assert.deepEqual(redactDeep({ n: 1, b: true, z: null }, r), { n: 1, b: true, z: null });
 });
 
+test("a marker is final: a value that is part of one is not found inside it", () => {
+  // `[secret]` is eight characters, so the floor used to make this impossible.
+  // The marker is covey's own text and no value of the reader's.
+  const r = redactor({ A: "sk_live_0123456789", B: "secret" })!;
+  assert.equal(r("sk_live_0123456789"), "[secret]");
+  // The same word in the reader's own prose still goes.
+  assert.equal(r("the secret is out"), "the [secret] is out");
+});
+
 // ---- covey's own bookkeeping ----------------------------------------------
+
+test("the remote URL is never vouched for, because it may be the credential", () => {
+  // `remoteForms` answers `null` for a token in an https URL, so
+  // `Project.remoteUrl` records that URL whole — and `git remote -v` in the
+  // thread's shell prints it. What covey vouches for is the host and the path.
+  const keep = repositoryNames("github.com/org/repo", "https://ghp_abcdefghijklmnop@github.com/org/repo.git");
+  const r = redactor({ GH_TOKEN: "ghp_abcdefghijklmnop" }, keep)!;
+  assert.equal(
+    r("origin\thttps://ghp_abcdefghijklmnop@github.com/org/repo.git (push)"),
+    "origin\thttps://[secret]@github.com/org/repo.git (push)",
+  );
+});
+
+test("the repository's two spellings are what covey vouches for, in the URL's own case", () => {
+  // `normaliseRemote` lowercases the identity, so a repository named `Acme/Api`
+  // needs the remote's own spelling beside it.
+  assert.deepEqual(repositoryNames("github.com/org/repo"), ["github.com/org/repo", "github.com:org/repo"]);
+  assert.deepEqual(
+    repositoryNames("github.com/acme/api", "git@github.com:Acme/Api.git"),
+    ["github.com/acme/api", "github.com:acme/api", "github.com/Acme/Api", "github.com:Acme/Api"],
+  );
+  // A local project has neither, and a URL covey cannot name adds nothing.
+  assert.deepEqual(repositoryNames(null, null), []);
+  assert.deepEqual(repositoryNames(null, "/srv/repos/thing.git"), []);
+});
+
 
 test("a string covey already stores in the clear keeps the value inside it", () => {
   // The `projects` table holds `github.com/owner/repo` whole, so redacting the

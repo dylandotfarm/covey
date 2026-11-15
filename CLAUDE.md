@@ -1090,9 +1090,13 @@
   with nothing said — and below `WHOLE_TOKEN_BELOW` it is replaced only where it stands as
   a whole token, because `1234` inside `some/path/1234/world` is a piece of a path and
   replacing it costs the reader a line and tells nobody anything. And `keep` holds covey's
-  own bookkeeping out of the way: the project's `repositoryIdentity` and `remoteUrl` are on
-  the project row in the clear, so a value standing *inside* one of them is left there —
-  which is what makes that URL a link the reader can open. It is `keepFilePaths`' rule for
+  own bookkeeping out of the way: `repositoryNames` gives the repository's host and path, in
+  both spellings and in the remote's own case, and the `projects` table carries them in the
+  clear — so a value standing *inside* one of them is left there, which is what makes that
+  URL a link the reader can open. **Never the remote URL itself**: `remoteForms` answers
+  `null` for `https://token@github.com/org/repo.git`, because a token in an https URL is the
+  user's own credential, so `Project.remoteUrl` records that URL whole and vouching for it
+  would write the token into every `git remote -v` a thread's shell ran. It is `keepFilePaths`' rule for
   a text covey wrote rather than for a field, and the two overlap without being one
   decision: this one says the repository's name is public, that one says a file covey put
   in the store is covey's own. `unredactor` still reads the *named* form, and only that

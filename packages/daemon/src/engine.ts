@@ -16,7 +16,7 @@ import { preambleFor } from "./plugin.js";
 import { applySecretWrites, projectSecretList, threadEnv, threadSecretList } from "./secrets.js";
 import { keepFilePaths, redactDeep, redactor, unredactor } from "./redact.js";
 import { threadFileTarget } from "./threadFiles.js";
-import { normaliseRemote, projectSlug, publishDirectory, listRemoteBranches, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
+import { normaliseRemote, projectSlug, repositoryNames, publishDirectory, listRemoteBranches, remoteUrl, currentBranch, createWorktree, removeWorktree, restoreWorktree, isGitRepo, gitInfo, defaultBranchRef, baseBranchRef, remoteHasBranch, isBranchName, cleanStartBase, cleanStartNote, cloneBare, fetchBranch, trackBranch, worktreePath, captureCheckpoint, diffCheckpoints, patchBetween, deleteCheckpointRefs, restoreTree, type CleanStart } from "./git.js";
 import { materialiseAttachments, attachmentsDir, keepAttachmentFile, removeThreadFiles, storeShownFiles, threadFilesDir, type ShownFile } from "./attachments.js";
 import { resolveDefaultPermissionMode, saveMachineSettings, dataDir, defaultLiveSessionLimit, DEFAULT_SESSION_IDLE_MINUTES, SESSION_MEMORY_BYTES, fleetSetting, projectsDir, savePeers } from "./config.js";
 import { generateTitle, fallbackTitle } from "./title.js";
@@ -544,13 +544,14 @@ export class Engine {
    * environment moves. A thread with no secret gets `null`, and then this is
    * the identity function — which is every thread on a machine that uses none.
    *
-   * The repository's identity goes with it, as a string covey vouches for.
-   * `github.com/owner/repo` is on the project row in the clear, so a value
-   * that is part of it — an owner who is also an account name somewhere else —
-   * is kept where it stands inside it. That is what makes the URL covey writes
-   * into its own watch news a link the reader can open, and it takes away the
-   * plainest reading of the marker: a redacted owner beside a repository name
-   * anybody can look up is a secret told.
+   * The repository's host and path go with it, as strings covey vouches for
+   * (`repositoryNames`). `github.com/owner/repo` is on the project row in the
+   * clear, so a value that is part of it — an owner who is also an account
+   * name somewhere else — is kept where it stands inside it. That is what
+   * makes the URL covey writes into its own watch news a link the reader can
+   * open, and it takes away the plainest reading of the marker: a redacted
+   * owner beside a repository name anybody can look up is a secret told. The
+   * remote URL itself is never vouched for; `repositoryNames` says why.
    */
   private redact<T>(threadId: string, value: T): T {
     let r = this.redactors.get(threadId);
@@ -561,10 +562,7 @@ export class Engine {
       // later with an environment behind it.
       if (!t) return value;
       const p = this.db.getProject(t.projectId);
-      // The URL as well as the identity: an `ssh` remote is spelled
-      // `git@github.com:owner/repo.git` and holds neither slash the identity has.
-      const keep = [p?.repositoryIdentity, p?.remoteUrl].filter((k): k is string => !!k);
-      r = redactor(threadEnv(this.db, t.projectId, t.id), keep);
+      r = redactor(threadEnv(this.db, t.projectId, t.id), repositoryNames(p?.repositoryIdentity, p?.remoteUrl));
       this.redactors.set(threadId, r);
     }
     return r ? redactDeep(value, r) : value;

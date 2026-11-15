@@ -91,9 +91,18 @@ export function redactor(env: Record<string, string>, keep: string[] = []): ((s:
   // Longest first here too, so a kept string inside another is not cut in two.
   const kept = [...new Set(keep.filter(Boolean))].sort((a, b) => b.length - a.length);
   const replace = (s: string) => {
-    let out = s;
-    for (const [, value] of pairs) out = replaceValue(out, value);
-    return out;
+    // A marker this puts in is final, and no later value is looked for inside
+    // it. The eight-character floor used to make that impossible: `[secret]`
+    // is eight characters, so nothing short enough to sit inside one was
+    // looked for at all. With every value looked for, a reader whose secret is
+    // `secret` would have read `[[secret]]` — untidy rather than unsafe, but
+    // it is covey's own text and no value of the reader's.
+    let segs: Segment[] = [{ text: s, done: false }];
+    for (const [, value] of pairs) {
+      if (!segs.some((g) => !g.done && g.text.includes(value))) continue;
+      segs = segs.flatMap((g) => (g.done ? [g] : cut(g.text, value)));
+    }
+    return segs.map((g) => g.text).join("");
   };
   return (s: string) => {
     // The common string holds none of covey's own bookkeeping, and then this
@@ -120,24 +129,29 @@ function segments(s: string, kept: string[]): { text: string; kept: boolean }[] 
   return out;
 }
 
+/** A run of text, and whether redaction is finished with it. */
+interface Segment { text: string; done: boolean }
+
 /**
- * Every occurrence of `value` in `s` replaced — or, for a value short enough
- * to turn up by chance, every occurrence that stands as a whole token.
+ * `s` cut on `value`: every occurrence replaced by a marker nothing may reach
+ * into — or, for a value short enough to turn up by chance, every occurrence
+ * that stands as a whole token.
  */
-function replaceValue(s: string, value: string): string {
-  if (!s.includes(value)) return s;
-  if (value.length >= WHOLE_TOKEN_BELOW) return s.split(value).join(SECRET_MARKER);
-  let out = "";
+function cut(s: string, value: string): Segment[] {
+  const anywhere = value.length >= WHOLE_TOKEN_BELOW;
+  const out: Segment[] = [];
+  // Where the text not yet emitted starts, which a match covey passes over
+  // does not move.
   let from = 0;
-  for (;;) {
-    const at = s.indexOf(value, from);
-    if (at < 0) break;
+  for (let at = s.indexOf(value); at >= 0; at = s.indexOf(value, at + value.length)) {
     const end = at + value.length;
-    const whole = !TOKEN.test(s[at - 1] ?? "") && !TOKEN.test(s[end] ?? "");
-    out += s.slice(from, at) + (whole ? SECRET_MARKER : value);
+    if (!anywhere && (TOKEN.test(s[at - 1] ?? "") || TOKEN.test(s[end] ?? ""))) continue;
+    if (at > from) out.push({ text: s.slice(from, at), done: false });
+    out.push({ text: SECRET_MARKER, done: true });
     from = end;
   }
-  return out + s.slice(from);
+  if (from < s.length) out.push({ text: s.slice(from), done: false });
+  return out;
 }
 
 /**

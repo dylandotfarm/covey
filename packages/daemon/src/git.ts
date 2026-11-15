@@ -115,6 +115,40 @@ export function remoteForms(url: string): { host: string; path: string; ssh: str
 }
 
 /**
+ * The names of a repository that covey vouches for in a redaction: its host
+ * and its path, in both spellings, and nothing else.
+ *
+ * `Engine.redact` holds these out of the redactor's way (`redactor`'s `keep`).
+ * The `projects` table carries the identity in the clear, so a value that is
+ * part of it — an owner who is also an account name somewhere else — is kept
+ * where it stands inside it, and the URL covey writes into its own watch news
+ * is a link the reader can open rather than a gap they can read the owner out
+ * of.
+ *
+ * **Never the remote URL itself.** `remoteForms` answers `null` for
+ * `https://token@github.com/org/repo.git` on purpose — a token in an https URL
+ * is the user's own credential — so `cloneCandidates` passes that URL through
+ * whole and `Project.remoteUrl` records it as it stands. To vouch for that
+ * string would write the token into every `git remote -v` a thread's shell
+ * ran, which is the one failure `redact.ts` exists to prevent. A host and a
+ * path can hold no credential, which is why they are what this answers.
+ *
+ * Both spellings, because `git@host:owner/repo.git` holds neither slash that
+ * `host/owner/repo` has. And the URL's own case as well as the identity's,
+ * because `normaliseRemote` lowercases and a repository named `Acme/Api` is
+ * written that way everywhere a reader sees it.
+ */
+export function repositoryNames(identity?: string | null, remoteUrl?: string | null): string[] {
+  const out = new Set<string>();
+  const add = (host: string, path: string) => { out.add(`${host}/${path}`); out.add(`${host}:${path}`); };
+  const cut = identity ? identity.indexOf("/") : -1;
+  if (identity && cut > 0) add(identity.slice(0, cut), identity.slice(cut + 1));
+  const forms = remoteUrl ? remoteForms(remoteUrl) : null;
+  if (forms) add(forms.host, forms.path);
+  return [...out];
+}
+
+/**
  * The URLs to try for a repository, best first.
  *
  * `protocol` is the way this machine clones, or null when it has no opinion
