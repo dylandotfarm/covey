@@ -391,8 +391,52 @@ test("a wait with no turn behind it says so rather than never moving", async (t)
   s.db.putThread(t1);
   s.advance(9 * 3_600_000);
   assert.deepEqual(await s.tick(), ["t1"]);
-  assert.equal(s.thread("t1").usageLimit!.firedAt !== null, true, "the row still says covey is coming back");
+  assert.equal(s.thread("t1").usageLimit!.firedAt !== null, true, "covey came back, so the row stops saying it will");
   assert.match(s.notes("t1").at(-1)!, /no turn to send again/);
+  assert.equal(threadNeedsPerson(s.thread("t1")), true, "and the row is the reader's again");
+});
+
+/**
+ * The turn a background task opened (#156). No message asked for the work, so
+ * there is no user item to send again and nothing the turn wrote to carry on
+ * from — the refusal is the only thing in it. Covey cannot repeat that work,
+ * so it must say so and give the row back: it told the reader hours earlier
+ * that nothing was needed from them, and that is the sentence that makes
+ * silence here worse than the red row covey left before this existed.
+ */
+test("a wait covey cannot send again strands nothing: it says so and gives the row back", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.send("t1", "write the tests");          // one ordinary turn, answered
+  // A background task wakes the session, and its first word is the refusal.
+  s.cli.push({ type: "assistant", parent_tool_use_id: null, message: { id: "msg-bg", model: "opus", content: [{ type: "text", text: REFUSED }] } });
+  s.cli.push({ type: "result", subtype: "error_during_execution", is_error: true, result: REFUSED, modelUsage: {}, user_message_uuid: null });
+  await settle();
+
+  const limit = s.thread("t1").usageLimit!;
+  assert.equal(limit.turnId, s.thread("t1").latestTurn!.turnId);
+  assert.notEqual(limit.turnId, null, "the unprompted turn has an id, so the no-turn guard never sees it");
+  assert.equal(threadOnLimit(s.thread("t1")), true);
+
+  const seen: Thread[] = [];
+  s.engine.onThread((_id, ev) => { if (ev.kind === "thread.updated" && ev.thread) seen.push(ev.thread); });
+  s.cli.refusal = null;
+  s.advance(9 * 3_600_000);
+  assert.deepEqual(await s.tick(), ["t1"]);
+
+  assert.equal(s.turns("t1").length, 1, "covey sent a turn it had no work for");
+  assert.match(s.notes("t1").at(-1)!, /no turn to send again/, "the row went quiet about it");
+  // The row is the reader's again, which is what it was before this feature
+  // existed and the one thing the note must not leave untrue.
+  assert.equal(threadNeedsPerson(s.thread("t1")), true);
+  assert.equal(s.thread("t1").status, "error");
+  assert.equal(s.thread("t1").lastError, REFUSED);
+
+  let prev = s.thread("t1");
+  prev = { ...prev, status: "idle", usageLimit: limit };
+  const news = seen.map((next) => { const n = threadNews(prev, next); prev = next; return n; }).filter((n) => n !== null);
+  assert.ok(news.some((n) => n!.wants), `nothing asked for the reader: ${news.map((n) => n!.lead).join(", ") || "(silence)"}`);
 });
 
 test("a thread that is merely ill does not wait for anything", async (t) => {

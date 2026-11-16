@@ -989,7 +989,16 @@
   that one text — without it every refused turn looks like one that had started, and "go
   on from where you stopped" to a model that never began is a turn spent working that out.
   **A turn that answers clears the record**, which is what breaks the chain; archiving and
-  `/clear` take it as they take the timer, and for the same two reasons. **The chain is
+  `/clear` take it as they take the timer, and for the same two reasons. **A wait covey
+  cannot send again gives the row back** (`strandedLimit`): `restartWork` answers `sent`,
+  `nothing` or `stood down` so that the one case in the middle can be told, and the
+  commonest shape of it is the turn a background task opened (#156) — no message asked for
+  the work, so there is nothing to send again, and the refusal is all the turn wrote, so
+  there is nothing to carry on from. The note is not enough on its own. `armUsageLimit`
+  put the `error` aside while covey was still coming back, so the row has to be given it
+  again, and `threadNews` needs a rule of its own there: no turn changes state at that
+  moment — the turn failed hours earlier — so the thread would go quiet for good under a
+  note that told the reader nothing was needed from them. **The chain is
   bounded** where a timer's is not (`USAGE_LIMIT_MAX_ROUNDS`): an account out of credits
   refuses every wait there is, so covey stops, writes a warning, and lets the row go back
   to the reader. And **nothing waits past `USAGE_LIMIT_MAX_WAIT_MS`** — a week is the

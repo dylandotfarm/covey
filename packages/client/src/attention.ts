@@ -88,6 +88,15 @@ export function threadNews(prev: Thread, next: Thread): ThreadNews | null {
     if (threadOnLimit(next)) return { mark: null, lead: "waiting on the usage limit", wants: false };
     return { mark: "error", lead: "failed", wants: true };
   }
+  // Covey said it would come back to this thread and it has, with nothing it
+  // could send: the wait fired and the turn it held could not be repeated.
+  // That is the one moment a held thread becomes the reader's again, and no
+  // turn changes state at it — the turn failed hours earlier and the rule
+  // above has long since passed — so without this the thread goes quiet for
+  // good, under a note that told the reader nothing was needed from them.
+  if (next.usageLimit?.firedAt && next.status === "error" && prev.status !== "error") {
+    return { mark: "error", lead: "failed", wants: true };
+  }
   if (nowDone) return { mark: "done", lead: "done", wants: true };
   // Nothing for the reader to do, and silence would be worse: a background
   // thread that stops with no word reads as stalled. So the review is reported

@@ -3638,19 +3638,24 @@ export class Engine {
    * turn is carried on with: the credentials, which covey has just refreshed,
    * and the plan's usage limit, which has just reset.
    *
-   * @returns true when a turn went out.
+   * The three answers are three different things to a caller, and telling them
+   * apart is the whole point of returning one. `stood down` is a thread that
+   * has already found its way back to the model, so the caller owes it
+   * nothing. `nothing` is covey holding a turn it cannot repeat, which is a
+   * sentence the reader is owed: the record says covey would come back, and
+   * that has stopped being true.
    */
-  private async restartWork(threadId: string, turnId: string | null, why: "auth" | "limit" = "auth"): Promise<boolean> {
+  private async restartWork(threadId: string, turnId: string | null, why: "auth" | "limit" = "auth"): Promise<"sent" | "nothing" | "stood down"> {
     const t = this.db.getThread(threadId);
-    if (!t || t.movedTo || t.latestTurn?.state === "running") return false;
-    if ((this.queues.get(threadId)?.length ?? 0) > 0) return false;
+    if (!t || t.movedTo || t.latestTurn?.state === "running") return "stood down";
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) return "stood down";
     const said = this.restartText(threadId, turnId, why, why === "limit" ? t.usageLimit?.message ?? null : null);
-    if (!said) return false;
+    if (!said) return "nothing";
     const trouble = why === "auth" ? "the authentication error" : "the usage limit";
     await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text: said.text, ...(said.system ? { system: true } : {}) })
       // A refresh that failed has already said so, and named the command.
       .catch((e: any) => { if (e?.code !== "auth") this.note(threadId, "warning", `Could not start a new session after ${trouble}: ${e?.message ?? String(e)}`); });
-    return true;
+    return "sent";
   }
 
   /**
@@ -3796,17 +3801,37 @@ export class Engine {
       this.putThreadAndEmit(fresh);
       woke.push(id);
       this.opts.log?.(`usage limit reset thread=${id.slice(0, 8)} round=${limit.round}`);
-      // A wait with no turn behind it has nothing to send. It is fired all the
-      // same, so the row stops saying covey is coming back, and the reader is
-      // told which of the two happened rather than meeting a row that never
-      // moves (#132).
-      if (!limit.turnId) {
-        this.note(id, "warning", "The usage limit has reset, but covey had no turn to send again. Write to the thread to go on.");
-        continue;
-      }
-      await this.restartWork(id, limit.turnId, "limit");
+      if (await this.restartWork(id, limit.turnId, "limit") === "nothing") this.strandedLimit(id, limit);
     }
     return woke;
+  }
+
+  /**
+   * The limit reset and there was nothing to send.
+   *
+   * Covey holds a turn it cannot repeat. The commonest shape is the turn a
+   * background task opened (#156): no message asked for the work, so there is
+   * no user message to send again, and the refusal is the only thing the turn
+   * wrote, so there is nothing to carry on from either. A record that names no
+   * turn at all is the other, and it ends here rather than in a branch of its
+   * own, because the two are one sentence to a reader.
+   *
+   * Two things are owed, and the note alone is not enough. The reader was told
+   * hours ago that nothing was needed from them, so they have to be told that
+   * has stopped being true — and the row has to *look* like it, which means
+   * the `error` that `armUsageLimit` put aside while covey was still coming
+   * back. Without this the thread is abandoned: the wait is fired, so no
+   * client paints it as held, and `status` was `idle`, so none of them paints
+   * it as failed either.
+   */
+  private strandedLimit(threadId: string, limit: ThreadUsageLimit) {
+    this.opts.log?.(`usage limit stranded thread=${threadId.slice(0, 8)} round=${limit.round}`);
+    this.note(threadId, "warning", `${limit.message} The limit has reset, but covey has no turn to send again — nothing a message asked for was left unfinished. Write to the thread to go on.`);
+    const t = this.db.getThread(threadId);
+    if (!t) return;
+    t.status = "error";
+    t.lastError = limit.message;
+    this.putThreadAndEmit(t);
   }
 
   /** One line in a thread's timeline, from the daemon rather than the model. */
