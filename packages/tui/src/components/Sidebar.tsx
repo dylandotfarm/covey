@@ -6,7 +6,7 @@ import type { SidebarCell } from "../sidebar.js";
 import { T, connColor, connDot, statusColor } from "../theme.js";
 import { relTime, truncate } from "../lines.js";
 import { hyperlinksEnabled, osc8 } from "../links.js";
-import { runMemberStateLabel, runState, tallyRun, threadOnTimer, threadReviewing, type Thread } from "@covey/protocol";
+import { runMemberStateLabel, runState, tallyRun, threadOnLimit, threadOnTimer, threadReviewing, type Thread } from "@covey/protocol";
 import { buildSkew } from "../build.js";
 
 const HYPERLINKS = hyperlinksEnabled();
@@ -107,6 +107,17 @@ export const REVIEW_MARK = "⊙";
 export const TIMER_MARK = "◷";
 
 /**
+ * The mark on a thread held on the plan's usage limit (#232).
+ *
+ * A gauge that is full, which is what the account is. It is its own glyph and
+ * not `TIMER_MARK`, because the two waits need different things of a reader:
+ * a timer is the thread's own doing and will be over in minutes, and this one
+ * is the account's and may run until Friday. Geometric Shapes again, for
+ * `TIMER_MARK`'s reason.
+ */
+export const LIMIT_MARK = "◍";
+
+/**
  * The one glyph on the left of a thread row, and its colour.
  *
  * The cell holds one glyph and is two columns wide on every row, so that every
@@ -136,6 +147,10 @@ export function threadMark(t: Thread, attention: "approval" | "done" | "error" |
   // can never both be true, because a thread with a timer running is not the
   // reader's again (`threadIsFinished`), so no `done` is ever raised over one.
   if (threadOnTimer(t)) return { glyph: TIMER_MARK, color: T.subtle };
+  // Beside the timer, and never as the `✗` of a turn that failed: covey holds
+  // the work and sends it again when the limit resets, so the row is one to
+  // leave alone rather than one to go and read.
+  if (threadOnLimit(t)) return { glyph: LIMIT_MARK, color: T.subtle };
   if (attention === "done") return { glyph: "✓", color: T.success };
   return { glyph: t.pinnedAt ? "⋆" : " ", color: statusColor(st, pulse) };
 }
@@ -150,14 +165,15 @@ export function threadMark(t: Thread, attention: "approval" | "done" | "error" |
  * sidebar of twenty threads reads better when the three waiting on a clock
  * step back. Everything else is `T.muted`, which is what every row was.
  *
- * The timer and the archive share the dim, and the glyph in the cell before the
- * title (`TIMER_MARK`) is what says which of the two it is. A colour is read
+ * The timer, the usage limit and the archive share the dim, and the glyph in
+ * the cell before the title (`TIMER_MARK`, `LIMIT_MARK`) is what says which of
+ * the three it is. A colour is read
  * from `T` at the moment of painting and never into a constant, because
  * `setTheme` rewrites that object in place.
  */
 export function threadTitleColor(t: Thread, o: { active: boolean; archived: boolean }): string {
   if (o.active) return T.text;
-  return o.archived || threadOnTimer(t) ? T.faint : T.muted;
+  return o.archived || threadOnTimer(t) || threadOnLimit(t) ? T.faint : T.muted;
 }
 
 /**

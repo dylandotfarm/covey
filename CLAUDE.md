@@ -959,6 +959,42 @@
   the loop and `covey env` — the moment a session needs this is the moment it is about to
   end a turn with a build still running, and a model that has not loaded the skill writes
   `sleep 600` instead.
+- A turn that dies on the **plan's usage limit** is held and sent again when the limit
+  resets (#232), rather than leaving a red row for a reader to come back to. One account
+  is one limit, so the afternoon it runs out every thread on the machine stops inside a
+  minute — and what the reader had to do then was type each message a second time, hours
+  later. `isUsageLimit` reads the refusal (`packages/daemon/src/usageLimit.ts`, a copy of
+  the SDK's own `USAGE_LIMIT_ERROR_PREFIXES`, never an import, for `KNOWN_MODELS`' reason:
+  `sdk.ts` is the one place that loads the SDK) and `Thread.usageLimit` is the whole of
+  it, so the daemon fires it from the row and an hour switched off loses nothing.
+  `fireLimits` rides on the watch tick beside `fireTimers` and ends at the same
+  `restartWork` the credentials use. It is the timer's rule with the clock read off the
+  refusal, and eight things fall out of that.
+  **The reset is read out of the message**, because that is the only place it is written:
+  Claude Code says `· resets 12:10am (UTC)` in its *own local zone* and names the zone
+  after it, so `limitResetAt` checks that name against the daemon's own and refuses
+  otherwise — the session is a subprocess of the daemon, so the two agree, and an hour
+  read in the wrong zone is a thread that wakes early and spends a whole round on a limit
+  that is still refusing it. **A reset covey could not read is a backoff and never a
+  guess covey states**, `USAGE_LIMIT_BACKOFF_MS` growing to an hour, and the row says how
+  long it will be rather than when. **One account is one limit**, so a reset one thread
+  read stands in for a thread whose refusal named none (`Engine.limitResetsAt`, memory
+  only, used only while it is still ahead). **The record goes on the frame that carries
+  the failed turn**, never on a later one: a client reads a turn going to `error` as the
+  bell (`threadNews`), and a bell every five hours for a thread covey is coming back to is
+  the thing this exists to stop — which is why `armUsageLimit` mutates the thread and
+  leaves both callers to emit it, and why `threadOnLimit` is a term of `threadNeedsPerson`
+  and of `threadIsFinished`. **The refusal is not work the turn did**: Claude Code reports
+  it twice, as an assistant message *and* as the error result, so `restartText` excludes
+  that one text — without it every refused turn looks like one that had started, and "go
+  on from where you stopped" to a model that never began is a turn spent working that out.
+  **A turn that answers clears the record**, which is what breaks the chain; archiving and
+  `/clear` take it as they take the timer, and for the same two reasons. **The chain is
+  bounded** where a timer's is not (`USAGE_LIMIT_MAX_ROUNDS`): an account out of credits
+  refuses every wait there is, so covey stops, writes a warning, and lets the row go back
+  to the reader. And **nothing waits past `USAGE_LIMIT_MAX_WAIT_MS`** — a week is the
+  longest window a plan has, so a reset further off has been misread, and a thread asleep
+  until March is one nobody comes back to.
 - A thread can take an issue (`thread.takeIssue`), open a pull request
   (`thread.openPullRequest`) and be watched (`Thread.watch`): the daemon that holds the
   branch polls the pull request and sends every checks verdict, review, comment and merge to

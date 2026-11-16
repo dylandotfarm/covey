@@ -6,7 +6,7 @@ import type {
   ShellSnapshot, ThreadSnapshot, AppBuild, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
-import { isUserClient, KNOWN_MODELS, MAX_THREAD_FILE_BYTES, MIN_CHAIN, TIMER_MAX_MS, TIMER_MIN_MS, localProjectError, localProjectId, threadIsBusy, type AssistantMessageItem, type ThreadTimer,} from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS, MAX_THREAD_FILE_BYTES, MIN_CHAIN, TIMER_MAX_MS, TIMER_MIN_MS, localProjectError, localProjectId, threadIsBusy, type AssistantMessageItem, type ThreadTimer, type ThreadUsageLimit,} from "@covey/protocol";
 import { MAX_TERMINAL_INPUT, MAX_TERMINALS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
@@ -24,6 +24,7 @@ import { ChainTracker, summariseActivity } from "./activity.js";
 import { ThreadTerminal, TerminalError } from "./terminal.js";
 import { summariseReply } from "./digest.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
+import { isUsageLimit, planUsageLimit, usageLimitNote, USAGE_LIMIT_MAX_ROUNDS } from "./usageLimit.js";
 import type { ClaudeModels } from "./models.js";
 import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, WatchRole, MergePolicy, MergeMethod, GitHubAction, GitHubItem, ReviewRequirement, ReviewerRecord, ReviewerState } from "@covey/protocol";
 import { reviewStanding } from "@covey/protocol";
@@ -40,7 +41,7 @@ import { news, emptyCursor, describeNews, describeArchive, asksForWork, endsWatc
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 import { signComment } from "./integrate/sign.js";
 import { timerNote, timerNoteText, timerTurn } from "./timer.js";
-import { timerLabel } from "@covey/client";
+import { limitLeftLabel, timerLabel } from "@covey/client";
 
 export class EngineError extends Error {
   constructor(public code: string, message: string) { super(message); }
@@ -201,6 +202,17 @@ export class Engine {
   private authRetry = new Map<string, "scheduled" | "spent" | "told">();
   /** The restarts waiting on their tick, so a shutdown can drop them. */
   private retryTimers = new Map<string, NodeJS.Timeout>();
+  /**
+   * When the plan's usage limit resets, as the last refusal on this machine
+   * named it, or null when none has.
+   *
+   * One account is one limit, so a reset one thread read is every thread's
+   * reset. It is a hint and not a record: a refusal that names its own time
+   * beats it, it is used only while it is still ahead, and it is held in
+   * memory because a daemon that has been off has no business believing a
+   * number nobody has checked since.
+   */
+  private limitResetsAt: number | null = null;
   /** What the credential store looked like when we last read it. */
   private credStamp: string | null = null;
   /** When each live session's process started, in milliseconds. A failure
@@ -255,7 +267,7 @@ export class Engine {
     // and with no timer of its own: it is a row to read, a timer is a minute
     // at its shortest, and a second interval would wake a sleeping daemon
     // every few seconds to find nothing.
-    this.watchTimer = setInterval(() => { void this.pollWatches(); void this.fireTimers(); }, WATCH_TICK_MS);
+    this.watchTimer = setInterval(() => { void this.pollWatches(); void this.fireTimers(); void this.fireLimits(); }, WATCH_TICK_MS);
     this.watchTimer.unref?.();
     // What the two session limits resolve to here. A client reads `null` as
     // "the default" and cannot name it: the live ceiling comes from this
@@ -992,6 +1004,11 @@ export class Engine {
           // than waits: a thread brought back a day later must not meet a
           // timer that came due while it was gone.
           if (fresh?.timer) { fresh.timer = null; this.note(fresh.id, "info", timerNote(null)); this.db.putThread(fresh); }
+          // A wait on the usage limit goes with it, and for the timer's
+          // reason: the turn it would send is work on a row the reader has put
+          // away, and a thread brought back next week must not meet a turn
+          // that was queued before it went.
+          if (fresh?.usageLimit) { fresh.usageLimit = null; this.db.putThread(fresh); }
           // A review thread archived before it decided leaves the author
           // waiting on a verdict that is never coming, so the author is told.
           // One that signed off is already recorded, and `dropReviewer` leaves
@@ -2743,6 +2760,9 @@ export class Engine {
       // branch and the secrets stay: a clear empties the conversation and
       // nothing else, and a timer is part of the conversation.
       x.timer = null;
+      // And the wait on the usage limit, for the same reason twice over: the
+      // turn it holds is a turn of the conversation this has just emptied.
+      x.usageLimit = null;
     });
   }
 
@@ -3610,17 +3630,27 @@ export class Engine {
     this.authRetry.delete(threadId);
   }
 
-  /** Send the failed work to a new session, unless the thread found other work
-   *  in the meantime. */
-  private async restartWork(threadId: string, turnId: string | null) {
+  /**
+   * Send the failed work to a new session, unless the thread found other work
+   * in the meantime.
+   *
+   * Two failures end here and they differ only in the sentence a part-done
+   * turn is carried on with: the credentials, which covey has just refreshed,
+   * and the plan's usage limit, which has just reset.
+   *
+   * @returns true when a turn went out.
+   */
+  private async restartWork(threadId: string, turnId: string | null, why: "auth" | "limit" = "auth"): Promise<boolean> {
     const t = this.db.getThread(threadId);
-    if (!t || t.movedTo || t.latestTurn?.state === "running") return;
-    if ((this.queues.get(threadId)?.length ?? 0) > 0) return;
-    const said = this.restartText(threadId, turnId);
-    if (!said) return;
+    if (!t || t.movedTo || t.latestTurn?.state === "running") return false;
+    if ((this.queues.get(threadId)?.length ?? 0) > 0) return false;
+    const said = this.restartText(threadId, turnId, why, why === "limit" ? t.usageLimit?.message ?? null : null);
+    if (!said) return false;
+    const trouble = why === "auth" ? "the authentication error" : "the usage limit";
     await this.dispatch({ commandId: randomUUID(), type: "turn.send", threadId, turnId: randomUUID(), text: said.text, ...(said.system ? { system: true } : {}) })
       // A refresh that failed has already said so, and named the command.
-      .catch((e: any) => { if (e?.code !== "auth") this.note(threadId, "warning", `Could not start a new session after the authentication error: ${e?.message ?? String(e)}`); });
+      .catch((e: any) => { if (e?.code !== "auth") this.note(threadId, "warning", `Could not start a new session after ${trouble}: ${e?.message ?? String(e)}`); });
+    return true;
   }
 
   /**
@@ -3633,16 +3663,150 @@ export class Engine {
    * and what goes back is the reader's own message, which covey must not
    * dress up as its own.
    */
-  private restartText(threadId: string, turnId: string | null): { text: string; system: boolean } | null {
+  private restartText(threadId: string, turnId: string | null, why: "auth" | "limit", refusal: string | null = null): { text: string; system: boolean } | null {
     if (!turnId) return null;
+    // `refusal` is the one thing the turn wrote that does not count as work.
+    // Claude Code reports a usage limit twice, as an assistant message and
+    // again as the error result, so without this every refused turn looks
+    // like one that had started — and "go on from where you stopped" to a
+    // model that never began is a turn spent working out that it never began.
     const started = this.db.sql.prepare(
-      "SELECT 1 FROM items WHERE thread_id = ? AND json_extract(json,'$.turnId') = ? AND json_extract(json,'$.kind') IN ('assistant','thinking','tool') LIMIT 1",
-    ).get(threadId, turnId);
-    if (started) return { text: "Your last session could not authenticate and stopped part way through that turn. This is a new session on the same transcript. Go on from the point where it stopped.", system: true };
+      "SELECT 1 FROM items WHERE thread_id = ? AND json_extract(json,'$.turnId') = ? AND json_extract(json,'$.kind') IN ('assistant','thinking','tool')"
+      + " AND COALESCE(json_extract(json,'$.text'), '') <> ? LIMIT 1",
+    ).get(threadId, turnId, refusal ?? "");
+    if (started) {
+      const stopped = why === "auth"
+        ? "Your last session could not authenticate and stopped part way through that turn."
+        : "Your last session stopped part way through that turn because the account had reached its usage limit. The limit has reset.";
+      return { text: `${stopped} This is a new session on the same transcript. Go on from the point where it stopped.`, system: true };
+    }
     const item = this.db.getItem(`u:${turnId}`);
     // Text alone: the CLI already mirrored the attachments of that message
     // into the transcript, and the new session reads them from there.
     return item && item.kind === "user" ? { text: item.text, system: item.system === true } : null;
+  }
+
+  // ---- the plan's usage limit ----------------------------------------------
+
+  /**
+   * A turn died because the account ran out of its plan's usage.
+   *
+   * This is not a turn that failed. The work is sound, nothing on the machine
+   * is broken, and the one thing that mends it is time — so covey writes the
+   * wait on the row and sends the work again when the limit resets, rather
+   * than leaving a reader to come back hours later and type the message a
+   * second time on every thread that had been running.
+   *
+   * The session goes first, as it does on an authentication failure: the
+   * process is in the middle of a turn the API refused, and holding 250 MB
+   * through five hours of waiting would be the limit costing the machine
+   * twice.
+   *
+   * It mutates the thread and does **not** write it: both callers emit the row
+   * themselves, and the record has to ride on the same emission that carries
+   * the failed turn. A client reads a turn going to `error` as the bell
+   * (`threadNews`), and a bell for a thread covey is coming back to is the one
+   * thing this whole feature exists to stop.
+   *
+   * @returns true when a wait was armed.
+   */
+  private armUsageLimit(t: Thread, error: string): boolean {
+    if (t.movedTo || t.archivedAt) return false;
+    const existing = t.usageLimit ?? null;
+    // One failure reaches this twice — the turn's result and the session's
+    // status both carry it — and a thread must not wait twice for one limit.
+    if (existing && !existing.firedAt) return false;
+    this.dropSession(t.id);
+    const nowMs = this.now();
+    const round = (existing?.round ?? 0) + 1;
+    // The sentence is the reader's only record of which limit it was, and it
+    // rides on every snapshot of the thread, so it is bounded like a timer's
+    // note rather than carrying a page of someone's stack trace.
+    const message = error.trim().replace(/\s+/gu, " ").slice(0, 300);
+    const known = this.limitResetsAt !== null && this.limitResetsAt > nowMs ? this.limitResetsAt : null;
+    const plan = planUsageLimit({ message, nowMs, round, known });
+    if (!plan) {
+      // The chain is cleared rather than left to grow: the row needs a person
+      // now, and a reader who comes back and writes has asked for a fresh set
+      // of waits rather than for the one that just ran out.
+      t.usageLimit = null;
+      this.opts.log?.(`usage limit gave up thread=${t.id.slice(0, 8)} rounds=${USAGE_LIMIT_MAX_ROUNDS}`);
+      this.note(t.id, "warning", `${message} Covey waited for this limit ${USAGE_LIMIT_MAX_ROUNDS} times and the work is still refused, so it stops here. Write to the thread to try again.`);
+      return false;
+    }
+    if (plan.resetsAt !== null) this.limitResetsAt = plan.resetsAt;
+    const limit: ThreadUsageLimit = {
+      message,
+      turnId: t.latestTurn?.turnId ?? null,
+      setAt: new Date(nowMs).toISOString(),
+      dueAt: new Date(plan.dueAt).toISOString(),
+      resetsAt: plan.resetsAt === null ? null : new Date(plan.resetsAt).toISOString(),
+      firedAt: null,
+      round,
+    };
+    t.usageLimit = limit;
+    // The session is gone and the thread is waiting, which is what `idle`
+    // says. It is written here rather than left as `error` because every mark
+    // a client paints reads the status first: a row that said `error` for five
+    // hours would be a red dot on a thread covey is coming back to, which is
+    // the thing this feature exists to stop. `lastError` keeps the sentence.
+    t.status = "idle";
+    this.opts.log?.(`usage limit thread=${t.id.slice(0, 8)} round=${round} in=${limitLeftLabel(limit, nowMs)} read=${plan.resetsAt !== null}`);
+    this.note(t.id, "info", usageLimitNote(limit, nowMs));
+    return true;
+  }
+
+  /**
+   * Send the work again on every thread whose limit has reset. The watch tick
+   * calls this; a test calls it by hand and moves the clock between calls.
+   *
+   * The record is written down as fired *before* the turn goes, so a dispatch
+   * that fails cannot be fired again by the next tick — `fireTimers`' rule,
+   * and its reasons hold here too.
+   *
+   * @returns the threads it woke.
+   */
+  async fireLimits(): Promise<string[]> {
+    const now = this.now();
+    const ready = (t: Thread | null | undefined): t is Thread => {
+      const limit = t?.usageLimit;
+      if (!t || !limit || limit.firedAt || t.movedTo || t.archivedAt) return false;
+      if (Date.parse(limit.dueAt) > now) return false;
+      // A thread that is working has already found its way back to the model,
+      // and one stopped on an approval is waiting on a person rather than on a
+      // clock. A message queued behind this one is the reader's own and starts
+      // a session of its own. In all three the wait stays armed and the next
+      // tick looks again: nothing is lost.
+      if ((this.queues.get(t.id)?.length ?? 0) > 0) return false;
+      return !threadIsBusy(t);
+    };
+    const due = this.db.listThreads().filter(ready);
+    // One at a time, not `Promise.all`: one account is one limit, so every
+    // thread on this machine comes due in the same minute, and ten sessions of
+    // 250 MB must not start together.
+    const woke: string[] = [];
+    for (const { id } of due) {
+      // Read the row again and test it again, for `fireTimers`' reason: the
+      // dispatch below revives a worktree and starts a session, so by the time
+      // the second thread of a batch comes round its row is seconds old.
+      const fresh = this.db.getThread(id);
+      if (!ready(fresh)) continue;
+      const limit: ThreadUsageLimit = { ...fresh.usageLimit!, firedAt: new Date(now).toISOString() };
+      fresh.usageLimit = limit;
+      this.putThreadAndEmit(fresh);
+      woke.push(id);
+      this.opts.log?.(`usage limit reset thread=${id.slice(0, 8)} round=${limit.round}`);
+      // A wait with no turn behind it has nothing to send. It is fired all the
+      // same, so the row stops saying covey is coming back, and the reader is
+      // told which of the two happened rather than meeting a row that never
+      // moves (#132).
+      if (!limit.turnId) {
+        this.note(id, "warning", "The usage limit has reset, but covey had no turn to send again. Write to the thread to go on.");
+        continue;
+      }
+      await this.restartWork(id, limit.turnId, "limit");
+    }
+    return woke;
   }
 
   /** One line in a thread's timeline, from the daemon rather than the model. */
@@ -3675,6 +3839,12 @@ export class Engine {
         t.lastError = error ?? null;
         const wasRunning = t.latestTurn?.state === "running";
         if (status === "error" && wasRunning) { t.latestTurn!.state = "error"; t.latestTurn!.completedAt = new Date().toISOString(); }
+        // Before the emit: the record has to ride on the frame that carries
+        // the failed turn, or the clients ring a bell for a thread covey is
+        // already coming back to. `wasRunning`, because what covey holds is
+        // the turn that was refused — a session that died with none would
+        // leave the record naming whatever ran last and send that again.
+        if (status === "error" && wasRunning && isUsageLimit(error)) this.armUsageLimit(t, error!);
         this.putThreadAndEmit(t);
         if (status === "error" && wasRunning && t.latestTurn) void this.finishTurn(threadId, t.latestTurn.turnId);
         if (status === "error" && isAuthFailure(error)) this.onAuthFailure(threadId, t.latestTurn?.turnId ?? null, error!);
@@ -3715,6 +3885,13 @@ export class Engine {
         }
         t.status = "idle";
         t.lastMessageAt = new Date().toISOString();
+        // Both of these come before the emit, and for one reason: a client
+        // reads a turn going to `error` as the bell, so the record that says
+        // covey is coming back must be on the same frame as the failure.
+        if (info.isError && isUsageLimit(info.result)) this.armUsageLimit(t, info.result);
+        // A turn that answered is a limit that has passed, whatever covey was
+        // waiting for, so the chain of waits starts again from one.
+        else if (!info.isError) t.usageLimit = null;
         this.putThreadAndEmit(t);
         // The one sentence a cover screen shows instead of the reply (#172).
         // Beside the turn, as a title and a chain's sentence are: until it

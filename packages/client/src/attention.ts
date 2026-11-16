@@ -17,7 +17,7 @@
  *
  * Pure and node-tested, like `timelineRows` and for the same reason.
  */
-import { threadIsFinished, threadOnTimer, type Thread } from "@covey/protocol";
+import { threadIsFinished, threadOnLimit, threadOnTimer, type Thread } from "@covey/protocol";
 
 /**
  * The mark a row carries once this has fired, and the three things a reader
@@ -80,7 +80,14 @@ export function threadNews(prev: Thread, next: Thread): ThreadNews | null {
     // to know which, because one of them is answered with a word.
     return { mark: "approval", lead: next.pendingApprovals > 0 ? "needs approval" : "asks you something", wants: true };
   }
-  if (nowError) return { mark: "error", lead: "failed", wants: true };
+  if (nowError) {
+    // A turn that stopped on the plan's usage limit is not a thread that
+    // failed. Nothing is wrong with the work, covey holds it and sends it
+    // again when the limit resets, and the reader has nothing to do — so it
+    // is a line and never a bell, which is the review's rule and the timer's.
+    if (threadOnLimit(next)) return { mark: null, lead: "waiting on the usage limit", wants: false };
+    return { mark: "error", lead: "failed", wants: true };
+  }
   if (nowDone) return { mark: "done", lead: "done", wants: true };
   // Nothing for the reader to do, and silence would be worse: a background
   // thread that stops with no word reads as stalled. So the review is reported
