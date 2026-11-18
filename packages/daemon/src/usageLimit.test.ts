@@ -200,6 +200,20 @@ test("the note says which limit, that covey holds the work, and when it goes aga
   assert.doesNotMatch(note, /wait \d in a row/, "the first wait is not a chain");
 });
 
+/**
+ * A note is written on the daemon's machine and read somewhere else, so the
+ * only clock it could write is a server's. The reader's own clock is on the
+ * thread's row, painted live by every client.
+ */
+test("the note names no clock time, in the daemon's zone or any other", () => {
+  const note = usageLimitNote(limit(), NOW);
+  assert.doesNotMatch(note, /UTC|12:10am/, "a zone the reader has to translate");
+  assert.match(note, /^You've hit your session limit\. /, "the refusal keeps its own words, less the reset");
+  // A tail that is not a clock is the reader's to act on and stays whole.
+  const funds = usageLimitNote(limit({ message: "Your org is out of usage · add funds to continue" }), NOW);
+  assert.match(funds, /add funds to continue/);
+});
+
 test("a note for a guessed wait names no reset, and a repeated one counts", () => {
   const note = usageLimitNote(limit({ resetsAt: null, dueAt: new Date(NOW + 15 * MINUTE).toISOString(), round: 3 }), NOW);
   assert.match(note, /could not read when the limit resets/);

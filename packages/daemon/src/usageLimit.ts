@@ -222,15 +222,35 @@ export function planUsageLimit(opts: { message: string; nowMs: number; round: nu
  * point of the whole feature — a reader who does not read it should still be
  * able to walk away.
  *
- * The reset is named as a clock time *and* as a wait. A clock alone is a
- * number to compare against a timezone; a wait alone is a figure that is wrong
- * the moment the row is read again.
+ * **The wait is said as a span and never as a clock time.** A note is written
+ * once, on the daemon's machine, and read somewhere else — very often on a
+ * phone in another country — so the only clock the daemon could write is its
+ * own, and a server keeps UTC. `3:50am (UTC)` is a sum the reader has to do,
+ * and this note said it for months. The clock belongs where it can be the
+ * *reader's* own and can stay true as the hours pass: the thread's row, which
+ * every client paints live from `ThreadUsageLimit.resetsAt` through
+ * `limitResetLabel`. So the reset clause is cut out of Claude Code's sentence
+ * as well, rather than repeated here in a zone nobody asked for.
  */
 export function usageLimitNote(limit: ThreadUsageLimit, nowMs: number): string {
   const left = limitSpanLabel(Math.max(0, Date.parse(limit.dueAt) - nowMs));
   const when = limit.resetsAt
-    ? `The limit resets at ${new Date(Date.parse(limit.resetsAt)).toISOString().slice(11, 16)} UTC, so covey sends this turn again in ${left}.`
+    ? `Covey sends this turn again when the limit resets, in ${left}.`
     : `Covey could not read when the limit resets, so it tries this turn again in ${left}.`;
   const chain = limit.round > 1 ? ` This is wait ${limit.round} in a row on this thread.` : "";
-  return `${limit.message} Covey holds this turn rather than stopping here. ${when}${chain} Nothing is needed from you.`;
+  return `${withoutReset(limit.message)} Covey holds this turn rather than stopping here. ${when}${chain} Nothing is needed from you.`;
+}
+
+/**
+ * Claude Code's sentence without its `· resets 3:50am (UTC)` clause, which the
+ * note says for itself in the reader's own terms.
+ *
+ * Only that one clause goes. A refusal carries other tails that are not a
+ * clock — `Your org is out of usage · add funds to continue` — and cutting at
+ * the separator would take the one thing the reader has to act on with it.
+ */
+function withoutReset(message: string): string {
+  const cut = (message ?? "").replace(/\s*·\s*resets\s+[^()·]+\([^()]+\)\s*$/iu, "").trim();
+  if (!cut) return (message ?? "").trim();
+  return /[.!?]$/u.test(cut) ? cut : `${cut}.`;
 }

@@ -1,7 +1,7 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { threadOnLimit, threadOnTimer, type Thread, type TimelineItem } from "@covey/protocol";
-import { limitLeftLabel, timerLeftLabel } from "@covey/client";
+import { limitLeftLabel, limitResetLabel, timerLeftLabel } from "@covey/client";
 import { T } from "../theme.js";
 import { LIMIT_MARK, TIMER_MARK } from "./Sidebar.js";
 import { fmtMs } from "../lines.js";
@@ -62,6 +62,14 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   // the one that is set last is the one the thread is waiting on.
   const limit = thread && threadOnLimit(thread) ? thread.usageLimit! : null;
   const now = Date.now();
+  // When the limit resets, on this terminal's own clock. The daemon may be a
+  // server in UTC and the reader is at a desk somewhere else, so the hour
+  // Claude Code wrote is one they would have to translate. The span says how
+  // long and this says when, which is the pair the page and the phone show.
+  // `width` is this box and not the terminal — the sidebar has its share
+  // already — so the guard is low: eight more columns, and the row truncates
+  // from the right, where the machine's name is.
+  const limitReset = limit && width > 70 ? limitResetLabel(limit, now) : null;
   return (
     /* `100%`, not `width`: see the root box in `App.tsx`. The width prop is
        still what the editor wraps to; this box has to be the width the terminal
@@ -99,7 +107,7 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
                 the sidebar and the status line — this row is the branch and
                 the machine, and a sentence here would push both off it. */}
             {timer && <Text color={T.subtle}>  {TIMER_MARK} {timerLeftLabel(timer, now)}</Text>}
-            {limit && <Text color={T.subtle}>  {LIMIT_MARK} limit {limitLeftLabel(limit, now)}</Text>}
+            {limit && <Text color={T.subtle}>  {LIMIT_MARK} limit {limitLeftLabel(limit, now)}{limitReset ? ` · resets ${limitReset}` : ""}</Text>}
             {thread && <Text color={T.faint}>  @{machineName}</Text>}
           </Text>
         </Box>

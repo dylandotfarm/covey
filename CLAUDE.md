@@ -975,8 +975,14 @@
   after it, so `limitResetAt` checks that name against the daemon's own and refuses
   otherwise — the session is a subprocess of the daemon, so the two agree, and an hour
   read in the wrong zone is a thread that wakes early and spends a whole round on a limit
-  that is still refusing it. **A reset covey could not read is a backoff and never a
-  guess covey states**, `USAGE_LIMIT_BACKOFF_MS` growing to an hour, and the row says how
+  that is still refusing it. That zone is the *daemon's*, and the reader is very often on
+  a phone in another country, so **what covey shows is an instant and every clock is the
+  device's own**: `resetsAt` goes on the row and `limitResetLabel` in `@covey/client`
+  paints it, naming no zone because it is already the reader's. Nothing covey *writes
+  down* names a clock at all — `usageLimitNote` cuts the `· resets …` clause out of
+  Claude Code's own sentence rather than repeat it — because a note is written once, on
+  one machine, and read hours later on another. **A reset covey could not read is a
+  backoff and never a guess covey states**, `USAGE_LIMIT_BACKOFF_MS` growing to an hour, and the row says how
   long it will be rather than when. **One account is one limit**, so a reset one thread
   read stands in for a thread whose refusal named none (`Engine.limitResetsAt`, memory
   only, used only while it is still ahead). **The record goes on the frame that carries
