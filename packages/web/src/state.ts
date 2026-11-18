@@ -383,12 +383,15 @@ export interface ProjectRow {
 }
 
 /**
- * The key of a project's row, and the key its fold is remembered under.
+ * The key of a project's row, and the key its fold is remembered under while
+ * the client runs.
  *
  * A fleet other than the default scopes it (`fleetScope`), so one repository
- * cloned at work and at home is two rows with two folds — and a reader who
- * has made no second fleet keeps every fold they ever made, because the scope
- * of the default fleet is empty.
+ * cloned at work and at home is two rows with two folds. The scope of the
+ * default fleet is empty, which is agreement with the TUI's own key and not a
+ * fold that survives a launch: neither of this function's callers persists
+ * `folded`, because `emptyState` builds a fresh set every time. The TUI is
+ * where that matters, and its rule is the one to match.
  */
 export function projectKey(machine: string, p: Project, fleet: string): string {
   const pool = projectPool(p);
@@ -476,6 +479,49 @@ function byRecency(a: Thread, b: Thread): number {
 /** The homes of a row a new thread can go to: connected machines only. */
 export function openHomes(r: ProjectRow): ProjectHome[] {
   return r.homes.filter((h) => h.conn === "connected");
+}
+
+/** What an empty list of projects says, and why it is empty. */
+export interface EmptyNote {
+  title: string;
+  hint?: string;
+}
+
+/**
+ * What to say when there is no project to paint.
+ *
+ * **Never "no projects" about a machine that did not answer.** A machine
+ * asleep must not read as a project with nothing in it — the rule `covey
+ * threads` keeps for a fleet member it could not reach, and #132's rule that
+ * one word must not stand for four different problems. It matters most on the
+ * app's fleet screen: the banner over the list speaks for the *primary*
+ * machine alone, which inside a fleet is very often not one of the machines
+ * that fleet is made of, so this sentence is all the reader gets.
+ *
+ * `fleet` scopes it to one fleet, as `projectRows` is scoped. The machines
+ * decide, not the rows: a fleet whose one machine is away has nothing to show
+ * and something to say.
+ */
+export function emptyProjects(s: State, fleet?: string): EmptyNote {
+  const scope = [...s.machines.values()].filter((m) => fleet === undefined || fleetKey(machineFleet(m)) === fleetKey(fleet));
+  if (scope.length === 0) return { title: "No machines here yet.", hint: "Add the machine that runs covey." };
+  const away = scope.filter((m) => m.conn !== "connected");
+  if (away.length === scope.length) {
+    // Nothing is connected, so there is nothing this list could show. A
+    // machine still dialling is told apart from one that gave up: the first
+    // is a wait and the second is a sentence about a machine that is off.
+    const names = away.map((m) => m.name).join(", ");
+    if (away.some((m) => m.conn === "connecting")) return { title: scope.length === 1 ? "Waiting for the machine…" : "Waiting for the machines…" };
+    return {
+      title: away.length === 1 ? `${names} is not answering.` : `${names} are not answering.`,
+      hint: away.length === 1 ? "Its projects are here when it does." : "Their projects are here when they do.",
+    };
+  }
+  if (away.length > 0) {
+    const names = away.map((m) => m.name).join(", ");
+    return { title: "No projects yet.", hint: `${names} ${away.length === 1 ? "is" : "are"} not answering, so anything there is not in this list.` };
+  }
+  return { title: "No projects yet.", hint: "Start one in the TUI, and it appears here." };
 }
 
 /**

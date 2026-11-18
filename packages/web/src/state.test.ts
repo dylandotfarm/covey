@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { AppBuildRun, GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ReviewerState, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem, UpdateStep } from "@covey/protocol";
 import type { TaggedAttachment } from "@covey/client";
 import {
-  addMachine, addressLink, appBuildLabel, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, fleetRows, fleetsOf, machineFleet, holderOf, isCurrentAddress,
+  addMachine, addressLink, appBuildLabel, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyProjects, emptyState, findRefs, fleetRows, fleetsOf, machineFleet, holderOf, isCurrentAddress,
   baseHash, isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaHash, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
   attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
@@ -190,6 +190,38 @@ test("a fleet row counts what is inside it, and says when something waits on the
     // project row under it already keeps: it is at work *and* it waits.
     { name: "work", key: "work", machines: 2, projects: 2, threads: 2, active: 2, waiting: 1 },
   ]);
+});
+
+test("an empty list says a machine did not answer, never that there is nothing there", () => {
+  // A fleet member asleep must not read as a project with nothing in it: the
+  // rule `covey threads` keeps, and #132's rule that one sentence must not
+  // stand for two different states. It matters most on the app's fleet
+  // screen, where the banner over the list speaks for the primary machine and
+  // the primary is very often in another fleet.
+  const s = emptyState();
+  const pi = addMachine(s, "ws://pi:3790", "pi", true);
+  const desk = addMachine(s, "ws://desk:3790", "desk");
+  applyShellSnapshot(pi, snap("pi", [], []));
+  applyShellSnapshot(desk, snap("desk", [], [], "work"));
+
+  // Still dialling is a wait, not a machine that is off.
+  assert.deepEqual(emptyProjects(s, "work"), { title: "Waiting for the machine…" });
+
+  desk.conn = "offline";
+  assert.deepEqual(emptyProjects(s, "work"), {
+    title: "desk is not answering.",
+    hint: "Its projects are here when it does.",
+  });
+
+  // Connected and empty is the plain sentence, and it names what to do.
+  pi.conn = "connected";
+  assert.deepEqual(emptyProjects(s, "covey"), { title: "No projects yet.", hint: "Start one in the TUI, and it appears here." });
+  // Across every fleet, one machine away and one answering: the list is what
+  // the one that answered holds, and the sentence names the one that did not.
+  assert.deepEqual(emptyProjects(s), {
+    title: "No projects yet.",
+    hint: "desk is not answering, so anything there is not in this list.",
+  });
 });
 
 test("a thread whose project the machine does not list is shown, not dropped", () => {

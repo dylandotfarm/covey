@@ -20,7 +20,7 @@ import { FlatList, Pressable, RefreshControl, Text, View } from "react-native";
 import { useNavigation, type NavigationProp } from "@react-navigation/native";
 import { threadIsBusy } from "@covey/protocol";
 import {
-  openHomes, projectRows, relTime, threadRefs, threadStatusLabel, threadTone,
+  emptyProjects, openHomes, projectRows, relTime, threadRefs, threadStatusLabel, threadTone,
   type ProjectRow, type ThreadRef,
 } from "@covey/web";
 import { store } from "../store";
@@ -81,7 +81,11 @@ export function ProjectList({ fleet, header }: {
       // meets by accident somewhere else entirely.
       onScrollBeginDrag={() => setSwiped(null)}
       ListHeaderComponent={header}
-      ListEmptyComponent={<Empty title="No projects yet." hint="Start one in the TUI, and it appears here." />}
+      // Never a flat "no projects": the banner above this list speaks for the
+      // primary machine, which inside a fleet is very often not one of that
+      // fleet's own — so a fleet whose machine is asleep would read as a fleet
+      // with nothing in it. `emptyProjects` holds that sentence.
+      ListEmptyComponent={<Empty {...emptyProjects(s, fleet)} />}
       renderItem={({ item: row }) => {
         const folded = s.folded.has(row.key);
         const homes = openHomes(row);

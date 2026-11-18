@@ -230,10 +230,10 @@ export function SettingsScreen({ navigation }: Props) {
         <AppBuildRow />
 
         <SectionTitle text="Machines" />
-        {/* Which fleet a machine is in, and only when there is more than one
-            it is what says why the home screen has two lists and
-            which of them this machine's projects are in. Read-only here — a
-            machine declares its own fleet, and the TUI is where one moves. */}
+        {/* Which fleet a machine is in, painted only when there is more than
+            one. It is what says why the home screen has two lists, and which
+            of them a machine's projects are in. Read-only here: a machine
+            declares its own fleet, and the TUI is where one is moved. */}
         {[...s.machines.values()].map((m) => {
           // Only what a person typed can be forgotten. A machine covey learned
           // from another machine's peer list and forgetting it here would mean

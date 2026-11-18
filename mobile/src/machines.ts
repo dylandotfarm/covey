@@ -78,38 +78,40 @@ export async function readToken(url: string): Promise<string | undefined> {
   try { return (await SecureStore.getItemAsync(tokenKey(url))) ?? undefined; } catch { return undefined; }
 }
 
-/** Add a machine, or change the name and the token of one already there. */
-export async function saveMachine(m: SavedMachine, token: string | undefined): Promise<void> {
-  const list = await readMachines();
-  const at = list.findIndex((x) => x.url === m.url);
-  if (at >= 0) list[at] = m; else list.push(m);
-  await AsyncStorage.setItem(LIST_KEY, JSON.stringify(list));
-  if (token) await SecureStore.setItemAsync(tokenKey(m.url), token);
-  else await SecureStore.deleteItemAsync(tokenKey(m.url)).catch(() => {});
-}
-
 /**
- * Remember the fleet a machine says it is in, or forget it for the default
- * one. A machine this device has not saved is not written: the peers come from
- * the fleet list and the TUI owns that.
+ * Write the whole list, as the store holds it.
  *
- * Its own writer rather than `saveMachine`, which takes the token away when it
- * is handed none — this is covey keeping its own record in step, and nothing a
- * reader typed goes with it.
+ * **The list is written from memory and never read back to be changed.** It
+ * had a writer per act — add this machine, forget that one — and each read the
+ * list, changed its own record and wrote the lot back. A person's fingers
+ * arrive one at a time, so that stood until the fleet gave covey a field it
+ * writes *itself*: a machine's snapshot carries it, and every machine this
+ * device has sends one within a few milliseconds of the launch. Two writers
+ * that each read before either wrote is the second write built on the first's
+ * stale copy, and on a first launch with two machines in one fleet — the setup
+ * this feature is for — one of them keeps nothing. It would not heal, either:
+ * the store's own guard reads the field it set in memory, so nothing writes
+ * again until the next launch, where that machine sits in the default fleet
+ * and one fleet reads as two.
+ *
+ * So `store.saved` is the list, every change is made there, and this writes
+ * it. The last write of a frame then carries every change of that frame.
  */
-export async function saveMachineFleet(url: string, fleet: string | undefined): Promise<void> {
-  const list = await readMachines();
-  const m = list.find((x) => x.url === url);
-  if (!m) return;
-  if (fleet) m.fleet = fleet; else delete m.fleet;
+export async function saveMachines(list: SavedMachine[]): Promise<void> {
   await AsyncStorage.setItem(LIST_KEY, JSON.stringify(list)).catch(() => {});
 }
 
-/** Forget a machine, and the token with it — never the address alone. */
-export async function forgetMachine(url: string): Promise<void> {
-  const list = (await readMachines()).filter((m) => m.url !== url);
-  await AsyncStorage.setItem(LIST_KEY, JSON.stringify(list));
-  await SecureStore.deleteItemAsync(tokenKey(url)).catch(() => {});
+/**
+ * Keep a machine's token, or take it away when it needs none.
+ *
+ * Its own call beside the list, because the two stores are different: the
+ * addresses go in `AsyncStorage` and a token is a credential, so it goes in
+ * the device's keychain. Never the address alone — a token left behind under
+ * an address nobody dials is a credential nothing will ever clear.
+ */
+export async function saveToken(url: string, token: string | undefined): Promise<void> {
+  if (token) await SecureStore.setItemAsync(tokenKey(url), token);
+  else await SecureStore.deleteItemAsync(tokenKey(url)).catch(() => {});
 }
 
 /** The level of detail this device reads transcripts at (#149). */

@@ -37,7 +37,7 @@ import {
   setPendingAttachments, syncAttachments, type MachineSlot, type SheetTarget, type State, type View,
 } from "@covey/web";
 import { attachingLabel, readConfirmed, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
-import { forgetMachine, readLod, readMachines, readNotifyWanted, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveMachineFleet, saveNotifyWanted, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
+import { readLod, readMachines, readNotifyWanted, readShowHidden, readTalk, readToken, saveLod, saveMachines, saveNotifyWanted, saveShowHidden, saveTalk, saveToken, type SavedMachine } from "./machines";
 import { asTalk, DEFAULT_TALK, type TalkMode } from "./talk";
 import { shrinkOnDevice, uploadFromDevice } from "./attach";
 import { primeUpdateToken } from "./ota";
@@ -349,15 +349,25 @@ class Store {
     const saved = this.saved.find((x) => x.url === slot.key);
     if (!saved || saved.fleet === slot.fleet) return;
     if (slot.fleet) saved.fleet = slot.fleet; else delete saved.fleet;
-    void saveMachineFleet(slot.key, slot.fleet);
+    // The list this store holds, never one read back from disk: every machine
+    // sends its snapshot within a few milliseconds of the launch, and two
+    // writers that each read before either wrote would lose one of the two
+    // fleets for good. `saveMachines` says why.
+    void saveMachines(this.saved);
   }
 
   // ---- machines a person added -------------------------------------------
 
   /** Add a machine and dial it at once, so the reader sees it connect. */
   addMachine = async (m: SavedMachine, token: string | undefined): Promise<void> => {
-    await saveMachine(m, token);
-    this.saved = await readMachines();
+    const at = this.saved.findIndex((x) => x.url === m.url);
+    // Merged into the record rather than put in its place: what a person
+    // types is the address, the name and the token, and the fleet beside them
+    // is covey's own cache of what that machine last said. A reader pasting a
+    // fresh link for a machine they already have must not take it away.
+    if (at >= 0) this.saved[at] = { ...this.saved[at]!, ...m }; else this.saved.push(m);
+    await saveMachines(this.saved);
+    await saveToken(m.url, token);
     if (!this.state.machines.has(m.url)) {
       const first = this.state.machines.size === 0;
       this.dial(addMachine(this.state, m.url, m.name, first, token), token);
@@ -379,8 +389,11 @@ class Store {
     for (const key of [...this.seen.keys()]) if (key.startsWith(`${url}:`)) this.seen.delete(key);
     if (this.state.view?.machine === url) this.state.view = null;
     if (this.state.item?.machine === url) this.state.item = null;
-    await forgetMachine(url);
-    this.saved = await readMachines();
+    this.saved = this.saved.filter((x) => x.url !== url);
+    await saveMachines(this.saved);
+    // The token goes with the address and never after it: one left behind
+    // under a machine nobody dials is a credential nothing will ever clear.
+    await saveToken(url, undefined);
     this.schedule();
   };
 
