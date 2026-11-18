@@ -90,6 +90,11 @@ export function limitResetLabel(limit: ThreadUsageLimit, nowMs: number, zone?: s
   if (!limit.resetsAt) return null;
   const at = Date.parse(limit.resetsAt);
   if (!Number.isFinite(at)) return null;
+  // A reset already past is no longer an answer to "when". Covey sends the
+  // work a grace minute and a watch tick after it, and longer when the daemon
+  // was switched off, and `4:07pm` painted at 4:08pm is an hour that has gone.
+  // The guard is here and not in the callers, so every client agrees.
+  if (at <= nowMs) return null;
   const days = daysApart(nowMs, at, zone);
   const clock = clockLabel(at, zone);
   if (days <= 0) return clock;

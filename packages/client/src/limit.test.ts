@@ -60,6 +60,10 @@ test("the reset is said on the clock of the device the reader is holding", () =>
   // A wait covey guessed is a backoff and not a reset, so there is no clock to
   // say — covey never states a time it did not read.
   assert.equal(limitResetLabel(limit({ resetsAt: null }), NOW, "UTC"), null);
+  // Nor is a reset already past an answer to "when". Covey sends the work a
+  // grace minute and a watch tick after it, and longer when the daemon was
+  // switched off, and an hour that has gone is not the one the reader wants.
+  assert.equal(limitResetLabel(limit({ resetsAt: "2026-11-15T16:07:00Z" }), NOW, "UTC"), null);
 });
 
 test("the line says which limit, when it resets and when covey tries again", () => {
@@ -75,4 +79,8 @@ test("a wait that is up reads as due, and never as zero", () => {
   assert.equal(limitLeftLabel(up, NOW), "due");
   assert.equal(limitLine(up, NOW), "session limit · covey retries now");
   assert.equal(limitLeftLabel(limit({ dueAt: "2026-11-15T16:08:30Z" }), NOW), "<1m");
+  // The minute between the reset and the retry: the wait still has time on it
+  // and the reset has gone, so the line says the span and no clock at all.
+  const grace = limit({ resetsAt: "2026-11-15T16:07:30Z", dueAt: "2026-11-15T16:08:30Z" });
+  assert.equal(limitLine(grace, NOW, "UTC"), "session limit · covey retries in <1m");
 });

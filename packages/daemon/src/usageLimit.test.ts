@@ -18,7 +18,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   USAGE_LIMIT_BACKOFF_MS, USAGE_LIMIT_GRACE_MS, USAGE_LIMIT_MAX_ROUNDS, USAGE_LIMIT_MAX_WAIT_MS,
-  isUsageLimit, limitResetAt, planUsageLimit, usageLimitNote,
+  isUsageLimit, limitResetAt, planUsageLimit, usageLimitNote, withoutReset,
 } from "./usageLimit.js";
 import type { ThreadUsageLimit } from "@covey/protocol";
 
@@ -212,6 +212,36 @@ test("the note names no clock time, in the daemon's zone or any other", () => {
   // A tail that is not a clock is the reader's to act on and stays whole.
   const funds = usageLimitNote(limit({ message: "Your org is out of usage · add funds to continue" }), NOW);
   assert.match(funds, /add funds to continue/);
+});
+
+/**
+ * The strip reaches wherever `limitResetAt` reads, and the two must agree on
+ * what a refusal says. The CLI wraps a refusal — `isUsageLimit` takes one
+ * after a `… error: ` on purpose — and wrapped is where a tail follows the
+ * zone, so an end-anchored strip keeps the clock on exactly the messages this
+ * exists for.
+ */
+test("the reset clause goes wherever it stands, and nothing else does", () => {
+  assert.equal(withoutReset("You've hit your session limit · resets 12:10am (UTC)"), "You've hit your session limit.");
+  assert.equal(withoutReset("You've reached your usage limit · resets 5am (UTC)."), "You've reached your usage limit.");
+  assert.equal(withoutReset("You've hit your limit · resets 12:10am (UTC) · upgrade to continue"), "You've hit your limit · upgrade to continue.");
+  assert.equal(withoutReset("You've hit your limit · resets Nov 17, 2:20am (America/New_York) and good luck"), "You've hit your limit and good luck.");
+  // A tail with no parenthesised zone is not a clock, and is the one thing the
+  // reader has to act on.
+  assert.equal(withoutReset("Your org is out of usage · add funds to continue"), "Your org is out of usage · add funds to continue.");
+  // Whatever is left of a refusal that is nothing but its clock.
+  assert.equal(withoutReset(""), "");
+  assert.equal(withoutReset("· resets 5am (UTC)"), "· resets 5am (UTC)");
+  // Every message `limitResetAt` can read a clock out of is one this empties
+  // of clocks: the promise is that no note covey writes names an hour.
+  for (const m of [
+    "You've hit your session limit · resets 12:10am (UTC)",
+    "Error: You've hit your session limit · resets 5pm (UTC) — try later",
+    "You've hit your weekly limit · resets Nov 21, 9am (UTC)",
+  ]) {
+    assert.equal(limitResetAt(m, NOW, "UTC") !== null, true, m);
+    assert.doesNotMatch(withoutReset(m), /resets|\(UTC\)/, m);
+  }
 });
 
 test("a note for a guessed wait names no reset, and a repeated one counts", () => {

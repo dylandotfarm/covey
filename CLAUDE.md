@@ -979,9 +979,13 @@
   a phone in another country, so **what covey shows is an instant and every clock is the
   device's own**: `resetsAt` goes on the row and `limitResetLabel` in `@covey/client`
   paints it, naming no zone because it is already the reader's. Nothing covey *writes
-  down* names a clock at all — `usageLimitNote` cuts the `· resets …` clause out of
-  Claude Code's own sentence rather than repeat it — because a note is written once, on
-  one machine, and read hours later on another. **A reset covey could not read is a
+  down* names a clock at all: every note the daemon writes about a limit goes through
+  `withoutReset`, which cuts the `· resets …` clause out of Claude Code's own sentence
+  rather than repeat it — because a note is written once, on one machine, and read hours
+  later on another. All three, and `strandedLimit`'s most of all, which is written after
+  the reset has passed. It strips wherever the clause stands and is not anchored to the
+  end, because `limitResetAt` reads it from anywhere and a refusal the CLI wrapped is
+  exactly where a tail follows the zone. **A reset covey could not read is a
   backoff and never a guess covey states**, `USAGE_LIMIT_BACKOFF_MS` growing to an hour, and the row says how
   long it will be rather than when. **One account is one limit**, so a reset one thread
   read stands in for a thread whose refusal named none (`Engine.limitResetsAt`, memory

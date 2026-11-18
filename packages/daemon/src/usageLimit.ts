@@ -242,15 +242,30 @@ export function usageLimitNote(limit: ThreadUsageLimit, nowMs: number): string {
 }
 
 /**
- * Claude Code's sentence without its `· resets 3:50am (UTC)` clause, which the
- * note says for itself in the reader's own terms.
+ * Claude Code's sentence without its `· resets 3:50am (UTC)` clause, which
+ * covey says for itself, in the reader's own terms and on the reader's own
+ * clock.
+ *
+ * **Every note the daemon writes about a usage limit goes through this**, not
+ * only `usageLimitNote`: the warning covey writes when it gives up, and
+ * `strandedLimit`'s, which is the worst of the three — it is written *after*
+ * the reset has passed, so the hour in it is a moment already gone. A rule
+ * that two of three callers keep is one the next reader finds broken.
+ *
+ * The clause goes wherever it stands and is not anchored to the end, because
+ * `limitResetAt` reads it from anywhere and the two must agree on what a
+ * refusal says. The CLI wraps a refusal — `isUsageLimit` takes one after a
+ * `… error: ` on purpose — and wrapped is exactly where a tail follows the
+ * zone.
  *
  * Only that one clause goes. A refusal carries other tails that are not a
  * clock — `Your org is out of usage · add funds to continue` — and cutting at
  * the separator would take the one thing the reader has to act on with it.
+ * The pattern asks for a time and a parenthesised zone, so it can match no
+ * ordinary prose.
  */
-function withoutReset(message: string): string {
-  const cut = (message ?? "").replace(/\s*·\s*resets\s+[^()·]+\([^()]+\)\s*$/iu, "").trim();
+export function withoutReset(message: string | null | undefined): string {
+  const cut = (message ?? "").replace(/\s*·\s*resets\s+[^()·]+\([^()]+\)/giu, "").replace(/\s+/gu, " ").trim();
   if (!cut) return (message ?? "").trim();
   return /[.!?]$/u.test(cut) ? cut : `${cut}.`;
 }
