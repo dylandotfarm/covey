@@ -255,7 +255,7 @@ export function readFileAttachment(path: string): { attachment?: Attachment; fai
   // Three limits, not one. An image is scaled down when it is over
   // `MAX_IMAGE_BYTES`, and also when either edge is over `MAX_IMAGE_EDGE` —
   // two different files, because a phone photograph is 1.5 MB and 4096 px
-  // wide, so weighing it finds nothing and the API refuses it anyway (#232).
+  // wide, so weighing it finds nothing and the API refuses it anyway (#236).
   // Every other file travels whole up to `MAX_ATTACHMENT_BYTES`, which is
   // what covey carries.
   const edges = imageMime(path) ? imageSizeOfPath(path) : null;
@@ -485,7 +485,7 @@ const SHRINKERS: { cmd: string; args: (src: string, dst: string, edge: number, q
   // The long edge, not the width. `scale='min(edge,iw)':-2` bounded the width
   // alone, so a portrait photograph came out 2576 wide and 3434 tall — under
   // the byte cap, over `MAX_IMAGE_EDGE`, and refused by the API all the same
-  // (#232). `force_original_aspect_ratio=decrease` fits the whole image inside
+  // (#236). `force_original_aspect_ratio=decrease` fits the whole image inside
   // a square of `edge` instead; the two `min`s keep a picture already smaller
   // than that at the size it came in, as the old filter's own `min` did.
   { cmd: "ffmpeg", args: (src, dst, edge, q) => ["-y", "-loglevel", "error", "-i", src, "-vf", `scale='min(iw,${edge})':'min(ih,${edge})':force_original_aspect_ratio=decrease:force_divisible_by=2`, "-q:v", String(Math.max(2, Math.round((100 - q) / 8))), dst] },

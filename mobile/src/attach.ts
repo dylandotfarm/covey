@@ -144,7 +144,8 @@ const PASSES: [number, number][] = [[SHRINK_LONG_EDGE, 0.85], [Math.round(SHRINK
  *
  * **Scale the long edge, never the width.** `resize({ width })` sets the width
  * and lets the height follow, so a portrait photograph came out 2576 wide and
- * 3435 tall: small enough to send and still taller than the API reads (#232).
+ * over 3400 tall: small enough to send and still taller than the API reads
+ * (#236; the TUI's ffmpeg fallback had the same fault, measured at 3434).
  * It also scales a *small* picture up, which is the same mistake pointing the
  * other way — bytes spent on pixels the camera never took. So the edge covey
  * fixes is whichever one is longer, and a picture already inside the box is

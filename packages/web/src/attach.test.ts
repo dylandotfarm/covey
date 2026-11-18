@@ -226,7 +226,7 @@ test("a converted image is called what it now is, so the agent can open it", asy
 });
 
 // ---------------------------------------------------------------------------
-// The API's other image limit: the shape, not the weight (#232)
+// The API's other image limit: the shape, not the weight (#236)
 // ---------------------------------------------------------------------------
 
 /** A real PNG header of `w` by `h`, padded out to `size` bytes. */
@@ -240,7 +240,7 @@ function pngFile(name: string, w: number, h: number, size: number): PickedFile {
   return { name, type: "image/png", size: b.byteLength, bytes: async () => b };
 }
 
-test("a phone photograph is scaled for its shape, though its weight is fine (#232)", async () => {
+test("a phone photograph is scaled for its shape, though its weight is fine (#236)", async () => {
   // The file that started this: 4096x3072 and 1.5 MB. Under MAX_IMAGE_BYTES,
   // so weighing it finds nothing — and refused by the API all the same once
   // the conversation holds a few pictures.

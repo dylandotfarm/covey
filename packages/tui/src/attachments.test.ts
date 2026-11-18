@@ -910,7 +910,7 @@ test("the join of a split path is text anyone can ask for, with no read", () => 
 });
 
 // ---------------------------------------------------------------------------
-// The API's other image limit: the shape, not the weight (#232)
+// The API's other image limit: the shape, not the weight (#236)
 // ---------------------------------------------------------------------------
 
 /** Write a PNG whose header says `w` by `h`. */
@@ -939,7 +939,7 @@ test("a file that is not an image, or is not there, measures nothing rather than
   assert.equal(imageSizeOfPath(join(dir, "nothing-here.png")), null);
 });
 
-test("a picture over MAX_IMAGE_EDGE is scaled, or says so — never sent as it is (#232)", () => {
+test("a picture over MAX_IMAGE_EDGE is scaled, or says so — never sent as it is (#236)", () => {
   // The invariant, whatever image tool this machine happens to have: a
   // photograph the API would refuse for its shape either comes back inside
   // the limit, or it comes back with a warning that names the shape. What it

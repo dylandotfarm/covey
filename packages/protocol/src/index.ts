@@ -2023,7 +2023,7 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
  * size for many-image requests: 3000 pixels`. A conversation with a few dozen
  * pictures in it is such a request, and every turn of it resends them all.
  *
- * So the two limits catch different files and covey has to read both (#232).
+ * So the two limits catch different files and covey has to read both (#236).
  * A 4096x3072 photograph off a phone is about 1.5 MB — far under
  * `MAX_IMAGE_BYTES`, so weighing it finds nothing wrong — and it is over this
  * by a thousand pixels. It went in without complaint and then broke every

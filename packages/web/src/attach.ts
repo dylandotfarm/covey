@@ -184,7 +184,7 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
     // `MAX_IMAGE_BYTES` is the weight the API refuses. Over `MAX_IMAGE_EDGE`
     // on a side is the *shape* it refuses, once a conversation carries a few
     // pictures — a different set of files, because a phone photograph is
-    // 1.5 MB and 4096 px wide (#232). And a type the API will not read at all
+    // 1.5 MB and 4096 px wide (#236). And a type the API will not read at all
     // — an iPhone photograph is `image/heic`, which only the phone can decode.
     // All three come back as JPEG, which is what the model reads.
     const scale = async (why: string) => {

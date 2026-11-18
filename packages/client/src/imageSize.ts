@@ -8,7 +8,7 @@
  * photograph off a phone is 1.5 MB, so it sails past the byte cap untouched,
  * and then every turn of that thread is refused with
  * `At least one of the image dimensions exceed max allowed size for
- * many-image requests: 3000 pixels` (#232).
+ * many-image requests: 3000 pixels` (#236).
  *
  * The header and never the pixels. Every format below states its size in the
  * first few dozen bytes, so this is a read of a prefix and a little arithmetic
