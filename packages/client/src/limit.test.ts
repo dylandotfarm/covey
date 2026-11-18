@@ -6,7 +6,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ThreadUsageLimit } from "@covey/protocol";
-import { limitLabel, limitLeftLabel, limitLine, limitSpanLabel } from "./limit.js";
+import { limitLabel, limitLeftLabel, limitLine, limitResetLabel, limitSpanLabel } from "./limit.js";
 
 const NOW = Date.parse("2026-11-15T16:08:00Z");
 
@@ -44,11 +44,34 @@ test("the label is the limit the reader met, and never the whole sentence", () =
   assert.ok(limitLabel(`You've hit your ${"very ".repeat(20)}long limit`).length <= 40, "a sidebar row is not a paragraph");
 });
 
-test("the line says which limit and when covey tries again, never a clock time", () => {
-  assert.equal(limitLine(limit(), NOW), "session limit · covey retries in 8h 3m");
-  // A zone the reader would have to translate is the one thing this line does
-  // not say: the wait is the fact they act on.
-  assert.doesNotMatch(limitLine(limit(), NOW), /UTC|12:10/);
+test("the reset is said on the clock of the device the reader is holding", () => {
+  // The daemon is on a server in UTC and the reader is in New York. Claude
+  // Code wrote `resets 12:10am (UTC)`, and neither of those is the hour the
+  // reader's own phone shows.
+  assert.equal(limitResetLabel(limit(), NOW, "America/New_York"), "7:10pm");
+  assert.equal(limitResetLabel(limit(), NOW, "UTC"), "tomorrow 12:10am");
+  // The day word is the zone's own calendar and never a count of hours: the
+  // same eight-hour wait is tomorrow in London and this morning in Sydney.
+  assert.equal(limitResetLabel(limit(), NOW, "Australia/Sydney"), "11:10am");
+  // On the hour, the minutes are not a column of zeroes.
+  assert.equal(limitResetLabel(limit({ resetsAt: "2026-11-15T21:00:00Z" }), NOW, "UTC"), "9pm");
+  // A weekly window resets days away, and `9am` alone reads as this morning.
+  assert.equal(limitResetLabel(limit({ resetsAt: "2026-11-21T09:00:00Z" }), NOW, "UTC"), "Nov 21, 9am");
+  // A wait covey guessed is a backoff and not a reset, so there is no clock to
+  // say — covey never states a time it did not read.
+  assert.equal(limitResetLabel(limit({ resetsAt: null }), NOW, "UTC"), null);
+  // Nor is a reset already past an answer to "when". Covey sends the work a
+  // grace minute and a watch tick after it, and longer when the daemon was
+  // switched off, and an hour that has gone is not the one the reader wants.
+  assert.equal(limitResetLabel(limit({ resetsAt: "2026-11-15T16:07:00Z" }), NOW, "UTC"), null);
+});
+
+test("the line says which limit, when it resets and when covey tries again", () => {
+  assert.equal(limitLine(limit(), NOW, "America/New_York"), "session limit · resets 7:10pm · covey retries in 8h 3m");
+  // No zone is named, because the clock is already the reader's own.
+  assert.doesNotMatch(limitLine(limit(), NOW, "America/New_York"), /UTC/);
+  // A guessed wait says the span alone.
+  assert.equal(limitLine(limit({ resetsAt: null }), NOW, "UTC"), "session limit · covey retries in 8h 3m");
 });
 
 test("a wait that is up reads as due, and never as zero", () => {
@@ -56,4 +79,8 @@ test("a wait that is up reads as due, and never as zero", () => {
   assert.equal(limitLeftLabel(up, NOW), "due");
   assert.equal(limitLine(up, NOW), "session limit · covey retries now");
   assert.equal(limitLeftLabel(limit({ dueAt: "2026-11-15T16:08:30Z" }), NOW), "<1m");
+  // The minute between the reset and the retry: the wait still has time on it
+  // and the reset has gone, so the line says the span and no clock at all.
+  const grace = limit({ resetsAt: "2026-11-15T16:07:30Z", dueAt: "2026-11-15T16:08:30Z" });
+  assert.equal(limitLine(grace, NOW, "UTC"), "session limit · covey retries in <1m");
 });

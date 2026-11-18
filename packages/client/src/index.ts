@@ -19,7 +19,7 @@ export { tableAt, tableCells, type Align, type Table } from "./markdown.js";
 export { firstSentence, replyLead, threadActivity, type Activity, type ActivityState } from "./digest.js";
 export { threadNews, type AttentionMark, type ThreadNews } from "./attention.js";
 export { parseTimer, timerLabel, timerLeftLabel, timerLeftMs, timerLine } from "./timer.js";
-export { limitLabel, limitLeftLabel, limitLeftMs, limitLine, limitSpanLabel } from "./limit.js";
+export { limitLabel, limitLeftLabel, limitLeftMs, limitLine, limitResetLabel, limitSpanLabel } from "./limit.js";
 export {
   NOTE_LEAD, chainLabel, chainsOf, foldsChains, noteFold, timelineRows,
   type ChainRow, type FoldOpts, type ItemRow, type SaidRow, type TimelineRow,
@@ -37,6 +37,7 @@ export {
   inFlightNotice, largeDropPrompt, readUploadAnswer, splitInFlight, tooLargeToUpload, uploadUrl,
   uploadingLabel, type LargeDropPrompt, type LargeFile, type UploadAnswer,
 } from "./upload.js";
+export { IMAGE_HEADER_BYTES, imageSizeOfBytes, overImageEdge, type ImageSize } from "./imageSize.js";
 export {
   ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, DEVICE_DOWNLINK_UUID, DEVICE_NAME_PREFIX,
   DEVICE_PROTOCOL, DEVICE_SERVICE_UUID, DEVICE_UPLINK_UUID, DeviceState, Down, FRAME_HEADER,

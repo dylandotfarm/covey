@@ -69,15 +69,82 @@ export function limitLabel(message: string): string {
 }
 
 /**
- * One line for a reader: which limit stopped the thread, and when covey tries
- * the work again.
+ * When the limit resets, on the clock of the device the reader is holding:
+ * `10:50pm`, `tomorrow 12:10am`, `Nov 21, 9am`. Null when covey read no reset
+ * and backed off instead, because a guess is not a clock time.
  *
- * It says the wait and never the reset time, whether covey read one or guessed
- * one. "retries in 7h" is the fact the reader acts on — whether to wait or to
- * go and do the work elsewhere — and it needs no timezone beside it.
+ * Claude Code writes the reset in the zone of the machine it runs on and names
+ * that zone after it — `resets 3:50am (UTC)` from a daemon on a server — and
+ * the reader is very often somewhere else, with a phone in one hand. A clock
+ * the reader has to translate is a clock they do not read, so covey keeps the
+ * reset as an instant (`ThreadUsageLimit.resetsAt`) and every client paints it
+ * in its own zone. No zone is named here for exactly that reason: it is the
+ * reader's own, and naming it would put the sum back.
+ *
+ * The day comes with it once the reset is not today, because a weekly window
+ * resets days away and `9am` alone reads as this morning.
+ *
+ * @param zone the reader's zone, for a test; the device's own by default.
  */
-export function limitLine(limit: ThreadUsageLimit, nowMs: number): string {
+export function limitResetLabel(limit: ThreadUsageLimit, nowMs: number, zone?: string): string | null {
+  if (!limit.resetsAt) return null;
+  const at = Date.parse(limit.resetsAt);
+  if (!Number.isFinite(at)) return null;
+  // A reset already past is no longer an answer to "when". Covey sends the
+  // work a grace minute and a watch tick after it, and longer when the daemon
+  // was switched off, and `4:07pm` painted at 4:08pm is an hour that has gone.
+  // The guard is here and not in the callers, so every client agrees.
+  if (at <= nowMs) return null;
+  const days = daysApart(nowMs, at, zone);
+  const clock = clockLabel(at, zone);
+  if (days <= 0) return clock;
+  if (days === 1) return `tomorrow ${clock}`;
+  return `${dateLabel(at, zone)}, ${clock}`;
+}
+
+/** `10:50pm`, `9am` — the hour as that zone's clock reads it. */
+function clockLabel(ms: number, zone?: string): string {
+  const text = new Intl.DateTimeFormat("en-US", { timeZone: zone, hour: "numeric", minute: "2-digit", hour12: true }).format(ms);
+  // The formatter puts a space before `AM` and some platforms make it a narrow
+  // no-break one, which `\s` covers.
+  return text.replace(/\s+/gu, "").toLowerCase().replace(/:00(?=[ap]m$)/u, "");
+}
+
+/** `Nov 21` — the day, for a reset that is not today or tomorrow. */
+function dateLabel(ms: number, zone?: string): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: zone, month: "short", day: "numeric" }).format(ms);
+}
+
+/**
+ * How many days apart two instants are *on that zone's calendar*, which is the
+ * question `tomorrow` asks and is not the same as a count of 24-hour spans: a
+ * reset eight hours away is tomorrow at 10pm and today at 2pm.
+ */
+function daysApart(fromMs: number, toMs: number, zone?: string): number {
+  const day = (ms: number): number => {
+    // `en-CA` writes `2026-11-18`, which is the one locale shape that parses
+    // back without a second formatter.
+    const [y, m, d] = new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" })
+      .format(ms).split("-").map(Number);
+    return Date.UTC(y!, m! - 1, d!);
+  };
+  return Math.round((day(toMs) - day(fromMs)) / 86_400_000);
+}
+
+/**
+ * One line for a reader: which limit stopped the thread, when it resets, and
+ * when covey tries the work again.
+ *
+ * The reset is a clock and the retry is a wait, because the two answer
+ * different questions and each is wrong on its own: a clock alone is a figure
+ * the reader has to subtract, and a wait alone is wrong the moment the row is
+ * read again. The clock is the reader's own (`limitResetLabel`), never the
+ * daemon's, and covey says none at all for a wait it guessed.
+ */
+export function limitLine(limit: ThreadUsageLimit, nowMs: number, zone?: string): string {
   const left = limitLeftLabel(limit, nowMs);
   const head = limitLabel(limit.message);
-  return left === "due" ? `${head} · covey retries now` : `${head} · covey retries in ${left}`;
+  if (left === "due") return `${head} · covey retries now`;
+  const at = limitResetLabel(limit, nowMs, zone);
+  return at ? `${head} · resets ${at} · covey retries in ${left}` : `${head} · covey retries in ${left}`;
 }

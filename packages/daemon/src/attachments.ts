@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync, readFileSync, existsSync, statSync, copyFileSync, rmSync } from "node:fs";
 import { dirname, extname, isAbsolute, join, relative } from "node:path";
 import { gunzipSync } from "node:zlib";
-import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_SHOWN_BYTES, MAX_SHOWN_FILES, isImageMime, type Attachment } from "@covey/protocol";
+import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, MAX_SHOWN_BYTES, MAX_SHOWN_FILES, isImageMime, type Attachment } from "@covey/protocol";
+import { imageSizeOfBytes, overImageEdge } from "@covey/client";
 import { dataDir } from "./config.js";
 import { mimeOf } from "./threadFiles.js";
 
@@ -305,18 +306,38 @@ export function attachmentBlocks(atts: Attachment[], cwd?: string): { blocks: un
       continue;
     }
     const size = sizeOf(a.path);
+    // The last gate before the model, and it reads both of the API's image
+    // limits — the weight *and* the shape (#236). Every client scales a
+    // picture that is over either one, but each of them has a path that gives
+    // up and sends the file whole: no image tool on the PATH, a canvas that
+    // cannot decode it, an `ImageManipulator` that threw. All three then warn
+    // that the model will not see it, and this is the line that has to make
+    // that true. It is also the only gate that covers a client covey cannot
+    // update — a machine update never touches `mobile/`, so a phone on an
+    // older build goes on dropping 4096 px photographs into threads.
+    let wide = false;
     if (isImageMime(a.mimeType) && size !== null && size <= MAX_IMAGE_BYTES) {
-      blocks.push({
-        type: "image",
-        source: { type: "base64", media_type: a.mimeType, data: readFileSync(a.path).toString("base64") },
-      });
-      noteLines.push(`Attached image: ${a.name} (${shown(a.path)})`);
-      continue;
+      // The bytes were read here anyway, so the shape costs nothing to ask.
+      const bytes = readFileSync(a.path);
+      const edges = imageSizeOfBytes(bytes);
+      wide = overImageEdge(edges?.width, edges?.height);
+      if (!wide) {
+        blocks.push({
+          type: "image",
+          source: { type: "base64", media_type: a.mimeType, data: bytes.toString("base64") },
+        });
+        noteLines.push(`Attached image: ${a.name} (${shown(a.path)})`);
+        continue;
+      }
     }
     // The store may have renamed the file to keep two drops of one name
     // apart, so the line carries the name it was dropped under as well.
+    // A picture held back for its shape says so: "Attached file" with no
+    // reason is the one word for four problems #132 is about, and the agent
+    // can scale it down itself once it knows why it was not shown one.
     const big = size !== null && size > MAX_ATTACHMENT_BYTES;
-    noteLines.push(`Attached file: ${a.name} (${shown(a.path)}${big ? `, ${mb(size)} MB` : ""})`);
+    const why = wide ? `, over ${MAX_IMAGE_EDGE} px on a side, so it is not shown as an image` : big ? `, ${mb(size)} MB` : "";
+    noteLines.push(`Attached file: ${a.name} (${shown(a.path)}${why})`);
     if (big) large.push({ name: a.name, bytes: size });
   }
   const note = largeFileNote(large);

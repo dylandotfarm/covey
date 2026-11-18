@@ -153,6 +153,10 @@ test("a thread held on the limit is dimmed, and the open one never is", () => {
  * The composer's status row, where the reader is already looking. The
  * sidebar's dim says the thread is held; this says for how much longer, which
  * is the one thing the reader cannot work out for themselves.
+ *
+ * The reset comes with it, on this terminal's own clock. Claude Code wrote the
+ * hour in the daemon's zone and named it — `resets 12:10am (UTC)` — and a
+ * reader whose daemon is a server would have to do the sum.
  */
 test("the open thread's wait is in the status row, with how long is left", async () => {
   const store = storeWith([held("limited", "2026-01-09T00:00:00Z")]);
@@ -161,6 +165,8 @@ test("the open thread's wait is in the status row, with how long is left", async
   try {
     const status = frame().filter((l) => l.includes("@pi")).at(-1) ?? "";
     assert.ok(status.includes(`${LIMIT_MARK} limit 8h`), `the status row says nothing about the wait: "${status}"`);
+    assert.match(status, /· resets (tomorrow )?\d{1,2}(:\d{2})?[ap]m/, `no reset on this terminal's clock: "${status}"`);
+    assert.ok(!status.includes("UTC"), `a zone the reader has to translate: "${status}"`);
   } finally { unmount(); }
 });
 
