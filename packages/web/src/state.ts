@@ -17,7 +17,7 @@ import {
   type AppBuildRun, type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
-import { idleChoices, idleValueLabel, keepTagged, limitLine, liveChoices, liveValueLabel, projectPool, timelineRows, timerLine, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
+import { cleanFleet, fleetKey, fleetOf, fleetScope, idleChoices, idleValueLabel, keepTagged, limitLine, liveChoices, liveValueLabel, projectPool, sortFleets, timelineRows, timerLine, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
 
 export interface MachineSlot {
   /** The `ws://` URL the page dials. */
@@ -28,8 +28,19 @@ export interface MachineSlot {
   info: MachineInfo | null;
   projects: Map<string, Project>;
   threads: Map<string, Thread>;
-  /** The daemon that served the page. Its fleet list names the others. */
+  /** The daemon that served the page. Its peer list names the others. */
   primary: boolean;
+  /**
+   * The fleet this machine last said it was in, or undefined for the default
+   * one.
+   *
+   * A cache and nothing more: `machineFleet` reads the machine's own answer
+   * first. It is what holds a machine that is away in its own fleet instead of
+   * dropping it into the default one, which is most of what a reader sees of a
+   * machine they are not using. The app keeps it across launches for the
+   * machines a person typed in (`SavedMachine.fleet`), the way the TUI does.
+   */
+  fleet?: string;
   /** The update in flight on that machine, or the last one it reported. */
   update: MachineUpdate | null;
   /** The app build in flight on that machine, or the last one it reported (#185). */
@@ -154,15 +165,28 @@ export function primaryMachine(s: State): MachineSlot | undefined {
 }
 
 export function applyShellSnapshot(m: MachineSlot, snap: ShellSnapshot): void {
-  m.info = snap.machine;
-  m.name = snap.machine.name;
+  tellMachine(m, snap.machine);
   m.projects = new Map(snap.projects.map((p) => [p.id, p]));
   m.threads = new Map(snap.threads.map((t) => [t.id, t]));
 }
 
+/**
+ * What a machine says about itself, folded into its slot.
+ *
+ * The fleet is cached here rather than read where it is needed, because this
+ * is the one moment a machine is in front of the client: a machine that is
+ * away reports nothing, and dropping it into the default fleet meanwhile is
+ * the one answer that moves a reader's work from one list to another.
+ */
+function tellMachine(m: MachineSlot, info: MachineInfo): void {
+  m.info = info;
+  m.name = info.name;
+  m.fleet = cleanFleet(info.settings.fleet) ?? undefined;
+}
+
 export function applyShellEvent(s: State, m: MachineSlot, ev: ShellEvent): void {
   switch (ev.kind) {
-    case "machine.updated": m.info = ev.machine; m.name = ev.machine.name; break;
+    case "machine.updated": tellMachine(m, ev.machine); break;
     case "project.upserted": m.projects.set(ev.project.id, ev.project); break;
     case "project.removed": m.projects.delete(ev.projectId); break;
     case "thread.upserted":
@@ -249,6 +273,76 @@ export function threadTone(t: Thread): Tone {
   return "idle";
 }
 
+/**
+ * The fleet one machine is in: what it says, else what it last said, else the
+ * default fleet.
+ *
+ * The machine declares its own fleet, so the terminal, the page and the app
+ * all group it the same way and no client can put one machine in two fleets.
+ * The rules themselves are `@covey/client`'s `fleets.ts`; this is only the
+ * shape the page and the app keep their machines in.
+ */
+export function machineFleet(m: MachineSlot): string {
+  return fleetOf(m.info?.settings.fleet, m.fleet);
+}
+
+/**
+ * Every fleet this client can see, the default one first and the rest by name.
+ *
+ * A fleet with no machine in it is not here: nothing would be under it and
+ * nothing to press. That is why the default fleet is not forced into the list
+ * the way the TUI's own `fleetsOf` forces it — the TUI can move a machine
+ * between fleets and so needs a row to move it back to, and neither the page
+ * nor the app can.
+ */
+export function fleetsOf(s: State): string[] {
+  return sortFleets([...s.machines.values()].map(machineFleet));
+}
+
+/**
+ * One fleet as the list screen shows it.
+ *
+ * A fleet is the line between two sets of machines on one tailnet — the ones
+ * at work and the ones at home — and the line is real: a project pools inside
+ * one fleet and never across two. So when there is more than one, the app
+ * opens on these rows and a tap goes into that fleet's projects, the way the
+ * TUI's sidebar grows a level of fold above the projects.
+ *
+ * The counts are the whole reason a reader can stay on this screen: a fleet
+ * must not hide that something inside it is working or waits on a person, the
+ * rule the fleet row and the project row already keep in the terminal.
+ */
+export interface FleetRow {
+  /** The name as its machines spell it, which is also the screen's title. */
+  name: string;
+  /** The name case folded: the row's identity, because `Work` and `work` are one fleet. */
+  key: string;
+  machines: number;
+  projects: number;
+  threads: number;
+  /** How many of its threads are at work, and how many wait on the reader. */
+  active: number;
+  waiting: number;
+}
+
+export function fleetRows(s: State): FleetRow[] {
+  // Every fleet with a machine in it, in the order `fleetsOf` gives, and the
+  // projects walked **once** rather than once per fleet: this runs on every
+  // frame of every turn, and a list of fleets is a row of counts that a
+  // second walk would pay for twice.
+  const rows = new Map<string, FleetRow>();
+  for (const name of fleetsOf(s)) rows.set(fleetKey(name), { name, key: fleetKey(name), machines: 0, projects: 0, threads: 0, active: 0, waiting: 0 });
+  for (const m of s.machines.values()) rows.get(fleetKey(machineFleet(m)))!.machines += 1;
+  for (const p of projectRows(s)) {
+    const row = rows.get(fleetKey(p.fleet))!;
+    row.projects += 1;
+    row.threads += p.threads.length;
+    row.active += p.active;
+    row.waiting += p.waiting;
+  }
+  return [...rows.values()];
+}
+
 /** A project on one machine. */
 export interface ProjectHome {
   machine: string;
@@ -279,6 +373,8 @@ export interface ProjectRow {
   title: string;
   /** The branch its threads start from, or null for the remote's default. */
   base: string | null;
+  /** The fleet every machine of this row is in. */
+  fleet: string;
   homes: ProjectHome[];
   threads: ThreadRef[];
   /** How many of its threads are at work or wait on the reader. */
@@ -286,9 +382,20 @@ export interface ProjectRow {
   waiting: number;
 }
 
-export function projectKey(machine: string, p: Project): string {
+/**
+ * The key of a project's row, and the key its fold is remembered under while
+ * the client runs.
+ *
+ * A fleet other than the default scopes it (`fleetScope`), so one repository
+ * cloned at work and at home is two rows with two folds. The scope of the
+ * default fleet is empty, which is agreement with the TUI's own key and not a
+ * fold that survives a launch: neither of this function's callers persists
+ * `folded`, because `emptyState` builds a fresh set every time. The TUI is
+ * where that matters, and its rule is the one to match.
+ */
+export function projectKey(machine: string, p: Project, fleet: string): string {
   const pool = projectPool(p);
-  return pool ? `repo:${pool}` : `local:${machine}:${p.id}`;
+  return fleetScope(fleet) + (pool ? `repo:${pool}` : `local:${machine}:${p.id}`);
 }
 
 /**
@@ -297,22 +404,35 @@ export function projectKey(machine: string, p: Project): string {
  * the phone is for what is going on, not for the record. A thread whose
  * project the machine does not list is kept under a row of its own, so
  * nothing the daemon sent is silently dropped.
+ *
+ * `fleet` names one fleet, and is how the app's list screen shows a fleet on
+ * its own. With none, every fleet's rows come back in one list, which is what
+ * the page asks for — it has no fleet screen, and the fleet is a line on the
+ * row instead.
+ *
+ * **A fleet is a real line and not a heading.** Two machines pool a repository
+ * only when they are in one fleet, exactly as `projectGroups` has it in the
+ * TUI: the same repository cloned at work and at home is two rows with their
+ * own threads and their own machines, because work must never land on the
+ * machine in the living room.
  */
-export function projectRows(s: State): ProjectRow[] {
+export function projectRows(s: State, fleet?: string): ProjectRow[] {
   const rows = new Map<string, ProjectRow>();
-  const row = (key: string, title: string, base: string | null = null) => {
+  const row = (key: string, title: string, inFleet: string, base: string | null = null) => {
     let r = rows.get(key);
-    if (!r) { r = { key, title, base, homes: [], threads: [], active: 0, waiting: 0 }; rows.set(key, r); }
+    if (!r) { r = { key, title, base, fleet: inFleet, homes: [], threads: [], active: 0, waiting: 0 }; rows.set(key, r); }
     return r;
   };
   for (const m of s.machines.values()) {
+    const f = machineFleet(m);
+    if (fleet !== undefined && fleetKey(f) !== fleetKey(fleet)) continue;
     for (const p of m.projects.values()) {
       // A project the reader put away is not a row here. The page has no
       // archived section and no way to add or remove a project — both are the
       // TUI's — so what it owes a reader is the list the TUI shows them, and
       // not a row they already took off that list.
       if (p.archivedAt) continue;
-      const r = row(projectKey(m.key, p), p.title, p.baseBranch ?? null);
+      const r = row(projectKey(m.key, p, f), p.title, f, p.baseBranch ?? null);
       r.homes.push({ machine: m.key, machineName: m.name, conn: m.conn, project: p });
     }
     for (const t of m.threads.values()) {
@@ -325,7 +445,7 @@ export function projectRows(s: State): ProjectRow[] {
       // The threads of an archived project go with it, or the row would come
       // back with no machine under it and no way to make a thread in it.
       if (p?.archivedAt) continue;
-      const r = p ? row(projectKey(m.key, p), p.title, p.baseBranch ?? null) : row(`orphan:${m.key}:${t.projectId}`, "(project not listed)");
+      const r = p ? row(projectKey(m.key, p, f), p.title, f, p.baseBranch ?? null) : row(`orphan:${m.key}:${t.projectId}`, "(project not listed)", f);
       r.threads.push({ machine: m.key, machineName: m.name, thread: t });
     }
   }
@@ -359,6 +479,49 @@ function byRecency(a: Thread, b: Thread): number {
 /** The homes of a row a new thread can go to: connected machines only. */
 export function openHomes(r: ProjectRow): ProjectHome[] {
   return r.homes.filter((h) => h.conn === "connected");
+}
+
+/** What an empty list of projects says, and why it is empty. */
+export interface EmptyNote {
+  title: string;
+  hint?: string;
+}
+
+/**
+ * What to say when there is no project to paint.
+ *
+ * **Never "no projects" about a machine that did not answer.** A machine
+ * asleep must not read as a project with nothing in it — the rule `covey
+ * threads` keeps for a fleet member it could not reach, and #132's rule that
+ * one word must not stand for four different problems. It matters most on the
+ * app's fleet screen: the banner over the list speaks for the *primary*
+ * machine alone, which inside a fleet is very often not one of the machines
+ * that fleet is made of, so this sentence is all the reader gets.
+ *
+ * `fleet` scopes it to one fleet, as `projectRows` is scoped. The machines
+ * decide, not the rows: a fleet whose one machine is away has nothing to show
+ * and something to say.
+ */
+export function emptyProjects(s: State, fleet?: string): EmptyNote {
+  const scope = [...s.machines.values()].filter((m) => fleet === undefined || fleetKey(machineFleet(m)) === fleetKey(fleet));
+  if (scope.length === 0) return { title: "No machines here yet.", hint: "Add the machine that runs covey." };
+  const away = scope.filter((m) => m.conn !== "connected");
+  if (away.length === scope.length) {
+    // Nothing is connected, so there is nothing this list could show. A
+    // machine still dialling is told apart from one that gave up: the first
+    // is a wait and the second is a sentence about a machine that is off.
+    const names = away.map((m) => m.name).join(", ");
+    if (away.some((m) => m.conn === "connecting")) return { title: scope.length === 1 ? "Waiting for the machine…" : "Waiting for the machines…" };
+    return {
+      title: away.length === 1 ? `${names} is not answering.` : `${names} are not answering.`,
+      hint: away.length === 1 ? "Its projects are here when it does." : "Their projects are here when they do.",
+    };
+  }
+  if (away.length > 0) {
+    const names = away.map((m) => m.name).join(", ");
+    return { title: "No projects yet.", hint: `${names} ${away.length === 1 ? "is" : "are"} not answering, so anything there is not in this list.` };
+  }
+  return { title: "No projects yet.", hint: "Start one in the TUI, and it appears here." };
 }
 
 /**

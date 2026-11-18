@@ -13,7 +13,7 @@ import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, allThreads, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, emptyProjects, findRefs, fleetsOf, machineFleet, allThreads, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
 import type { ChainRow, TimelineRow } from "@covey/client";
 
 export interface Actions {
@@ -496,10 +496,19 @@ export class Renderer {
     if (s.showAddresses) { this.list.append(this.settingsPanel(s)); return; }
     const rows = projectRows(s);
     if (rows.length === 0) {
-      this.list.append(h("p", { class: "empty" }, primary?.info ? "No projects on any machine yet. Add one from the TUI." : "Waiting for the machine…"));
+      // Which of the two it is — nothing to show, or a machine that did not
+      // answer — is `emptyProjects`, shared with the app so both clients say
+      // one thing about one state.
+      const note = emptyProjects(s);
+      this.list.append(h("p", { class: "empty" }, note.title, note.hint ? h("small", {}, ` ${note.hint}`) : null));
       return;
     }
     const showMachine = s.machines.size > 1;
+    // A fleet is a real line, so the same repository cloned at work and at
+    // home is two rows here. The page has no fleet screen the way the
+    // app does, so the fleet is a word on the row instead — without it the
+    // two rows differ only by the machines under them.
+    const showFleet = fleetsOf(s).length > 1;
     for (const row of rows) {
       const folded = s.folded.has(row.key);
       const count = row.waiting > 0 ? h("span", { class: "count waiting" }, String(row.waiting)) : row.active > 0 ? h("span", { class: "count busy" }, String(row.active)) : null;
@@ -511,6 +520,7 @@ export class Renderer {
           // repository differ only in the base, and the reader has to see
           // whether this thread starts from `main` or from a feature branch.
           h("span", { class: "title" }, row.title,
+            showFleet ? h("small", { class: "fleet" }, ` ${row.fleet}`) : null,
             row.base ? h("small", { class: "base" }, ` · ${row.base}`) : null,
             showMachine && row.homes.length ? h("small", { class: "homes" }, ` ${row.homes.map((x) => x.machineName).join(" · ")}`) : null),
           count,
@@ -545,7 +555,7 @@ export class Renderer {
     const panel = h("div", { class: "settings" }, h("h2", {}, "Settings"));
     panel.append(h("h3", {}, "Detail"), this.lodPanel(s), this.hiddenRow(s));
     panel.append(h("h3", {}, "Machines"));
-    for (const m of s.machines.values()) panel.append(this.machineCard(m));
+    for (const m of s.machines.values()) panel.append(this.machineCard(s, m));
     if (s.machines.size === 1) panel.append(h("p", { class: "hint" }, "Other machines appear here once the TUI starts the web server on this one; it hands over the list."));
     panel.append(h("h3", {}, "Get LAN address"));
     if (!s.access) { panel.append(h("p", { class: "empty" }, primaryMachine(s)?.conn === "connected" ? "asking the machine…" : "connect first")); return panel; }
@@ -608,7 +618,7 @@ export class Renderer {
    * it from git, and restart it. Both interrupt the turns it runs, so both
    * ask first.
    */
-  private machineCard(m: MachineSlot): HTMLElement {
+  private machineCard(s: State, m: MachineSlot): HTMLElement {
     const connected = m.conn === "connected";
     const bind = m.info?.settings?.bind;
     const web = m.info?.settings?.webEnabled ? "web server on" : "web server off";
@@ -616,7 +626,11 @@ export class Renderer {
     return h("div", { class: `machine-card conn-${m.conn}` },
       h("div", { class: "head" },
         h("span", { class: "name" }, m.name),
-        h("span", { class: "kind" }, m.primary ? "this page" : "fleet"),
+        // "peer" and not "fleet": this says the primary named the machine,
+        // which is `machine.peers` and has nothing to do with the fleet the
+        // machine is in. The word is the fleet's now.
+        h("span", { class: "kind" }, m.primary ? "this page" : "peer"),
+        fleetsOf(s).length > 1 ? h("span", { class: "kind" }, machineFleet(m)) : null,
         h("span", { class: `conn` }, m.conn),
         // The defaults every new thread on this machine inherits (#117).
         h("button", { class: "opts", type: "button", "aria-label": `Settings for ${m.name}`, disabled: !connected, onclick: () => this.a.openSheet({ kind: "machine", machine: m.key }) }, "⋮"),

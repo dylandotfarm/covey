@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import type { AppBuildRun, GitHubIssue, GitHubPullRequest, MachineInfo, ModelChoice, Project, ReviewerState, ShellSnapshot, Thread, ThreadSnapshot, TimelineItem, UpdateStep } from "@covey/protocol";
 import type { TaggedAttachment } from "@covey/client";
 import {
-  addMachine, addressLink, appBuildLabel, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyState, findRefs, holderOf, isCurrentAddress,
+  addMachine, addressLink, appBuildLabel, applyShellEvent, applyShellSnapshot, applyThreadEvent, applyThreadSnapshot, checksLabel, connectionSummary, emptyProjects, emptyState, findRefs, fleetRows, fleetsOf, machineFleet, holderOf, isCurrentAddress,
   baseHash, isGitHubAttachment, itemActions, itemHash, itemStateLabel, mediaHash, mediaKind, mediaSrc, openHomes, openView, orderedItems, projectRows, relTime, routeOf, rowSignature, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, viewRows, viewRowNumber,
   threadHash, threadRefs, threadStatusLabel, threadTone,
   attachmentRows, composerKey, httpBase, pendingAttachments, pendingBytes, sendableAttachments, setPendingAttachments, syncAttachments, threadFileSrc,
@@ -18,10 +18,10 @@ const MODELS: ModelChoice[] = [
   { id: "sonnet", label: "Sonnet", resolved: "claude-sonnet-5", description: "Sonnet 5 · Efficient for routine tasks" },
 ];
 const CLAUDE_DEFAULT: ModelChoice = { id: "", label: "Default (recommended)", resolved: "claude-opus-5[1m]", description: "Opus 5 with 1M context" };
-const info = (name: string): MachineInfo => ({
+const info = (name: string, fleet?: string): MachineInfo => ({
   machineId: `${name}-id`, name, os: "linux", arch: "arm64", homeDir: "/home/x", daemonVersion: "t", protocolVersion: 1,
   capabilities: { claude: true, worktrees: true, moveThreads: true, providers: ["claude"] },
-  settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null },
+  settings: { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, ...(fleet ? { fleet } : {}) },
   models: MODELS, claudeDefaultModel: CLAUDE_DEFAULT,
 });
 const project = (id: string, title: string, repo: string | null = null): Project => ({ id, title, workspaceRoot: `/p/${id}`, repositoryIdentity: repo, defaultModel: null, createdAt: "2026-09-21T00:00:00Z", updatedAt: "2026-09-21T00:00:00Z" });
@@ -31,7 +31,7 @@ const thread = (id: string, projectId: string, extra: Partial<Thread> = {}): Thr
   createdAt: "2026-09-21T00:00:00Z", updatedAt: "2026-09-21T00:00:00Z", ...extra,
 });
 const item = (id: string, seq: number, text: string): TimelineItem => ({ id, threadId: "t1", turnId: null, seq, createdAt: "2026-09-21T00:00:00Z", updatedAt: "2026-09-21T00:00:00Z", kind: "assistant", text, streaming: false, model: null });
-const snap = (name: string, projects: Project[], threads: Thread[]): ShellSnapshot => ({ seq: 1, machine: info(name), projects, threads });
+const snap = (name: string, projects: Project[], threads: Thread[], fleet?: string): ShellSnapshot => ({ seq: 1, machine: info(name, fleet), projects, threads });
 
 test("the list groups live threads by project, newest first, pinned on top, archived and moved left out", () => {
   const s = emptyState();
@@ -104,6 +104,124 @@ test("one repository on two base branches is two rows, each with its own threads
     ["repo:github.com/dylandotfarm/covey#ui-rework", "ui-rework"],
   ], "the row on the remote's default branch keeps the key it always had");
   assert.deepEqual(rows.map((r) => r.threads.map((t) => t.thread.id)), [["a"], ["b"]]);
+});
+
+test("one repository in two fleets is two rows, and neither pools the other's machines", () => {
+  // The line a fleet draws is real and not a heading: work must never land on
+  // the machine in the living room. So the same repository cloned at work and
+  // at home is two rows, each with its own machines and its own threads — the
+  // rule `projectGroups` has kept in the TUI since fleets existed.
+  const s = emptyState();
+  const home = addMachine(s, "ws://pi:3790", "pi", true);
+  const work = addMachine(s, "ws://desk:3790", "desk");
+  applyShellSnapshot(home, snap("pi", [project("p1", "covey", "github.com/d/covey")], [thread("mine", "p1")]));
+  applyShellSnapshot(work, snap("desk", [project("p2", "covey", "github.com/d/covey")], [thread("theirs", "p2")], "work"));
+  home.conn = "connected"; work.conn = "connected";
+
+  const rows = projectRows(s);
+  assert.deepEqual(rows.map((r) => [r.fleet, r.key]), [
+    ["covey", "repo:github.com/d/covey"],
+    ["work", "work/repo:github.com/d/covey"],
+  ], "the row in the default fleet keeps the key it always had, so no fold moves");
+  assert.deepEqual(rows.map((r) => r.homes.map((h) => h.machineName)), [["pi"], ["desk"]]);
+  assert.deepEqual(rows.map((r) => r.threads.map((t) => t.thread.id)), [["mine"], ["theirs"]]);
+
+  // And one fleet at a time is what the app's own screen asks for.
+  assert.deepEqual(projectRows(s, "work").map((r) => r.threads.map((t) => t.thread.id)), [["theirs"]]);
+  // `Work` and `work` are one fleet, whatever a reader typed where.
+  assert.deepEqual(projectRows(s, "Work").map((r) => r.key), ["work/repo:github.com/d/covey"]);
+  assert.deepEqual(projectRows(s, "covey").map((r) => r.threads.map((t) => t.thread.id)), [["mine"]]);
+});
+
+test("two machines of one fleet still pool their repository", () => {
+  // The other half of the rule: the line is between fleets and not between
+  // machines, so a fleet with two machines holding one repository is one row.
+  const s = emptyState();
+  const a = addMachine(s, "ws://a:3790", "a", true);
+  const b = addMachine(s, "ws://b:3790", "b");
+  applyShellSnapshot(a, snap("a", [project("p1", "covey", "github.com/d/covey")], [thread("one", "p1")], "work"));
+  applyShellSnapshot(b, snap("b", [project("p2", "covey", "github.com/d/covey")], [thread("two", "p2")], "Work"));
+  const rows = projectRows(s);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0]!.homes.map((h) => h.machineName), ["a", "b"]);
+  assert.deepEqual(rows[0]!.threads.map((t) => t.thread.id).sort(), ["one", "two"]);
+});
+
+test("the fleets are the default one first, and a machine that is away keeps the fleet it last said", () => {
+  const s = emptyState();
+  const home = addMachine(s, "ws://pi:3790", "pi", true);
+  const work = addMachine(s, "ws://desk:3790", "desk");
+  applyShellSnapshot(home, snap("pi", [], []));
+  applyShellSnapshot(work, snap("desk", [], [], "work"));
+  assert.deepEqual(fleetsOf(s), ["covey", "work"]);
+  assert.equal(machineFleet(work), "work");
+
+  // The machine goes away. Its own answer is gone and the cache answers for
+  // it, because dropping it into the default fleet would move a reader's work
+  // from one list to another for as long as the machine is asleep.
+  work.info = null;
+  work.conn = "offline";
+  assert.equal(machineFleet(work), "work");
+  assert.deepEqual(fleetsOf(s), ["covey", "work"]);
+
+  // A machine moved back to the default fleet clears the cache with it.
+  applyShellEvent(s, work, { seq: 2, kind: "machine.updated", machine: info("desk") });
+  assert.equal(work.fleet, undefined);
+  assert.equal(machineFleet(work), "covey");
+  assert.deepEqual(fleetsOf(s), ["covey"]);
+});
+
+test("a fleet row counts what is inside it, and says when something waits on the reader", () => {
+  const s = emptyState();
+  const home = addMachine(s, "ws://pi:3790", "pi", true);
+  const work = addMachine(s, "ws://desk:3790", "desk");
+  const laptop = addMachine(s, "ws://lap:3790", "lap");
+  applyShellSnapshot(home, snap("pi", [project("h", "notes")], [thread("chat", "h")]));
+  applyShellSnapshot(work, snap("desk", [project("w1", "api", "github.com/d/api"), project("w2", "app", "github.com/d/app")], [
+    thread("busy", "w1", { status: "running" }),
+    thread("asks", "w2", { pendingApprovals: 1 }),
+  ], "work"));
+  applyShellSnapshot(laptop, snap("lap", [project("w3", "api", "github.com/d/api")], [], "work"));
+
+  assert.deepEqual(fleetRows(s), [
+    { name: "covey", key: "covey", machines: 1, projects: 1, threads: 1, active: 0, waiting: 0 },
+    // Two projects over two machines: `api` is pooled, `app` is not. A thread
+    // asking for an approval counts in both numbers, which is the rule the
+    // project row under it already keeps: it is at work *and* it waits.
+    { name: "work", key: "work", machines: 2, projects: 2, threads: 2, active: 2, waiting: 1 },
+  ]);
+});
+
+test("an empty list says a machine did not answer, never that there is nothing there", () => {
+  // A fleet member asleep must not read as a project with nothing in it: the
+  // rule `covey threads` keeps, and #132's rule that one sentence must not
+  // stand for two different states. It matters most on the app's fleet
+  // screen, where the banner over the list speaks for the primary machine and
+  // the primary is very often in another fleet.
+  const s = emptyState();
+  const pi = addMachine(s, "ws://pi:3790", "pi", true);
+  const desk = addMachine(s, "ws://desk:3790", "desk");
+  applyShellSnapshot(pi, snap("pi", [], []));
+  applyShellSnapshot(desk, snap("desk", [], [], "work"));
+
+  // Still dialling is a wait, not a machine that is off.
+  assert.deepEqual(emptyProjects(s, "work"), { title: "Waiting for the machine…" });
+
+  desk.conn = "offline";
+  assert.deepEqual(emptyProjects(s, "work"), {
+    title: "desk is not answering.",
+    hint: "Its projects are here when it does.",
+  });
+
+  // Connected and empty is the plain sentence, and it names what to do.
+  pi.conn = "connected";
+  assert.deepEqual(emptyProjects(s, "covey"), { title: "No projects yet.", hint: "Start one in the TUI, and it appears here." });
+  // Across every fleet, one machine away and one answering: the list is what
+  // the one that answered holds, and the sentence names the one that did not.
+  assert.deepEqual(emptyProjects(s), {
+    title: "No projects yet.",
+    hint: "desk is not answering, so anything there is not in this list.",
+  });
 });
 
 test("a thread whose project the machine does not list is shown, not dropped", () => {

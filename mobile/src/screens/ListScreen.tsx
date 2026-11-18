@@ -1,63 +1,42 @@
 /**
- * Projects and their conversations (issue #168).
+ * The home screen: the fleets, or the projects when there is only one of them.
  *
- * `projectRows` in `@covey/web` decides what a row is and what order the rows come
- * in — a repository on one base branch, wherever it is checked out, with two
- * machines holding the same repository on the same base folded into one row. That
- * is shared with the page on purpose: `projectPool` is what makes two projects
- * one row, and keying it anywhere else would start a thread from the wrong commit.
+ * A fleet is the line between two sets of machines on one tailnet — the ones at
+ * work and the ones at home — and the line is real rather than cosmetic: a
+ * repository pools inside one fleet and never across two, so the same
+ * repository cloned at work and at home is two rows with their own threads and
+ * their own machines. The terminal has drawn that line for a year; this screen
+ * is the phone drawing it.
  *
- * A row is one target (#115). The chips are text, and a hold opens the
- * conversation's sheet — a thumb aimed at a row must not hit a chip inside it.
+ * **One fleet is the shape covey has always had, and it keeps it.** A reader
+ * who has never made a second fleet opens the app on their projects, at the
+ * depth they always were. The fleet rows appear the moment a second fleet does
+ * and go when it goes, which is the same rule the TUI's own fleet fold follows.
+ *
+ * The projects themselves are `ProjectList`, because a tap on a fleet opens
+ * exactly that list scoped to one fleet. Written once: a list the home screen
+ * shows and the fleet screen does not would be two lists to keep in step.
  */
-import { useCallback, useState } from "react";
 import { FlatList, Pressable, RefreshControl, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { threadIsBusy } from "@covey/protocol";
-import {
-  connectionSummary, openHomes, projectRows, relTime, threadRefs, threadStatusLabel, threadTone,
-  type ProjectRow, type ThreadRef,
-} from "@covey/web";
+import { fleetRows, type FleetRow } from "@covey/web";
 import { store } from "../store";
 import { useStore } from "../useStore";
-import { SIZE, T, TONE } from "../theme";
-import { Dot, Empty, Notice, Pill, Row, S, useContentInsets } from "../ui";
+import { SIZE, T } from "../theme";
+import { Empty, Pill, Row, S, useContentInsets } from "../ui";
 import { Icon } from "../Icon";
-import { SwipeRow } from "../components/SwipeRow";
+import { ProjectList } from "../components/ProjectList";
+import { TopLines } from "../components/TopLines";
 import type { Routes } from "../nav";
 
 type Props = NativeStackScreenProps<Routes, "List">;
 
 export function ListScreen({ navigation }: Props) {
   useStore();
-  /**
-   * The one row slid open, if any. The list holds it rather than the rows, so
-   * opening a second shuts the first — the page keeps the same rule, and two
-   * open rows is two Archive buttons a thumb can reach by accident.
-   */
-  const [swiped, setSwiped] = useState<string | null>(null);
   // A camera punch is inside the screen on Android 15 and later, and on a
   // Razr's cover display it is inside the only screen there is.
   const insets = useContentInsets();
   const s = store.state;
-  const rows = projectRows(s);
-  const conn = connectionSummary(s);
-
-  const openThread = useCallback((t: ThreadRef) => {
-    setSwiped(null);
-    navigation.navigate("Thread", { machine: t.machine, threadId: t.thread.id });
-  }, [navigation]);
-
-  const newThread = useCallback((row: ProjectRow) => {
-    const homes = openHomes(row);
-    if (homes.length === 0) return;
-    // More than one machine can hold this project, so the reader picks. One and
-    // there is nothing to ask.
-    if (homes.length > 1) { store.chooseMachine(row.key); return; }
-    const home = homes[0]!;
-    const threadId = store.newThread(home.machine, home.project.id);
-    navigation.navigate("Thread", { machine: home.machine, threadId });
-  }, [navigation]);
 
   if (!store.loaded) return <View style={S.screen} />;
 
@@ -92,118 +71,56 @@ export function ListScreen({ navigation }: Props) {
     );
   }
 
+  const settings = (
+    <Pressable onPress={() => navigation.navigate("Settings")} style={[S.row, { paddingBottom: 4 }]}>
+      <Icon name="settings" size={16} colour={T.accent} />
+      <Text style={{ color: T.accent, fontSize: SIZE.small }}>Machines and settings</Text>
+    </Pressable>
+  );
+
+  const fleets = fleetRows(s);
+
   return (
     <View style={S.screen}>
-      {store.notice ? <Notice text={store.notice} onDismiss={store.clearNotice} /> : null}
-      {conn.state !== "connected" ? (
-        <Pressable onPress={store.retry} style={{ backgroundColor: T.surfaceAlt, paddingHorizontal: 14, paddingVertical: 8 }}>
-          <Text style={{ color: T.warning, fontSize: SIZE.small }}>{conn.text} — tap to retry</Text>
-        </Pressable>
-      ) : null}
-
-      <FlatList
-        data={rows}
-        keyExtractor={(r) => r.key}
-        refreshControl={<RefreshControl refreshing={false} onRefresh={store.retry} tintColor={T.accent} />}
-        // A row left open while the list scrolls is an Archive button a thumb
-        // meets by accident somewhere else entirely.
-        onScrollBeginDrag={() => setSwiped(null)}
-        ListHeaderComponent={
-          <Pressable onPress={() => navigation.navigate("Settings")} style={[S.row, { paddingBottom: 4 }]}>
-            <Icon name="settings" size={16} colour={T.accent} />
-            <Text style={{ color: T.accent, fontSize: SIZE.small }}>Machines and settings</Text>
-          </Pressable>
-        }
-        ListEmptyComponent={<Empty title="No projects yet." hint="Start one in the TUI, and it appears here." />}
-        renderItem={({ item: row }) => {
-          const folded = s.folded.has(row.key);
-          const homes = openHomes(row);
-          const choosing = s.choosing === row.key;
-          return (
+      <TopLines />
+      {fleets.length > 1 ? (
+        <FlatList
+          data={fleets}
+          keyExtractor={(f) => f.key}
+          // The gesture that dials a machine again, as the project list has it:
+          // a reader whose fleet is empty because a machine is asleep reaches
+          // for this before they read the banner.
+          refreshControl={<RefreshControl refreshing={false} onRefresh={store.retry} tintColor={T.accent} />}
+          ListHeaderComponent={settings}
+          renderItem={({ item: f }) => (
             <View style={S.card}>
-              <Row first onPress={() => { setSwiped(null); store.toggleFold(row.key); }}>
-                <Icon name={folded ? "shut" : "open"} size={17} colour={T.faint} />
+              <Row first onPress={() => navigation.navigate("Projects", { fleet: f.name })}>
                 <View style={S.grow}>
-                  <Text style={[S.title, { fontWeight: "600" }]} numberOfLines={1}>{row.title}</Text>
-                  <Text style={S.subtle} numberOfLines={1}>
-                    {/* The base branch, because two rows of one repository differ
-                        only by it and the reader must see which base a thread
-                        starts from. */}
-                    {row.base ?? "default branch"}
-                    {row.homes.length > 1 ? ` · ${row.homes.length} machines` : ""}
-                  </Text>
+                  {/* A fleet name is a reader's own word, so it keeps the case
+                      they typed. `fleetKey` folds the case to decide what is
+                      one fleet; nothing folds it to paint one. */}
+                  <Text style={[S.title, { fontWeight: "600" }]} numberOfLines={1}>{f.name}</Text>
+                  <Text style={S.subtle} numberOfLines={1}>{fleetMeta(f)}</Text>
                 </View>
-                {row.waiting > 0 ? <Pill text={`${row.waiting} waiting`} colour={T.awaiting} /> : null}
-                {row.active > 0 ? <Pill text={`${row.active} busy`} colour={T.working} /> : null}
-                {homes.length > 0 ? (
-                  <Pressable onPress={() => newThread(row)} hitSlop={10} style={{ paddingHorizontal: 6 }}>
-                    <Icon name="add" size={24} colour={T.accent} />
-                  </Pressable>
-                ) : null}
+                {/* A fleet may not hide that something inside it is working or
+                    waits on a person — the rule the project row keeps one
+                    level down, and the reason a reader can stay here. */}
+                {f.waiting > 0 ? <Pill text={`${f.waiting} waiting`} colour={T.awaiting} /> : null}
+                {f.active > 0 ? <Pill text={`${f.active} busy`} colour={T.working} /> : null}
+                <Icon name="chevron" size={20} colour={T.faint} />
               </Row>
-
-              {choosing ? (
-                <View style={{ backgroundColor: T.surfaceAlt, paddingVertical: 4 }}>
-                  <Text style={[S.subtle, { paddingHorizontal: 14, paddingVertical: 4 }]}>Start it on…</Text>
-                  {homes.map((h) => (
-                    <Row
-                      key={h.machine}
-                      onPress={() => {
-                        const threadId = store.newThread(h.machine, h.project.id);
-                        navigation.navigate("Thread", { machine: h.machine, threadId });
-                      }}
-                    >
-                      <Text style={S.title}>{h.machineName}</Text>
-                    </Row>
-                  ))}
-                </View>
-              ) : null}
-
-              {folded ? null : row.threads.map((t) => {
-                const tone = threadTone(t.thread);
-                const refs = threadRefs(t.thread);
-                const key = `${t.machine}:${t.thread.id}`;
-                return (
-                  <SwipeRow
-                    key={key}
-                    open={swiped === key}
-                    onOpen={() => setSwiped(key)}
-                    onClose={() => setSwiped((k) => (k === key ? null : k))}
-                    onPress={() => openThread(t)}
-                    // A hold is the way to this conversation's settings (#115),
-                    // because the chips on the row are text and not targets.
-                    onLongPress={() => navigation.navigate("Sheet", { target: { kind: "thread", machine: t.machine, threadId: t.thread.id } })}
-                    action={{
-                      label: "Archive",
-                      onPress: () => {
-                        setSwiped(null);
-                        store.archiveThread(t.machine, t.thread.id);
-                      },
-                    }}
-                  >
-                    <Dot colour={TONE[tone]} />
-                    <View style={S.grow}>
-                      {/* A thread asleep on a timer steps back, the way its row
-                          does in the terminal and on the page: there is nothing
-                          in it to read until covey wakes it. */}
-                      <Text style={[S.title, tone === "timer" ? { color: T.subtle } : null]} numberOfLines={1}>{t.thread.title || "Untitled"}</Text>
-                      <Text style={S.subtle} numberOfLines={1}>
-                        {threadStatusLabel(t.thread)}
-                        {refs.length ? ` · ${refs.map((r) => r.label).join(" ")}` : ""}
-                        {row.homes.length > 1 ? ` · ${t.machineName}` : ""}
-                      </Text>
-                    </View>
-                    {threadIsBusy(t.thread) ? null : (
-                      <Text style={{ color: T.faint, fontSize: 10 }}>{relTime(t.thread.lastMessageAt ?? t.thread.updatedAt)}</Text>
-                    )}
-                  </SwipeRow>
-                );
-              })}
             </View>
-          );
-        }}
-        contentContainerStyle={{ paddingBottom: 28 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
-      />
+          )}
+          contentContainerStyle={{ paddingBottom: 28 + insets.bottom, paddingLeft: insets.left, paddingRight: insets.right }}
+        />
+      ) : (
+        <ProjectList header={settings} />
+      )}
     </View>
   );
+}
+
+/** What a fleet holds, in the words the TUI's own fleet row uses. */
+function fleetMeta(f: FleetRow): string {
+  return `${f.projects} project${f.projects === 1 ? "" : "s"} · ${f.machines} machine${f.machines === 1 ? "" : "s"}`;
 }

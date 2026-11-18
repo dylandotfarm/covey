@@ -23,8 +23,17 @@
 import type { SheetTarget } from "@covey/web";
 
 export type Routes = {
-  /** Projects and their conversations. The screen with no parameters. */
+  /**
+   * The home screen: the fleets, or the projects when there is only one
+   * fleet. The screen with no parameters.
+   */
   List: undefined;
+  /**
+   * The projects of one fleet, which is where `List` goes when a reader taps a
+   * fleet row. Named by the fleet rather than by its rows, so work that starts
+   * while the reader is in here arrives on its own.
+   */
+  Projects: { fleet: string };
   Thread: { machine: string; threadId: string };
   /** An issue or a pull request (#108), over the thread or the list it came from. */
   Item: { machine: string; projectId: string; number: number };
