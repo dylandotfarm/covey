@@ -353,7 +353,11 @@ class Store {
     // sends its snapshot within a few milliseconds of the launch, and two
     // writers that each read before either wrote would lose one of the two
     // fleets for good. `saveMachines` says why.
-    void saveMachines(this.saved);
+    //
+    // The one caller that may lose its write in silence: this is a cache of
+    // what the machine just said, the machine says it again on its next
+    // snapshot, and a notice about it would be a notice about nothing.
+    void saveMachines(this.saved).catch(() => {});
   }
 
   // ---- machines a person added -------------------------------------------
@@ -365,8 +369,19 @@ class Store {
     // types is the address, the name and the token, and the fleet beside them
     // is covey's own cache of what that machine last said. A reader pasting a
     // fresh link for a machine they already have must not take it away.
+    const before = [...this.saved];
     if (at >= 0) this.saved[at] = { ...this.saved[at]!, ...m }; else this.saved.push(m);
-    await saveMachines(this.saved);
+    // The list in memory never claims what the disk does not hold, so a write
+    // that failed puts it back and the reader is told: `AddMachineScreen`
+    // catches this and prints it in the field under the address. A machine
+    // added in silence and gone at the next launch is the one record this app
+    // cannot rediscover.
+    try {
+      await saveMachines(this.saved);
+    } catch (e) {
+      this.saved = before;
+      throw e;
+    }
     await saveToken(m.url, token);
     if (!this.state.machines.has(m.url)) {
       const first = this.state.machines.size === 0;
@@ -389,8 +404,23 @@ class Store {
     for (const key of [...this.seen.keys()]) if (key.startsWith(`${url}:`)) this.seen.delete(key);
     if (this.state.view?.machine === url) this.state.view = null;
     if (this.state.item?.machine === url) this.state.item = null;
+    const before = this.saved;
     this.saved = this.saved.filter((x) => x.url !== url);
-    await saveMachines(this.saved);
+    // Nothing here can be undone — the socket is shut and the threads are off
+    // the screen — so a failed write is said rather than rolled back. Without
+    // it the machine comes back at the next launch and the reader is left
+    // wondering why.
+    try {
+      await saveMachines(this.saved);
+    } catch (e) {
+      // The address is still on disk, so its token stays with it: a machine
+      // that comes back at the next launch without one cannot connect and
+      // says nothing about why.
+      this.saved = before;
+      this.fail(e);
+      this.schedule();
+      return;
+    }
     // The token goes with the address and never after it: one left behind
     // under a machine nobody dials is a credential nothing will ever clear.
     await saveToken(url, undefined);

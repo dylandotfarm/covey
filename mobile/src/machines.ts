@@ -96,9 +96,17 @@ export async function readToken(url: string): Promise<string | undefined> {
  *
  * So `store.saved` is the list, every change is made there, and this writes
  * it. The last write of a frame then carries every change of that frame.
+ *
+ * **It rejects rather than swallowing a failed write**, unlike the preference
+ * writers below it. A preference that did not land costs a setting; this list
+ * is the one record the app cannot rediscover, so a machine a person typed in
+ * that was not written works for this session and is gone at the next launch.
+ * The add path turns that into a sentence in the field the reader is already
+ * looking at. The fleet is a cache and its caller catches, because there is
+ * nothing to say about a cache that will be written again.
  */
 export async function saveMachines(list: SavedMachine[]): Promise<void> {
-  await AsyncStorage.setItem(LIST_KEY, JSON.stringify(list)).catch(() => {});
+  await AsyncStorage.setItem(LIST_KEY, JSON.stringify(list));
 }
 
 /**
