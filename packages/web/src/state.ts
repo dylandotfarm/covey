@@ -315,18 +315,21 @@ export interface FleetRow {
 }
 
 export function fleetRows(s: State): FleetRow[] {
-  return fleetsOf(s).map((name) => {
-    const rows = projectRows(s, name);
-    const row: FleetRow = {
-      name,
-      key: fleetKey(name),
-      machines: [...s.machines.values()].filter((m) => fleetKey(machineFleet(m)) === fleetKey(name)).length,
-      projects: rows.length,
-      threads: 0, active: 0, waiting: 0,
-    };
-    for (const r of rows) { row.threads += r.threads.length; row.active += r.active; row.waiting += r.waiting; }
-    return row;
-  });
+  // Every fleet with a machine in it, in the order `fleetsOf` gives, and the
+  // projects walked **once** rather than once per fleet: this runs on every
+  // frame of every turn, and a list of fleets is a row of counts that a
+  // second walk would pay for twice.
+  const rows = new Map<string, FleetRow>();
+  for (const name of fleetsOf(s)) rows.set(fleetKey(name), { name, key: fleetKey(name), machines: 0, projects: 0, threads: 0, active: 0, waiting: 0 });
+  for (const m of s.machines.values()) rows.get(fleetKey(machineFleet(m)))!.machines += 1;
+  for (const p of projectRows(s)) {
+    const row = rows.get(fleetKey(p.fleet))!;
+    row.projects += 1;
+    row.threads += p.threads.length;
+    row.active += p.active;
+    row.waiting += p.waiting;
+  }
+  return [...rows.values()];
 }
 
 /** A project on one machine. */

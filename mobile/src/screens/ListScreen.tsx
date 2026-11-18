@@ -17,7 +17,7 @@
  * exactly that list scoped to one fleet. Written once: a list the home screen
  * shows and the fleet screen does not would be two lists to keep in step.
  */
-import { FlatList, Pressable, Text, View } from "react-native";
+import { FlatList, Pressable, RefreshControl, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { fleetRows, type FleetRow } from "@covey/web";
 import { store } from "../store";
@@ -87,6 +87,10 @@ export function ListScreen({ navigation }: Props) {
         <FlatList
           data={fleets}
           keyExtractor={(f) => f.key}
+          // The gesture that dials a machine again, as the project list has it:
+          // a reader whose fleet is empty because a machine is asleep reaches
+          // for this before they read the banner.
+          refreshControl={<RefreshControl refreshing={false} onRefresh={store.retry} tintColor={T.accent} />}
           ListHeaderComponent={settings}
           renderItem={({ item: f }) => (
             <View style={S.card}>
