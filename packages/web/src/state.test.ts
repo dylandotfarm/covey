@@ -931,6 +931,35 @@ test("a thread on a timer says so, with how long is left, and is not called done
   assert.equal(threadTone({ ...sleeping, latestTurn: { ...ended, state: "running" } }), "busy");
 });
 
+/**
+ * A thread held on the plan's usage limit. The page says it in the words
+ * `limitLine` gives every client, and the dot is the timer's grey rather than
+ * the red of a failure: the turn did fail, and covey is coming back to it, and
+ * a red row on a thread nobody has to touch is what this feature exists to
+ * stop.
+ */
+test("a thread held on the usage limit says so, and never reads as a failure", () => {
+  const died = { turnId: "x", state: "error" as const, startedAt: "", completedAt: "" };
+  const usageLimit = (over: Partial<NonNullable<Thread["usageLimit"]>> = {}) => ({
+    message: "You've hit your session limit · resets 12:10am (UTC)", turnId: "x",
+    setAt: new Date(Date.now() - 180_000).toISOString(),
+    dueAt: new Date(Date.now() + 8 * 3_600_000).toISOString(),
+    resetsAt: new Date(Date.now() + 8 * 3_600_000 - 60_000).toISOString(),
+    firedAt: null, round: 1, ...over,
+  });
+  const held = { ...thread("t", "p1"), latestTurn: died, lastError: "You've hit your session limit · resets 12:10am (UTC)", usageLimit: usageLimit() };
+  assert.equal(threadStatusLabel(held), "session limit · covey retries in 8h");
+  assert.equal(threadTone(held), "timer");
+  // Once covey has sent the work again the row is an ordinary one, and a
+  // failure covey has given up on is a failure again.
+  const fired = { ...held, usageLimit: usageLimit({ firedAt: new Date().toISOString() }) };
+  assert.equal(threadTone(fired), "error");
+  assert.equal(threadStatusLabel({ ...held, usageLimit: null }), "error: You've hit your session limit · resets 12:10am (UTC)");
+  // Anything the reader has to act on is the nearer answer.
+  assert.equal(threadStatusLabel({ ...held, pendingApprovals: 1 }), "needs approval");
+  assert.equal(threadStatusLabel({ ...held, latestTurn: { ...died, state: "running" } }), "working");
+});
+
 test("an app build says which step it is on, and what came out", () => {
   const step = (name: UpdateStep["name"], status: UpdateStep["status"]): UpdateStep =>
     ({ name, label: name, command: name, status, output: "", exitCode: null });
