@@ -22,7 +22,7 @@ import { File, UploadType } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import { MAX_IMAGE_BYTES, SHRINK_LONG_EDGE } from "@covey/protocol";
-import { overImageEdge, readUploadAnswer, uploadUrl } from "@covey/client";
+import { overImageEdge, readUploadAnswer, uploadUrl, type ImageSize } from "@covey/client";
 import { fileMime, type PickedFile, type Shrinker, type Uploader } from "@covey/web/attach";
 
 /**
@@ -58,10 +58,10 @@ function picked(f: { uri: string; name: string; mimeType?: string | null; size?:
     size: f.size ?? 0,
     // The photo roll reports the two edges, and `readPicked` needs them to
     // tell a picture the API will refuse for its *shape* from one it refuses
-    // for its weight. A picker that names neither leaves them undefined, and
-    // the shared reader then reads them out of the header instead.
-    ...(f.width ? { width: f.width } : {}),
-    ...(f.height ? { height: f.height } : {}),
+    // for its weight. Both or neither, never one: `overImageEdge` answers from
+    // a single edge, so a half-reported shape would be refused and then
+    // described to the reader as `4096xundefined`.
+    ...(f.width && f.height ? { width: f.width, height: f.height } : {}),
     bytes: () => bytesOf(f.uri),
   };
 }
@@ -151,7 +151,7 @@ const PASSES: [number, number][] = [[SHRINK_LONG_EDGE, 0.85], [Math.round(SHRINK
  * fixes is whichever one is longer, and a picture already inside the box is
  * re-encoded without being resized at all.
  */
-export const shrinkOnDevice: Shrinker = async (file: PickedFile) => {
+export const shrinkOnDevice: Shrinker = async (file: PickedFile, shape?: ImageSize) => {
   // Every file that reaches here came from a picker above, so it is a
   // `DeviceFile`. The check is what makes that an assumption the code states
   // rather than one it relies on.
@@ -160,10 +160,13 @@ export const shrinkOnDevice: Shrinker = async (file: PickedFile) => {
   for (const [edge, compress] of PASSES) {
     try {
       let ctx = ImageManipulator.manipulate(uri);
-      // The picker reported the shape, so covey knows which edge is the long
-      // one before it decodes anything. Without it — a file picked as a
-      // document — the width is the safe guess it has always been.
-      const { width, height } = file;
+      // Whichever shape covey has: the picker's, or the one `readPicked` read
+      // out of the header for a picker that named none. Taking the second is
+      // the whole reason `Shrinker` carries it — without it a photograph
+      // picked as a *document* fell back to the width guess, came back too
+      // tall, and landed on the second pass at half the resolution the same
+      // photograph got from the photo roll.
+      const { width, height } = shape ?? file;
       if (!width || !height) ctx = ctx.resize({ width: edge });
       else if (Math.max(width, height) > edge) ctx = width >= height ? ctx.resize({ width: edge }) : ctx.resize({ height: edge });
       const ref = await ctx.renderAsync();

@@ -16,7 +16,7 @@ import {
   IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, MAX_UPLOAD_BYTES, isImageMime,
   type Attachment,
 } from "@covey/protocol";
-import { imageSizeOfBytes, megabytes, overImageEdge, tooLargeToUpload, type FailedDrop } from "@covey/client";
+import { imageSizeOfBytes, megabytes, overImageEdge, tooLargeToUpload, type FailedDrop, type ImageSize } from "@covey/client";
 
 /** A file the reader picked, as much of it as this file needs. */
 export interface PickedFile {
@@ -37,10 +37,16 @@ export interface PickedFile {
 }
 
 /**
- * Bring an image under `MAX_IMAGE_BYTES`, or into a media type the model
- * accepts, or answer null when the browser cannot decode it.
+ * Bring an image under `MAX_IMAGE_BYTES` and `MAX_IMAGE_EDGE`, or into a media
+ * type the model accepts, or answer null when the browser cannot decode it.
+ *
+ * `shape` is what covey measured, when it measured anything: the picker's own
+ * answer, or the one `readPicked` read out of the header. A shrinker that has
+ * to know which edge is the long one should take it from here rather than
+ * guess, or a photograph picked as a *document* is scaled differently from the
+ * same photograph picked from the roll.
  */
-export type Shrinker = (file: PickedFile) => Promise<{ bytes: Uint8Array; mimeType: string } | null>;
+export type Shrinker = (file: PickedFile, shape?: ImageSize) => Promise<{ bytes: Uint8Array; mimeType: string } | null>;
 
 export interface ReadResult {
   attachments: Attachment[];
@@ -135,6 +141,15 @@ export function renamed(name: string, mimeType: string): string {
   return `${had ? name.slice(0, name.length - had.length) : name}${ext}`;
 }
 
+/**
+ * The shape a picker reported, when it reported both edges. One edge alone is
+ * enough to *refuse* a picture and not enough to scale one, so this answers
+ * undefined and the shrinker falls back to what it can measure itself.
+ */
+function shapeOf(file: PickedFile): ImageSize | undefined {
+  return file.width && file.height ? { width: file.width, height: file.height } : undefined;
+}
+
 /** A file that is over what covey carries, in the reader's words. */
 function tooBig(name: string, size: number, room: number): FailedDrop {
   const chip = `${megabytes(size)} MB, over the limit`;
@@ -187,10 +202,10 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
     // 1.5 MB and 4096 px wide (#236). And a type the API will not read at all
     // — an iPhone photograph is `image/heic`, which only the phone can decode.
     // All three come back as JPEG, which is what the model reads.
-    const scale = async (why: string) => {
+    const scale = async (why: string, shape?: ImageSize) => {
       tried = true;
       let smaller: { bytes: Uint8Array; mimeType: string } | null = null;
-      try { smaller = await shrink(file); } catch { smaller = null; }
+      try { smaller = await shrink(file, shape); } catch { smaller = null; }
       if (!smaller) { warnings.push(why); return; }
       bytes = smaller.bytes;
       mimeType = smaller.mimeType;
@@ -200,12 +215,16 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
       name = renamed(name, mimeType);
     };
     const heavy = `${name} is ${megabytes(file.size)} MB and this browser could not scale it down. It goes as a file the agent can open, but the model cannot see an image over ${megabytes(MAX_IMAGE_BYTES)} MB.`;
-    const wide = (w: number, h: number) => `${name} is ${w}x${h} and this browser could not scale it down. It goes as a file the agent can open, but the model cannot see an image over ${MAX_IMAGE_EDGE} px on a side once a conversation holds a few of them.`;
+    // Worded from the edges covey has, not from two it assumed: a picker that
+    // named a width and no height would otherwise write "4096xundefined",
+    // which is #132 in miniature.
+    const shapeLabel = (w?: number, h?: number) => (w && h ? `${w}x${h}` : `${w || h} px on a side`);
+    const wide = (w?: number, h?: number) => `${name} is ${shapeLabel(w, h)} and this browser could not scale it down. It goes as a file the agent can open, but the model cannot see an image over ${MAX_IMAGE_EDGE} px on a side once a conversation holds a few of them.`;
     const unreadableType = `${name} is ${mimeType}, which the model cannot read, and this browser could not convert it. It goes as a file the agent can open. The model reads ${IMAGE_MIME_TYPES.join(", ")}.`;
 
     if (isPicture(mimeType)) {
       if (file.size > MAX_IMAGE_BYTES) await scale(heavy);
-      else if (overImageEdge(file.width, file.height)) await scale(wide(file.width!, file.height!));
+      else if (overImageEdge(file.width, file.height)) await scale(wide(file.width, file.height), shapeOf(file));
       else if (!isImageMime(mimeType)) await scale(unreadableType);
     }
     // Nothing has been read yet, so this is the one chance to decide from the
@@ -224,7 +243,9 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
     // bytes it was going to read anyway, which is why asking costs nothing.
     if (!tried && isPicture(mimeType)) {
       const edges = imageSizeOfBytes(bytes);
-      if (overImageEdge(edges?.width, edges?.height)) await scale(wide(edges!.width, edges!.height));
+      // The shape goes to the shrinker as well as to the warning: it is the
+      // only measurement anybody has for a file whose picker named none.
+      if (overImageEdge(edges?.width, edges?.height)) await scale(wide(edges!.width, edges!.height), edges!);
     }
     // The backstop, for a picker that reported no size at all: the bytes are
     // in hand, so there is nothing left to save by uploading them instead.

@@ -9,7 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_UPLOAD_BYTES } from "@covey/protocol";
-import { largeDropPrompt } from "@covey/client";
+import { largeDropPrompt, type ImageSize } from "@covey/client";
 import { attachingLabel, extensionOf, fileMime, isDrop, isPicture, readConfirmed, readPicked, renamed, sendingLabel, toBase64, type PickedFile, type Shrinker, type Uploader } from "./attach.js";
 
 /** A file the reader picked, of `size` bytes that are all `fill`. */
@@ -312,4 +312,45 @@ test("one picture is scaled once, whichever limit asked for it", async () => {
   const r = await readPicked([heavyAndWide], counting);
   assert.equal(calls, 1, "over both caps is still one scaling");
   assert.equal(r.attachments[0]!.name, "huge.jpg", "and it is called what it now is");
+});
+
+test("the shrinker is handed the shape covey measured, not left to guess it", async () => {
+  // A phone picking from the photo roll gets the shape from the picker; one
+  // picking the same file as a *document* gets nothing, and `readPicked` reads
+  // it out of the header. Both have to reach the shrinker, or the two pickers
+  // scale one photograph two different ways.
+  const seen: (ImageSize | undefined)[] = [];
+  const noting: Shrinker = async (_f, shape) => { seen.push(shape); return { bytes: new Uint8Array(10), mimeType: "image/jpeg" }; };
+
+  await readPicked([{
+    name: "roll.jpg", type: "image/jpeg", size: 900_000, width: 3072, height: 4096,
+    bytes: async () => new Uint8Array(900_000),
+  }], noting);
+  assert.deepEqual(seen[0], { width: 3072, height: 4096 }, "the picker's own answer");
+
+  await readPicked([pngFile("doc.png", 3072, 4096, 2000)], noting);
+  assert.deepEqual(seen[1], { width: 3072, height: 4096 }, "the one read out of the header");
+});
+
+test("a picker that names one edge does not describe the other as undefined", async () => {
+  // `overImageEdge` refuses from a single edge, so the warning has to be
+  // worded from what covey actually knows — "4096xundefined" is #132 again.
+  const half: PickedFile = {
+    name: "half.jpg", type: "image/jpeg", size: 900_000, width: 4096,
+    bytes: async () => new Uint8Array(900_000),
+  };
+  const r = await readPicked([half], cannotShrink);
+  assert.equal(r.warnings.length, 1);
+  assert.doesNotMatch(r.warnings[0]!, /undefined/);
+  assert.match(r.warnings[0]!, /4096 px on a side/);
+});
+
+test("a shape with only one edge is not handed to the shrinker as a shape", async () => {
+  const seen: (ImageSize | undefined)[] = [];
+  const noting: Shrinker = async (_f, shape) => { seen.push(shape); return null; };
+  await readPicked([{
+    name: "half.jpg", type: "image/jpeg", size: 900_000, width: 4096,
+    bytes: async () => new Uint8Array(900_000),
+  }], noting);
+  assert.equal(seen[0], undefined, "one edge refuses a picture and cannot scale one");
 });
