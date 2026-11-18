@@ -224,3 +224,92 @@ test("a converted image is called what it now is, so the agent can open it", asy
   assert.equal(r.attachments[0]!.name, "IMG_0003.jpg");
   assert.equal(r.attachments[0]!.path, "IMG_0003.jpg");
 });
+
+// ---------------------------------------------------------------------------
+// The API's other image limit: the shape, not the weight (#232)
+// ---------------------------------------------------------------------------
+
+/** A real PNG header of `w` by `h`, padded out to `size` bytes. */
+function pngFile(name: string, w: number, h: number, size: number): PickedFile {
+  const b = new Uint8Array(Math.max(size, 24));
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  b.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+  const view = new DataView(b.buffer);
+  view.setUint32(16, w);
+  view.setUint32(20, h);
+  return { name, type: "image/png", size: b.byteLength, bytes: async () => b };
+}
+
+test("a phone photograph is scaled for its shape, though its weight is fine (#232)", async () => {
+  // The file that started this: 4096x3072 and 1.5 MB. Under MAX_IMAGE_BYTES,
+  // so weighing it finds nothing — and refused by the API all the same once
+  // the conversation holds a few pictures.
+  const photo: PickedFile = {
+    name: "1000014121.jpg", type: "image/jpeg", size: 1_572_316, width: 4096, height: 3072,
+    bytes: async () => new Uint8Array(1_572_316),
+  };
+  const r = await readPicked([photo], shrinksTo(400_000));
+  assert.deepEqual(r.warnings, []);
+  assert.deepEqual(r.failed, []);
+  assert.equal(r.attachments.length, 1);
+  assert.equal(r.attachments[0]!.mimeType, "image/jpeg");
+  assert.equal(Buffer.from(r.attachments[0]!.data!, "base64").byteLength, 400_000, "the scaled bytes, not the original");
+});
+
+test("either edge is enough: a tall picture is as refused as a wide one", async () => {
+  const tall: PickedFile = {
+    name: "tall.jpg", type: "image/jpeg", size: 900_000, width: 1200, height: 4000,
+    bytes: async () => new Uint8Array(900_000),
+  };
+  const r = await readPicked([tall], shrinksTo(300_000));
+  assert.equal(Buffer.from(r.attachments[0]!.data!, "base64").byteLength, 300_000);
+});
+
+test("a picture inside both limits is left alone, and never scaled for nothing", async () => {
+  const fine: PickedFile = {
+    name: "render.png", type: "image/png", size: 300_000, width: 1500, height: 1050,
+    bytes: async () => new Uint8Array(300_000).fill(3),
+  };
+  const r = await readPicked([fine], shrinksTo(1)); // a shrinker that would ruin it
+  assert.equal(r.attachments[0]!.mimeType, "image/png", "not re-encoded");
+  assert.equal(Buffer.from(r.attachments[0]!.data!, "base64").byteLength, 300_000);
+});
+
+test("an edge no picker named is read out of the header instead", async () => {
+  // A browser's `File` carries a size and no shape, so covey has to find the
+  // edges itself — out of bytes it was going to read anyway.
+  const r = await readPicked([pngFile("wide.png", 5000, 1200, 2000)], shrinksTo(900));
+  assert.deepEqual(r.warnings, []);
+  assert.equal(Buffer.from(r.attachments[0]!.data!, "base64").byteLength, 900, "scaled, with nobody having reported a shape");
+});
+
+test("a header covey cannot read leaves the file exactly as it was", async () => {
+  const opaque = file("mystery.png", "image/png", 2000, 9);
+  const r = await readPicked([opaque], shrinksTo(1));
+  assert.deepEqual(r.warnings, [], "covey measured nothing, so it says nothing");
+  assert.equal(Buffer.from(r.attachments[0]!.data!, "base64").byteLength, 2000, "and scales nothing");
+});
+
+test("a picture too wide that no browser could scale says so in the shape's own words", async () => {
+  const photo: PickedFile = {
+    name: "big.jpg", type: "image/jpeg", size: 900_000, width: 4096, height: 3072,
+    bytes: async () => new Uint8Array(900_000),
+  };
+  const r = await readPicked([photo], cannotShrink);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0]!, /4096x3072/, "the shape, not a size in MB (#132)");
+  assert.match(r.warnings[0]!, /3000 px/);
+  assert.equal(r.attachments.length, 1, "it still travels, as a file the agent can open");
+});
+
+test("one picture is scaled once, whichever limit asked for it", async () => {
+  let calls = 0;
+  const counting: Shrinker = async () => { calls++; return { bytes: new Uint8Array(500).fill(2), mimeType: "image/jpeg" }; };
+  const heavyAndWide: PickedFile = {
+    name: "huge.png", type: "image/png", size: MAX_IMAGE_BYTES + 1, width: 9000, height: 9000,
+    bytes: async () => new Uint8Array(10),
+  };
+  const r = await readPicked([heavyAndWide], counting);
+  assert.equal(calls, 1, "over both caps is still one scaling");
+  assert.equal(r.attachments[0]!.name, "huge.jpg", "and it is called what it now is");
+});

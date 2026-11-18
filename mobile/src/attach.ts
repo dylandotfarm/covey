@@ -22,7 +22,7 @@ import { File, UploadType } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import { ImageManipulator, SaveFormat } from "expo-image-manipulator";
 import { MAX_IMAGE_BYTES, SHRINK_LONG_EDGE } from "@covey/protocol";
-import { readUploadAnswer, uploadUrl } from "@covey/client";
+import { overImageEdge, readUploadAnswer, uploadUrl } from "@covey/client";
 import { fileMime, type PickedFile, type Shrinker, type Uploader } from "@covey/web/attach";
 
 /**
@@ -50,12 +50,18 @@ async function bytesOf(uri: string): Promise<Uint8Array> {
  * read every photograph first would run out of memory before it got to the
  * check that would have refused them.
  */
-function picked(f: { uri: string; name: string; mimeType?: string | null; size?: number | null }): DeviceFile {
+function picked(f: { uri: string; name: string; mimeType?: string | null; size?: number | null; width?: number | null; height?: number | null }): DeviceFile {
   return {
     uri: f.uri,
     name: f.name,
     type: f.mimeType ?? "",
     size: f.size ?? 0,
+    // The photo roll reports the two edges, and `readPicked` needs them to
+    // tell a picture the API will refuse for its *shape* from one it refuses
+    // for its weight. A picker that names neither leaves them undefined, and
+    // the shared reader then reads them out of the header instead.
+    ...(f.width ? { width: f.width } : {}),
+    ...(f.height ? { height: f.height } : {}),
     bytes: () => bytesOf(f.uri),
   };
 }
@@ -85,6 +91,8 @@ export async function pickMedia(): Promise<DeviceFile[]> {
     name: a.fileName ?? nameOf(a.uri, `image-${i + 1}.jpg`),
     mimeType: a.mimeType,
     size: a.fileSize,
+    width: a.width,
+    height: a.height,
   }));
 }
 
@@ -99,6 +107,8 @@ export async function pickCamera(): Promise<DeviceFile[]> {
     name: a.fileName ?? nameOf(a.uri, `photo-${i + 1}.jpg`),
     mimeType: a.mimeType,
     size: a.fileSize,
+    width: a.width,
+    height: a.height,
   }));
 }
 
@@ -125,11 +135,20 @@ export async function pickDocument(): Promise<DeviceFile[]> {
 const PASSES: [number, number][] = [[SHRINK_LONG_EDGE, 0.85], [Math.round(SHRINK_LONG_EDGE / 2), 0.7]];
 
 /**
- * Bring a photograph under `MAX_IMAGE_BYTES`, or answer null.
+ * Bring a photograph under `MAX_IMAGE_BYTES` and under `MAX_IMAGE_EDGE`, or
+ * answer null.
  *
  * Null is not a failure: `readPicked` reads it as "this still travels, and the
  * model will be told it is a file rather than a picture", which is the rule the
  * TUI keeps for an image no tool could shrink.
+ *
+ * **Scale the long edge, never the width.** `resize({ width })` sets the width
+ * and lets the height follow, so a portrait photograph came out 2576 wide and
+ * 3435 tall: small enough to send and still taller than the API reads (#232).
+ * It also scales a *small* picture up, which is the same mistake pointing the
+ * other way — bytes spent on pixels the camera never took. So the edge covey
+ * fixes is whichever one is longer, and a picture already inside the box is
+ * re-encoded without being resized at all.
  */
 export const shrinkOnDevice: Shrinker = async (file: PickedFile) => {
   // Every file that reaches here came from a picker above, so it is a
@@ -139,12 +158,21 @@ export const shrinkOnDevice: Shrinker = async (file: PickedFile) => {
   if (typeof uri !== "string" || !uri) return null;
   for (const [edge, compress] of PASSES) {
     try {
-      const ref = await ImageManipulator.manipulate(uri).resize({ width: edge }).renderAsync();
+      let ctx = ImageManipulator.manipulate(uri);
+      // The picker reported the shape, so covey knows which edge is the long
+      // one before it decodes anything. Without it — a file picked as a
+      // document — the width is the safe guess it has always been.
+      const { width, height } = file;
+      if (!width || !height) ctx = ctx.resize({ width: edge });
+      else if (Math.max(width, height) > edge) ctx = width >= height ? ctx.resize({ width: edge }) : ctx.resize({ height: edge });
+      const ref = await ctx.renderAsync();
       // JPEG: the one encoding every phone writes, and a media type the API
       // reads. A photograph has no transparency to lose.
       const out = await ref.saveAsync({ format: SaveFormat.JPEG, compress });
       const bytes = await bytesOf(out.uri);
-      if (bytes.byteLength <= MAX_IMAGE_BYTES) return { bytes, mimeType: "image/jpeg" };
+      if (bytes.byteLength <= MAX_IMAGE_BYTES && !overImageEdge(ref.width, ref.height)) {
+        return { bytes, mimeType: "image/jpeg" };
+      }
     } catch {
       // A file this device cannot decode. The next pass will not decode it
       // either, so stop rather than spend the second one finding out.

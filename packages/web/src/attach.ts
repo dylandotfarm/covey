@@ -13,10 +13,10 @@
  * `shrink.ts` holds the real one.
  */
 import {
-  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_UPLOAD_BYTES, isImageMime,
+  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, MAX_UPLOAD_BYTES, isImageMime,
   type Attachment,
 } from "@covey/protocol";
-import { megabytes, tooLargeToUpload, type FailedDrop } from "@covey/client";
+import { imageSizeOfBytes, megabytes, overImageEdge, tooLargeToUpload, type FailedDrop } from "@covey/client";
 
 /** A file the reader picked, as much of it as this file needs. */
 export interface PickedFile {
@@ -24,6 +24,15 @@ export interface PickedFile {
   /** What the browser calls it. Empty for a file whose type it cannot name. */
   type: string;
   size: number;
+  /**
+   * The two edges, when the picker named them. The phone's photo roll does;
+   * a browser's `File` does not, and there `readPicked` reads them out of the
+   * header once the bytes are in hand. Either way the answer decides the same
+   * thing — whether this picture is over `MAX_IMAGE_EDGE` — so a picker that
+   * knows only saves covey a read, and one that does not costs nothing.
+   */
+  width?: number;
+  height?: number;
   bytes(): Promise<Uint8Array>;
 }
 
@@ -166,26 +175,38 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
     let name = file.name || "file";
     let mimeType = fileMime(file);
     let bytes: Uint8Array | null = null;
-    // Two limits, not one. An image goes through the canvas when it is over
-    // `MAX_IMAGE_BYTES`, and also when its type is one the API refuses — an
-    // iPhone photograph is `image/heic`, which only the phone can decode. Both
-    // come back as JPEG, which is what the model reads.
-    if (isPicture(mimeType) && (file.size > MAX_IMAGE_BYTES || !isImageMime(mimeType))) {
+    // One picture is scaled at most once, whether or not the scaling worked.
+    // A heavy photograph that is also too wide would otherwise be offered to
+    // the canvas twice and, when the canvas cannot do it, leave the reader two
+    // warnings about one file.
+    let tried = false;
+    // One picture, one scaling, and three reasons to want it. Over
+    // `MAX_IMAGE_BYTES` is the weight the API refuses. Over `MAX_IMAGE_EDGE`
+    // on a side is the *shape* it refuses, once a conversation carries a few
+    // pictures — a different set of files, because a phone photograph is
+    // 1.5 MB and 4096 px wide (#232). And a type the API will not read at all
+    // — an iPhone photograph is `image/heic`, which only the phone can decode.
+    // All three come back as JPEG, which is what the model reads.
+    const scale = async (why: string) => {
+      tried = true;
       let smaller: { bytes: Uint8Array; mimeType: string } | null = null;
       try { smaller = await shrink(file); } catch { smaller = null; }
-      if (smaller) {
-        bytes = smaller.bytes;
-        mimeType = smaller.mimeType;
-        // The name is what the file is called in the store and what the agent
-        // opens, so it has to say what the bytes are: an `IMG_0001.HEIC` that
-        // holds JPEG is a file nothing on the machine can read.
-        name = renamed(name, mimeType);
-      }
-      else if (file.size > MAX_IMAGE_BYTES) {
-        warnings.push(`${name} is ${megabytes(file.size)} MB and this browser could not scale it down. It goes as a file the agent can open, but the model cannot see an image over ${megabytes(MAX_IMAGE_BYTES)} MB.`);
-      } else {
-        warnings.push(`${name} is ${mimeType}, which the model cannot read, and this browser could not convert it. It goes as a file the agent can open. The model reads ${IMAGE_MIME_TYPES.join(", ")}.`);
-      }
+      if (!smaller) { warnings.push(why); return; }
+      bytes = smaller.bytes;
+      mimeType = smaller.mimeType;
+      // The name is what the file is called in the store and what the agent
+      // opens, so it has to say what the bytes are: an `IMG_0001.HEIC` that
+      // holds JPEG is a file nothing on the machine can read.
+      name = renamed(name, mimeType);
+    };
+    const heavy = `${name} is ${megabytes(file.size)} MB and this browser could not scale it down. It goes as a file the agent can open, but the model cannot see an image over ${megabytes(MAX_IMAGE_BYTES)} MB.`;
+    const wide = (w: number, h: number) => `${name} is ${w}x${h} and this browser could not scale it down. It goes as a file the agent can open, but the model cannot see an image over ${MAX_IMAGE_EDGE} px on a side once a conversation holds a few of them.`;
+    const unreadableType = `${name} is ${mimeType}, which the model cannot read, and this browser could not convert it. It goes as a file the agent can open. The model reads ${IMAGE_MIME_TYPES.join(", ")}.`;
+
+    if (isPicture(mimeType)) {
+      if (file.size > MAX_IMAGE_BYTES) await scale(heavy);
+      else if (overImageEdge(file.width, file.height)) await scale(wide(file.width!, file.height!));
+      else if (!isImageMime(mimeType)) await scale(unreadableType);
     }
     // Nothing has been read yet, so this is the one chance to decide from the
     // size alone. A shrunk image already holds its bytes and is small by
@@ -197,6 +218,13 @@ export async function readPicked(files: PickedFile[], shrink: Shrinker, already 
     }
     if (!bytes) {
       try { bytes = await file.bytes(); } catch (e) { failed.push(unreadable(name, e)); continue; }
+    }
+    // The edge the picker never reported. A browser's `File` carries a size
+    // and no shape, so this is where covey learns it — out of the header of
+    // bytes it was going to read anyway, which is why asking costs nothing.
+    if (!tried && isPicture(mimeType)) {
+      const edges = imageSizeOfBytes(bytes);
+      if (overImageEdge(edges?.width, edges?.height)) await scale(wide(edges!.width, edges!.height));
     }
     // The backstop, for a picker that reported no size at all: the bytes are
     // in hand, so there is nothing left to save by uploading them instead.
