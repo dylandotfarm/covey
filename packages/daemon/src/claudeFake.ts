@@ -17,6 +17,23 @@ import type { QueryFactory } from "./claude.js";
 export interface FakeCli {
   /** While true, a turn sent to this CLI stays running. */
   held: boolean;
+  /**
+   * The sentence every turn answers with instead of "ok", or null for the
+   * ordinary answer.
+   *
+   * It is what a turn that died on the plan's usage limit looks like from
+   * here, and the shape matters: Claude Code writes the refusal **twice**, as
+   * an assistant message and again as the error result. Measured on a thread
+   * that met the limit on 2026-11-15, where both items carry the same
+   * sentence.
+   */
+  refusal: string | null;
+  /**
+   * Prose the turn writes before it is refused, or null for a turn that is
+   * refused before its first word. The two are different work to covey: the
+   * first is carried on where it stopped and the second is sent again whole.
+   */
+  wrote: string | null;
   /** Let every held turn answer. Set to `held = false` first. */
   release(): void;
   /**
@@ -36,6 +53,8 @@ export interface FakeCli {
 export function fakeCli(): FakeCli {
   const cli: FakeCli = {
     held: false,
+    refusal: null,
+    wrote: null,
     release: () => {},
     push: () => {},
     backgroundTask(taskId) {
@@ -66,6 +85,14 @@ export function autoReply(cli: FakeCli): QueryFactory {
     void (async () => {
       for await (const _ of prompt as AsyncIterable<SDKUserMessage>) {
         while (cli.held) await new Promise<void>((r) => { const prior = cli.release; cli.release = () => { prior(); r(); }; });
+        if (cli.refusal !== null) {
+          for (const text of [cli.wrote, cli.refusal]) {
+            if (text === null) continue;
+            push({ type: "assistant", parent_tool_use_id: null, message: { id: `msg-${crypto.randomUUID()}`, model: "opus", content: [{ type: "text", text }] } });
+          }
+          push({ type: "result", subtype: "error_during_execution", is_error: true, result: cli.refusal, modelUsage: {}, user_message_uuid: null });
+          continue;
+        }
         push({ type: "assistant", parent_tool_use_id: null, message: { id: `msg-${crypto.randomUUID()}`, model: "opus", content: [{ type: "text", text: "ok" }] } });
         push({ type: "result", subtype: "success", is_error: false, result: "ok", modelUsage: {}, user_message_uuid: null });
       }

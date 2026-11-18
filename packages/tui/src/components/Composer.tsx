@@ -1,9 +1,9 @@
 import React from "react";
 import { Box, Text } from "ink";
-import { threadOnTimer, type Thread, type TimelineItem } from "@covey/protocol";
-import { timerLeftLabel } from "@covey/client";
+import { threadOnLimit, threadOnTimer, type Thread, type TimelineItem } from "@covey/protocol";
+import { limitLeftLabel, timerLeftLabel } from "@covey/client";
 import { T } from "../theme.js";
-import { TIMER_MARK } from "./Sidebar.js";
+import { LIMIT_MARK, TIMER_MARK } from "./Sidebar.js";
 import { fmtMs } from "../lines.js";
 import { caretToVisual, type VisualLine } from "../editor.js";
 import { menuWindowStart, MENU_ROWS, type MenuView } from "../composerMenu.js";
@@ -58,6 +58,9 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
   // here is what `relTime` already does in the sidebar — the store ticks the
   // client at `CLOCK_MS`, which is what keeps both true.
   const timer = thread && threadOnTimer(thread) ? thread.timer! : null;
+  // The same rule for the usage limit, and the two can never both be painted:
+  // the one that is set last is the one the thread is waiting on.
+  const limit = thread && threadOnLimit(thread) ? thread.usageLimit! : null;
   const now = Date.now();
   return (
     /* `100%`, not `width`: see the root box in `App.tsx`. The width prop is
@@ -96,6 +99,7 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
                 the sidebar and the status line — this row is the branch and
                 the machine, and a sentence here would push both off it. */}
             {timer && <Text color={T.subtle}>  {TIMER_MARK} {timerLeftLabel(timer, now)}</Text>}
+            {limit && <Text color={T.subtle}>  {LIMIT_MARK} limit {limitLeftLabel(limit, now)}</Text>}
             {thread && <Text color={T.faint}>  @{machineName}</Text>}
           </Text>
         </Box>
