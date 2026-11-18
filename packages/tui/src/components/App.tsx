@@ -1811,7 +1811,11 @@ export function App({ store }: { store: Store }) {
         store.setFocus("composer");
         return;
       }
-      case "project": return store.toggleExpanded(row.groupKey!);
+      // A project inside the ARCHIVED section has no fold to open, so enter
+      // does nothing there. The summary pane already names what is in it, and
+      // the way back is `x`, or `n`, which brings the project out and works in
+      // it.
+      case "project": return row.archived ? undefined : store.toggleExpanded(row.groupKey!);
       case "machines": return store.toggleExpanded(machinesKey(row.fleet ?? DEFAULT_FLEET), false);
       case "run": {
         setOvCursor(0);
@@ -2659,14 +2663,12 @@ export function App({ store }: { store: Store }) {
       return activateRow(row);
     }
     if (input === "h" || key.leftArrow) {
-      // Inside the archived-projects section, left furls the project itself
-      // first and the section after it, which is the tree idiom one level up:
-      // ←← is the way out of the archive from any row inside it.
+      // Inside the archived-projects section, left furls the section, from the
+      // heading and from any project row in it. An archived project holds no
+      // rows of its own, so there is no second step: furling the section takes
+      // the project row away with it, and `cursorIndex` puts the cursor on
+      // whatever stands where it was — which is the section itself.
       if (row.kind === "archivedProjects" || (row.kind === "project" && row.archived)) {
-        if (row.kind === "project" && store.isExpanded(row.groupKey!, true)) { store.toggleExpanded(row.groupKey!, true); return; }
-        // Furling the section is the whole of the second step: it takes the
-        // project row away with it, and `cursorIndex` puts the cursor on
-        // whatever stands where it was — which is the section itself.
         const k = projectsArchiveKey(row.fleet ?? DEFAULT_FLEET);
         if (store.isExpanded(k, false)) store.toggleExpanded(k, false);
         return;

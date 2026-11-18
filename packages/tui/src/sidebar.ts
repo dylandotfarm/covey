@@ -38,9 +38,16 @@ export function sidebarCells(rows: SidebarRow[]): SidebarCell[] {
     // A project that leads a fleet takes no line of its own: the fleet row
     // above it already carries one, and two blanks read as a gap rather than
     // as a heading.
-    const k = rows[i]!.kind;
+    //
+    // A project inside ARCHIVED takes none either. The blank is what makes a
+    // project row read as a heading, and those rows head nothing: they are a
+    // list of names the reader put away, so they are packed like the archived
+    // threads of a project. Five archived projects cost five lines, not ten.
+    const r = rows[i]!;
+    const k = r.kind;
+    const heading = (k === "project" && !r.archived) || k === "machines" || k === "fleet" || k === "archivedProjects";
     const after = rows[i - 1]?.kind;
-    if (i > 0 && (k === "project" || k === "machines" || k === "fleet" || k === "archivedProjects") && after !== "fleet") all.push({ kind: "blank" });
+    if (i > 0 && heading && after !== "fleet") all.push({ kind: "blank" });
     all.push({ kind: "row", index: i });
   }
   return all;
