@@ -25,7 +25,7 @@ import type { SheetTarget } from "@covey/web";
 export type Routes = {
   /**
    * The home screen: the fleets, or the projects when there is only one
-   * fleet (#205). The screen with no parameters.
+   * fleet. The screen with no parameters.
    */
   List: undefined;
   /**

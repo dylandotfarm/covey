@@ -2,7 +2,7 @@
  * The two lines above a list: what went wrong, and a machine that is not
  * answering.
  *
- * Its own component because there is more than one list screen now (#205): a
+ * Its own component because there is more than one list screen now: a
  * reader inside a fleet has to be told that a command was refused exactly as a
  * reader on the home screen does, and a notice is the only channel a failure
  * has.

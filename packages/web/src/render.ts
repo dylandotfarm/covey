@@ -501,7 +501,7 @@ export class Renderer {
     }
     const showMachine = s.machines.size > 1;
     // A fleet is a real line, so the same repository cloned at work and at
-    // home is two rows here (#205). The page has no fleet screen the way the
+    // home is two rows here. The page has no fleet screen the way the
     // app does, so the fleet is a word on the row instead — without it the
     // two rows differ only by the machines under them.
     const showFleet = fleetsOf(s).length > 1;

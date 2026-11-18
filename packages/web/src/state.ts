@@ -289,7 +289,7 @@ export function fleetsOf(s: State): string[] {
 }
 
 /**
- * One fleet as the list screen shows it (#205).
+ * One fleet as the list screen shows it.
  *
  * A fleet is the line between two sets of machines on one tailnet — the ones
  * at work and the ones at home — and the line is real: a project pools inside

@@ -1,5 +1,5 @@
 /**
- * The projects of one fleet, and their conversations (issue #168, #205).
+ * The projects of one fleet, and their conversations (issue #168).
  *
  * `projectRows` in `@covey/web` decides what a row is and what order the rows come
  * in — a repository on one base branch, wherever it is checked out, with two
@@ -8,7 +8,7 @@
  * one row, and keying it anywhere else would start a thread from the wrong commit.
  *
  * It takes a fleet, because a fleet is a real line and not a heading: two
- * machines pool a repository only when they are in one fleet (#205). With one
+ * machines pool a repository only when they are in one fleet. With one
  * fleet this *is* the home screen; with more than one the home screen is the
  * list of fleets and this is what a tap on one opens.
  *

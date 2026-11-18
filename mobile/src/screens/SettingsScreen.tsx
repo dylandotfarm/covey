@@ -52,7 +52,7 @@ export function SettingsScreen({ navigation }: Props) {
   const [otaWord, setOtaWord] = useState<string | null>(null);
   const hidden = hiddenPanel(allThreads(s), s.showHidden);
   // A machine says which fleet it is in, and the word is worth a reader's
-  // screen only when there is more than one (#205).
+  // screen only when there is more than one.
   const showFleet = fleetsOf(s).length > 1;
   const notes = notifyPanel(store.notify, store.notesAllowed, notesAvailable);
 
@@ -231,7 +231,7 @@ export function SettingsScreen({ navigation }: Props) {
 
         <SectionTitle text="Machines" />
         {/* Which fleet a machine is in, and only when there is more than one
-            (#205): it is what says why the home screen has two lists and
+            it is what says why the home screen has two lists and
             which of them this machine's projects are in. Read-only here — a
             machine declares its own fleet, and the TUI is where one moves. */}
         {[...s.machines.values()].map((m) => {

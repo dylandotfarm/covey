@@ -106,7 +106,7 @@ test("one repository on two base branches is two rows, each with its own threads
   assert.deepEqual(rows.map((r) => r.threads.map((t) => t.thread.id)), [["a"], ["b"]]);
 });
 
-test("one repository in two fleets is two rows, and neither pools the other's machines (#205)", () => {
+test("one repository in two fleets is two rows, and neither pools the other's machines", () => {
   // The line a fleet draws is real and not a heading: work must never land on
   // the machine in the living room. So the same repository cloned at work and
   // at home is two rows, each with its own machines and its own threads — the
@@ -133,7 +133,7 @@ test("one repository in two fleets is two rows, and neither pools the other's ma
   assert.deepEqual(projectRows(s, "covey").map((r) => r.threads.map((t) => t.thread.id)), [["mine"]]);
 });
 
-test("two machines of one fleet still pool their repository (#205)", () => {
+test("two machines of one fleet still pool their repository", () => {
   // The other half of the rule: the line is between fleets and not between
   // machines, so a fleet with two machines holding one repository is one row.
   const s = emptyState();
@@ -147,7 +147,7 @@ test("two machines of one fleet still pool their repository (#205)", () => {
   assert.deepEqual(rows[0]!.threads.map((t) => t.thread.id).sort(), ["one", "two"]);
 });
 
-test("the fleets are the default one first, and a machine that is away keeps the fleet it last said (#205)", () => {
+test("the fleets are the default one first, and a machine that is away keeps the fleet it last said", () => {
   const s = emptyState();
   const home = addMachine(s, "ws://pi:3790", "pi", true);
   const work = addMachine(s, "ws://desk:3790", "desk");
@@ -171,7 +171,7 @@ test("the fleets are the default one first, and a machine that is away keeps the
   assert.deepEqual(fleetsOf(s), ["covey"]);
 });
 
-test("a fleet row counts what is inside it, and says when something waits on the reader (#205)", () => {
+test("a fleet row counts what is inside it, and says when something waits on the reader", () => {
   const s = emptyState();
   const home = addMachine(s, "ws://pi:3790", "pi", true);
   const work = addMachine(s, "ws://desk:3790", "desk");

@@ -1,5 +1,5 @@
 /**
- * The home screen: the fleets, or the projects when there is only one (#205).
+ * The home screen: the fleets, or the projects when there is only one of them.
  *
  * A fleet is the line between two sets of machines on one tailnet — the ones at
  * work and the ones at home — and the line is real rather than cosmetic: a

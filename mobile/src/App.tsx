@@ -102,7 +102,7 @@ export function App() {
             <Stack.Screen name="List" component={ListScreen} options={{ title: "covey" }} />
             {/* The fleet's own name is the title: the reader tapped it, and it
                 is the one word that says which half of their machines this
-                list is (#205). */}
+                list is. */}
             <Stack.Screen
               name="Projects"
               component={ProjectsScreen}

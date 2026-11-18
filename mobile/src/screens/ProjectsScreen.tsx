@@ -1,5 +1,5 @@
 /**
- * One fleet's projects (#205).
+ * One fleet's projects.
  *
  * The screen a tap on a fleet row opens, and a screen rather than a fold
  * because that is what the back gesture already shuts — the lesson `nav.ts`
