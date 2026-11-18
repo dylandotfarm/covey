@@ -110,11 +110,45 @@ test("unfurling the section paints the archived projects, a level in, and marked
     { "projects:archived": true },
   );
   const rows = sidebarRows(s);
-  assert.deepEqual(rows.map((r) => r.kind), ["project", "thread", "archivedProjects", "project", "thread", "machines"]);
+  assert.deepEqual(rows.map((r) => r.kind), ["project", "thread", "archivedProjects", "project", "machines"]);
   assert.equal(rows[3]!.projectId, "b");
   assert.ok(rows[3]!.archived, "the row says it is inside the archive, so ← and x know where they are");
   assert.equal(rows[3]!.depth, rows[0]!.depth + 1, "a level under the section, the way a project sits under a fleet");
-  assert.equal(rows[4]!.thread!.id, "t-b", "and its threads come with it");
+});
+
+test("an archived project is a leaf: one row, whatever it holds", () => {
+  // The archive is a list of names. A reader who put twenty projects away
+  // wants the twenty rows, not a tree under each — and the way into one is to
+  // bring it out, which `n` and a move both do.
+  const s = appState(
+    [archivedProject("b")],
+    [
+      thread("t-b", "b"),
+      thread("old-b", "b", { archivedAt: "2026-02-01T00:00:00Z" }),
+    ],
+    { "projects:archived": true, "pi:b": true, [archiveKey("pi:b")]: true },
+  );
+  const rows = sidebarRows(s);
+  assert.deepEqual(rows.map((r) => r.kind), ["empty", "archivedProjects", "project", "machines"]);
+  assert.ok(!rows.some((r) => r.kind === "thread"), "no threads, however the folds stand");
+  assert.ok(!rows.some((r) => r.kind === "archived"), "and no archived folder of its own");
+});
+
+test("an archived project still carries the dot and the count of what is in it", () => {
+  // The row holds no threads now, so these three fields are the whole of what
+  // a reader is told about the work inside — and archiving stops none of it.
+  const s = appState(
+    [archivedProject("b")],
+    [thread("busy", "b", { status: "running" }), thread("idle", "b")],
+    { "projects:archived": true },
+  );
+  const row = sidebarRows(s).find((r) => r.kind === "project")!;
+  assert.equal(row.count, 2);
+  assert.equal(row.busy, true);
+  assert.equal(row.waiting, false);
+
+  const asking = appState([archivedProject("b")], [thread("asking", "b", { pendingApprovals: 1 })], { "projects:archived": true });
+  assert.equal(sidebarRows(asking).find((r) => r.kind === "project")!.waiting, true);
 });
 
 test("a section that holds something working says so while it is furled", () => {
@@ -165,6 +199,21 @@ test("a top-level row after the first is preceded by a blank line, so rows and l
     { kind: "blank" },
     { kind: "row", index: 4 },
   ]);
+});
+
+test("the archived projects are packed, because none of them heads anything", () => {
+  // A blank line is what makes a project row read as a heading. A project
+  // inside ARCHIVED is a leaf, so five of them cost five lines and not ten —
+  // which is the whole reason the section flattened.
+  const away = (key: string): SidebarRow => ({ ...row("project", key, 1), archived: true });
+  const cells = sidebarCells([
+    row("project", "p", 0),
+    row("thread", "t0"),
+    row("archivedProjects", "ap", 0),
+    away("a0"), away("a1"), away("a2"),
+    row("machines", "machines", 0),
+  ]);
+  assert.deepEqual(cells.map((c) => c.kind === "blank" ? "blank" : c.index), [0, 1, "blank", 2, 3, 4, 5, "blank", 6]);
 });
 
 test("the whole list is painted when it fits", () => {

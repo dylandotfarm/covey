@@ -964,6 +964,16 @@ export interface Thread {
    */
   timer?: ThreadTimer | null;
   /**
+   * The usage limit this thread's work is waiting on, or absent when none.
+   *
+   * A turn that died because the account ran out of its plan's usage is not a
+   * turn that failed: nothing is wrong with the work, and the one thing that
+   * mends it is time. So the daemon holds the work here and sends it again
+   * when the limit resets. It lives on the row, as the timer does, so an hour
+   * switched off loses nothing.
+   */
+  usageLimit?: ThreadUsageLimit | null;
+  /**
    * Set on a review thread: the pull request it reviews, and the thread that
    * asked. Absent on every other thread, and on every thread written before
    * the automated review existed.
@@ -1011,6 +1021,12 @@ export function threadIsBusy(t: Thread): boolean {
  * approval deadlocks in silence when the reader cannot see it.
  */
 export function threadNeedsPerson(t: Thread): boolean {
+  // A turn that stopped on a usage limit is the one failure covey mends by
+  // itself. The row carries the error and the reason, and covey sends the work
+  // again when the limit resets, so there is nothing here for a person to do —
+  // and a bell every five hours for a thread that is only waiting is what this
+  // whole feature exists to stop.
+  if (threadOnLimit(t)) return false;
   return t.status === "error" || t.status === "waiting" || t.pendingApprovals > 0;
 }
 
@@ -1063,7 +1079,7 @@ export function threadReviewing(t: Thread): number {
  * blocked is painted whatever this says.
  */
 export function threadIsFinished(t: Thread): boolean {
-  return t.latestTurn?.state === "completed" && threadReviewing(t) === 0 && !threadOnTimer(t);
+  return t.latestTurn?.state === "completed" && threadReviewing(t) === 0 && !threadOnTimer(t) && !threadOnLimit(t);
 }
 
 /**
@@ -1143,6 +1159,81 @@ export interface ThreadTimer {
  */
 export function threadOnTimer(t: Thread): boolean {
   return !!t.timer && !t.timer.firedAt && !t.archivedAt && !threadIsBusy(t);
+}
+
+/**
+ * The usage limit a thread's work waits on, and the work it waits with.
+ *
+ * An account on a plan has a window of usage, and a turn that reaches the end
+ * of one dies where it stands: `You've hit your session limit · resets 12:10am
+ * (UTC)`. Nothing about that is a fault of the work. Until this, the thread
+ * stopped there with an error on its row, and the reader had to come back
+ * hours later and type the message again — on every thread that had been
+ * running, because one account is one limit and a machine of ten threads hits
+ * it ten times in a minute.
+ *
+ * So covey holds the work instead. The daemon that holds the thread reads when
+ * the limit resets, waits for it, and sends the turn again, exactly as the
+ * timer sends one and for the same reason: covey is the only thing that will
+ * wake the thread, and a person is not it.
+ */
+export interface ThreadUsageLimit {
+  /**
+   * The sentence Claude Code gave for the refusal, as the reader saw it in the
+   * transcript. It is the only place the *kind* of limit is written down —
+   * covey reads a time out of it and nothing else — and a reader who meets a
+   * row waiting until Friday wants to read that it is the weekly one.
+   */
+  message: string;
+  /**
+   * The turn covey sends again when the limit resets, or null when it has
+   * nothing to send. A turn that had already written something is carried on
+   * from where it stopped; one that died before its first word is sent again
+   * whole.
+   */
+  turnId: string | null;
+  setAt: string;
+  /** When covey tries again. */
+  dueAt: string;
+  /**
+   * When the limit resets, read out of the message, or null when covey could
+   * not read one and is backing off instead.
+   *
+   * The two are told apart on purpose. A time covey read is a fact it can put
+   * in the note it writes — "the limit resets at 00:10 UTC" — and a time covey
+   * guessed is not, so that note says it could not read one. The row's own
+   * line (`limitLine`) says how long is left either way, because a wait is the
+   * thing a reader acts on and needs no timezone beside it.
+   */
+  resetsAt: string | null;
+  /**
+   * When covey sent the work again, or null while it waits. A fired record
+   * stays on the row until a turn answers, as a fired timer does, so the next
+   * wait can count the chain.
+   */
+  firedAt: string | null;
+  /**
+   * How many times in a row covey has waited for this limit. A turn that
+   * answers clears the record and breaks the chain.
+   *
+   * Covey bounds the chain, unlike a timer's: a limit that is still refusing
+   * work after several waits is not one more wait away from clearing, and a
+   * thread that tried for ever would be a thread nobody was told about.
+   */
+  round: number;
+}
+
+/**
+ * True when this thread is waiting on a usage limit and nothing else.
+ *
+ * The one copy of the decision every client paints, as `threadOnTimer` is. It
+ * is also what keeps the failed turn from ringing a bell: the thread is not
+ * the reader's again (`threadIsFinished`) and does not need them
+ * (`threadNeedsPerson`), because covey is coming back to it.
+ */
+export function threadOnLimit(t: Thread): boolean {
+  const limit = t.usageLimit;
+  return !!limit && !limit.firedAt && !t.archivedAt && !threadIsBusy(t);
 }
 
 /** The issue a thread took. The number is the link; the rest is for the reader. */

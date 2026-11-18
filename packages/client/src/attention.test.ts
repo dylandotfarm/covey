@@ -115,3 +115,35 @@ test("a turn that ended onto a timer is progress and not an interruption", () =>
   assert.deepEqual(threadNews(running(onTimer()), ended({ ...onTimer(), pendingApprovals: 1 })),
     { mark: "approval", lead: "needs approval", wants: true });
 });
+
+/**
+ * The usage limit is the timer's case again while covey is still coming back
+ * to the thread — a line and never a bell, because nothing is wrong with the
+ * work and the reader has nothing to do.
+ *
+ * It stops being that case the moment covey comes back with nothing it can
+ * send. That is the one transition no turn marks: the turn failed hours
+ * earlier, so the rule for a failure has long since passed, and the thread
+ * would go quiet for good under a note saying nothing was needed.
+ */
+test("a usage limit is a line while covey holds the work, and a bell when it cannot", () => {
+  const message = "You've hit your session limit · resets 12:10am (UTC)";
+  const held = (over: Partial<NonNullable<Thread["usageLimit"]>> = {}): Partial<Thread> => ({
+    usageLimit: { message, turnId: "x", setAt: "", dueAt: "2099-01-01T00:00:00Z", resetsAt: "2099-01-01T00:00:00Z", firedAt: null, round: 1, ...over },
+  });
+  assert.deepEqual(threadNews(running(held()), failed(held())),
+    { mark: null, lead: "waiting on the usage limit", wants: false });
+  // Covey gave up on the chain and cleared the record, so the failure is the
+  // reader's in the ordinary way.
+  assert.deepEqual(threadNews(running(held()), failed()), { mark: "error", lead: "failed", wants: true });
+
+  // The wait fires. Nothing is said: covey has sent the work and the thread is
+  // about to run again.
+  const fired = held({ firedAt: "2026-11-16T00:11:00Z" });
+  assert.equal(threadNews(failed(held()), failed(fired)), null);
+  // And then it turns out there was nothing to send.
+  assert.deepEqual(threadNews(failed(fired), failed({ ...fired, status: "error", lastError: message })),
+    { mark: "error", lead: "failed", wants: true });
+  // Said once. The row stays in that state until the reader writes.
+  assert.equal(threadNews(failed({ ...fired, status: "error" }), failed({ ...fired, status: "error" })), null);
+});

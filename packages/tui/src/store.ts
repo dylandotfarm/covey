@@ -3182,6 +3182,9 @@ export function sidebarRows(s: AppState): SidebarRow[] {
      * its own archived folder. `depth` is where the project row sits, because
      * the archived section puts a level above the projects inside it, the way
      * a fleet row does above every project of a fleet.
+     *
+     * `inArchive` is a project the reader put away, and that row is a leaf:
+     * the walk below it is made for the dot and the count alone.
      */
     const pushProject = (g: ProjectGroup, depth: number, inArchive: boolean) => {
       const first = g.members[0]!;
@@ -3208,6 +3211,14 @@ export function sidebarRows(s: AppState): SidebarRow[] {
         }
       }
       Object.assign(rows[rows.length - 1]!, { busy, waiting, count });
+      // A project inside the archive is one row and nothing else: no threads,
+      // no runs, no archived folder and no fold of its own. The archive is a
+      // list of the projects the reader put away, and a reader who put twenty
+      // away wants the twenty names rather than a tree of each. What the row
+      // still carries is the dot and the count, which is the whole of what a
+      // fold may not hide — and the way back in is to work there, because `n`
+      // and a move both bring the project out first.
+      if (inArchive) return;
       if (!(s.expanded[g.key] ?? true)) return;
       owned.sort((a, b) => byRecency(a.t, b.t));
       const threads = owned.map((o) => o.t);

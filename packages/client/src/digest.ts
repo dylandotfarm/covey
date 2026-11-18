@@ -13,7 +13,8 @@
  * lands. A small screen that had to wait for a round trip would be a small
  * screen that says nothing for the first second.
  */
-import { threadIsBusy, type AssistantMessageItem, type Thread, type TimelineItem } from "@covey/protocol";
+import { threadIsBusy, threadOnLimit, type AssistantMessageItem, type Thread, type TimelineItem } from "@covey/protocol";
+import { limitLabel, limitLeftLabel } from "./limit.js";
 
 /**
  * What the agent is doing, in the order a reader cares about it.
@@ -94,6 +95,14 @@ export function threadActivity(thread: Thread, items: TimelineItem[] = []): Acti
     return { activity: "thinking", label: "Thinking", detail: queued };
   }
 
+  // Before the failure, which is the state the turn is in. A turn that stopped
+  // on the plan's usage limit is work covey is holding, so the cover says what
+  // is holding it and when it goes again — the reading the sidebar and the
+  // page give the same row — rather than `Failed` about a thread that is going
+  // to finish by itself.
+  if (threadOnLimit(thread)) {
+    return { activity: "idle", label: limitLabel(thread.usageLimit!.message), detail: `covey retries in ${limitLeftLabel(thread.usageLimit!, Date.now())}` };
+  }
   if (thread.status === "error" || thread.latestTurn?.state === "error") {
     return { activity: "failed", label: "Failed", detail: thread.lastError ? firstSentence(thread.lastError, 40) : null };
   }

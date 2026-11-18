@@ -13,11 +13,11 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadOnTimer, threadReviewing, type Lod,
+  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadOnLimit, threadOnTimer, threadReviewing, type Lod,
   type AppBuildRun, type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
-import { idleChoices, idleValueLabel, keepTagged, liveChoices, liveValueLabel, projectPool, timelineRows, timerLine, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
+import { idleChoices, idleValueLabel, keepTagged, limitLine, liveChoices, liveValueLabel, projectPool, timelineRows, timerLine, type BudgetChoice, type ConnState, type TaggedAttachment, type TimelineRow } from "@covey/client";
 
 export interface MachineSlot {
   /** The `ws://` URL the page dials. */
@@ -218,6 +218,13 @@ export function orderedItems(v: View): TimelineItem[] {
   return [...v.items.values()].sort((a, b) => a.seq - b.seq);
 }
 
+/**
+ * The tones a thread's row can take. `timer` is a *painting* and not a state:
+ * it is the dimmed row of a thread covey will come back to on its own, which
+ * is a thread asleep on a timer it set and a thread held on the plan's usage
+ * limit both. Neither is the reader's to act on, and both read wrong as
+ * `idle`.
+ */
 export type Tone = "busy" | "waiting" | "error" | "done" | "timer" | "idle";
 
 /** One word for the dot beside a thread. `waiting` wins, because it is the
@@ -228,6 +235,10 @@ export type Tone = "busy" | "waiting" | "error" | "done" | "timer" | "idle";
  *  dot said it was while the line beside it said "under review". */
 export function threadTone(t: Thread): Tone {
   if (t.pendingApprovals > 0 || t.status === "waiting") return "waiting";
+  // Before the error, which is the state the row is in: a turn that stopped
+  // on the plan's usage limit is work covey is holding, not work that failed,
+  // and a red row would send the reader to a thread with nothing to do in it.
+  if (threadOnLimit(t)) return "timer";
   if (t.status === "error" || t.latestTurn?.state === "error") return "error";
   if (threadIsBusy(t)) return "busy";
   if (threadIsFinished(t)) return "done";
@@ -444,6 +455,10 @@ export function threadStatusLabel(t: Thread): string {
     return t.queuedTurns > 0 ? `${word} · ${t.queuedTurns} queued` : word;
   }
   if (t.status === "starting") return "starting";
+  // The usage limit comes before the error for `threadTone`'s reason, and
+  // says which limit and when covey tries again: `limitLine` is the sentence
+  // every client says, in `@covey/client`.
+  if (threadOnLimit(t)) return limitLine(t.usageLimit!, Date.now());
   if (t.status === "error" || t.latestTurn?.state === "error") return t.lastError ? `error: ${t.lastError}` : "error";
   if (t.latestTurn?.state === "interrupted") return "interrupted";
   // A thread with a pull request open sits still while covey's own reviewers
