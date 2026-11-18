@@ -326,7 +326,14 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       // once, over the walk that found the threads, so a paint reads three
       // fields and scans nothing.
       const { busy = false, waiting = false, count = 0 } = row;
-      const agg = !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
+      // A project inside the ARCHIVED section holds no rows, so it has no
+      // caret: that column keeps the attention dot and nothing else, because
+      // archiving stops no turn and the dot is what says a thread in there is
+      // still running. A caret over a fold that opens nothing is a key the
+      // reader presses twice and then stops trusting.
+      const agg = row.archived
+        ? (waiting || busy ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text> </Text>)
+        : !open && (waiting || busy) ? <Text color={waiting ? T.awaiting : T.working}>●</Text> : <Text color={T.subtle}>{open ? "▾" : "▸"}</Text>;
       // The last row whose width was a constant rather than a sum of the cells
       // it paints: the indent, the caret or the dot, the space before the
       // title, the space before the number, and the padding on the right. The
@@ -353,7 +360,12 @@ function Row({ row, state, selected, active, width }: { row: SidebarRow; state: 
       return (
         <Box paddingLeft={indent} paddingRight={1} height={1} backgroundColor={bg}>
           {agg}
-          <Text color={T.text} bold> {truncate(row.project!.title, Math.max(1, room - base.length))}</Text>
+          {/* A project the reader put away is dimmed to `T.muted`, which is
+              what the ARCHIVED heading above it paints: it is a name to come
+              back to, not the work in hand. Not the `T.faint` of an archived
+              thread — this title is bold, and bold faint reads as a fault in
+              the terminal rather than as a row that is quiet. */}
+          <Text color={row.archived ? T.muted : T.text} bold> {truncate(row.project!.title, Math.max(1, room - base.length))}</Text>
           <Text color={T.subtle}>{base}</Text>
           <Text color={T.subtle}>{pool}</Text>
           <Text color={T.faint}> {num}</Text>

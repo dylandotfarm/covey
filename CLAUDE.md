@@ -571,7 +571,15 @@
   not in: **`n` and a move both bring it back first**, because those are the only two
   doors into a project and a move is the one where the reader cannot see the state
   they are choosing — so the destination pick names it `archived` as well, the way
-  `kin` names the base it works from. The page and the phone paint no archived
+  `kin` names the base it works from. **Inside the section a project is one row
+  and nothing else**: no threads, no runs, no archived folder, no caret and no
+  blank line above it, so twenty projects put away cost twenty lines rather than
+  a tree of each (`pushProject`'s `inArchive`, and `sidebarCells`, which gives a
+  blank line only to a row that heads something). What the row keeps is the dot
+  and the count, which is the whole of what a fold may not hide; what a reader
+  wants to *read* is the summary pane, which still lists the threads; and the
+  way in is still to work there, which is why `n` had to bring it back first
+  before this was tolerable. The page and the phone paint no archived
   project at all (`projectRows`, and its threads go with it): they cannot add or
   remove a project either, so what they owe a reader is the list the TUI shows them.
   A machine of the pool that did not answer is **named** in the notice, with what
