@@ -37,6 +37,7 @@ export {
   inFlightNotice, largeDropPrompt, readUploadAnswer, splitInFlight, tooLargeToUpload, uploadUrl,
   uploadingLabel, type LargeDropPrompt, type LargeFile, type UploadAnswer,
 } from "./upload.js";
+export { IMAGE_HEADER_BYTES, imageSizeOfBytes, overImageEdge, type ImageSize } from "./imageSize.js";
 export {
   ADPCM_BLOCK_BYTES, ADPCM_BLOCK_SAMPLES, DEVICE_DOWNLINK_UUID, DEVICE_NAME_PREFIX,
   DEVICE_PROTOCOL, DEVICE_SERVICE_UUID, DEVICE_UPLINK_UUID, DeviceState, Down, FRAME_HEADER,

@@ -2015,6 +2015,27 @@ export const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 /**
+ * The longest either edge of an image may be and still be shown to the model.
+ *
+ * This is the API's *other* image limit, and it is not a size in bytes: in a
+ * request that carries many images, one whose width or height is over this is
+ * refused outright — `At least one of the image dimensions exceed max allowed
+ * size for many-image requests: 3000 pixels`. A conversation with a few dozen
+ * pictures in it is such a request, and every turn of it resends them all.
+ *
+ * So the two limits catch different files and covey has to read both (#236).
+ * A 4096x3072 photograph off a phone is about 1.5 MB — far under
+ * `MAX_IMAGE_BYTES`, so weighing it finds nothing wrong — and it is over this
+ * by a thousand pixels. It went in without complaint and then broke every
+ * later turn of the thread it landed in, because the refusal arrives when the
+ * *conversation* grows, not when the picture does.
+ *
+ * `SHRINK_LONG_EDGE` is comfortably under it, so an image covey scaled is an
+ * image that passes.
+ */
+export const MAX_IMAGE_EDGE = 3000;
+
+/**
  * The long edge covey shrinks an oversized image to.
  *
  * The model never sees more than this: the API scales an image past its

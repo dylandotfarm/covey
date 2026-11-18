@@ -7,8 +7,9 @@ import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
-import { parseDroppedPaths, imageMime, fileMime, readDroppedFiles, readSplitDrop, splitDropJoin, droppedPathText, isDrop, isDirectoryDrop, readClipboard, readClipboardText, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, cutTag, revealDrop, tagSpanAt, type RunReader } from "./attachments.js";
+import { parseDroppedPaths, imageMime, fileMime, imageSizeOfPath, readFileAttachment, readDroppedFiles, readSplitDrop, splitDropJoin, droppedPathText, isDrop, isDirectoryDrop, readClipboard, readClipboardText, parseUriList, imageMimeOfBytes, makeTag, tagAttachments, spliceTags, keepTagged, applyDrop, cutTag, revealDrop, tagSpanAt, type RunReader } from "./attachments.js";
 import { largeDropPrompt } from "@covey/client";
+import { MAX_IMAGE_EDGE } from "@covey/protocol";
 
 test("parses the path shapes terminals actually paste on drop", () => {
   assert.deepEqual(parseDroppedPaths("/home/me/shot.png"), ["/home/me/shot.png"]);
@@ -906,4 +907,62 @@ test("the join of a split path is text anyone can ask for, with no read", () => 
   assert.deepEqual(splitDropJoin("see /var/T/", "shot.png"), { start: 4, text: "/var/T/shot.png" });
   assert.equal(splitDropJoin("see what", "shot.png"), null);
   assert.equal(droppedPathText("what do you make of this"), "", "prose names no path");
+});
+
+// ---------------------------------------------------------------------------
+// The API's other image limit: the shape, not the weight (#236)
+// ---------------------------------------------------------------------------
+
+/** Write a PNG whose header says `w` by `h`. */
+function writePng(dir: string, name: string, w: number, h: number): string {
+  const b = Buffer.alloc(1024);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  b.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+  b.writeUInt32BE(w, 16);
+  b.writeUInt32BE(h, 20);
+  const path = join(dir, name);
+  writeFileSync(path, b);
+  return path;
+}
+
+test("an image's shape is read from its header, off the disk", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-edge-"));
+  assert.deepEqual(imageSizeOfPath(writePng(dir, "a.png", 4096, 3072)), { width: 4096, height: 3072 });
+  assert.deepEqual(imageSizeOfPath(writePng(dir, "b.png", 1500, 1050)), { width: 1500, height: 1050 });
+});
+
+test("a file that is not an image, or is not there, measures nothing rather than guessing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-edge-"));
+  const notes = join(dir, "notes.md");
+  writeFileSync(notes, "# hello\n".repeat(40));
+  assert.equal(imageSizeOfPath(notes), null);
+  assert.equal(imageSizeOfPath(join(dir, "nothing-here.png")), null);
+});
+
+test("a picture over MAX_IMAGE_EDGE is scaled, or says so — never sent as it is (#236)", () => {
+  // The invariant, whatever image tool this machine happens to have: a
+  // photograph the API would refuse for its shape either comes back inside
+  // the limit, or it comes back with a warning that names the shape. What it
+  // must never do is go up at 4096 px with nothing said, which is what covey
+  // did before this.
+  const dir = mkdtempSync(join(tmpdir(), "covey-edge-"));
+  const wide = writePng(dir, "photo.png", 4096, 3072);
+  const r = readFileAttachment(wide);
+  assert.ok(r.attachment, "it travels either way");
+  const out = imageSizeOfPath(r.attachment!.path);
+  if (r.warning) {
+    assert.match(r.warning, /4096x3072/, "the shape, in the reader's words (#132)");
+    assert.match(r.warning, new RegExp(String(MAX_IMAGE_EDGE)));
+  } else {
+    assert.ok(out && out.width <= MAX_IMAGE_EDGE && out.height <= MAX_IMAGE_EDGE, `scaled to ${out?.width}x${out?.height}`);
+  }
+});
+
+test("a picture inside both limits is sent exactly as it came", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-edge-"));
+  const fine = writePng(dir, "render.png", 1500, 1050);
+  const r = readFileAttachment(fine);
+  assert.equal(r.warning, undefined);
+  assert.equal(r.attachment!.mimeType, "image/png", "not re-encoded for nothing");
+  assert.equal(r.attachment!.path, fine, "and not copied either");
 });

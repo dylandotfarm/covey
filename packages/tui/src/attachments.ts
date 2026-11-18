@@ -1,15 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { basename, extname, isAbsolute, join } from "node:path";
-import { createReadStream, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, createReadStream, openSync, readFileSync, readSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { Transform, Readable } from "node:stream";
 import { gzipSync } from "node:zlib";
 import { tmpdir } from "node:os";
 import {
-  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_DIRECTORY_FILES, MAX_IMAGE_BYTES, MAX_UPLOAD_BYTES,
-  PACK_ATTACHMENT_BYTES, SHRINK_LONG_EDGE, type Attachment,
+  IMAGE_MIME_TYPES, MAX_ATTACHMENT_BYTES, MAX_DIRECTORY_FILES, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE,
+  MAX_UPLOAD_BYTES, PACK_ATTACHMENT_BYTES, SHRINK_LONG_EDGE, type Attachment,
 } from "@covey/protocol";
-import { readUploadAnswer, tooLargeToUpload, uploadUrl, type FailedDrop } from "@covey/client";
+import {
+  IMAGE_HEADER_BYTES, imageSizeOfBytes, overImageEdge, readUploadAnswer, tooLargeToUpload,
+  uploadUrl, type FailedDrop, type ImageSize,
+} from "@covey/client";
 
 /**
  * Terminals do not deliver file *data* on drag-and-drop — they paste a path.
@@ -249,12 +252,18 @@ export function readFileAttachment(path: string): { attachment?: Attachment; fai
   let read = path;
   let mimeType = fileMime(path);
   let warning: string | undefined;
-  // Two limits, not one. An image over `MAX_IMAGE_BYTES` is scaled down,
-  // because that is all the model would have read anyway; every other file
-  // travels whole up to `MAX_ATTACHMENT_BYTES`, which is what covey carries.
-  if (imageMime(path) && size > MAX_IMAGE_BYTES) {
+  // Three limits, not one. An image is scaled down when it is over
+  // `MAX_IMAGE_BYTES`, and also when either edge is over `MAX_IMAGE_EDGE` —
+  // two different files, because a phone photograph is 1.5 MB and 4096 px
+  // wide, so weighing it finds nothing and the API refuses it anyway (#236).
+  // Every other file travels whole up to `MAX_ATTACHMENT_BYTES`, which is
+  // what covey carries.
+  const edges = imageMime(path) ? imageSizeOfPath(path) : null;
+  const wide = overImageEdge(edges?.width, edges?.height);
+  if (imageMime(path) && (size > MAX_IMAGE_BYTES || wide)) {
     const smaller = shrinkImage(path);
     if (smaller) { read = smaller.path; mimeType = smaller.mimeType; size = statSync(read).size; }
+    else if (wide) warning = `${name} is ${edges!.width}x${edges!.height} and covey found no tool to shrink it (it looks for sips, magick, convert or ffmpeg on the PATH). It goes as a file the agent can open, but the model cannot see an image over ${MAX_IMAGE_EDGE} px on a side once a conversation holds a few of them.`;
     else warning = `${name} is ${mb(size)} MB and covey found no tool to shrink it (it looks for sips, magick, convert or ffmpeg on the PATH). It goes as a file the agent can open, but the model cannot see an image over ${mb(MAX_IMAGE_BYTES)} MB.`;
   }
   if (size > MAX_UPLOAD_BYTES) return { failure: tooLargeToUpload(name, size), warning };
@@ -473,13 +482,26 @@ const SHRINKERS: { cmd: string; args: (src: string, dst: string, edge: number, q
   { cmd: "sips", args: (src, dst, edge, q) => ["-Z", String(edge), "-s", "format", "jpeg", "-s", "formatOptions", String(q), src, "--out", dst] },
   { cmd: "magick", args: (src, dst, edge, q) => [src, "-resize", `${edge}x${edge}>`, "-quality", String(q), dst] },
   { cmd: "convert", args: (src, dst, edge, q) => [src, "-resize", `${edge}x${edge}>`, "-quality", String(q), dst] },
-  { cmd: "ffmpeg", args: (src, dst, edge, q) => ["-y", "-loglevel", "error", "-i", src, "-vf", `scale='min(${edge},iw)':-2`, "-q:v", String(Math.max(2, Math.round((100 - q) / 8))), dst] },
+  // The long edge, not the width. `scale='min(edge,iw)':-2` bounded the width
+  // alone, so a portrait photograph came out 2576 wide and 3434 tall — under
+  // the byte cap, over `MAX_IMAGE_EDGE`, and refused by the API all the same
+  // (#236). `force_original_aspect_ratio=decrease` fits the whole image inside
+  // a square of `edge` instead; the two `min`s keep a picture already smaller
+  // than that at the size it came in, as the old filter's own `min` did.
+  { cmd: "ffmpeg", args: (src, dst, edge, q) => ["-y", "-loglevel", "error", "-i", src, "-vf", `scale='min(iw,${edge})':'min(ih,${edge})':force_original_aspect_ratio=decrease:force_divisible_by=2`, "-q:v", String(Math.max(2, Math.round((100 - q) / 8))), dst] },
 ];
 
 /**
- * Bring an oversized image under the cap, or answer null when this machine has
- * nothing to do it with. Two passes at most: the second only runs when scaling
- * alone was not enough, and it is the one that costs quality.
+ * Bring an oversized image under both caps, or answer null when this machine
+ * has nothing to do it with. Two passes at most: the second only runs when
+ * scaling alone was not enough, and it is the one that costs quality.
+ *
+ * The result is *measured* rather than assumed. The four tools take four
+ * different ways of saying "fit inside this square" and one of them bounded
+ * the width alone for a year, which left a portrait photograph small enough
+ * to send and still too tall for the API to read. A pass whose answer covey
+ * has not checked is a pass that can hand back a file the model never sees,
+ * so each one has to come back under `limit` *and* under `MAX_IMAGE_EDGE`.
  */
 export function shrinkImage(path: string, limit = MAX_IMAGE_BYTES): { path: string; mimeType: string } | null {
   for (const s of SHRINKERS) {
@@ -489,7 +511,8 @@ export function shrinkImage(path: string, limit = MAX_IMAGE_BYTES): { path: stri
       if (r.error || r.status !== 0) break; // this tool is not here, or cannot do it: try the next
       let size: number;
       try { size = statSync(dst).size; } catch { break; }
-      if (size <= limit) return { path: dst, mimeType: "image/jpeg" };
+      const out = imageSizeOfPath(dst);
+      if (size <= limit && !overImageEdge(out?.width, out?.height)) return { path: dst, mimeType: "image/jpeg" };
     }
   }
   return null;
@@ -641,6 +664,27 @@ const runReader: RunReader = (bin, args) => {
   const r = spawnSync(bin, args, { maxBuffer: CLIPBOARD_BUFFER_BYTES });
   return { stdout: r.stdout, status: r.status, error: r.error as NodeJS.ErrnoException | undefined };
 };
+
+/**
+ * The size of an image on disk, read from its header alone.
+ *
+ * A prefix and never the file: a drop may be a 40 MB photograph, and covey
+ * wants nine numbers out of the front of it. `null` is "covey could not tell",
+ * and every caller leaves such a file alone.
+ */
+export function imageSizeOfPath(path: string): ImageSize | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const buf = Buffer.alloc(IMAGE_HEADER_BYTES);
+    const read = readSync(fd, buf, 0, IMAGE_HEADER_BYTES, 0);
+    return imageSizeOfBytes(buf.subarray(0, read));
+  } catch {
+    return null; // unreadable here is the caller's problem, not this one's
+  } finally {
+    if (fd !== undefined) try { closeSync(fd); } catch { /* already gone */ }
+  }
+}
 
 /** The first bytes of each image type the model accepts. */
 export function imageMimeOfBytes(buf: Buffer): string | null {
@@ -968,6 +1012,19 @@ function saveClipboardImage(buf: Buffer, mime: string): Attachment {
   const ext = Object.entries(IMAGE_EXT).find(([, m]) => m === mime)?.[0] ?? ".png";
   const path = join(tmpdir(), `covey-clipboard-${randomUUID()}${ext}`);
   writeFileSync(path, buf);
+  // The bytes are already under `MAX_IMAGE_BYTES` — `readImageBytes` refuses
+  // anything heavier — but a screen grab off a 5K display is wider than the
+  // API reads, and a copied screenshot is the commonest thing in this path.
+  // There is a real file here, so it shrinks exactly as a dropped one does.
+  const edges = imageSizeOfBytes(buf);
+  if (overImageEdge(edges?.width, edges?.height)) {
+    const smaller = shrinkImage(path);
+    if (smaller) {
+      const shrunk = readFileSync(smaller.path);
+      return { name: `clipboard-${stamp}.jpg`, path: smaller.path, mimeType: smaller.mimeType, data: shrunk.toString("base64") };
+    }
+    // No tool to do it: the picture still goes, as it did before this.
+  }
   return { name: `clipboard-${stamp}${ext}`, path, mimeType: mime, data: buf.toString("base64") };
 }
 

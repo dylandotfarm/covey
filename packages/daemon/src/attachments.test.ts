@@ -292,3 +292,52 @@ test("a shown file keeps the store out of git, as a dropped one does (#160)", ()
   storeShownFiles(dir, "t", [{ name: "shot.png", path: made }]);
   assert.equal(readFileSync(join(dir, ".covey", ".gitignore"), "utf8"), "*\n");
 });
+
+// ---------------------------------------------------------------------------
+// The last gate before the model reads both image limits (#236)
+// ---------------------------------------------------------------------------
+
+/** A PNG whose header says `w` by `h`, light enough to pass the byte cap. */
+function shapedPng(dir: string, name: string, w: number, h: number): string {
+  const b = Buffer.alloc(4096);
+  b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  b.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+  b.writeUInt32BE(w, 16);
+  b.writeUInt32BE(h, 20);
+  const path = join(dir, name);
+  writeFileSync(path, b);
+  return path;
+}
+
+test("a picture over MAX_IMAGE_EDGE is not shown to the model, however light it is (#236)", () => {
+  // Every client warns that the model will not see a picture it could not
+  // scale. This is the line that has to make that true — and the only gate
+  // that covers a client covey cannot update, such as a phone on an older APK.
+  const dir = mkdtempSync(join(tmpdir(), "covey-edge-"));
+  for (const [name, w, h] of [["wide.png", 4096, 3072], ["tall.png", 1200, 4000]] as const) {
+    const path = shapedPng(dir, name, w, h);
+    const { blocks, noteLines } = attachmentBlocks([{ name, path, mimeType: "image/png" }]);
+    assert.deepEqual(blocks, [], `${name} must not reach the model as an image`);
+    assert.match(noteLines[0]!, /^Attached file:/, "the agent is told it is a file");
+    assert.match(noteLines[0]!, /over 3000 px on a side/, "and why, rather than one word for four problems (#132)");
+  }
+});
+
+test("a picture inside both limits still reaches the model as an image", () => {
+  const dir = mkdtempSync(join(tmpdir(), "covey-edge-"));
+  const path = shapedPng(dir, "fine.png", 1500, 1050);
+  const { blocks, noteLines } = attachmentBlocks([{ name: "fine.png", path, mimeType: "image/png" }]);
+  assert.equal(blocks.length, 1);
+  assert.equal((blocks[0] as { type: string }).type, "image");
+  assert.match(noteLines[0]!, /^Attached image:/);
+});
+
+test("a shape the daemon cannot measure is shown, as it always was", () => {
+  // `imageSizeOfBytes` answers null for bytes it cannot read. Refusing on that
+  // would stop pictures covey has no complaint about from ever being seen.
+  const dir = mkdtempSync(join(tmpdir(), "covey-edge-"));
+  const path = join(dir, "odd.png");
+  writeFileSync(path, Buffer.alloc(64, 7));
+  const { blocks } = attachmentBlocks([{ name: "odd.png", path, mimeType: "image/png" }]);
+  assert.equal(blocks.length, 1, "covey scales what it measured, and refuses nothing it did not");
+});
