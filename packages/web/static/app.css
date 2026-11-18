@@ -45,6 +45,9 @@ a { color: var(--accent); }
 .project-row .chevron { width: 14px; color: var(--subtle); }
 .project-row .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .project-row .title .homes { color: var(--faint); text-transform: none; letter-spacing: 0; font-size: 12px; }
+/* The fleet the row's machines are in, painted only when there is more than
+   one. A fleet name is what a reader typed, so it keeps its own case. */
+.project-row .title .fleet { color: var(--accent); text-transform: none; letter-spacing: 0; font-size: 12px; }
 /* The base branch of the project. Never uppercased: a branch name is what
    git stores, and `Main` is not `main`. */
 .project-row .title .base { color: var(--subtle); text-transform: none; letter-spacing: 0; font-size: 12px; }

@@ -37,7 +37,7 @@ import {
   setPendingAttachments, syncAttachments, type MachineSlot, type SheetTarget, type State, type View,
 } from "@covey/web";
 import { attachingLabel, readConfirmed, readPicked, sendingLabel, type PickedFile } from "@covey/web/attach";
-import { forgetMachine, readLod, readMachines, readNotifyWanted, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveNotifyWanted, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
+import { forgetMachine, readLod, readMachines, readNotifyWanted, readShowHidden, readTalk, readToken, saveLod, saveMachine, saveMachineFleet, saveNotifyWanted, saveShowHidden, saveTalk, type SavedMachine } from "./machines";
 import { asTalk, DEFAULT_TALK, type TalkMode } from "./talk";
 import { shrinkOnDevice, uploadFromDevice } from "./attach";
 import { primeUpdateToken } from "./ota";
@@ -209,7 +209,13 @@ class Store {
       // The first machine is the primary: it is the one asked for the fleet.
       // The page's primary is whichever served it; here it is whichever the
       // reader added first, and nothing else turns on the choice.
-      this.dial(addMachine(this.state, m.url, m.name, i === 0, token), token);
+      const slot = addMachine(this.state, m.url, m.name, i === 0, token);
+      // The fleet this machine last said it was in, so a machine that is
+      // asleep is in its own fleet from the first frame rather than in the
+      // default one until it answers. `machineFleet` prefers the machine's
+      // own word the moment there is one.
+      slot.fleet = m.fleet;
+      this.dial(slot, token);
     }
     this.loaded = true;
     this.schedule();
@@ -260,6 +266,7 @@ class Store {
       },
       shellSnapshot: (snap) => {
         applyShellSnapshot(slot, snap);
+        this.settleFleet(slot);
         // Nothing in a snapshot is news. It is every thread the machine has, so
         // a first connection or a reconnect after a sleep would otherwise
         // announce an hour of history the list already shows. Seeding the
@@ -269,6 +276,7 @@ class Store {
       },
       shellEvent: (ev) => {
         applyShellEvent(this.state, slot, ev);
+        if (ev.kind === "machine.updated") this.settleFleet(slot);
         if (ev.kind === "thread.upserted") this.tell(slot, ev.thread);
         if (ev.kind === "thread.removed") this.seen.delete(composerKey(slot.key, ev.threadId));
         this.schedule();
@@ -324,6 +332,24 @@ class Store {
     try { key = new URL(m.url).toString().replace(/\/$/, ""); } catch { return; }
     if (this.state.machines.has(key)) return;
     this.dial(addMachine(this.state, key, m.name, false, m.token), m.token);
+  }
+
+  /**
+   * Keep this device's record of a machine's fleet in step with the machine.
+   *
+   * The machine declares its own fleet and covey never writes it from here —
+   * this only *remembers* what the machine said, so the next launch puts it in
+   * its own fleet while it is still asleep. `applyShellSnapshot` has already
+   * put the answer on the slot; what is left is the disk.
+   *
+   * A machine a person did not type in is not written: the peers come from the
+   * TUI's own list, which changes, and a copy here would go stale.
+   */
+  private settleFleet(slot: MachineSlot): void {
+    const saved = this.saved.find((x) => x.url === slot.key);
+    if (!saved || saved.fleet === slot.fleet) return;
+    if (slot.fleet) saved.fleet = slot.fleet; else delete saved.fleet;
+    void saveMachineFleet(slot.key, slot.fleet);
   }
 
   // ---- machines a person added -------------------------------------------

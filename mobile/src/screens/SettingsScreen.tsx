@@ -17,7 +17,7 @@ import { Alert, RefreshControl, ScrollView, Switch, Text, View } from "react-nat
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { LOD_LABEL, LOD_ORDER, type Lod } from "@covey/protocol";
 import { hiddenPanel } from "@covey/client";
-import { allThreads, bindLabel, relTime, updateLabel } from "@covey/web";
+import { allThreads, bindLabel, fleetsOf, machineFleet, relTime, updateLabel } from "@covey/web";
 import { store } from "../store";
 import { Icon, iconFontFailure } from "../Icon";
 import { useStore } from "../useStore";
@@ -51,6 +51,9 @@ export function SettingsScreen({ navigation }: Props) {
   const [ready, setReady] = useState(false);
   const [otaWord, setOtaWord] = useState<string | null>(null);
   const hidden = hiddenPanel(allThreads(s), s.showHidden);
+  // A machine says which fleet it is in, and the word is worth a reader's
+  // screen only when there is more than one (#205).
+  const showFleet = fleetsOf(s).length > 1;
   const notes = notifyPanel(store.notify, store.notesAllowed, notesAvailable);
 
   useEffect(() => {
@@ -227,10 +230,14 @@ export function SettingsScreen({ navigation }: Props) {
         <AppBuildRow />
 
         <SectionTitle text="Machines" />
+        {/* Which fleet a machine is in, and only when there is more than one
+            (#205): it is what says why the home screen has two lists and
+            which of them this machine's projects are in. Read-only here — a
+            machine declares its own fleet, and the TUI is where one moves. */}
         {[...s.machines.values()].map((m) => {
-          // Only what a person typed can be forgotten. A fleet member came from
-          // the TUI's list and forgetting it here would mean nothing: the next
-          // `machine.access` would bring it straight back.
+          // Only what a person typed can be forgotten. A machine covey learned
+          // from another machine's peer list and forgetting it here would mean
+          // nothing: the next `machine.access` would bring it straight back.
           const added = store.saved.some((x) => x.url === m.key);
           return (
             <View key={m.key} style={S.card}>
@@ -243,7 +250,8 @@ export function SettingsScreen({ navigation }: Props) {
                   <Text style={[S.title, { fontWeight: "600" }]} numberOfLines={1}>{m.name}</Text>
                   <Text style={S.subtle} numberOfLines={1}>
                     {m.key}
-                    {m.primary ? " · asked for the fleet" : added ? "" : " · from the fleet"}
+                    {showFleet ? ` · ${machineFleet(m)}` : ""}
+                    {m.primary ? " · asked for the peers" : added ? "" : " · from the peer list"}
                   </Text>
                   {m.connError ? <Text style={{ color: T.danger, fontSize: SIZE.small }}>{m.connError}</Text> : null}
                   {m.info?.settings.bind ? <Text style={S.subtle}>{bindLabel(m.info.settings.bind)}</Text> : null}

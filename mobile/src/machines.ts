@@ -23,6 +23,17 @@ export interface SavedMachine {
   /** The `ws://host:port` this device dials. */
   url: string;
   name: string;
+  /**
+   * The fleet this machine last said it was in, absent for the default one.
+   *
+   * A cache and nothing else: the machine declares its own fleet, and covey
+   * reads the machine's answer whenever it has one. This is what holds a
+   * machine that is away in its own fleet across a launch, instead of
+   * dropping its work into the default fleet's list until it answers — which
+   * on a phone is most of the day. The TUI keeps the same field for the same
+   * reason.
+   */
+  fleet?: string;
 }
 
 const LIST_KEY = "covey.machines";
@@ -50,9 +61,13 @@ export async function readMachines(): Promise<SavedMachine[]> {
     const list = JSON.parse(raw) as unknown;
     if (!Array.isArray(list)) return [];
     // Anything a newer build wrote that this one cannot read is dropped rather
-    // than crashing the launch: the reader can add the machine again.
-    return list.filter((m): m is SavedMachine =>
-      typeof m === "object" && m !== null && typeof (m as SavedMachine).url === "string" && typeof (m as SavedMachine).name === "string");
+    // than crashing the launch: the reader can add the machine again. Each
+    // field is taken one at a time for the same reason — a fleet name that is
+    // not a string would reach `fleetOf` and throw where nothing catches.
+    return (list as Partial<SavedMachine>[]).flatMap((m) => {
+      if (typeof m?.url !== "string" || typeof m.name !== "string") return [];
+      return [{ url: m.url, name: m.name, ...(typeof m.fleet === "string" ? { fleet: m.fleet } : {}) }];
+    });
   } catch {
     return [];
   }
@@ -71,6 +86,23 @@ export async function saveMachine(m: SavedMachine, token: string | undefined): P
   await AsyncStorage.setItem(LIST_KEY, JSON.stringify(list));
   if (token) await SecureStore.setItemAsync(tokenKey(m.url), token);
   else await SecureStore.deleteItemAsync(tokenKey(m.url)).catch(() => {});
+}
+
+/**
+ * Remember the fleet a machine says it is in, or forget it for the default
+ * one. A machine this device has not saved is not written: the peers come from
+ * the fleet list and the TUI owns that.
+ *
+ * Its own writer rather than `saveMachine`, which takes the token away when it
+ * is handed none — this is covey keeping its own record in step, and nothing a
+ * reader typed goes with it.
+ */
+export async function saveMachineFleet(url: string, fleet: string | undefined): Promise<void> {
+  const list = await readMachines();
+  const m = list.find((x) => x.url === url);
+  if (!m) return;
+  if (fleet) m.fleet = fleet; else delete m.fleet;
+  await AsyncStorage.setItem(LIST_KEY, JSON.stringify(list)).catch(() => {});
 }
 
 /** Forget a machine, and the token with it — never the address alone. */

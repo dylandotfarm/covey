@@ -18,6 +18,7 @@ import { T } from "./theme";
 import type { Routes } from "./nav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ListScreen } from "./screens/ListScreen";
+import { ProjectsScreen } from "./screens/ProjectsScreen";
 import { ThreadScreen } from "./screens/ThreadScreen";
 import { ItemScreen } from "./screens/ItemScreen";
 import { MediaScreen } from "./screens/MediaScreen";
@@ -99,6 +100,14 @@ export function App() {
             }}
           >
             <Stack.Screen name="List" component={ListScreen} options={{ title: "covey" }} />
+            {/* The fleet's own name is the title: the reader tapped it, and it
+                is the one word that says which half of their machines this
+                list is (#205). */}
+            <Stack.Screen
+              name="Projects"
+              component={ProjectsScreen}
+              options={({ route }) => ({ title: route.params.fleet })}
+            />
             <Stack.Screen name="Thread" component={ThreadScreen} options={{ title: "" }} />
             <Stack.Screen name="Item" component={ItemScreen} options={{ title: "" }} />
             <Stack.Screen name="Settings" component={SettingsScreen} options={{ title: "Settings" }} />

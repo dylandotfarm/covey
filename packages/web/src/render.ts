@@ -13,7 +13,7 @@ import { LOD_LABEL, LOD_ORDER, questionAnswers, questionAsks, threadIsBusy, type
 import { commandMenuFor, stepRow, type CommandMenu } from "./commandMenu.js";
 import { clear, h, type Child } from "./dom.js";
 import { markdownToHtml } from "./markdown.js";
-import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, allThreads, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
+import { addressLink, attachmentRows, bindLabel, rowSignature, viewRows, checksLabel, connectionSummary, findRefs, fleetsOf, allThreads, holderOf, isCurrentAddress, itemActions, itemStateLabel, mediaSrc, openHomes, orderedItems, pendingAttachments, primaryMachine, projectRows, relTime, sheetChoices, sheetKey, sheetNote, sheetRows, sheetTitle, threadFileSrc, threadRefs, threadStatusLabel, threadTone, updateLabel, type ItemView, type MachineSlot, type ProjectRow, type SheetTarget, type State, type ThreadRef, type View } from "./state.js";
 import type { ChainRow, TimelineRow } from "@covey/client";
 
 export interface Actions {
@@ -500,6 +500,11 @@ export class Renderer {
       return;
     }
     const showMachine = s.machines.size > 1;
+    // A fleet is a real line, so the same repository cloned at work and at
+    // home is two rows here (#205). The page has no fleet screen the way the
+    // app does, so the fleet is a word on the row instead — without it the
+    // two rows differ only by the machines under them.
+    const showFleet = fleetsOf(s).length > 1;
     for (const row of rows) {
       const folded = s.folded.has(row.key);
       const count = row.waiting > 0 ? h("span", { class: "count waiting" }, String(row.waiting)) : row.active > 0 ? h("span", { class: "count busy" }, String(row.active)) : null;
@@ -511,6 +516,7 @@ export class Renderer {
           // repository differ only in the base, and the reader has to see
           // whether this thread starts from `main` or from a feature branch.
           h("span", { class: "title" }, row.title,
+            showFleet ? h("small", { class: "fleet" }, ` ${row.fleet}`) : null,
             row.base ? h("small", { class: "base" }, ` · ${row.base}`) : null,
             showMachine && row.homes.length ? h("small", { class: "homes" }, ` ${row.homes.map((x) => x.machineName).join(" · ")}`) : null),
           count,
