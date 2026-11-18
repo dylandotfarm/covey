@@ -24,7 +24,7 @@ import { ChainTracker, summariseActivity } from "./activity.js";
 import { ThreadTerminal, TerminalError } from "./terminal.js";
 import { summariseReply } from "./digest.js";
 import { isAuthFailure, credentialStamp } from "./auth.js";
-import { isUsageLimit, planUsageLimit, usageLimitNote, USAGE_LIMIT_MAX_ROUNDS } from "./usageLimit.js";
+import { isUsageLimit, planUsageLimit, usageLimitNote, withoutReset, USAGE_LIMIT_MAX_ROUNDS } from "./usageLimit.js";
 import type { ClaudeModels } from "./models.js";
 import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashCommandInfo, PathEntry, TurnUsage, UsageGroupBy, UsageQuery, UsageReport, RunIssue, RunPullRequest, AuditFinding, GateVerdict, MemberDiff, MergeParty, QueueEntryWire, QueuePosition, RegressionEvidence, RunMemberRef, RunMemberState, PullRequestWatch, WatchState, WatchRole, MergePolicy, MergeMethod, GitHubAction, GitHubItem, ReviewRequirement, ReviewerRecord, ReviewerState } from "@covey/protocol";
 import { reviewStanding } from "@covey/protocol";
@@ -3736,7 +3736,7 @@ export class Engine {
       // of waits rather than for the one that just ran out.
       t.usageLimit = null;
       this.opts.log?.(`usage limit gave up thread=${t.id.slice(0, 8)} rounds=${USAGE_LIMIT_MAX_ROUNDS}`);
-      this.note(t.id, "warning", `${message} Covey waited for this limit ${USAGE_LIMIT_MAX_ROUNDS} times and the work is still refused, so it stops here. Write to the thread to try again.`);
+      this.note(t.id, "warning", `${withoutReset(message)} Covey waited for this limit ${USAGE_LIMIT_MAX_ROUNDS} times and the work is still refused, so it stops here. Write to the thread to try again.`);
       return false;
     }
     if (plan.resetsAt !== null) this.limitResetsAt = plan.resetsAt;
@@ -3826,7 +3826,9 @@ export class Engine {
    */
   private strandedLimit(threadId: string, limit: ThreadUsageLimit) {
     this.opts.log?.(`usage limit stranded thread=${threadId.slice(0, 8)} round=${limit.round}`);
-    this.note(threadId, "warning", `${limit.message} The limit has reset, but covey has no turn to send again — nothing a message asked for was left unfinished. Write to the thread to go on.`);
+    // `withoutReset` for every note's reason, and this one most of all: the
+    // reset has already passed, so the hour the refusal named is a moment gone.
+    this.note(threadId, "warning", `${withoutReset(limit.message)} The limit has reset, but covey has no turn to send again — nothing a message asked for was left unfinished. Write to the thread to go on.`);
     const t = this.db.getThread(threadId);
     if (!t) return;
     t.status = "error";

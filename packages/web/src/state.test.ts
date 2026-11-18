@@ -862,7 +862,9 @@ test("a thread held on the usage limit says so, and never reads as a failure", (
     firedAt: null, round: 1, ...over,
   });
   const held = { ...thread("t", "p1"), latestTurn: died, lastError: "You've hit your session limit · resets 12:10am (UTC)", usageLimit: usageLimit() };
-  assert.equal(threadStatusLabel(held), "session limit · covey retries in 8h");
+  // The reset is a clock on the device's own zone, never the daemon's, and the
+  // retry is a span: `limitLine` holds the words and `limit.test.ts` the zones.
+  assert.match(threadStatusLabel(held), /^session limit · resets .+ · covey retries in 8h$/);
   assert.equal(threadTone(held), "timer");
   // Once covey has sent the work again the row is an ordinary one, and a
   // failure covey has given up on is a failure again.

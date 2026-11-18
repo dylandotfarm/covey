@@ -1199,11 +1199,16 @@ export interface ThreadUsageLimit {
    * When the limit resets, read out of the message, or null when covey could
    * not read one and is backing off instead.
    *
-   * The two are told apart on purpose. A time covey read is a fact it can put
-   * in the note it writes — "the limit resets at 00:10 UTC" — and a time covey
-   * guessed is not, so that note says it could not read one. The row's own
-   * line (`limitLine`) says how long is left either way, because a wait is the
-   * thing a reader acts on and needs no timezone beside it.
+   * The two are told apart on purpose. A time covey read is a fact a client
+   * can paint as a clock (`limitResetLabel`), and a time covey guessed is not,
+   * so the row says the wait alone and the note says it could not read one.
+   *
+   * It is an instant and never the words Claude Code wrote, which is what lets
+   * each client paint it **in its own zone**. The refusal names the daemon's
+   * zone — `resets 3:50am (UTC)` from a server — and the reader is very often
+   * on a phone somewhere else, so a clock copied out of the message is a sum
+   * they have to do. The daemon's note names no clock for the same reason: it
+   * is written once, on one machine, and read somewhere else.
    */
   resetsAt: string | null;
   /**
