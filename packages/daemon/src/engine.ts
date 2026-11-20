@@ -2409,12 +2409,13 @@ export class Engine {
   private saveWatch(t: Thread, comments: readonly CommentEntry[], emit: boolean): void {
     const fresh = this.db.getThread(t.id);
     const w = t.watch;
-    if (!fresh || !w) return;
     // `recordPoll`'s guard, for the write rather than for the read: the row may
     // have been handed another pull request while the poll ran, and a watch
-    // this poll is about to end must not land on top of that one.
-    if (fresh.watch && fresh.watch.number !== w.number) return;
-    const mine = fresh.watch?.review;
+    // this poll is about to end must not land on top of that one. A row with no
+    // watch at all is the same answer — this poll no longer describes it — so
+    // it is refused here rather than given its watch back.
+    if (!fresh?.watch || !w || fresh.watch.number !== w.number) return;
+    const mine = fresh.watch.review;
     fresh.watch = w.role === "reviewer" || mine === undefined
       ? w
       : { ...w, review: reconcileReview(mine, comments) ?? mine };

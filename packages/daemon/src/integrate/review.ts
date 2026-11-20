@@ -134,10 +134,17 @@ export function reviewGate(review: ReviewRequirement | null | undefined): { read
 /**
  * A reviewer's last word, short enough for a row on a panel.
  *
- * Here rather than beside the engine's other helpers because
- * `reconcileReview` reads the same line back off the pull request. Two ways of
- * shortening one sentence is a seat whose note changes every time covey looks
- * at it.
+ * Here rather than beside the engine's other helpers because `reconcileReview`
+ * shortens the same sentence, and two ways of cutting one line is a note that
+ * reads differently depending on which path wrote it.
+ *
+ * What the two paths are *given* still differs, and this cannot fix that:
+ * `recordVerdict` has the body the reviewer wrote, and a repair has the body
+ * GitHub holds, which `postComment` put through `unwrapMarkdown` first. So a
+ * reviewer who wrapped its first paragraph gets its first wrapped line from the
+ * one and the joined paragraph from the other. It costs a reader nothing and it
+ * settles after one write, because `decidedAt` then matches the comment and
+ * nothing reads it again.
  */
 export function firstLine(body: string): string | null {
   const line = body.trim().split("\n").map((l) => l.trim()).find(Boolean);
