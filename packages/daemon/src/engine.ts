@@ -30,7 +30,7 @@ import type { Attachment, PullRequestAttachment, TurnDiff, ProjectGit, SlashComm
 import { reviewStanding } from "@covey/protocol";
 import { readIssues, pullRequestFor } from "./gh.js";
 import { cloneUrlsFor, GH_CWD } from "./repos.js";
-import { realGhHost, UploadRefused, type GhHost, type RealHostOptions } from "./integrate/gh.js";
+import { realGhHost, UploadRefused, type CommentEntry, type GhHost, type RealHostOptions } from "./integrate/gh.js";
 import { AttachError, describeUploadFailure, placeAttachments, planAttachments, type UploadedAttachment } from "./integrate/attach.js";
 import { gateMember } from "./integrate/gate.js";
 import { buildQueue } from "./integrate/queue.js";
@@ -38,7 +38,7 @@ import { findingFor } from "./integrate/audit.js";
 import { mergeMember } from "./integrate/merge.js";
 import { unwrapMarkdown } from "./integrate/reflow.js";
 import { news, emptyCursor, describeNews, describeArchive, asksForWork, endsWatch, splitForBudget, mergeReadiness, pollDelayMs, WATCH_MAX_MS, DEFAULT_MAX_ROUNDS, type WatchEvent } from "./integrate/news.js";
-import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
+import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, firstLine, reconcileReview, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 import { signComment } from "./integrate/sign.js";
 import { timerNote, timerNoteText, timerTurn } from "./timer.js";
 import { limitLeftLabel, timerLabel } from "@covey/client";
@@ -2158,7 +2158,7 @@ export class Engine {
       if (nowMs - Date.parse(w.startedAt) >= WATCH_MAX_MS) {
         const hours = Math.round(WATCH_MAX_MS / 3_600_000);
         this.endWatch(t, "blocked", `The watch ran for ${hours} hours without a merge or a close. A person has to look at the pull request.`);
-        this.putThreadAndEmit(t);
+        this.saveWatch(t, [], true);
         return;
       }
       const host = this.hostFor({ cwd: t.worktreePath ?? p.workspaceRoot });
@@ -2175,11 +2175,6 @@ export class Engine {
         this.recordPoll(t.id, w.number, (x) => { x.error = `pull request #${w.number} could not be read; gh may be logged out on this machine`; x.quiet++; }, nowIso);
         return;
       }
-      // The read took a while. The watch may have ended, or been replaced,
-      // while it ran, and a stale answer must not be delivered on top.
-      const fresh = this.db.getThread(t.id);
-      const live = fresh?.watch;
-      if (!fresh || !live || live.state !== "watching" || live.number !== w.number) return;
       // The base head, under either policy. Under `auto` staleness stands
       // between the thread and its merge. Under `manual` the readiness on the
       // row (#172) is nonsense without it: `isStale` refuses on doubt, so an
@@ -2187,8 +2182,29 @@ export class Engine {
       // said "6 checks started before the base head is unknown" about a branch
       // that was ready. One `gh` call per poll, and polls are 30 seconds apart
       // at their fastest.
+      //
+      // It is read here and not below, with the last of the reads rather than
+      // the first of the decisions, because everything after this works from
+      // the row: a `gh` read with the row in hand is a window for every other
+      // writer of it, and a reviewer signing off in that window is #237.
       const base = facts.state === "OPEN" ? await host.baseHead(facts.baseRefName).catch(() => null) : null;
+      // The reads took a while. The watch may have ended, or been replaced,
+      // while they ran, and a stale answer must not be delivered on top.
+      const fresh = this.db.getThread(t.id);
+      const live = fresh?.watch;
+      if (!fresh || !live || live.state !== "watching" || live.number !== w.number) return;
       const role: WatchRole = live.role === "reviewer" ? "reviewer" : "author";
+      // The pull request is the second copy of the review, and the fresher one
+      // whenever a write to this row was lost. It is repaired before the gate
+      // reads it, so a sign-off already on GitHub does not block the merge for
+      // one more poll. The comments are in hand, so this costs no call.
+      if (role === "author") {
+        const repaired = reconcileReview(live.review, facts.comments);
+        if (repaired) {
+          live.review = repaired;
+          this.opts.log?.(`watch repaired the review thread=${fresh.id.slice(0, 8)} pr=#${live.number} from the pull request`);
+        }
+      }
       const { events, cursor } = news(facts, lineComments, live.cursor, nowIso, { merge: live.merge, base, role, review: live.review, self: fresh.id });
       live.cursor = cursor;
       live.polledAt = nowIso;
@@ -2226,7 +2242,7 @@ export class Engine {
           this.opts.log?.(`watch holds the merge thread=${fresh.id.slice(0, 8)} pr=#${live.number}: a turn is running`);
         }
       }
-      if (events.length === 0) { this.db.putThread(fresh); return; }
+      if (events.length === 0) { this.saveWatch(fresh, facts.comments, false); return; }
 
       const ctx = {
         branch: fresh.pullRequest?.branch ?? fresh.reviewOf?.branch ?? fresh.branch ?? "",
@@ -2244,7 +2260,7 @@ export class Engine {
       if (merged && this.machine.settings.archiveOnMerge !== false) {
         this.endWatch(fresh, "merged", this.watchEndReason(merged));
         this.note(fresh.id, "info", describeArchive(facts, events, ctx));
-        this.putThreadAndEmit(fresh);
+        this.saveWatch(fresh, facts.comments, true);
         if (role === "reviewer") this.markReviewerOver(fresh, "the pull request was merged");
         this.opts.log?.(`watch merged thread=${fresh.id.slice(0, 8)} pr=#${w.number}; archived the thread`);
         await this.archiveWhenIdle(fresh.id);
@@ -2274,7 +2290,7 @@ export class Engine {
         if (role === "reviewer") {
           this.note(fresh.id, "warning", describeNews(facts, events, { ...ctx, spent: true }));
           this.endWatch(fresh, "blocked", `The author pushed ${live.maxRounds} time${live.maxRounds === 1 ? "" : "s"} and this review has not signed off. A person has to read the change.`);
-          this.putThreadAndEmit(fresh);
+          this.saveWatch(fresh, facts.comments, true);
           await this.dropReviewer(fresh, "its own watch ran out of rounds");
           return;
         }
@@ -2292,14 +2308,14 @@ export class Engine {
       }
       // Nothing survived the split: the whole batch was work. The cursor still
       // has to be kept, or the same news comes round again on the next poll.
-      if (batch.length === 0) { this.putThreadAndEmit(fresh); return; }
+      if (batch.length === 0) { this.saveWatch(fresh, facts.comments, true); return; }
       // A round is budget for work still to come, and a pull request that is
       // over has none.
       if (!end && batch.some((e) => asksForWork(e, role))) live.rounds++;
       ctx.rounds = live.rounds;
       const text = describeNews(facts, batch, ctx);
       if (end) this.endWatch(fresh, end.kind, this.watchEndReason(end));
-      this.putThreadAndEmit(fresh);
+      this.saveWatch(fresh, facts.comments, true);
       // The pull request is over, so the reviewer's seat is too. The author is
       // not told: it is reading the same merge on its own watch.
       if (end && role === "reviewer") this.markReviewerOver(fresh, end.kind === "closed" ? "the pull request was closed" : "the pull request was merged");
@@ -2371,6 +2387,40 @@ export class Engine {
     this.archivePending.delete(threadId);
     await this.dispatch({ commandId: randomUUID(), type: "thread.archive", threadId, archived: true })
       .catch((e: any) => this.note(threadId, "warning", `Could not archive this thread: ${e?.message ?? String(e)}`));
+  }
+
+  /**
+   * Write what a poll worked out, onto the row as it is now.
+   *
+   * A poll holds its thread across a `gh` read that takes a second or more,
+   * and the daemon goes on writing that row while the read runs: a reviewer
+   * signs off, a timer is set, a usage limit is armed, a title lands. A write
+   * of the whole row puts covey's own copy of all of it back. The one that
+   * cost a reader a merge was the verdict (#237) — the sign-off was already on
+   * the pull request and behind the watch's cursor, so nothing read it again
+   * and the pull request waited for a review that had signed off.
+   *
+   * A poll owns its watch and nothing else, so that is all it writes.
+   * `review` is not the poll's either: it is the author's record of what its
+   * reviewers decided, and only `reviewDecide` and `reconcileReview` move it.
+   * So the row's own review stands, with whatever the pull request said about
+   * it laid back over the top — the one direction that can only add.
+   */
+  private saveWatch(t: Thread, comments: readonly CommentEntry[], emit: boolean): void {
+    const fresh = this.db.getThread(t.id);
+    const w = t.watch;
+    // `recordPoll`'s guard, for the write rather than for the read: the row may
+    // have been handed another pull request while the poll ran, and a watch
+    // this poll is about to end must not land on top of that one. A row with no
+    // watch at all is the same answer — this poll no longer describes it — so
+    // it is refused here rather than given its watch back.
+    if (!fresh?.watch || !w || fresh.watch.number !== w.number) return;
+    const mine = fresh.watch.review;
+    fresh.watch = w.role === "reviewer" || mine === undefined
+      ? w
+      : { ...w, review: reconcileReview(mine, comments) ?? mine };
+    if (emit) this.putThreadAndEmit(fresh);
+    else this.db.putThread(fresh);
   }
 
   /** Store what a poll found out about itself, on the row as it is now. */
@@ -4226,13 +4276,6 @@ function reviewCount(v: number | undefined): number {
   if (v === undefined) return DEFAULT_REVIEWS;
   if (!Number.isFinite(v)) return DEFAULT_REVIEWS;
   return Math.min(MAX_REVIEWS, Math.max(0, Math.floor(v)));
-}
-
-/** A reviewer's last word, short enough for a row on a panel. */
-function firstLine(body: string): string | null {
-  const line = body.trim().split("\n").map((l) => l.trim()).find(Boolean);
-  if (!line) return null;
-  return line.length > 120 ? `${line.slice(0, 117)}...` : line;
 }
 
 function mergeMethodOf(v: unknown, fallback: MergeMethod): MergeMethod {

@@ -66,6 +66,7 @@ function setup() {
     db, dir, host, cli,
     get engine() { return engine; },
     advance: (ms: number) => { clock += ms; },
+    now: () => clock,
     newThread(id: string) { db.putThread(thread(id)); return id; },
     command(cmd: Record<string, unknown>) { return engine.dispatch({ commandId: randomUUID(), ...cmd } as never); },
     /** Open a pull request, with one reviewer unless the case says otherwise. */
@@ -775,4 +776,118 @@ test("the restart repair leaves a reviewer that is still reading", async (t) => 
   await engine.sweepFinishedReviewers();
   await settle();
   assert.equal(s.db.getThread(opened.reviewers[0]!)!.archivedAt, null, "it has not decided, so it has work");
+});
+
+// ---- the record and the pull request, when they disagree (#237) -------------
+//
+// The seat is covey's record and the comment is the artefact, and `reviewDecide`
+// writes them a moment apart. A poll that held the author's row across its `gh`
+// read put the old verdict back over a sign-off, and nothing read the sign-off
+// again: the comment was already behind the cursor, so the merge waited for a
+// review that had signed off.
+
+test("a verdict written while a poll reads GitHub is not put back by that poll", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  await settle();
+  const reviewer = s.reviewThreads()[0]!;
+  await s.engine.reviewDecide({ threadId: reviewer.id, verdict: "changes", body: "One item holds this up." });
+  await settle();
+  assert.equal(s.reviewers("t1")[0]!.state, "changesRequested");
+
+  // Only the author's watch is due, so the window under test is the one that
+  // holds the author's row.
+  s.advance(POLL_MAX_MS);
+  const rt = s.thread(reviewer.id);
+  rt.watch!.polledAt = new Date(s.now()).toISOString();
+  s.db.putThread(rt);
+
+  // The reviewer signs off inside the poll's own `gh` read, which is where the
+  // 35 seconds between a sign-off and the next push put it.
+  const base = s.host.baseHead;
+  s.host.baseHead = async (ref: string) => {
+    s.host.baseHead = base;
+    await s.engine.reviewDecide({ threadId: reviewer.id, verdict: "approve", body: "2f34ff8 fixes the blocking item." });
+    await s.command({ type: "thread.rename", threadId: "t1", title: "renamed in the window" });
+    return base(ref);
+  };
+  await s.engine.pollWatches();
+  await settle();
+
+  const seat = s.reviewers("t1")[0]!;
+  assert.equal(seat.state, "signedOff", "the sign-off stands");
+  assert.equal(seat.note, "2f34ff8 fixes the blocking item.");
+  // The verdict is only the one that cost a merge. A poll writes its watch and
+  // nothing else, so every other write of that window stands too.
+  assert.equal(s.thread("t1").title, "renamed in the window");
+  assert.deepEqual(s.thread("t1").watch!.readiness, { ready: true });
+});
+
+test("a poll writes its watch and nothing else, so the merge it makes undoes no write beside it", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1", { merge: "auto" });
+  await settle();
+  const reviewer = s.reviewThreads()[0]!;
+  await s.engine.reviewDecide({ threadId: reviewer.id, verdict: "approve", body: "Nothing holds it up." });
+  await settle();
+
+  // The merge is the one `gh` call left that runs with the row in hand.
+  const merge = s.host.mergePullRequest!;
+  s.host.mergePullRequest = async (number: number, method: never) => {
+    s.host.mergePullRequest = merge;
+    await s.command({ type: "thread.rename", threadId: "t1", title: "renamed under the merge" });
+    return merge(number, method);
+  };
+  await s.poll();
+
+  assert.equal(s.thread("t1").watch!.state, "merged");
+  assert.equal(s.thread("t1").title, "renamed under the merge");
+});
+
+test("a seat that lost the write is repaired from the comment on the pull request", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  await settle();
+  const reviewer = s.reviewThreads()[0]!;
+  await s.engine.reviewDecide({ threadId: reviewer.id, verdict: "approve", body: "Nothing holds it up." });
+  await settle();
+
+  // The row as #237 left it: the sign-off is on the pull request, and the seat
+  // still says what the reviewer asked for before it.
+  const author = s.thread("t1");
+  author.watch!.review!.reviewers[0] = {
+    ...author.watch!.review!.reviewers[0]!,
+    state: "changesRequested", note: "One item holds this up.", decidedAt: "2026-09-01T00:00:00Z",
+  };
+  s.db.putThread(author);
+  assert.equal(s.thread("t1").watch!.readiness?.ready, undefined);
+
+  await s.poll();
+
+  const seat = s.reviewers("t1")[0]!;
+  assert.equal(seat.state, "signedOff");
+  assert.equal(seat.note, "Nothing holds it up.", "and the words are the ones it signed off with");
+  assert.deepEqual(s.thread("t1").watch!.readiness, { ready: true }, "so the pull request is ready again");
+});
+
+test("a comment older than the seat changes nothing", async (t) => {
+  const s = setup();
+  t.after(s.cleanup);
+  s.newThread("t1");
+  await s.open("t1");
+  await settle();
+  const reviewer = s.reviewThreads()[0]!;
+  await s.engine.reviewDecide({ threadId: reviewer.id, verdict: "changes", body: "One item holds this up." });
+  await settle();
+  const before = s.reviewers("t1")[0]!;
+  await s.poll();
+  // The fake dates every comment before the clock, so the record stands: what
+  // the daemon wrote is never undone by an older copy of itself.
+  assert.deepEqual(s.reviewers("t1")[0], before);
 });

@@ -28,7 +28,8 @@
  *    build is the author's work, already in hand, and a reviewer woken by it
  *    would spend a round of its budget on somebody else's job.
  */
-import { reviewStanding, type ReviewRequirement, type ReviewerRecord } from "@covey/protocol";
+import { reviewStanding, type ReviewRequirement, type ReviewerRecord, type ReviewerState } from "@covey/protocol";
+import { signedBy, unsign } from "./sign.js";
 
 /**
  * The words that mark a comment as a machine's.
@@ -128,6 +129,95 @@ export function reviewGate(review: ReviewRequirement | null | undefined): { read
     return { ready: false, why: `no automated review is left to sign off: ${s.dropped} of ${s.required} was dropped` };
   }
   return { ready: false, why: `${s.signedOff} of ${s.required} automated reviews have signed off` };
+}
+
+/**
+ * A reviewer's last word, short enough for a row on a panel.
+ *
+ * Here rather than beside the engine's other helpers because `reconcileReview`
+ * shortens the same sentence, and two ways of cutting one line is a note that
+ * reads differently depending on which path wrote it.
+ *
+ * What the two paths are *given* still differs, and this cannot fix that:
+ * `recordVerdict` has the body the reviewer wrote, and a repair has the body
+ * GitHub holds, which `postComment` put through `unwrapMarkdown` first. So a
+ * reviewer who wrapped its first paragraph gets its first wrapped line from the
+ * one and the joined paragraph from the other. It costs a reader nothing and it
+ * settles after one write, because `decidedAt` then matches the comment and
+ * nothing reads it again.
+ */
+export function firstLine(body: string): string | null {
+  const line = body.trim().split("\n").map((l) => l.trim()).find(Boolean);
+  if (!line) return null;
+  return line.length > 120 ? `${line.slice(0, 117)}...` : line;
+}
+
+/** One comment on the pull request, as `reconcileReview` reads it. */
+export interface ReviewComment {
+  body: string;
+  createdAt: string | null;
+}
+
+/**
+ * Put each reviewer's seat back in step with the pull request.
+ *
+ * The seat is covey's record and the comment is the artefact, and the two are
+ * written a moment apart: `reviewDecide` posts the comment, then writes the
+ * seat. So a seat that disagrees with a *later* comment from the same thread
+ * has lost a write. That is #237: a poll held the author's row across a `gh`
+ * read, a reviewer signed off inside that window, and the poll put the old
+ * verdict back. Nothing read the sign-off again, because the comment was
+ * already behind the watch's cursor, and the merge waited for a review that
+ * had signed off two hours before.
+ *
+ * Covey signs every comment it posts with the thread that wrote it
+ * (`integrate/sign.ts`) and writes the verdict into the tagline, so the pull
+ * request holds a second copy of the whole review. This reads that copy back,
+ * and the author's poll already has the comments in hand, so it costs no call.
+ *
+ * Three rules, and each of them is a way this could do harm instead:
+ *
+ *  - **Only a comment *newer* than the seat moves it.** The seat may be what
+ *    the daemon wrote a second ago and the comments are what `gh` answered a
+ *    second before that, so a verdict recorded while the read ran would be
+ *    undone by its own older copy — the same lost write in the other
+ *    direction. Newer, never merely different.
+ *  - **A `dropped` seat stands.** That thread is gone and can no longer stand
+ *    behind what it said, which is why the author was told about it; a comment
+ *    it left before it went must not hold or release a merge.
+ *  - **A comment carrying no verdict says nothing.** A reviewer may leave an
+ *    ordinary comment, and only a sign-off and a request for changes decide a
+ *    seat.
+ *
+ * @returns the review as it should stand, or null when nothing moved — so the
+ *          caller writes a row only when the pull request really disagreed.
+ */
+export function reconcileReview(review: ReviewRequirement | null | undefined, comments: readonly ReviewComment[]): ReviewRequirement | null {
+  if (!review || review.reviewers.length === 0) return null;
+  let moved = false;
+  const reviewers = review.reviewers.map((r): ReviewerRecord => {
+    if (r.state === "dropped") return r;
+    const said = lastVerdict(comments, r.threadId);
+    if (!said) return r;
+    if (r.decidedAt && Date.parse(said.at) <= Date.parse(r.decidedAt)) return r;
+    const state: ReviewerState = said.verdict === "approved" ? "signedOff" : "changesRequested";
+    if (r.state === state && r.decidedAt === said.at) return r;
+    moved = true;
+    return { ...r, state, note: firstLine(unsign(said.body)) ?? r.note, decidedAt: said.at };
+  });
+  return moved ? { required: review.required, reviewers } : null;
+}
+
+/** The last comment one thread wrote that decided anything. */
+function lastVerdict(comments: readonly ReviewComment[], threadId: string): { verdict: "approved" | "changes"; at: string; body: string } | null {
+  let out: { verdict: "approved" | "changes"; at: string; body: string } | null = null;
+  for (const c of comments) {
+    if (!c.createdAt || signedBy(c.body) !== threadId) continue;
+    const verdict = reviewVerdictOf(c.body);
+    if (verdict !== "approved" && verdict !== "changes") continue;
+    if (!out || Date.parse(c.createdAt) >= Date.parse(out.at)) out = { verdict, at: c.createdAt, body: c.body };
+  }
+  return out;
 }
 
 /** What a review thread needs to know about the pull request it reviews. */

@@ -10,7 +10,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { ReviewRequirement, ReviewerRecord } from "@covey/protocol";
 import { reviewSatisfied, reviewStanding } from "@covey/protocol";
-import { REVIEW_TAGLINE, reviewBrief, reviewGate, reviewVerdictOf, tagComment, describeDropped } from "./review.js";
+import { REVIEW_TAGLINE, reconcileReview, reviewBrief, reviewGate, reviewVerdictOf, tagComment, describeDropped } from "./review.js";
+import { signComment } from "./sign.js";
 
 function reviewer(over: Partial<ReviewerRecord> & { index: number }): ReviewerRecord {
   return {
@@ -146,4 +147,76 @@ test("a reviewer dropped when the sign-offs were already in changes nothing", ()
     review: requirement(1, reviewer({ index: 1, state: "signedOff" }), reviewer({ index: 2, state: "dropped" })),
   });
   assert.match(text, /still has the sign-offs it needs/);
+});
+
+// ---- reading the seats back off the pull request (#237) -------------------
+//
+// Covey signs every comment it posts and writes the verdict into the tagline,
+// so the pull request is a second copy of the whole review. A seat that lost a
+// write is repaired from it.
+
+/** A comment as the pull request carries it: tagged, then signed. */
+function posted(threadId: string, verdict: "approved" | "changes" | "comment", words: string, createdAt: string) {
+  return { body: signComment(tagComment(words, verdict, { index: 1, of: 1 }), threadId), createdAt };
+}
+
+test("a sign-off on the pull request repairs a seat that lost the write", () => {
+  const review = requirement(1, reviewer({ index: 1, state: "changesRequested", note: "One item holds this up.", decidedAt: "2026-11-20T21:25:12Z" }));
+  const out = reconcileReview(review, [
+    posted("thread-1", "changes", "One item holds this up.", "2026-11-20T21:25:12Z"),
+    posted("thread-1", "approved", "2f34ff8 fixes the blocking item.", "2026-11-20T21:27:15Z"),
+  ]);
+  assert.ok(out, "the pull request disagreed with the row");
+  assert.equal(out.reviewers[0]!.state, "signedOff");
+  assert.equal(out.reviewers[0]!.note, "2f34ff8 fixes the blocking item.");
+  assert.equal(out.reviewers[0]!.decidedAt, "2026-11-20T21:27:15Z");
+  assert.equal(reviewSatisfied(out), true, "and the merge gate opens");
+});
+
+test("a record that already agrees with the pull request is not rewritten", () => {
+  const review = requirement(1, reviewer({ index: 1, state: "signedOff", note: "Fine.", decidedAt: "2026-11-20T21:27:16Z" }));
+  assert.equal(reconcileReview(review, [posted("thread-1", "approved", "Fine.", "2026-11-20T21:27:15Z")]), null);
+});
+
+test("an older comment never undoes a verdict the daemon has just written", () => {
+  // The seat is what `reviewDecide` wrote a second ago and the comments are
+  // what `gh` answered a second before that. Newer, never merely different.
+  const review = requirement(1, reviewer({ index: 1, state: "signedOff", note: "Fine.", decidedAt: "2026-11-20T21:27:16Z" }));
+  assert.equal(reconcileReview(review, [posted("thread-1", "changes", "One item holds this up.", "2026-11-20T21:25:12Z")]), null);
+});
+
+test("a reviewer that never decided takes the verdict its comment carries", () => {
+  const out = reconcileReview(requirement(1, reviewer({ index: 1 })), [posted("thread-1", "changes", "Line 20 drops a row.", "2026-11-20T21:25:12Z")]);
+  assert.equal(out?.reviewers[0]!.state, "changesRequested");
+  assert.equal(out?.reviewers[0]!.decidedAt, "2026-11-20T21:25:12Z");
+});
+
+test("a dropped seat stands, whatever the thread said before it went", () => {
+  // It can no longer stand behind the words, which is why the author was told.
+  const review = requirement(1, reviewer({ index: 1, state: "dropped", note: "somebody deleted the review thread", decidedAt: "2026-11-20T21:20:00Z" }));
+  assert.equal(reconcileReview(review, [posted("thread-1", "approved", "Fine.", "2026-11-20T21:27:15Z")]), null);
+});
+
+test("an ordinary comment from a reviewer decides nothing", () => {
+  const review = requirement(1, reviewer({ index: 1, state: "changesRequested", note: "One item.", decidedAt: "2026-11-20T21:25:12Z" }));
+  assert.equal(reconcileReview(review, [posted("thread-1", "comment", "One more thought.", "2026-11-20T21:30:00Z")]), null);
+});
+
+test("a comment from another thread moves no seat", () => {
+  const review = requirement(2, reviewer({ index: 1 }), reviewer({ index: 2 }));
+  const out = reconcileReview(review, [posted("thread-2", "approved", "Fine.", "2026-11-20T21:33:53Z")]);
+  assert.equal(out?.reviewers[0]!.state, "reviewing", "reviewer 1 said nothing");
+  assert.equal(out?.reviewers[1]!.state, "signedOff");
+});
+
+test("an unsigned comment, and a comment with no date, move nothing", () => {
+  const review = requirement(1, reviewer({ index: 1 }));
+  const words = tagComment("Fine.", "approved", { index: 1, of: 1 });
+  assert.equal(reconcileReview(review, [{ body: words, createdAt: "2026-11-20T21:27:15Z" }]), null, "nobody signed it");
+  assert.equal(reconcileReview(review, [{ body: signComment(words, "thread-1"), createdAt: null }]), null, "and nothing can be compared");
+});
+
+test("a review nobody asked for is left alone", () => {
+  assert.equal(reconcileReview(null, [posted("thread-1", "approved", "Fine.", "2026-11-20T21:27:15Z")]), null);
+  assert.equal(reconcileReview(requirement(0), []), null);
 });
