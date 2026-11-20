@@ -1125,6 +1125,23 @@
   cursor is a bounded list on the row, so it covered neither a comment GitHub listed with no
   URL nor a watch stopped and started again. It stays for a comment covey posted before it
   signed them, and is never the only guard.
+  **The seat and the comment are one answer in two places, and the comment is the copy
+  that keeps.** `reviewDecide` posts the comment and *then* writes the seat, so a seat
+  that disagrees with a later signed comment from the same thread has lost a write.
+  That is #237: a poll held the author's row across its `gh` read, a reviewer signed
+  off inside that window, and the poll put the old verdict back — on a pull request
+  GitHub was happy to merge, with a sign-off nothing would ever read again, because
+  the comment was already behind the watch's cursor. So `reconcileReview` reads the
+  seats back off the pull request on every poll of an author's watch, which costs no
+  call because the comments are in hand. Three rules hold it, and each is a way it
+  could do harm instead: it moves a seat **only from a comment newer than
+  `decidedAt`**, because the seat may be what the daemon wrote a second ago and the
+  comments are what `gh` answered a second before that; a `dropped` seat stands,
+  because that thread can no longer stand behind what it said; and a comment carrying
+  no verdict decides nothing. The cause is fixed as well, twice over: every `gh` read
+  of a poll now happens **before** the row is read, because a read with the row in
+  hand is a window for every other writer of it, and `saveWatch` writes the poll's
+  *watch* onto the row as it is rather than the whole row as it was.
   The review needs no watch event of its own: it is a `mergeBlock` under the code
   `unreviewed`, so the checks verdict is keyed on it and the pass is re-delivered the moment
   the review signs off. It is the one block that is covey's refusal and not GitHub's, which
