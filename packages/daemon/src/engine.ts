@@ -41,6 +41,7 @@ import { news, emptyCursor, describeNews, describeArchive, asksForWork, endsWatc
 import { DEFAULT_REVIEWS, MAX_REVIEWS, POSTED_KEPT, describeDropped, firstLine, reconcileReview, reviewBrief, reviewGate, tagComment, type ReviewVerdict } from "./integrate/review.js";
 import { signComment } from "./integrate/sign.js";
 import { timerNote, timerNoteText, timerTurn } from "./timer.js";
+import { findThreadProcesses, processLabels, stopProcesses, stoppedNote, stoppedPreface, type ThreadProcess } from "./threadProcesses.js";
 import { limitLeftLabel, timerLabel } from "@covey/client";
 
 export class EngineError extends Error {
@@ -1018,7 +1019,12 @@ export class Engine {
         // un-archives it) puts the worktree back at the same path.
         if (cmd.archived) {
           if (t.latestTurn?.state === "running") throw new EngineError("busy", "interrupt the running turn before archiving");
+          // The list is read before the session stops, because Claude Code
+          // ends its own background tasks as it exits, and a server that went
+          // that way must still be named to the agent that started it.
+          const procs = findThreadProcesses(t.id);
           this.dropSession(t.id);
+          await this.stopThreadProcesses(t.id, procs);
           await this.releaseWorktree(t);
           // A watch on an archived thread would wake it with a turn, and
           // "I am done here" says otherwise. The record stays for the reader.
@@ -1051,7 +1057,10 @@ export class Engine {
       case "thread.delete": {
         const t = this.db.getThread(cmd.threadId);
         if (!t) return this.db.shellSeq();
+        const procs = findThreadProcesses(t.id);
         this.dropSession(t.id);
+        // Nobody is left to tell, so the processes stop with no note.
+        await stopProcesses(procs);
         this.closeTerminalsOf([t.id]);
         this.queues.delete(t.id);
         this.forgetAuthFailure(t.id);
@@ -2549,8 +2558,12 @@ export class Engine {
     // snapshot the working tree before the agent touches it
     const before = await captureCheckpoint(cwd, `${threadId}/${turnId}/before`).catch(() => null);
     this.db.putCheckpoint({ threadId, turnId, beforeTree: before, afterTree: null, cwd });
-    session.sendTurn(turnId, text, attachments);
+    // The agent cannot read the note that the archive wrote, so the first
+    // turn after it carries the same news at its head.
+    const stopped = t.stoppedProcesses?.length ? t.stoppedProcesses : null;
+    session.sendTurn(turnId, stopped ? `${stoppedPreface(stopped)}\n\n${text}` : text, attachments);
     const fresh = this.db.getThread(threadId)!;
+    if (stopped) fresh.stoppedProcesses = null;
     const firstMessage = fresh.lastMessageAt === null;
     fresh.latestTurn = { turnId, state: "running", startedAt: now, completedAt: null };
     fresh.lastMessageAt = now;
@@ -3263,6 +3276,25 @@ export class Engine {
    *  sharing the same refs, so checkpoints read the same from either. */
   private gitCwd(t: Thread, p: Project): string {
     return t.worktreePath && existsSync(t.worktreePath) ? t.worktreePath : p.workspaceRoot;
+  }
+
+  /**
+   * Stop what the thread's tool calls left running, and record it on the row
+   * and in the transcript. The note comes before the worktree note, in the
+   * order the archive did the two things.
+   */
+  private async stopThreadProcesses(threadId: string, procs: ThreadProcess[]): Promise<void> {
+    if (!procs.length) return;
+    await stopProcesses(procs);
+    // A command line holds what the shell expanded, so a secret's value can
+    // stand in it, and the row goes to every client as it is.
+    const labels = this.redact(threadId, processLabels(procs));
+    this.opts.log?.(`archive thread=${threadId.slice(0, 8)} stopped ${procs.length} process(es): ${labels.join(" | ")}`);
+    const t = this.db.getThread(threadId);
+    if (!t || !labels.length) return;
+    t.stoppedProcesses = labels;
+    this.db.putThread(t);
+    this.note(threadId, "info", stoppedNote(labels));
   }
 
   /** Remove an archived thread's worktree, and record in its transcript what

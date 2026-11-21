@@ -979,6 +979,13 @@ export interface Thread {
    */
   usageLimit?: ThreadUsageLimit | null;
   /**
+   * The commands of the processes that covey stopped when it archived this
+   * thread, or absent when it stopped none. The daemon tells the agent about
+   * them at the head of the next turn and then clears the list, because the
+   * model never reads the note that the reader sees.
+   */
+  stoppedProcesses?: string[] | null;
+  /**
    * Set on a review thread: the pull request it reviews, and the thread that
    * asked. Absent on every other thread, and on every thread written before
    * the automated review existed.
