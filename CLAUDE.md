@@ -902,7 +902,9 @@
   there is one, because it would reach what all of covey reaches). The narrowest
   choice wins when a session starts (`threadModel` in `@covey/protocol`), and a wider
   choice takes back every narrower one inside it (`model.apply`), so the choice made
-  last is the one in force. A fleet and all of covey are the same `model.apply` with
+  last is the one in force. The last row of the first screen makes *no* choice
+  (`model: null`), so the next wider choice decides — the only way back to a project's
+  model, or to Claude Code's own. A fleet and all of covey are the same `model.apply` with
   scope `machine`, sent to different machines: the daemon holds one default and the
   client draws the line, as with every other fleet rule. **The daemon never copies a
   model onto a thread** — not at `thread.create`, not for a reviewer, and not from the

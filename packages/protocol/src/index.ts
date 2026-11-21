@@ -2760,9 +2760,10 @@ export type Command =
    * threads. `machine` sets the machine's default and clears every project
    * default and every thread model on it. A fleet and the whole of covey are
    * this command sent to each of their machines; the client draws that line.
+   * `null` makes no choice at that scope, so the next wider one decides.
    */
-  | { type: "model.apply"; scope: "project"; projectId: ProjectId; model: string }
-  | { type: "model.apply"; scope: "machine"; model: string }
+  | { type: "model.apply"; scope: "project"; projectId: ProjectId; model: string | null }
+  | { type: "model.apply"; scope: "machine"; model: string | null }
   /**
    * Turn incremental text on or off for one thread. It applies to the live
    * session at once, mid-turn included, because the daemon always asks the SDK

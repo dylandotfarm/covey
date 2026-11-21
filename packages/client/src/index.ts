@@ -20,7 +20,7 @@ export { firstSentence, replyLead, threadActivity, type Activity, type ActivityS
 export { threadNews, type AttentionMark, type ThreadNews } from "./attention.js";
 export { parseTimer, timerLabel, timerLeftLabel, timerLeftMs, timerLine } from "./timer.js";
 export {
-  modelApplyNotice, modelScopeOption, modelScopeTitle, modelScopes, modelSourceLabel,
+  CLEAR_MODEL, CLEAR_MODEL_ROW, modelApplyNotice, modelScopeOption, modelScopeTitle, modelScopes, modelSourceLabel,
   type ModelHover, type ModelScope, type ScopeFacts,
 } from "./modelScope.js";
 export { limitLabel, limitLeftLabel, limitLeftMs, limitLine, limitResetLabel, limitSpanLabel } from "./limit.js";

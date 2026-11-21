@@ -13,7 +13,7 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadOnLimit, threadOnTimer, threadReviewing, type Lod,
+  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadModel, threadIsFinished, threadIsHidden, threadOnLimit, threadOnTimer, threadReviewing, type Lod,
   type AppBuildRun, type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
@@ -1085,8 +1085,8 @@ const NO_SETTINGS: MachineSettings = { defaultModel: null, defaultPermissionMode
 export function inheritedModel(s: State, sheet: SheetState): string | undefined {
   const m = sheetMachine(s, sheet);
   const t = sheetThread(s, sheet);
-  const pinned = (t && m?.projects.get(t.projectId)?.defaultModel) || m?.info?.settings?.defaultModel || null;
-  return pinned ? modelLabel(pinned, machineModels(m)) : modelVersion(m?.info?.claudeDefaultModel);
+  const { model } = threadModel(null, t ? m?.projects.get(t.projectId) : null, m?.info?.settings);
+  return model ? modelLabel(model, machineModels(m)) : modelVersion(m?.info?.claudeDefaultModel);
 }
 
 /** The settings of a sheet's machine, or empty ones while it is not connected. */

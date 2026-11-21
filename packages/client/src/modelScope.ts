@@ -35,6 +35,12 @@ export function modelScopes(hover: ModelHover, fleets = 2): ModelScope[] {
   return fleets > 1 ? all : all.filter((x) => x !== "fleet");
 }
 
+/** The id of the first-screen row that makes no choice at a scope. */
+export const CLEAR_MODEL = "";
+
+/** That row's words. Which wider choice then decides is said on the second screen. */
+export const CLEAR_MODEL_ROW = { label: "No choice here", hint: "a wider choice decides" } as const;
+
 /** What a client knows about the scopes of one row. */
 export interface ScopeFacts {
   thread?: string;
@@ -45,19 +51,34 @@ export interface ScopeFacts {
   machines: Partial<Record<ModelScope, number>>;
   /** How many narrower choices each scope takes back. */
   clears: Partial<Record<ModelScope, number>>;
+  /**
+   * Where the model would come from if the thread or the project made no
+   * choice of its own. A fleet or all of covey with no choice is always
+   * Claude Code's own default.
+   */
+  inherits?: { thread?: ModelSource; project?: ModelSource };
 }
 
 const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
-/** One row of the second screen: what the scope is, and what it will change. */
-export function modelScopeOption(scope: ModelScope, f: ScopeFacts): { label: string; hint: string } {
+/**
+ * One row of the second screen: what the scope is, and what it will change.
+ * With `clearing`, the row also says where the model then comes from, in the
+ * words the palette row will show for it.
+ */
+export function modelScopeOption(scope: ModelScope, f: ScopeFacts, clearing = false): { label: string; hint: string } {
   const label = scope === "thread" ? `This thread${f.thread ? ` — ${f.thread}` : ""}`
     : scope === "project" ? `This project${f.project ? ` — ${f.project}` : ""}`
     : scope === "fleet" ? `This fleet${f.fleet ? ` — ${f.fleet}` : ""}`
     : "All of covey";
   const parts: string[] = [];
   const machines = f.machines[scope];
-  if (scope === "thread") parts.push("this thread only");
+  // Making no choice says what then decides, in place of the reach: the
+  // row is one line, and the label must not be the part that gets cut.
+  if (clearing) {
+    const then = scope === "thread" ? f.inherits?.thread : scope === "project" ? f.inherits?.project : null;
+    parts.push(`then ${modelSourceLabel(then ?? null)}`);
+  } else if (scope === "thread") parts.push("this thread only");
   else if (machines !== undefined) parts.push(scope === "covey" ? `every machine (${machines})` : `on ${plural(machines, "machine")}`);
   const clears = f.clears[scope] ?? 0;
   if (clears > 0) parts.push(`replaces ${plural(clears, "narrower choice")}`);
@@ -74,9 +95,9 @@ export function modelSourceLabel(from: ModelSource): string {
   }
 }
 
-/** The title of the second screen. */
-export function modelScopeTitle(modelName: string): string {
-  return `Apply ${modelName} to`;
+/** The title of the second screen. `null` is the row that makes no choice. */
+export function modelScopeTitle(modelName: string | null): string {
+  return modelName === null ? "Make no choice for" : `Apply ${modelName} to`;
 }
 
 /**
@@ -84,13 +105,14 @@ export function modelScopeTitle(modelName: string): string {
  * its reason, because "some machines failed" says neither which nor why.
  */
 export function modelApplyNotice(
-  modelName: string,
+  modelName: string | null,
   scope: ModelScope,
   f: ScopeFacts,
   missed: { machine: string; why: string }[],
 ): { text: string; level: "success" | "warning" } {
   const where = modelScopeOption(scope, f).label.replace(/^This/, "this").replace(/^All of covey/, "all of covey");
-  if (missed.length === 0) return { text: `${modelName} now applies to ${where}`, level: "success" };
+  const done = modelName === null ? `no model chosen for ${where} now` : `${modelName} now applies to ${where}`;
+  if (missed.length === 0) return { text: done, level: "success" };
   const who = missed.map((m) => `${m.machine} (${m.why})`).join(", ");
-  return { text: `${modelName} applies to ${where}, except on ${who}`, level: "warning" };
+  return { text: `${done}, except on ${who}`, level: "warning" };
 }

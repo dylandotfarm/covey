@@ -1086,8 +1086,9 @@ export class Engine {
         return seq;
       }
       case "model.apply": {
-        if (typeof cmd.model !== "string" || !cmd.model.trim()) throw new EngineError("bad_model", "name a model to apply");
-        const model = cmd.model.trim();
+        // `null` clears the scope's own choice, so the next wider one decides.
+        if (cmd.model !== null && (typeof cmd.model !== "string" || !cmd.model.trim())) throw new EngineError("bad_model", "name a model to apply, or null to clear the choice");
+        const model = cmd.model === null ? null : cmd.model.trim();
         // Everything inside the scope takes the new model: the scope's own
         // default changes, and every narrower choice inside it goes, so a
         // thread pinned last week does not quietly keep its old model.

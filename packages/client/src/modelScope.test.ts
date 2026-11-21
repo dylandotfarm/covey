@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { threadModel } from "@covey/protocol";
-import { modelApplyNotice, modelScopeOption, modelScopes, modelSourceLabel } from "./modelScope.js";
+import { modelApplyNotice, modelScopeOption, modelScopeTitle, modelScopes, modelSourceLabel } from "./modelScope.js";
 
 test("each row offers its own scope and every wider one, and all of covey always", () => {
   assert.deepEqual(modelScopes("thread"), ["thread", "project", "fleet", "covey"]);
@@ -37,11 +37,21 @@ test("the narrowest choice wins, and nothing chosen is Claude Code's own default
   assert.equal(modelSourceLabel(null), "Claude Code's default");
 });
 
+test("making no choice says which wider choice then decides", () => {
+  const f = { thread: "fix login", project: "covey", machines: { project: 1, covey: 2 }, clears: { project: 1 }, inherits: { thread: "project" as const, project: "machine" as const } };
+  assert.equal(modelScopeTitle(null), "Make no choice for");
+  assert.equal(modelScopeTitle("Opus"), "Apply Opus to");
+  assert.equal(modelScopeOption("thread", f, true).hint, "then from the project");
+  assert.equal(modelScopeOption("project", f, true).hint, "then from the fleet or covey · replaces 1 narrower choice");
+  assert.equal(modelScopeOption("covey", f, true).hint, "then Claude Code's default");
+  assert.deepEqual(modelApplyNotice(null, "project", f, []), { text: "no model chosen for this project — covey now", level: "success" });
+});
+
 test("the notice names every machine that did not take the model, and why", () => {
   const f = { project: "covey", machines: { project: 2 }, clears: {} };
   assert.deepEqual(modelApplyNotice("Opus", "project", f, []), { text: "Opus now applies to this project — covey", level: "success" });
   assert.deepEqual(
     modelApplyNotice("Opus", "covey", f, [{ machine: "steamdeck", why: "not connected" }]),
-    { text: "Opus applies to all of covey, except on steamdeck (not connected)", level: "warning" },
+    { text: "Opus now applies to all of covey, except on steamdeck (not connected)", level: "warning" },
   );
 });

@@ -326,8 +326,17 @@ test("a model applied to a project or a machine takes back every narrower choice
   assert.ok(s.projects.every((p: any) => !p.defaultModel), "the machine's model replaces every project's");
   assert.equal((await thread()).model, null, "and every thread's");
 
+  // No choice at a scope clears it and every narrower choice, so the next
+  // wider one decides: here, Claude Code's own default.
+  await a.command({ type: "model.apply", scope: "project", projectId, model: "sonnet" });
+  await a.command({ type: "model.apply", scope: "machine", model: null });
+  s = await snap();
+  assert.equal(s.machine.settings.defaultModel, null);
+  assert.ok(s.projects.every((p: any) => !p.defaultModel));
+  assert.deepEqual(threadModel(await thread(), null, s.machine.settings), { model: null, from: null });
+
   await assert.rejects(a.command({ type: "model.apply", scope: "project", projectId: "nope", model: "opus" }), /not found/);
-  await a.command({ type: "machine.settings", defaultModel: null });
+  await assert.rejects(a.command({ type: "model.apply", scope: "machine", model: "  " }), /name a model/);
 });
 
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {

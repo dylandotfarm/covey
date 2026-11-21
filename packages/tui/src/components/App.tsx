@@ -3,7 +3,7 @@ import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, threadModel, type ModelSource, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Project, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { DEFAULT_FLEET, budgetValue, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, modelScopeOption, modelScopeTitle, modelScopes, modelSourceLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel, type ModelHover, type ModelScope } from "@covey/client";
+import { DEFAULT_FLEET, budgetValue, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, CLEAR_MODEL, CLEAR_MODEL_ROW, modelScopeOption, modelScopeTitle, modelScopes, modelSourceLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel, type ModelHover, type ModelScope } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { localProjectError, localProjectId } from "@covey/protocol";
 import { Store, USAGE_WINDOWS, fleetMachines, fleetsOf, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, projectsArchiveKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, modelScopeFacts, type ModelTarget, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
@@ -1729,13 +1729,19 @@ export function App({ store }: { store: Store }) {
     const live = now.model ?? info?.claudeDefaultModel?.resolved ?? null;
     const fleets = fleetsOf(state).filter((f) => fleetMachines(state, f).length > 0).length;
     openPick(`Model for ${modelSubjectName(x)} — now ${now.name}, ${modelSourceLabel(now.from)}`,
-      models.map((k) => ({ id: k.id, label: k.label, hint: modelIsCurrent(k, live) ? "current" : (modelVersion(k) || k.id) })),
+      [
+        ...models.map((k) => ({ id: k.id, label: k.label, hint: modelIsCurrent(k, live) ? "current" : (modelVersion(k) || k.id) })),
+        // Last, so an enter pressed too soon picks a model rather than
+        // takes a choice away. The second screen says what then decides.
+        { id: CLEAR_MODEL, ...CLEAR_MODEL_ROW },
+      ],
       (mid) => {
-        const name = modelName(x.target.machine, mid);
+        const model = mid === CLEAR_MODEL ? null : mid;
+        const name = model === null ? null : modelName(x.target.machine, model);
         const facts = modelScopeFacts(state, x.target);
-        openPick(modelScopeTitle(name), modelScopes(x.hover, fleets).map((sc) => ({ id: sc, ...modelScopeOption(sc, facts) })), (sc) => {
+        openPick(modelScopeTitle(name), modelScopes(x.hover, fleets).map((sc) => ({ id: sc, ...modelScopeOption(sc, facts, model === null) })), (sc) => {
           store.setOverlay(null);
-          void store.applyModel(sc as ModelScope, x.target, mid, name, facts);
+          void store.applyModel(sc as ModelScope, x.target, model, name, facts);
         });
       });
   };
@@ -3560,7 +3566,7 @@ export function App({ store }: { store: Store }) {
                   ? <Summary state={state} row={summaryRow!} width={mainW} height={transcriptH} />
                   : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={scrollFromBottom} width={mainW} selection={state.selection} />}
         </Box>
-        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} menu={menu} />
+        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} model={state.view?.thread ? modelNow({ hover: "thread", target: { machine: state.view.machine, fleet: machineFleet(state, state.view.machine), projectId: state.view.thread.projectId, threadId: state.view.thread.id } }).name : ""} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} menu={menu} />
       </Box>
     </Box>
   );
