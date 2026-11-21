@@ -2559,11 +2559,12 @@ export class Engine {
     const before = await captureCheckpoint(cwd, `${threadId}/${turnId}/before`).catch(() => null);
     this.db.putCheckpoint({ threadId, turnId, beforeTree: before, afterTree: null, cwd });
     // The agent cannot read the note that the archive wrote, so the first
-    // turn after it carries the same news at its head.
+    // turn after it carries the same news at its head. The list stays until a
+    // turn answers: a turn that dies on the credentials or the usage limit is
+    // sent again by `restartWork`, and that turn must carry it too.
     const stopped = t.stoppedProcesses?.length ? t.stoppedProcesses : null;
     session.sendTurn(turnId, stopped ? `${stoppedPreface(stopped)}\n\n${text}` : text, attachments);
     const fresh = this.db.getThread(threadId)!;
-    if (stopped) fresh.stoppedProcesses = null;
     const firstMessage = fresh.lastMessageAt === null;
     fresh.latestTurn = { turnId, state: "running", startedAt: now, completedAt: null };
     fresh.lastMessageAt = now;
@@ -3283,18 +3284,17 @@ export class Engine {
    * and in the transcript. The note comes before the worktree note, in the
    * order the archive did the two things.
    */
-  private async stopThreadProcesses(threadId: string, procs: ThreadProcess[]): Promise<void> {
+  private async stopThreadProcesses(threadId: string, procs: ThreadProcess[], did: "Archived" | "Moved" = "Archived"): Promise<void> {
     if (!procs.length) return;
     await stopProcesses(procs);
     // A command line holds what the shell expanded, so a secret's value can
     // stand in it, and the row goes to every client as it is.
     const labels = this.redact(threadId, processLabels(procs));
-    this.opts.log?.(`archive thread=${threadId.slice(0, 8)} stopped ${procs.length} process(es): ${labels.join(" | ")}`);
+    this.opts.log?.(`${did.toLowerCase()} thread=${threadId.slice(0, 8)} stopped ${procs.length} process(es): ${labels.join(" | ")}`);
     const t = this.db.getThread(threadId);
     if (!t || !labels.length) return;
-    t.stoppedProcesses = labels;
-    this.db.putThread(t);
-    this.note(threadId, "info", stoppedNote(labels));
+    if (did === "Archived") { t.stoppedProcesses = labels; this.db.putThread(t); }
+    this.note(threadId, "info", stoppedNote(labels, did));
   }
 
   /** Remove an archived thread's worktree, and record in its transcript what
@@ -4058,6 +4058,8 @@ export class Engine {
         // A turn that answered is a limit that has passed, whatever covey was
         // waiting for, so the chain of waits starts again from one.
         else if (!info.isError) t.usageLimit = null;
+        // A turn that answered has read the list of stopped processes.
+        if (!info.isError) t.stoppedProcesses = null;
         this.putThreadAndEmit(t);
         // The one sentence a cover screen shows instead of the reply (#172).
         // Beside the turn, as a title and a chain's sentence are: until it
@@ -4217,7 +4219,12 @@ export class Engine {
   markMoved(threadId: string, machineId: string, newThreadId: string): void {
     const t = this.db.getThread(threadId);
     if (!t) return;
+    // The work moves and its processes do not, so they stop here, as on an
+    // archive. The session on the other machine is a new one and needs no
+    // preface; the note is for the reader of this machine's copy.
+    const procs = findThreadProcesses(threadId);
     this.dropSession(threadId);
+    void this.stopThreadProcesses(threadId, procs, "Moved");
     // The export carried the watch whole, so the other machine's daemon
     // polls it from the same cursor. This one must not poll it too.
     if (t.watch?.state === "watching") this.endWatch(t, "dropped", "The thread was moved to another machine, which watches from here on.");

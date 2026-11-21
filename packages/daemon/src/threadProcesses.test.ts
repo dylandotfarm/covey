@@ -68,6 +68,7 @@ test("a label is the command the agent wrote", () => {
 
 test("the note and the preface name every command, up to a bound", () => {
   assert.equal(stoppedNote(["npm run dev"]), "Archived · stopped a process that this thread started: `npm run dev`");
+  assert.match(stoppedNote(["npm run dev"], "Moved"), /^Moved · stopped a process/);
   const many = Array.from({ length: 10 }, (_, i) => `job ${i}`);
   assert.match(stoppedNote(many), /stopped 10 processes .*`job 7`, and 2 more$/);
   const preface = stoppedPreface(["npm run dev"]);
@@ -124,9 +125,17 @@ test("an archive stops the thread's server, and the next turn tells the agent", 
   const notes = db.listItems(id).items.filter((i) => i.kind === "note").map((i) => (i as { text: string }).text);
   assert.ok(notes.includes("Archived · stopped a process that this thread started: `sleep 300`"), notes.join("\n"));
 
+  // A turn that fails has not been read, so the next one carries the list too.
+  cli.refusal = "API Error: 500 the server had an error";
   await command({ type: "turn.send", threadId: id, turnId: randomUUID(), text: "is the page up?" });
   await settle();
-  const first = JSON.stringify(cli.sent[0]?.message.content);
+  assert.match(JSON.stringify(cli.sent[0]?.message.content), /- sleep 300/);
+  assert.deepEqual(db.getThread(id)!.stoppedProcesses, ["sleep 300"]);
+  cli.refusal = null;
+
+  await command({ type: "turn.send", threadId: id, turnId: randomUUID(), text: "is the page up?" });
+  await settle();
+  const first = JSON.stringify(cli.sent[1]?.message.content);
   assert.match(first, /covey stopped the processes/);
   assert.match(first, /- sleep 300/);
   assert.match(first, /is the page up\?/);

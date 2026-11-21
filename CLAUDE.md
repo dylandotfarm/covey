@@ -997,9 +997,12 @@
   named. Then `SIGTERM`, and `SIGKILL` after `STOP_GRACE_MS`. It is said twice, because the
   model never reads a note: a note in the transcript for the reader, and
   `Thread.stoppedProcesses` on the row, which `startTurn` puts at the head of the next turn
-  (`stoppedPreface`) and then clears — the reader's own message item stays what they wrote.
-  The labels go through `redact` before the row, because a command line holds what the
-  shell expanded. A delete stops the same list and writes nothing.
+  (`stoppedPreface`) and clears only when a turn *answers* — a turn that dies on the
+  credentials or the usage limit is sent again by `restartWork`, and that one must carry it
+  too. The reader's own message item stays what they wrote. The labels go through `redact`
+  before the row, because a command line holds what the shell expanded. A move stops the
+  same list with a note and no preface, because the session on the other machine is a new
+  one; a delete stops it and writes nothing.
 - A turn that dies on the **plan's usage limit** is held and sent again when the limit
   resets (#232), rather than leaving a red row for a reader to come back to. One account
   is one limit, so the afternoon it runs out every thread on the machine stops inside a

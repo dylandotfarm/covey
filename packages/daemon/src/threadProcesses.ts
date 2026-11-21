@@ -133,8 +133,8 @@ function named(labels: string[]): string {
 }
 
 /** The transcript note, for the reader. */
-export function stoppedNote(labels: string[]): string {
-  return `Archived · stopped ${labels.length === 1 ? "a process" : `${labels.length} processes`} that this thread started: ${named(labels)}`;
+export function stoppedNote(labels: string[], did: "Archived" | "Moved" = "Archived"): string {
+  return `${did} · stopped ${labels.length === 1 ? "a process" : `${labels.length} processes`} that this thread started: ${named(labels)}`;
 }
 
 /**
