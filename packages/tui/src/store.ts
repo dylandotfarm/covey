@@ -8,6 +8,8 @@ import { DEFAULT_BRIEF, allocatePorts, allocateResources, memberSlug, placeTasks
 import { loadConfig, saveConfig, type TuiConfig } from "./config.js";
 import { keepTagged, type TaggedAttachment } from "./attachments.js";
 import { expandPastes, sendableAttachments, type PastedText } from "@covey/client";
+import { modelApplyNotice, type ModelScope, type ScopeFacts } from "@covey/client";
+import { threadModel } from "@covey/protocol";
 import { ViewCache } from "./viewCache.js";
 import { Frames, type FrameOptions } from "./frames.js";
 import type { ScrollAnchor } from "./scroll.js";
@@ -1426,6 +1428,34 @@ export class Store {
 
   // ---- machine control panel ------------------------------------------------
 
+  /**
+   * Put one model on a scope: one thread, a project on every machine of its
+   * pool, every machine of a fleet, or every machine covey knows. Each machine
+   * takes back the narrower choices inside the scope itself (`model.apply`).
+   * One notice says what happened, and names each machine that did not take
+   * it, because a write that landed on three machines of four is not done.
+   */
+  async applyModel(scope: ModelScope, target: ModelTarget, model: string | null, modelName: string | null, facts: ScopeFacts): Promise<void> {
+    const sends: { machine: string; cmd: Parameters<MachineClient["command"]>[0] }[] = [];
+    if (scope === "thread" && target.threadId) sends.push({ machine: target.machine, cmd: { type: "thread.setModel", threadId: target.threadId, model } });
+    else if (scope === "project" && target.projectId) {
+      const group = groupOfProject(this.state, target.machine, target.projectId);
+      for (const x of group?.members ?? [{ machine: target.machine, projectId: target.projectId }]) sends.push({ machine: x.machine, cmd: { type: "model.apply", scope: "project", projectId: x.projectId, model } });
+    } else {
+      const machines = scope === "fleet" ? fleetMachines(this.state, target.fleet) : this.state.order;
+      for (const m of machines) sends.push({ machine: m, cmd: { type: "model.apply", scope: "machine", model } });
+    }
+    const missed: { machine: string; why: string }[] = [];
+    await Promise.all(sends.map(async ({ machine, cmd }) => {
+      const client = this.clients.get(machine);
+      const why = !client || this.state.machines.get(machine)?.conn !== "connected" ? "not connected"
+        : await client.command(cmd).then(() => null, (e: any) => String(e?.message ?? "refused"));
+      if (why) missed.push({ machine: machineLabel(this.state, machine), why });
+    }));
+    const n = modelApplyNotice(modelName, scope, facts, missed);
+    this.notify(n.text, n.level);
+  }
+
   /** Machine-wide defaults for new threads. Persisted by the daemon. */
   async setMachineDefaults(machine: string, patch: Partial<MachineSettings>) {
     await this.threadCommand({ type: "machine.settings", ...patch }, machine);
@@ -2671,6 +2701,45 @@ export function permissionModeLabel(mode: PermissionMode | null | undefined): st
 /** Threads a user expects to see: no archive, no tombstones of moved threads. */
 /** One machine's copy of a pooled project. */
 export interface PoolMember { machine: string; projectId: string; project: Project }
+
+/** The row a model is chosen from: the machine it acts on, and what it names. */
+export interface ModelTarget { machine: string; fleet: string; projectId?: string; threadId?: string }
+
+/**
+ * What each scope of a model choice reaches, for the second screen: how many
+ * machines it writes to, and how many narrower choices it takes back.
+ */
+export function modelScopeFacts(s: AppState, target: ModelTarget): ScopeFacts {
+  const m = s.machines.get(target.machine);
+  const thread = target.threadId ? m?.threads.get(target.threadId) : undefined;
+  const group = target.projectId ? groupOfProject(s, target.machine, target.projectId) : null;
+  const pinned = (keys: string[], projects?: Set<string>) => {
+    let n = 0;
+    for (const k of keys) {
+      const ms = s.machines.get(k);
+      for (const t of ms?.threads.values() ?? []) if (t.model && (!projects || projects.has(`${k}:${t.projectId}`))) n++;
+      if (!projects) for (const p of ms?.projects.values() ?? []) if (p.defaultModel) n++;
+    }
+    return n;
+  };
+  const fleet = fleetMachines(s, target.fleet);
+  const pool = group?.members ?? [];
+  return {
+    ...(thread ? { thread: thread.title } : {}),
+    ...(group ? { project: group.title } : {}),
+    fleet: target.fleet,
+    machines: { project: poolMachines(pool), fleet: fleet.length, covey: s.order.length },
+    inherits: {
+      thread: threadModel(null, target.projectId ? m?.projects.get(target.projectId) : null, m?.info?.settings).from,
+      project: threadModel(null, null, m?.info?.settings).from,
+    },
+    clears: {
+      project: pinned([...new Set(pool.map((x) => x.machine))], new Set(pool.map((x) => `${x.machine}:${x.projectId}`))),
+      fleet: pinned(fleet),
+      covey: pinned(s.order),
+    },
+  };
+}
 
 /**
  * How many machines a pool spans. Not how many rows it holds: a machine may

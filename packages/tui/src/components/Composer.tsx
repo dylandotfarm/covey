@@ -16,6 +16,8 @@ export interface ComposerProps {
   width: number;
   pending: TimelineItem | null;
   machineName: string;
+  /** The model the thread runs, from whichever choice decided it (`threadModel`). */
+  model: string;
   /** Word-wrapped rows, computed in App so it can size the box to match. */
   rows: VisualLine[];
   maxRows: number;
@@ -41,7 +43,7 @@ export function turnStats(turn: Thread["latestTurn"] | undefined): string {
 }
 
 /** Renders the multi-line editor. Editing state lives in App (useInput). */
-export function Composer({ thread, value, cursor, focused, width, pending, machineName, rows, maxRows, answerDraft, menu }: ComposerProps) {
+export function Composer({ thread, value, cursor, focused, width, pending, machineName, model, rows, maxRows, answerDraft, menu }: ComposerProps) {
   const running = thread?.latestTurn?.state === "running";
   const lines = editorLines(rows, value, cursor, focused, maxRows);
   const borderColor = pending ? T.warning : focused ? T.accentDim : T.border;
@@ -96,7 +98,7 @@ export function Composer({ thread, value, cursor, focused, width, pending, machi
             below already holds the text to this box. */}
         <Box flexShrink={1} marginRight={2}>
           <Text wrap="truncate">
-            <Text color={T.subtle}>{thread ? shortModel(thread.model) : ""}</Text>
+            <Text color={T.subtle}>{thread ? model : ""}</Text>
             {thread && <Text color={modeColor} bold={bypass}>  {modeLabel}</Text>}
             {thread && !bypass && width > 90 && <Text color={T.faint}> (shift+tab)</Text>}
             {thread?.branch && <Text color={T.subtle}>  ⎇ {thread.branch}</Text>}
@@ -180,10 +182,4 @@ function editorLines(rows: VisualLine[], value: string, cursor: number, focused:
     }
     return <Text key={idx}>{l.text.length > 0 ? l.text : " "}</Text>;
   });
-}
-
-/** claude-opus-5[1m] → opus-5[1m]; claude-fable-5-1 → fable-5-1 */
-function shortModel(m: string | null): string {
-  if (!m) return "default model";
-  return m.replace(/^claude-/, "").replace(/-\d{8}$/, "");
 }

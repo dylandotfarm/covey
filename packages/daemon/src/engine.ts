@@ -6,7 +6,7 @@ import type {
   ShellSnapshot, ThreadSnapshot, AppBuild, MachineInfo, MachineResources, ThreadExport, PermissionMode, ShellEventBody, ThreadEventBody,
   ThreadOrigin, SecretEntry, SecretWrite, TerminalEvent, TerminalInfo, TerminalSignal,
 } from "@covey/protocol";
-import { isUserClient, KNOWN_MODELS, MAX_THREAD_FILE_BYTES, MIN_CHAIN, TIMER_MAX_MS, TIMER_MIN_MS, localProjectError, localProjectId, threadIsBusy, type AssistantMessageItem, type ThreadTimer, type ThreadUsageLimit,} from "@covey/protocol";
+import { isUserClient, KNOWN_MODELS, MAX_THREAD_FILE_BYTES, MIN_CHAIN, TIMER_MAX_MS, TIMER_MIN_MS, localProjectError, localProjectId, threadIsBusy, threadModel, type AssistantMessageItem, type ThreadTimer, type ThreadUsageLimit,} from "@covey/protocol";
 import { MAX_TERMINAL_INPUT, MAX_TERMINALS } from "@covey/protocol";
 import type { ModelChoice } from "@covey/protocol";
 import { Db } from "./db.js";
@@ -383,6 +383,26 @@ export class Engine {
     return seq;
   }
 
+  /**
+   * The model a session of this thread runs: its own choice, else its
+   * project's, else this machine's. `null` lets Claude Code choose.
+   */
+  private modelFor(t: Thread): string | null {
+    return threadModel(t, this.db.getProject(t.projectId), this.machine.settings).model;
+  }
+
+  /**
+   * Tell each live session of these threads the model it should run now. A
+   * session that is not live reads it from `modelFor` when it next starts.
+   */
+  private async followModels(threadIds: string[]): Promise<void> {
+    await Promise.all(threadIds.map(async (id) => {
+      const s = this.sessions.get(id);
+      const t = s && this.db.getThread(id);
+      if (t) await s.setModel(this.modelFor(t));
+    }));
+  }
+
   private putThreadAndEmit(t: Thread): number {
     t.updatedAt = new Date().toISOString();
     this.db.putThread(t);
@@ -658,6 +678,7 @@ export class Engine {
         // wins at start and is never written). What the machine reports is
         // where it listens, not what the file says.
         this.machine.settings.bind = rebind ?? liveBind;
+        if (cmd.defaultModel !== undefined) await this.followModels(this.db.listThreads().map((t) => t.id));
         // A lower limit applies to the sessions already live, not only to the
         // next one: the user asked for less memory now.
         this.publishSessionBudget();
@@ -772,6 +793,7 @@ export class Engine {
         }
         p.updatedAt = now;
         this.db.putProject(p);
+        if (cmd.defaultModel !== undefined) await this.followModels(this.db.listThreads().filter((t) => t.projectId === p.id).map((t) => t.id));
         return this.emitShell({ kind: "project.upserted", project: p });
       }
       case "project.archive": {
@@ -882,7 +904,10 @@ export class Engine {
         const t: Thread = {
           id: cmd.threadId, projectId: p.id, title: cmd.title ?? "New thread", titleAuto: cmd.title === undefined, provider: "claude",
           ...(origin ? { origin } : {}),
-          sessionId: cmd.sessionId, model: cmd.model ?? p.defaultModel ?? this.machine.settings.defaultModel,
+          // The thread's own choice and nothing else: the project's and the
+          // machine's are read when the session starts (`modelFor`), so a
+          // default changed later still reaches this thread.
+          sessionId: cmd.sessionId, model: cmd.model ?? null,
           // The command wins, then the machine's default; only when neither has
           // an opinion do we honour the user's own settings default.
           permissionMode: cmd.permissionMode ?? machineMode ?? resolveDefaultPermissionMode(worktreePath ?? p.workspaceRoot),
@@ -1056,8 +1081,40 @@ export class Engine {
         return this.mutateThread(cmd.threadId, (t) => { t.permissionMode = cmd.mode; t.permissionModeExplicit = true; });
       }
       case "thread.setModel": {
-        await this.sessions.get(cmd.threadId)?.setModel(cmd.model);
-        return this.mutateThread(cmd.threadId, (t) => { t.model = cmd.model; });
+        const seq = this.mutateThread(cmd.threadId, (t) => { t.model = cmd.model; });
+        await this.followModels([cmd.threadId]);
+        return seq;
+      }
+      case "model.apply": {
+        // `null` clears the scope's own choice, so the next wider one decides.
+        if (cmd.model !== null && (typeof cmd.model !== "string" || !cmd.model.trim())) throw new EngineError("bad_model", "name a model to apply, or null to clear the choice");
+        const model = cmd.model === null ? null : cmd.model.trim();
+        // Everything inside the scope takes the new model: the scope's own
+        // default changes, and every narrower choice inside it goes, so a
+        // thread pinned last week does not quietly keep its old model.
+        const threads = this.db.listThreads();
+        if (cmd.scope === "project") {
+          const p = this.db.getProject(cmd.projectId);
+          if (!p) throw new EngineError("not_found", "project not found");
+          p.defaultModel = model;
+          p.updatedAt = new Date().toISOString();
+          this.db.putProject(p);
+          this.emitShell({ kind: "project.upserted", project: p });
+        } else if (cmd.scope === "machine") {
+          this.machine.settings = { ...saveMachineSettings({ defaultModel: model }), bind: this.machine.settings.bind };
+          for (const p of this.db.listProjects()) {
+            if (!p.defaultModel) continue;
+            p.defaultModel = null;
+            p.updatedAt = new Date().toISOString();
+            this.db.putProject(p);
+            this.emitShell({ kind: "project.upserted", project: p });
+          }
+          this.emitShell({ kind: "machine.updated", machine: this.machine });
+        } else throw new EngineError("bad_scope", "a model applies to a project or to a machine");
+        const inside = threads.filter((t) => cmd.scope === "machine" || t.projectId === cmd.projectId);
+        for (const t of inside) if (t.model) { t.model = null; this.putThreadAndEmit(t); }
+        await this.followModels(inside.map((t) => t.id));
+        return this.db.shellSeq();
       }
       case "thread.setStreaming": {
         // No restart, and no wait for the turn to end: the session already
@@ -1671,7 +1728,7 @@ export class Engine {
       // The reviewer reads and comments. It never writes to the repository, so
       // it inherits the author's model and the machine's own permission mode
       // and asks for nothing more.
-      model: author.model ?? p.defaultModel ?? this.machine.settings.defaultModel,
+      model: author.model ?? null,
       permissionMode: author.permissionMode,
       permissionModeExplicit: author.permissionModeExplicit,
       streaming: author.streaming ?? this.machine.settings.defaultStreaming ?? false,
@@ -2591,7 +2648,7 @@ export class Engine {
       state,
       // The model that did most of the work. `byModel` keeps the rest, so a
       // turn that changed model, or ran a subagent elsewhere, can be re-priced.
-      model: usage.byModel[0]?.model ?? t.model,
+      model: usage.byModel[0]?.model ?? this.modelFor(t),
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cacheCreationInputTokens: usage.cacheCreationInputTokens,
@@ -3288,7 +3345,7 @@ export class Engine {
     const session = new ClaudeSession(
       {
         threadId: t.id, sessionId: t.sessionId, projectId: p.id, cwd: t.worktreePath ?? p.workspaceRoot,
-        model: t.model, permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
+        model: this.modelFor(t), permissionMode: t.permissionMode, permissionModeExplicit: t.permissionModeExplicit ?? false,
         streaming: t.streaming ?? false,
         resume: hasTranscript, sessionStore: storeForThread,
         ...(Object.keys(secrets).length ? { secrets } : {}),
@@ -3984,8 +4041,6 @@ export class Engine {
         else if (!info.isError) this.forgetAuthFailure(threadId);
       },
       onSessionInit: (info) => {
-        const t = this.db.getThread(threadId);
-        if (t && !t.model) { t.model = info.model; this.putThreadAndEmit(t); }
         // The user updated Claude Code under a running daemon, so the model
         // list this machine reported is a version old. A session says which
         // version it is, which is the one signal that costs nothing — the

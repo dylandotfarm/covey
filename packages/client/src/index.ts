@@ -19,6 +19,10 @@ export { tableAt, tableCells, type Align, type Table } from "./markdown.js";
 export { firstSentence, replyLead, threadActivity, type Activity, type ActivityState } from "./digest.js";
 export { threadNews, type AttentionMark, type ThreadNews } from "./attention.js";
 export { parseTimer, timerLabel, timerLeftLabel, timerLeftMs, timerLine } from "./timer.js";
+export {
+  CLEAR_MODEL, CLEAR_MODEL_ROW, modelApplyNotice, modelScopeOption, modelScopeTitle, modelScopes, modelSourceLabel,
+  type ModelHover, type ModelScope, type ScopeFacts,
+} from "./modelScope.js";
 export { limitLabel, limitLeftLabel, limitLeftMs, limitLine, limitResetLabel, limitSpanLabel } from "./limit.js";
 export {
   NOTE_LEAD, chainLabel, chainsOf, foldsChains, noteFold, timelineRows,

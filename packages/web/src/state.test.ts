@@ -544,13 +544,13 @@ test("the conversation sheet leads with the issue and the pull request a thread 
   assert.equal(viewRowNumber("view:x"), null);
 });
 
-test("a thread with no model of its own reads as the machine's Claude settings, and streaming absent reads as off", () => {
+test("a thread with no model of its own names the model it inherits, and streaming absent reads as off", () => {
   const s = emptyState();
   const box = addMachine(s, "ws://box:3790", "box", true);
   applyShellSnapshot(box, snap("box", [project("p", "alpha")], [thread("t1", "p")]));
   s.sheet = { target: { kind: "thread", machine: box.key, threadId: "t1" }, page: "" };
   const rows = sheetRows(s, s.sheet);
-  assert.equal(rows.find((r) => r.id === "model")!.value, "From Claude settings");
+  assert.equal(rows.find((r) => r.id === "model")!.value, "Opus 5 with 1M context", "what Claude Code's own default resolves to there");
   assert.equal(rows.find((r) => r.id === "streaming")!.value, "Off");
   s.sheet.page = "streaming";
   assert.deepEqual(sheetChoices(s, s.sheet).filter((c) => c.current).map((c) => c.id), ["off"]);

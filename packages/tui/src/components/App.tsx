@@ -2,11 +2,11 @@ import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } fro
 import { appendFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
-import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Project, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
-import { DEFAULT_FLEET, budgetValue, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel } from "@covey/client";
+import { KNOWN_MODELS, LOD_LABEL, LOD_ORDER, type Lod, modelIsCurrent, modelLabel, modelVersion, threadModel, type ModelSource, runMemberStateLabel, secretKeyError, type Attachment, type ClaudeInstall, type MachineInfo, type PermissionMode, type Project, type Run, type RunMember, type RunMemberState, type RunTask, type UsageGroupBy } from "@covey/protocol";
+import { DEFAULT_FLEET, budgetValue, claudeChoices, claudeListNote, claudeNotice, claudeValue, claudeValueLabel, fleetKey, fleetNameError, hiddenPanel, idleChoices, idleValueLabel, isDefaultFleet, liveChoices, liveValueLabel, CLEAR_MODEL, CLEAR_MODEL_ROW, modelScopeOption, modelScopeTitle, modelScopes, modelSourceLabel, projectPool, sessionMemoryLabel, type BudgetChoice, type HiddenPanel, type ModelHover, type ModelScope } from "@covey/client";
 import { repoOptions, branchOptions, DEFAULT_BASE } from "../repos.js";
 import { localProjectError, localProjectId } from "@covey/protocol";
-import { Store, USAGE_WINDOWS, fleetMachines, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, projectsArchiveKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
+import { Store, USAGE_WINDOWS, fleetMachines, fleetsOf, fleetRowKey, isMachinesRowKey, machineFleet, machinesKey, projectsArchiveKey, sidebarRows, archiveKey, runKey, threadGroupKey, groupOfProject, machineLabel, paneOf, poolMachines, secretPanelKeys, selectionBounds, permissionModeLabel, isLoopbackUrl, previewPage, modelScopeFacts, type ModelTarget, type MediaRef, type PickOption, type Pane, type Selection, type SidebarRow, type Overlay, type AppState } from "../store.js";
 import { ItemLines, diffToLines, selectedText, activityLine, elide, linkAt, truncate, wordRangeAt, wrappedRun, lineWidth, type Line } from "../lines.js";
 import { layoutTitleBar, PART_GAP, RIGHT_GAP, type BarPart } from "../titleBar.js";
 import { httpBaseFor, hyperlinksEnabled, openCommand, openGesture, osc8, repoUrlOf, threadFileUri, type LinkContext } from "../links.js";
@@ -1050,7 +1050,7 @@ export function App({ store }: { store: Store }) {
     const opts: PickOption[] = [
       { id: "update", label: "Update — pull, rebuild, restart", hint: skew === "behind" ? "older build than your client" : busy ? "interrupts running turns" : "" },
       { id: "restart", label: "Restart the daemon", hint: busy ? `${busy} running` : "" },
-      { id: "model", label: `Default model: ${defaultLabel}`, hint: "new threads here" },
+      { id: "model", label: `Default model: ${defaultLabel}`, hint: "set for a fleet or for all of covey" },
       { id: "mode", label: `Default mode: ${permissionModeLabel(settings.defaultPermissionMode)}`, hint: "new threads here" },
       { id: "streaming", label: `Default streaming: ${settings.defaultStreaming ? "on" : "off"}`, hint: "new threads here" },
       { id: "web", label: `Web server: ${settings.webEnabled ? "on" : "off"}`, hint: settings.webEnabled ? (info.webAddresses?.find((a) => a.reachable)?.url ?? "serving the phone client") : "serve the phone client from this machine" },
@@ -1088,16 +1088,7 @@ export function App({ store }: { store: Store }) {
       switch (id) {
         case "update": return void confirmUpdate(machineKey!);
         case "restart": return confirmRestart(machineKey!);
-        case "model": return openPick(`Default model on ${info.name}`, [
-          // The "no model set" row says what Claude Code's own default
-          // resolves to there, so the reader can tell which Opus they get.
-          { id: "", label: "From Claude settings", hint: settings.defaultModel ? modelVersion(info.claudeDefaultModel) : "current" },
-          ...models.map((k) => ({ id: k.id, label: k.label, hint: modelIsCurrent(k, settings.defaultModel) ? "current" : (modelVersion(k) || k.id) })),
-        ], (mid) => {
-          store.setOverlay(null);
-          void store.setMachineDefaults(machineKey!, { defaultModel: mid || null });
-          store.notify(`${info.name}: new threads use ${mid ? modelLabel(mid, models) : "the model from Claude settings"}`);
-        });
+        case "model": return openModelFlow({ hover: "machine", target: { machine: machineKey!, fleet: machineFleet(state, machineKey!) } });
         case "mode": return openPick(`Default mode on ${info.name}`, MACHINE_MODES.map((o) => ({
           ...o, hint: (o.id === "" ? settings.defaultPermissionMode === null : o.id === settings.defaultPermissionMode) ? "current" : o.hint,
         })), (mid) => {
@@ -1682,22 +1673,92 @@ export function App({ store }: { store: Store }) {
     return null;
   };
 
+  /**
+   * What a model is chosen for: the row under the sidebar cursor when it is a
+   * thread, a project, a fleet or a machine, else the open thread. The row
+   * decides which scopes the second screen offers (`modelScopes`).
+   */
+  const modelSubject = (): { hover: ModelHover; target: ModelTarget } | null => {
+    const r = currentRow;
+    const at = (machine: string) => machineFleet(state, machine);
+    if (r?.kind === "thread" && r.thread) return { hover: "thread", target: { machine: r.machine, fleet: at(r.machine), projectId: r.thread.projectId, threadId: r.thread.id } };
+    if (r?.kind === "project") {
+      const c = rowContext(r);
+      if (c.machine && c.projectId) return { hover: "project", target: { machine: c.machine, fleet: at(c.machine), projectId: c.projectId } };
+    }
+    if (r?.kind === "machine" && r.machine) return { hover: "machine", target: { machine: r.machine, fleet: at(r.machine) } };
+    if ((r?.kind === "fleet" || r?.kind === "machines") && r.fleet) {
+      const keys = fleetMachines(state, r.fleet);
+      const live = keys.find((k) => state.machines.get(k)?.conn === "connected") ?? keys[0];
+      if (live) return { hover: "fleet", target: { machine: live, fleet: r.fleet } };
+    }
+    const v = state.view;
+    if (v?.thread) return { hover: "thread", target: { machine: v.machine, fleet: at(v.machine), projectId: v.thread.projectId, threadId: v.thread.id } };
+    return null;
+  };
+  const modelSubjectName = (x: { hover: ModelHover; target: ModelTarget }): string =>
+    x.hover === "thread" ? "this thread" : x.hover === "project" ? "this project"
+      : x.hover === "machine" ? machineLabel(state, x.target.machine) : `the ${x.target.fleet} fleet`;
+  /** A model in the words the picker uses: the version when Claude Code gives one. */
+  const modelName = (machine: string, id: string | null): string => {
+    const info = state.machines.get(machine)?.info;
+    const models = info?.models ?? KNOWN_MODELS;
+    // The line beside it says where the model came from, so this names the
+    // model alone: what Claude Code's own default resolves to on that machine.
+    if (!id) return modelVersion(info?.claudeDefaultModel) || "Claude Code's default";
+    return modelVersion(models.find((m) => modelIsCurrent(m, id))) || modelLabel(id, models);
+  };
+  /** The model the subject runs now, and which choice decided it. */
+  const modelNow = (x: { hover: ModelHover; target: ModelTarget }): { model: string | null; from: ModelSource; name: string } => {
+    const m = state.machines.get(x.target.machine);
+    const t = x.target.threadId ? (m?.threads.get(x.target.threadId) ?? (state.view?.thread?.id === x.target.threadId ? state.view.thread : undefined)) : undefined;
+    const p = x.target.projectId ? m?.projects.get(x.target.projectId) : undefined;
+    const r = threadModel(x.hover === "thread" ? t : null, x.hover === "thread" || x.hover === "project" ? p : null, m?.info?.settings);
+    return { ...r, name: modelName(x.target.machine, r.model) };
+  };
+  /**
+   * Choose a model, then where it applies. Two screens on purpose: the
+   * second says in words what the choice reaches and what it takes back.
+   */
+  const openModelFlow = (x: { hover: ModelHover; target: ModelTarget }) => {
+    const info = state.machines.get(x.target.machine)?.info;
+    const models = info?.models ?? KNOWN_MODELS;
+    const now = modelNow(x);
+    // With no choice made, the row Claude Code's own default resolves to is
+    // the one in force, and the reader should see it marked.
+    const live = now.model ?? info?.claudeDefaultModel?.resolved ?? null;
+    const fleets = fleetsOf(state).filter((f) => fleetMachines(state, f).length > 0).length;
+    openPick(`Model for ${modelSubjectName(x)} — now ${now.name}, ${modelSourceLabel(now.from)}`,
+      [
+        ...models.map((k) => ({ id: k.id, label: k.label, hint: modelIsCurrent(k, live) ? "current" : (modelVersion(k) || k.id) })),
+        // Last, so an enter pressed too soon picks a model rather than
+        // takes a choice away. The second screen says what then decides.
+        { id: CLEAR_MODEL, ...CLEAR_MODEL_ROW },
+      ],
+      (mid) => {
+        const model = mid === CLEAR_MODEL ? null : mid;
+        const name = model === null ? null : modelName(x.target.machine, model);
+        const facts = modelScopeFacts(state, x.target);
+        openPick(modelScopeTitle(name), modelScopes(x.hover, fleets).map((sc) => ({ id: sc, ...modelScopeOption(sc, facts, model === null) })), (sc) => {
+          store.setOverlay(null);
+          void store.applyModel(sc as ModelScope, x.target, model, name, facts);
+        });
+      });
+  };
+
   const palette = () => {
     const t = state.view?.thread;
     // The models of the machine the open thread runs on. A thread on a Pi and
     // a thread on a laptop may be offered different lists, because the two
     // machines may run different Claude Codes.
-    const tm = state.view ? state.machines.get(state.view.machine) : null;
-    const threadModels = tm?.info?.models ?? KNOWN_MODELS;
-    // What a thread with no model of its own ends up running: the project's
-    // default, else the machine's, else whatever Claude Code itself picks.
-    const inherited = (t && tm?.projects.get(t.projectId)?.defaultModel) || tm?.info?.settings?.defaultModel || null;
-    const inheritedHint = inherited ? modelLabel(inherited, threadModels) : modelVersion(tm?.info?.claudeDefaultModel);
+    const ms = modelSubject();
+    const now = ms ? modelNow(ms) : null;
+    const modelRow: PickOption | null = ms && now ? { id: "model", label: `Model for ${modelSubjectName(ms)}: ${now.name}`, hint: modelSourceLabel(now.from) } : null;
     const opts: PickOption[] = [];
     if (t) {
       opts.push({ id: "move", label: "Move thread to another machine", hint: "m" });
       opts.push({ id: "rename", label: "Rename thread", hint: "r" });
-      opts.push({ id: "model", label: `Model: ${t.model ? modelLabel(t.model, threadModels) : "default"}`, hint: t.model ? "" : inheritedHint });
+      if (modelRow) opts.push(modelRow);
       opts.push({ id: "mode", label: `Permission mode: ${t.permissionMode}` });
       opts.push({ id: "streaming", label: t.streaming ? "Streaming: on — text arrives token by token" : "Streaming: off — each reply lands whole", hint: "this thread" });
       opts.push({ id: "diff", label: "Show changes from the last turn", hint: "d" });
@@ -1715,6 +1776,7 @@ export function App({ store }: { store: Store }) {
       if (t.pullRequest) opts.push({ id: "openpr", label: `Open pull request #${t.pullRequest.number} on GitHub — into ${t.pullRequest.base}`, hint: "browser" });
       opts.push({ id: "stop", label: "Stop session process" });
     }
+    if (!t && modelRow) opts.push(modelRow);
     opts.push({ id: "new", label: "New thread — in its own worktree", hint: "n" });
     opts.push({ id: "addproject", label: "Add project — pick a repository, make one, or give a URL; then the machines", hint: "a" });
     if (contextProject) opts.push({ id: "pooladd", label: "Add a machine to this project — clone it there too" });
@@ -1750,10 +1812,7 @@ export function App({ store }: { store: Store }) {
       switch (id) {
         case "move": return moveThread();
         case "rename": return openInput("Rename thread", (v) => { store.setOverlay(null); void store.threadCommand({ type: "thread.rename", threadId: t!.id, title: v }); }, t!.title);
-        case "model": return openPick("Model", [
-          { id: "", label: "Default", hint: inheritedHint },
-          ...threadModels.map((m) => ({ id: m.id, label: m.label, hint: modelIsCurrent(m, t!.model) ? "current" : (modelVersion(m) || m.id) })),
-        ], (mid) => { store.setOverlay(null); void store.threadCommand({ type: "thread.setModel", threadId: t!.id, model: mid || null }); });
+        case "model": return ms ? openModelFlow(ms) : undefined;
         case "mode": return openPick("Permission mode", PERMISSION_CYCLE.map((m) => ({ id: m, label: m, hint: m === "bypassPermissions" ? "runs tools without asking" : m === t!.permissionMode ? "current" : "" })), (m) => { store.setOverlay(null); void store.setPermissionMode(t!.id, m as PermissionMode); });
         case "streaming": return void store.setStreaming(t!.id, !t!.streaming);
         case "diff": return void store.toggleDiff();
@@ -3507,7 +3566,7 @@ export function App({ store }: { store: Store }) {
                   ? <Summary state={state} row={summaryRow!} width={mainW} height={transcriptH} />
                   : <Transcript view={state.view} layout={layout} height={transcriptH} scrollFromBottom={scrollFromBottom} width={mainW} selection={state.selection} />}
         </Box>
-        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} menu={menu} />
+        <Composer thread={state.view?.thread ?? null} value={draft} cursor={caret} focused={state.focus === "composer"} width={mainW} pending={pending} machineName={machineName} model={state.view?.thread ? modelNow({ hover: "thread", target: { machine: state.view.machine, fleet: machineFleet(state, state.view.machine), projectId: state.view.thread.projectId, threadId: state.view.thread.id } }).name : ""} rows={editorRows} maxRows={maxEditorRows} answerDraft={answerDraft} menu={menu} />
       </Box>
     </Box>
   );

@@ -895,6 +895,22 @@
   Store the id Claude Code gives, usually an alias (`sonnet`, `opus[1m]`), so a pinned
   thread follows the SDK; match a stored id on `resolved` too, because covey stored wire
   ids before this. A session that reports a new version makes the daemon read again.
+- **A model is chosen first and placed second**: the reader picks a model, then where
+  it applies — this thread, this project, this fleet, or all of covey — and the row
+  under the sidebar cursor decides which of those the second screen offers
+  (`modelScopes` in `@covey/client`, pure and node-tested; the fleet is left out when
+  there is one, because it would reach what all of covey reaches). The narrowest
+  choice wins when a session starts (`threadModel` in `@covey/protocol`), and a wider
+  choice takes back every narrower one inside it (`model.apply`), so the choice made
+  last is the one in force. The last row of the first screen makes *no* choice
+  (`model: null`), so the next wider choice decides — the only way back to a project's
+  model, or to Claude Code's own. A fleet and all of covey are the same `model.apply` with
+  scope `machine`, sent to different machines: the daemon holds one default and the
+  client draws the line, as with every other fleet rule. **The daemon never copies a
+  model onto a thread** — not at `thread.create`, not for a reviewer, and not from the
+  model a session reports — because a copy is a pin, and a project default set the
+  next day would never reach it. A change reaches a live session at once
+  (`followModels`). A machine that did not take a write is named in the notice.
 - The daemon listens on port 3790 by default. `COVEY_PORT` moves it.
 - A machine's control panel (enter on a sidebar machine row) makes the daemon pull, rebuild
   and restart itself (`packages/daemon/src/update.ts`). Restarting ends every turn that

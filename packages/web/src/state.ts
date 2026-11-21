@@ -13,7 +13,7 @@
  * and a thread on screen is named by its machine and its id.
  */
 import {
-  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadIsFinished, threadIsHidden, threadOnLimit, threadOnTimer, threadReviewing, type Lod,
+  DEFAULT_LOD, KNOWN_MODELS, modelIsCurrent, modelLabel, modelVersion, threadIsBusy, threadModel, threadIsFinished, threadIsHidden, threadOnLimit, threadOnTimer, threadReviewing, type Lod,
   type AppBuildRun, type GitHubAction, type GitHubItem, type GitHubPullRequest, type MachineAccess, type MachineInfo, type MachineSettings, type MachineUpdate, type ModelChoice, type PermissionMode, type Project, type ShellEvent, type ShellSnapshot, type SlashCommandInfo, type Thread, type ThreadEvent,
   type ThreadSnapshot, type TimelineItem, type WebAddress, isImageMime, type Attachment,
 } from "@covey/protocol";
@@ -1085,8 +1085,8 @@ const NO_SETTINGS: MachineSettings = { defaultModel: null, defaultPermissionMode
 export function inheritedModel(s: State, sheet: SheetState): string | undefined {
   const m = sheetMachine(s, sheet);
   const t = sheetThread(s, sheet);
-  const pinned = (t && m?.projects.get(t.projectId)?.defaultModel) || m?.info?.settings?.defaultModel || null;
-  return pinned ? modelLabel(pinned, machineModels(m)) : modelVersion(m?.info?.claudeDefaultModel);
+  const { model } = threadModel(null, t ? m?.projects.get(t.projectId) : null, m?.info?.settings);
+  return model ? modelLabel(model, machineModels(m)) : modelVersion(m?.info?.claudeDefaultModel);
 }
 
 /** The settings of a sheet's machine, or empty ones while it is not connected. */
@@ -1095,11 +1095,13 @@ export function sheetSettings(s: State, sheet: SheetState): MachineSettings {
 }
 
 /** The settings of one conversation. */
-export function threadSheetRows(t: Thread, models: ModelChoice[] = KNOWN_MODELS): SheetRow[] {
+export function threadSheetRows(t: Thread, models: ModelChoice[] = KNOWN_MODELS, inherited?: string): SheetRow[] {
   return [
     // The chips in the list are text, so the sheet is the way to the item (#115).
     ...threadRefs(t).map((r) => ({ id: `${VIEW_ROW}${r.number}`, label: r.menuLabel })),
-    { id: "model", label: "Model", value: modelLabel(t.model, models), choices: true },
+    // A thread with no choice of its own runs its project's, its machine's or
+    // Claude Code's model, and the row names that one rather than "default".
+    { id: "model", label: "Model", value: t.model || !inherited ? modelLabel(t.model, models) : inherited, choices: true },
     { id: "mode", label: "Permission mode", value: permissionModeLabel(t.permissionMode), choices: true },
     { id: "streaming", label: "Streaming", value: t.streaming ? "On" : "Off", choices: true },
     { id: "rename", label: "Rename conversation" },
@@ -1142,7 +1144,7 @@ function budgetSheetChoices(choices: BudgetChoice[]): SheetChoice[] {
 export function sheetRows(s: State, sheet: SheetState): SheetRow[] {
   if (sheet.target.kind === "thread") {
     const t = sheetThread(s, sheet);
-    return t ? threadSheetRows(t, machineModels(sheetMachine(s, sheet))) : [];
+    return t ? threadSheetRows(t, machineModels(sheetMachine(s, sheet)), inheritedModel(s, sheet)) : [];
   }
   const m = sheetMachine(s, sheet);
   return m ? machineSheetRows(m) : [];
