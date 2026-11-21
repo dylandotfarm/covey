@@ -912,6 +912,11 @@ export interface Thread {
   provider: ProviderName;
   /** SDK session id — minted client-side before the first turn. */
   sessionId: string;
+  /**
+   * The model the reader chose for this thread alone, or `null` to take the
+   * project's, then the machine's, then Claude Code's own. Read it through
+   * `threadModel`, which says which of those decided.
+   */
   model: string | null;
   /**
    * The mode in force. Until the user picks one explicitly this mirrors what
@@ -2749,6 +2754,16 @@ export type Command =
   | { type: "thread.setPermissionMode"; threadId: ThreadId; mode: PermissionMode }
   | { type: "thread.setModel"; threadId: ThreadId; model: string | null }
   /**
+   * Put one model on everything under a scope of this machine, and take back
+   * every narrower choice inside it, so the newest choice is the one in force.
+   * `project` sets that project's default and clears the model of each of its
+   * threads. `machine` sets the machine's default and clears every project
+   * default and every thread model on it. A fleet and the whole of covey are
+   * this command sent to each of their machines; the client draws that line.
+   */
+  | { type: "model.apply"; scope: "project"; projectId: ProjectId; model: string }
+  | { type: "model.apply"; scope: "machine"; model: string }
+  /**
    * Turn incremental text on or off for one thread. It applies to the live
    * session at once, mid-turn included, because the daemon always asks the SDK
    * for partial messages and decides here whether to forward them.
@@ -3546,6 +3561,29 @@ export const KNOWN_MODELS: ModelChoice[] = [
 export function modelIsCurrent(m: ModelChoice, id: string | null | undefined): boolean {
   if (!id) return false;
   return m.id === id || m.resolved === id;
+}
+
+/** Where the model a thread runs comes from. `null` is Claude Code's own default. */
+export type ModelSource = "thread" | "project" | "machine" | null;
+
+/**
+ * The model a thread runs, and which choice decided it: the thread's own, else
+ * its project's, else its machine's, else Claude Code's own default.
+ *
+ * The narrowest choice wins. A wider choice made later takes the narrower ones
+ * back (`model.apply`), so "narrowest wins" and "newest wins" agree. The
+ * daemon reads this when a session starts and never copies the answer onto
+ * the thread, or a default changed later would never reach it.
+ */
+export function threadModel(
+  thread: { model: string | null } | null | undefined,
+  project?: { defaultModel?: string | null } | null,
+  machine?: { defaultModel?: string | null } | null,
+): { model: string | null; from: ModelSource } {
+  if (thread?.model) return { model: thread.model, from: "thread" };
+  if (project?.defaultModel) return { model: project.defaultModel, from: "project" };
+  if (machine?.defaultModel) return { model: machine.defaultModel, from: "machine" };
+  return { model: null, from: null };
 }
 
 /**

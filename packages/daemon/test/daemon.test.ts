@@ -3,6 +3,7 @@
  * exercises the protocol (projects, threads, export → import → markMoved)
  * without talking to Claude. Set COVEY_LIVE_TESTS=1 to also run a real turn.
  */
+import { threadModel } from "@covey/protocol";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
@@ -302,6 +303,33 @@ test("a moved thread keeps its branch when the remote has it, and starts fresh w
   assert.match(note2.text, new RegExp(`The branch covey/${local.slice(0, 8)} is not on origin, so its commits are still on alpha`));
 });
 
+test("a model applied to a project or a machine takes back every narrower choice inside it", async () => {
+  const snap = async () => a.rpc("shell.snapshot", {});
+  const projectId = (await snap()).projects[0]!.id;
+  const pinned = randomUUID();
+  await a.command({ type: "thread.create", projectId, threadId: pinned, sessionId: randomUUID(), model: "haiku" });
+  const thread = async () => (await a.rpc("thread.snapshot", { threadId: pinned })).thread;
+  assert.equal((await thread()).model, "haiku");
+
+  await a.command({ type: "model.apply", scope: "project", projectId, model: "sonnet" });
+  let s = await snap();
+  assert.equal(s.projects.find((p: any) => p.id === projectId).defaultModel, "sonnet");
+  assert.equal((await thread()).model, null, "the project's model replaces the thread's own");
+  assert.deepEqual(threadModel(await thread(), s.projects.find((p: any) => p.id === projectId), s.machine.settings).from, "project");
+
+  await a.command({ type: "thread.setModel", threadId: pinned, model: "haiku" });
+  assert.equal((await thread()).model, "haiku", "a narrower choice made later wins over the project's");
+
+  await a.command({ type: "model.apply", scope: "machine", model: "opus" });
+  s = await snap();
+  assert.equal(s.machine.settings.defaultModel, "opus");
+  assert.ok(s.projects.every((p: any) => !p.defaultModel), "the machine's model replaces every project's");
+  assert.equal((await thread()).model, null, "and every thread's");
+
+  await assert.rejects(a.command({ type: "model.apply", scope: "project", projectId: "nope", model: "opus" }), /not found/);
+  await a.command({ type: "machine.settings", defaultModel: null });
+});
+
 test("machine defaults are machine-wide, persisted, and inherited by new threads", async () => {
   const settings = async () => (await a.rpc("hello", { protocolVersion: 1, client: "test" })).settings;
   assert.deepEqual(await settings(), { defaultModel: null, defaultPermissionMode: null, defaultStreaming: null, sessionIdleMinutes: null, maxLiveSessions: null, webEnabled: null, archiveOnMerge: null, fleet: null, claudeVersion: null, bind: "loopback" }, "no opinion until one is set");
@@ -323,7 +351,8 @@ test("machine defaults are machine-wide, persisted, and inherited by new threads
   const inherited = randomUUID();
   await a.command({ type: "thread.create", projectId, threadId: inherited, sessionId: randomUUID() });
   const t = (await a.rpc("thread.snapshot", { threadId: inherited })).thread;
-  assert.equal(t.model, "claude-opus-5");
+  assert.equal(t.model, null, "the default is read when a session starts, never copied onto the thread");
+  assert.deepEqual(threadModel(t, null, (await a.rpc("shell.snapshot", {})).machine.settings), { model: "claude-opus-5", from: "machine" });
   assert.equal(t.permissionMode, "bypassPermissions");
   assert.equal(t.permissionModeExplicit, true, "a machine default is a choice, so the SDK is told about it");
   assert.equal(t.streaming, true);
