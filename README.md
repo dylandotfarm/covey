@@ -3,11 +3,14 @@
 A multi-agent terminal UI for Claude Code, built from scratch on the official
 [Claude Agent SDK](https://www.npmjs.com/package/@anthropic-ai/claude-agent-sdk).
 
-![The covey TUI. Four threads across two projects take a message each and work
-at the same time, and the last panel is the diff of one turn.](docs/media/threads.gif)
+![The covey TUI. A message goes into the composer, a thread works through it —
+tool calls folded into one row each, prose between them — and the pull request
+it opened comes back as a message when the automated review signs off.](docs/media/demo.gif)
 
-*Four threads, two projects, one machine. Each thread works in its own git
-worktree, so they never collide, and `d` shows what a turn changed.*
+*One thread, from the message to the pull request. This is a replay of a real
+covey thread in this repository — the one behind pull request
+[#222](https://github.com/dylandotfarm/covey/pull/222) — with the sidebar of a
+working machine beside it.*
 
 - Left sidebar: projects → threads, with the machines below — and a row per fleet above
   them once you have more than one. Many threads run concurrently.
@@ -27,6 +30,12 @@ worktree, so they never collide, and `d` shows what a turn changed.*
 - An experimental **desktop client in Rust**, styled like the TUI but drawn in a window, so a
   screenshot in a transcript is a screenshot and the mouse reports pixels. It runs beside the
   TUI and replaces nothing — see [docs/DESKTOP.md](docs/DESKTOP.md).
+
+![The covey TUI. Four threads across two projects take a message each and work
+at the same time, and the last panel is the diff of one turn.](docs/media/threads.gif)
+
+*Four threads, two projects, one machine. Each thread works in its own git
+worktree, so they never collide, and `d` shows what a turn changed.*
 
 ## Quick start
 
@@ -273,7 +282,8 @@ desktop/            the experimental Rust desktop client — its own cargo works
 scripts/crate-age.mjs  the 7-day rule for crates; cargo cannot hold it below Rust 1.100
 docs/DESIGN.md      architecture and the reasoning behind it
 docs/DESKTOP.md     why there is a second client, and how its cell grid holds a picture
-docs/media/         the demo recordings this page shows
+docs/media/         the demo recordings this page shows, and demo-compact.gif —
+                    the same recording at 70 columns, for a small tile elsewhere
 ```
 
 Data lives in `~/.local/share/covey` (Linux), `~/Library/Application Support/covey` (macOS),
