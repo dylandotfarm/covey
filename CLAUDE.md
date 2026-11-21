@@ -983,6 +983,26 @@
   the loop and `covey env` — the moment a session needs this is the moment it is about to
   end a turn with a build still running, and a model that has not loaded the skill writes
   `sleep 600` instead.
+- **An archive stops what the thread left running** — a background task, a `nohup … &`,
+  a dev server on a port — because nobody is left to read it and a server holds its port
+  for ever. `packages/daemon/src/threadProcesses.ts` reads the list from `/proc` (Linux
+  only; elsewhere it is empty) and a process is on it when its environment carries
+  **both** `COVEY_THREAD_ID=<id>` and `CLAUDECODE=1`: the first is inherited by everything
+  the session starts, also a process that left the tree, and the second is what Claude
+  Code sets for a tool call and not for itself. So the session process is never on it, and
+  the reader's shell never is either, because `shellEnv` deletes the thread id. The daemon
+  and every process above it are left out, because a daemon an agent started carries the
+  marks of that agent's thread. The list is read **before** `dropSession`: Claude Code ends
+  its own background tasks as it exits, and a server that went that way must still be
+  named. Then `SIGTERM`, and `SIGKILL` after `STOP_GRACE_MS`. It is said twice, because the
+  model never reads a note: a note in the transcript for the reader, and
+  `Thread.stoppedProcesses` on the row, which `startTurn` puts at the head of the next turn
+  (`stoppedPreface`) and clears only when a turn *answers* — a turn that dies on the
+  credentials or the usage limit is sent again by `restartWork`, and that one must carry it
+  too. The reader's own message item stays what they wrote. The labels go through `redact`
+  before the row, because a command line holds what the shell expanded. A move stops the
+  same list with a note and no preface, because the session on the other machine is a new
+  one; a delete stops it and writes nothing.
 - A turn that dies on the **plan's usage limit** is held and sent again when the limit
   resets (#232), rather than leaving a red row for a reader to come back to. One account
   is one limit, so the afternoon it runs out every thread on the machine stops inside a

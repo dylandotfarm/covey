@@ -34,6 +34,8 @@ export interface FakeCli {
    * first is carried on where it stopped and the second is sent again whole.
    */
   wrote: string | null;
+  /** Every message the sessions were sent, in order, as the SDK took it. */
+  sent: SDKUserMessage[];
   /** Let every held turn answer. Set to `held = false` first. */
   release(): void;
   /**
@@ -55,6 +57,7 @@ export function fakeCli(): FakeCli {
     held: false,
     refusal: null,
     wrote: null,
+    sent: [],
     release: () => {},
     push: () => {},
     backgroundTask(taskId) {
@@ -83,7 +86,8 @@ export function autoReply(cli: FakeCli): QueryFactory {
     cli.push = push;
     options.abortController?.signal.addEventListener("abort", () => { done = true; wake?.(); });
     void (async () => {
-      for await (const _ of prompt as AsyncIterable<SDKUserMessage>) {
+      for await (const message of prompt as AsyncIterable<SDKUserMessage>) {
+        cli.sent.push(message);
         while (cli.held) await new Promise<void>((r) => { const prior = cli.release; cli.release = () => { prior(); r(); }; });
         if (cli.refusal !== null) {
           for (const text of [cli.wrote, cli.refusal]) {
