@@ -84,6 +84,23 @@ function transcript(n: number): Map<string, TimelineItem> {
       ? { ...base, kind: "tool", toolUseId: `u${i}`, toolName: "Read", input: { file: "/src/covey/x.ts" }, summary: "Read x.ts", status: "completed", output: PROSE, isError: false, parentToolUseId: null, durationMs: 120 }
       : { ...base, kind: "assistant", text: PROSE.repeat(3), streaming: false, model: "claude" } as TimelineItem);
   }
+  // The two row shapes that carry a mark in front of their text: a tool call
+  // naming a file, and a note carrying a URL. Until these the fixture was
+  // prose and a four-word summary, so nothing here measured a row whose
+  // wrapped lines hang under the first one (`wrapSpans`'s `hang`).
+  //
+  // What this file measures is the bytes, and `Transcript` paints its rows
+  // `wrap="truncate"`, so a row too wide for the pane is *cut* rather than
+  // handed to the terminal to wrap — which is why a hung row that overflows
+  // cannot fail here, and why `lines.test.ts` is where that width is held.
+  // These are here so that the day a row of this shape does reach the
+  // terminal, this file is the one that says so.
+  const mark = { threadId: "alpha", createdAt: AT, updatedAt: AT };
+  items.set("mark-tool", { ...mark, id: "mark-tool", turnId: "t0", seq: n, kind: "tool", toolUseId: "um", toolName: "Read",
+    input: { file: "/src/covey/packages/daemon/src/integrate/news.test.ts" }, summary: "Read packages/daemon/src/integrate/news.test.ts",
+    status: "completed", output: PROSE, isError: false, parentToolUseId: null, durationMs: 120 } as TimelineItem);
+  items.set("mark-note", { ...mark, id: "mark-note", turnId: null, seq: n + 1, kind: "note", tone: "info",
+    text: "Commented on pull request #222 (https://github.com/dylandotfarm/covey/pull/222#issuecomment-6393278944). Each checks verdict, review, comment and merge arrives here as a turn." } as TimelineItem);
   return items;
 }
 

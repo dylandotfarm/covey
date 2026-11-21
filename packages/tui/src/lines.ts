@@ -108,26 +108,32 @@ export function wrapSpans(spans: Span[], w: number, links?: LinkContext, hang = 
     cur.wrap = how;
     lines.push(cur); cur = []; curW = 0;
   };
+  /** Cut a token that is wider than the room, filling this row and the next. */
+  const hardBreak = (sp: Span, tok: string) => {
+    let rest = tok;
+    while (width(rest) > 0) {
+      if (room() - curW <= 0) flush("char");
+      let take = "";
+      for (const ch of rest) { if (width(take + ch) > (room() - curW)) break; take += ch; }
+      push({ ...sp, text: take });
+      rest = rest.slice(take.length);
+      if (width(rest) > 0) flush("char");
+    }
+  };
   for (const sp of spans) {
     const tokens = sp.text.split(/(\s+)/).filter((t) => t.length > 0);
     for (const tok of tokens) {
       const tw = width(tok);
       if (curW + tw <= room()) { push({ ...sp, text: tok }); continue; }
       if (/^\s+$/.test(tok)) { flush("space"); continue; }
-      if (tw > room()) {
-        // hard-break a very long token
-        let rest = tok;
-        while (width(rest) > 0) {
-          if (room() - curW <= 0) flush("char");
-          let take = "";
-          for (const ch of rest) { if (width(take + ch) > (room() - curW)) break; take += ch; }
-          push({ ...sp, text: take });
-          rest = rest.slice(take.length);
-          if (width(rest) > 0) flush("char");
-        }
-        continue;
-      }
+      if (tw > room()) { hardBreak(sp, tok); continue; }
+      // It does not fit here, so it lands on the next row — and under `hang`
+      // that row is `hang` columns narrower than this one. Ask again from
+      // there: a token between `w - hang` and `w` fits the row it was
+      // measured against and overflows the row it lands on, which is a line
+      // the terminal wraps and the layout counts as one (`resize.test.ts`).
       flush("space");
+      if (tw > room()) { hardBreak(sp, tok); continue; }
       push({ ...sp, text: tok });
     }
   }
