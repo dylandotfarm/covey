@@ -15,6 +15,21 @@ test("wrapSpans hard-breaks tokens longer than the width", () => {
   assert.deepEqual(lines.map(text), ["abcde", "fghij", "klmno", "p"]);
 });
 
+test("a wrapped row that carries a mark hangs under its own text", () => {
+  // A fold row is one line of prose with a handle in front of it. Wrapped flush
+  // against the pane's left edge, its second line read as a row of its own —
+  // and in the transcript that edge is the rail beside the sidebar.
+  const lines = wrapSpans([{ text: "  \u25b8 >_ a sentence long enough to wrap twice over" }], 24, undefined, 4);
+  assert.deepEqual(lines.map(text), ["  \u25b8 >_ a sentence long", "    enough to wrap twice", "    over"]);
+  assert.equal(lineWidth(lines[1]!) <= 24, true, "the indent comes out of the width, not out of the pane");
+});
+
+test("a chain row and a long note wrap under themselves", () => {
+  const base = { threadId: "x", turnId: null, seq: 1, createdAt: "", updatedAt: "" } as const;
+  const note = renderItem({ ...base, id: "n", kind: "note", tone: "info", text: "Watching pull request #222 (https://example.com/p/222). Each checks verdict arrives here as a turn." }, { width: 44, expanded: new Set() });
+  assert.match(lineText(note[1]!), /^ {4}\S/, "the note's second line sits under the first one's text");
+});
+
 test("markdownToLines handles fences, bullets and inline code", () => {
   const lines = markdownToLines("# Title\n\n- one `x`\n- two\n\n```js\nconst a = 1;\n```", 40);
   const texts = lines.map(text);

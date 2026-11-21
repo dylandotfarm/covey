@@ -84,13 +84,23 @@ export function width(s: string): number {
  * `links` turns on link detection, which runs *before* the wrap: a path that
  * crosses a row boundary is scanned whole here, and each piece the wrap cuts
  * keeps the `link` field, so both rows open the same file.
+ *
+ * `hang` indents every row after the first by that many columns, and takes
+ * them out of the width those rows get. It is for a row that carries a mark
+ * in front of its text — a fold's arrow, a tool's tick, a note's dash. Those
+ * rows used to wrap flush against the pane's left edge, where the transcript's
+ * own prose starts two columns in, so a long one read as a new row rather than
+ * as the rest of the one above it. Four columns is where an open note already
+ * puts its body.
  */
-export function wrapSpans(spans: Span[], w: number, links?: LinkContext): Line[] {
+export function wrapSpans(spans: Span[], w: number, links?: LinkContext, hang = 0): Line[] {
   if (links) spans = linkSpans(spans, links);
   const lines: Line[] = [];
   let cur: Line = [];
   let curW = 0;
   const push = (sp: Span) => { cur.push(sp); curW += width(sp.text); };
+  /** The room this row has: the first keeps `w`, the rest pay for the indent. */
+  const room = () => (hang && lines.length > 0 ? Math.max(1, w - hang) : w);
   /** `how` says why this row ends, so a copy can put back what the wrap took
    *  out: a space at a word break, nothing inside a token. */
   const flush = (how: Line["wrap"]) => {
@@ -102,16 +112,15 @@ export function wrapSpans(spans: Span[], w: number, links?: LinkContext): Line[]
     const tokens = sp.text.split(/(\s+)/).filter((t) => t.length > 0);
     for (const tok of tokens) {
       const tw = width(tok);
-      if (curW + tw <= w) { push({ ...sp, text: tok }); continue; }
+      if (curW + tw <= room()) { push({ ...sp, text: tok }); continue; }
       if (/^\s+$/.test(tok)) { flush("space"); continue; }
-      if (tw > w) {
+      if (tw > room()) {
         // hard-break a very long token
         let rest = tok;
         while (width(rest) > 0) {
-          const room = w - curW;
-          if (room <= 0) flush("char");
+          if (room() - curW <= 0) flush("char");
           let take = "";
-          for (const ch of rest) { if (width(take + ch) > (w - curW)) break; take += ch; }
+          for (const ch of rest) { if (width(take + ch) > (room() - curW)) break; take += ch; }
           push({ ...sp, text: take });
           rest = rest.slice(take.length);
           if (width(rest) > 0) flush("char");
@@ -123,8 +132,10 @@ export function wrapSpans(spans: Span[], w: number, links?: LinkContext): Line[]
     }
   }
   if (cur.length || lines.length === 0) lines.push(cur);
-  // trim leading whitespace spans on wrapped lines
-  const out = lines.map((l, i) => (i === 0 ? l : trimLeading(l)));
+  // trim leading whitespace spans on wrapped lines, then hang the rest of the
+  // rows under the first one's text.
+  const pad = " ".repeat(hang);
+  const out = lines.map((l, i) => (i === 0 ? l : hang ? withWrap([{ text: pad }, ...trimLeading(l)], l) : trimLeading(l)));
   // The last row has nothing left to join to. Text that ends on a column
   // boundary flushes and leaves `cur` empty, and a marker left there would
   // claim the *next* paragraph as a continuation of this one.
@@ -397,7 +408,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       // clean finish "background · done" has already said it. It earns the
       // room only when the task did not simply succeed.
       if (bg?.summary && (bg.state === "failed" || bg.state === "stopped")) head.push({ text: `  ${bg.summary}`, color: T.danger });
-      const headLines = wrapSpans(head, w);
+      const headLines = wrapSpans(head, w, undefined, 4);
       if (!open) return headLines;
       const out = [...headLines];
       if (bg?.summary) out.push(...wrapSpans([{ text: "    background: " + bg.summary, color: T.subtle }], w, o.links));
@@ -489,7 +500,7 @@ export function renderItem(item: TimelineItem, o: RenderOpts): Line[] {
       // The arrow leads, as it does on a chain row and on a thought, and the
       // dash stays: it is what says the line is covey's own and not prose.
       const mark = rest ? (open ? "  ▾ ─ " : "  ▸ ─ ") : "  ─ ";
-      const lines: Line[] = item.text ? wrapSpans([{ text: mark + lead, color, italic: true }], w, o.links) : [];
+      const lines: Line[] = item.text ? wrapSpans([{ text: mark + lead, color, italic: true }], w, o.links, 4) : [];
       // `markdownToLines`, not `wrapSpans`: the rest carries the newlines the
       // agent wrote, and `wrapSpans` reads one paragraph. A newline left
       // inside a span is a row Ink paints as several and the layout counts as
@@ -551,7 +562,7 @@ export function renderChainHead(row: ChainRow, o: { width: number; links?: LinkC
   // says go and look, the other says the sentence is not the final word.
   if (row.failed > 0) head.push({ text: `  ${row.failed} failed`, color: T.danger });
   if (row.running > 0) head.push({ text: `  ${row.running} running`, color: T.working });
-  const lines = wrapSpans(head, w);
+  const lines = wrapSpans(head, w, undefined, 4);
   return row.open ? lines : [...lines, []];
 }
 
@@ -572,7 +583,7 @@ export function renderSaidHead(row: SaidRow, o: { width: number }): Line[] {
   ];
   // The count names what the row hides, so an open row does not carry one.
   if (more > 0 && !row.open) head.push({ text: `  +${more} more`, color: T.faint });
-  const lines = wrapSpans(head, Math.max(20, o.width));
+  const lines = wrapSpans(head, Math.max(20, o.width), undefined, 4);
   return row.open ? lines : [...lines, []];
 }
 
